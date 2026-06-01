@@ -24,6 +24,12 @@ python3 -m http.server 4180 --bind 127.0.0.1
 
 Railway runs the app with `npm start`. The server listens on the `PORT` environment variable that Railway injects and exposes `/health` for deployment health checks.
 
+Production URL:
+
+```text
+https://personalweb-production-81a6.up.railway.app/
+```
+
 ## Main Files
 
 - `index.html`
