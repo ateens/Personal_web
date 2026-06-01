@@ -1,0 +1,13 @@
+{
+  "name": "personal-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check app.js && node --check Notion_like/app.js && node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
