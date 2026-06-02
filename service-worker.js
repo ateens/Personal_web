@@ -1,7 +1,7 @@
-const CACHE_NAME = "sygma-personal-web-v163";
+const CACHE_NAME = "sygma-personal-web-v203";
 const ASSETS = [
-  "./styles.css?v=20260529-68",
-  "./app.js?v=20260529-68",
+  "./styles.css?v=20260602-05",
+  "./app.js?v=20260602-05",
   "./manifest.json",
   "./icons/app-icon.svg"
 ];
@@ -41,6 +41,7 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith("/api/")) return;
 
   event.respondWith(networkFirst(event.request));
 });

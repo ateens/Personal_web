@@ -1,6 +1,9 @@
 const STORAGE_KEY = "sygma-personal-web-state-v2";
-const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-const GOOGLE_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
+const DEFAULT_CALENDAR_SOURCES = {
+  tasks: true,
+  projects: true,
+  google: true,
+};
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
@@ -8,14 +11,13 @@ const toast = document.querySelector("#toast");
 const NAV_ITEMS = [
   ["today", "오늘", "⌁"],
   ["inbox", "Inbox", "↧"],
-  ["tasks", "Tasks", "✓"],
+  ["tasks", "할 일 배치", "✓"],
   ["projects", "Projects", "▦"],
   ["goals", "Goals", "◎"],
   ["boxes", "Boxes", "□"],
   ["resources", "Resources", "≡"],
   ["habits", "Habits", "◌"],
   ["journal", "Journal", "✎"],
-  ["obstacles", "Issues", "!"],
   ["calendar", "Calendar", "◷"],
   ["database", "DB", "◇"],
 ];
@@ -65,88 +67,105 @@ const STATUSES = {
     completed: "완료",
     canceled: "취소",
   },
-  obstacle: {
-    open: "열림",
-    watching: "관찰",
-    mitigated: "완화",
-    resolved: "해결",
-    archived: "보관",
-  },
 };
 
 const DB_SCHEMA = [
   {
     key: "captures",
     label: "Captures",
-    fields: ["title", "url", "status", "convertedTo", "createdAt"],
-    relations: ["분류 후 Task/Project/Goal/Resource로 연결"],
+    fields: ["id", "title", "url", "status", "convertedTo", "convertedId", "createdAt", "processedAt"],
+    relations: ["convertedTo/convertedId -> Task, Project, Goal, Resource, Box"],
   },
   {
     key: "boxes",
     label: "Boxes",
-    fields: ["name", "visibility", "color", "blocks"],
-    relations: ["Goals", "Projects", "Tasks", "Resources", "Habits"],
+    fields: ["id", "name", "visibility", "color", "blocks"],
+    relations: ["Goals/Projects/Tasks/Resources/Habits.boxId에서 참조"],
   },
   {
     key: "goals",
     label: "Goals",
-    fields: ["name", "status", "year", "quarter", "targetDate", "blocks"],
-    relations: ["Box", "Projects", "Tasks", "Resources"],
+    fields: ["id", "name", "status", "boxId", "year", "quarter", "targetDate", "blocks"],
+    relations: ["boxId -> Boxes", "Projects/Tasks/Resources.goalId에서 참조"],
   },
   {
     key: "projects",
     label: "Projects",
-    fields: ["name", "status", "startDate", "endDate", "blocks"],
-    relations: ["Box", "Goal", "Tasks", "Resources", "Obstacles"],
+    fields: ["id", "name", "status", "boxId", "goalId", "startDate", "endDate", "blocks"],
+    relations: ["boxId -> Boxes", "goalId -> Goals", "Tasks/Resources.projectId에서 참조"],
   },
   {
     key: "tasks",
     label: "Tasks",
-    fields: ["title", "dueDate", "completedAt", "blocks"],
-    relations: ["Box", "Goal", "Project", "Resource"],
+    fields: ["id", "title", "status", "boxId", "goalId", "projectId", "resourceId", "dueDate", "scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes", "completedAt", "googleEventId", "blocks"],
+    relations: ["boxId -> Boxes", "goalId -> Goals", "projectId -> Projects", "resourceId -> Resources"],
   },
   {
     key: "resources",
     label: "Resources",
-    fields: ["title", "type", "importance", "url", "pinned", "readLater", "blocks"],
-    relations: ["Box", "Goal", "Project", "Tasks"],
+    fields: ["id", "title", "type", "importance", "pinned", "readLater", "url", "boxId", "goalId", "projectId", "blocks"],
+    relations: ["boxId -> Boxes", "goalId -> Goals", "projectId -> Projects", "Tasks.resourceId에서 참조"],
   },
   {
     key: "habits",
     label: "Habits",
-    fields: ["title", "cadence", "target", "status", "blocks"],
-    relations: ["Box", "Project", "Habit instances"],
+    fields: ["id", "title", "cadence", "target", "status", "boxId", "projectId", "blocks"],
+    relations: ["boxId -> Boxes", "projectId -> Projects", "HabitInstances.habitId에서 참조"],
+  },
+  {
+    key: "habitInstances",
+    label: "Habit Instances",
+    fields: ["id", "habitId", "date", "completed", "completedAt"],
+    relations: ["habitId -> Habits"],
   },
   {
     key: "journals",
     label: "Journals",
-    fields: ["title", "date", "satisfaction", "blocks"],
-    relations: ["reviewed Tasks/Projects through block references"],
+    fields: ["id", "title", "date", "satisfaction", "blocks"],
+    relations: ["blocks 안에서 관련 객체를 텍스트로 참조"],
   },
   {
-    key: "obstacles",
-    label: "Obstacles",
-    fields: ["title", "status", "severity", "blocks"],
-    relations: ["Box", "Project", "Task"],
+    key: "googleCalendars",
+    label: "Google Calendars",
+    fields: ["id", "summary", "primary", "selected", "hidden", "backgroundColor", "foregroundColor", "accessRole"],
+    relations: ["GoogleEvents.calendarId에서 참조"],
+  },
+  {
+    key: "googleEvents",
+    label: "Google Events",
+    fields: ["id", "calendarId", "calendarSummary", "source", "title", "start", "end", "startDate", "endDate", "allDay", "htmlLink", "status", "updated"],
+    relations: ["calendarId -> Google Calendars"],
+  },
+  {
+    key: "links",
+    label: "Links",
+    fields: ["sourceType", "sourceId", "targetType", "targetId", "kind"],
+    relations: ["다형 참조용 예비 컬렉션"],
   },
   {
     key: "settings",
     label: "Settings",
-    fields: ["appMode", "notionSyncMode", "googleClientId", "googleCalendarId", "lastGoogleSyncAt"],
+    fields: ["appMode", "notionSyncMode", "navOrder", "calendarSources", "visibleGoogleCalendars", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
     relations: ["PWA", "Google Calendar", "final Notion export"],
   },
 ];
 
 let state = loadState();
-let googleAccessToken = "";
+let googleBackendStatus = {
+  configured: true,
+  connected: Boolean(state.settings.googleConnectedAt),
+  loading: true,
+};
 let els = {};
 let navCloseTimer = 0;
 let navShortcutHoldTimer = 0;
 let scheduleMonthHoverTimer = 0;
 let habitResizeTimer = 0;
+let projectCalendarResizeTimer = 0;
+const todayTaskPropertyTransitionTimers = new Map();
+const todayTaskPropertyResizeTimers = new Map();
 let ui = {
   view: "today",
-  selected: null,
   commandOpen: false,
   navOpen: false,
   navDocked: false,
@@ -167,11 +186,25 @@ let ui = {
   },
   editorMarquee: null,
   expandedProjectId: "",
+  editingProjectId: "",
+  projectDeleteConfirmId: "",
   expandedTodayTaskId: "",
+  projectCalendarMode: "week",
+  projectCalendarAnchor: dateKey(new Date()),
+  calendarMonth: monthKey(new Date()),
+  todayTaskPropsOpen: {},
+  todayTaskActiveProperty: {},
   expandedHabitId: "",
+  editingHabitId: "",
+  habitDeleteConfirmId: "",
   habitDayCount: 0,
   search: "",
   draggedTaskId: "",
+  pendingTodayTaskDrag: null,
+  todayTaskDrag: null,
+  pendingDeleteDrag: null,
+  deleteDrag: null,
+  suppressDeleteClickUntil: 0,
   scheduleHoldTaskId: "",
   pendingScheduleDrag: null,
   suppressTaskClickUntil: 0,
@@ -183,6 +216,7 @@ let ui = {
 init();
 
 function init() {
+  const googleRedirect = handleGoogleRedirectResult();
   app.innerHTML = renderShell();
   els = {
     navTrack: app.querySelector("#navTrack"),
@@ -217,27 +251,44 @@ function init() {
   document.addEventListener("pointermove", handleBlockPointerMove, true);
   document.addEventListener("pointermove", handleEditorMarqueePointerMove, true);
   document.addEventListener("pointermove", handleResourcePointerMove, true);
+  document.addEventListener("pointermove", handleTodayTaskPointerMove, true);
+  document.addEventListener("pointermove", handleDeleteDragPointerMove, true);
   document.addEventListener("pointermove", handleSchedulePointerMove, true);
+  document.addEventListener("mousemove", handleTodayTaskPointerMove, true);
+  document.addEventListener("mousemove", handleDeleteDragPointerMove, true);
   document.addEventListener("mousemove", handleSchedulePointerMove, true);
   document.addEventListener("pointerup", finishBlockDrag, true);
   document.addEventListener("pointerup", finishEditorMarqueeDrag, true);
   document.addEventListener("pointerup", finishResourceDrag, true);
+  document.addEventListener("pointerup", finishTodayTaskDrag, true);
+  document.addEventListener("pointerup", finishDeleteDrag, true);
   document.addEventListener("pointerup", finishScheduleDrag, true);
   document.addEventListener("pointercancel", cancelBlockDrag, true);
   document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
   document.addEventListener("pointercancel", cancelResourceDrag, true);
+  document.addEventListener("pointercancel", cancelTodayTaskDrag, true);
+  document.addEventListener("pointercancel", cancelDeleteDrag, true);
   document.addEventListener("pointercancel", cancelScheduleDrag, true);
+  document.addEventListener("mouseup", finishTodayTaskDrag, true);
+  document.addEventListener("mouseup", finishDeleteDrag, true);
   document.addEventListener("mouseup", finishScheduleDrag, true);
   document.addEventListener("mouseleave", handleSchedulePointerExit);
   document.addEventListener("dragend", cancelScheduleDrag);
+  document.addEventListener("dragend", clearTaskDrag);
   document.addEventListener("dragend", clearNavDrag);
   document.addEventListener("visibilitychange", handleScheduleVisibilityChange);
   window.addEventListener("scroll", updateTopbarStickiness, { passive: true });
   window.addEventListener("resize", updateTopbarStickiness);
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("pointerup", finishScheduleDrag, true);
+  window.addEventListener("pointerup", finishTodayTaskDrag, true);
+  window.addEventListener("pointerup", finishDeleteDrag, true);
+  window.addEventListener("mouseup", finishTodayTaskDrag, true);
+  window.addEventListener("mouseup", finishDeleteDrag, true);
   window.addEventListener("mouseup", finishScheduleDrag, true);
   window.addEventListener("blur", cancelScheduleDrag);
+  window.addEventListener("blur", cancelTodayTaskDrag);
+  window.addEventListener("blur", cancelDeleteDrag);
   window.addEventListener("blur", resetNavShortcutState);
 
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
@@ -252,6 +303,24 @@ function init() {
   renderDetail();
   renderOverlays();
   updateTopbarStickiness();
+  if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
+  if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
+  refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
+}
+
+function handleGoogleRedirectResult() {
+  const params = new URLSearchParams(window.location.search);
+  const result = params.get("google");
+  if (!result) return { connected: false, failed: false };
+  params.delete("google");
+  const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, "", nextUrl || "/");
+  if (result === "connected") {
+    ui.view = window.sessionStorage.getItem("sygma-google-return-view") || "calendar";
+    window.sessionStorage.removeItem("sygma-google-return-view");
+    return { connected: true, failed: false };
+  }
+  return { connected: false, failed: true };
 }
 
 function renderShell() {
@@ -363,13 +432,21 @@ function setView(view, options = {}) {
     return;
   }
   ui.view = view;
-  ui.selected = null;
   ui.search = "";
   ui.slash = null;
   ui.scheduler = null;
+  ui.pendingDeleteDrag = null;
+  ui.deleteDrag = null;
   ui.expandedProjectId = "";
+  ui.editingProjectId = "";
+  ui.projectDeleteConfirmId = "";
   ui.expandedTodayTaskId = "";
+  ui.todayTaskPropsOpen = {};
+  ui.todayTaskActiveProperty = {};
+  clearTodayTaskPropertyTransitions();
   ui.expandedHabitId = "";
+  ui.editingHabitId = "";
+  ui.habitDeleteConfirmId = "";
   if (ui.navOpen && !ui.navDocked) {
     closeNav(options.navTarget || null);
   } else {
@@ -490,7 +567,6 @@ function renderView({ transition = false, soft = false, animateCards = false } =
     resources: renderResources,
     habits: renderHabits,
     journal: renderJournal,
-    obstacles: renderObstacles,
     calendar: renderCalendar,
     database: renderDatabase,
   };
@@ -540,11 +616,13 @@ function animateCardReorder(previousRects) {
 
 function renderToday() {
   const today = dateKey(new Date());
+  const tomorrow = dateKey(addDays(new Date(), 1));
   const activeTodayTasks = state.tasks.filter((task) => isTaskOnDate(task, today) && task.status !== "done").sort(bySchedule);
   const completedTodayTasks = state.tasks
     .filter((task) => isTaskOnDate(task, today) && task.status === "done")
     .sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
   const todayTasks = [...activeTodayTasks, ...completedTodayTasks];
+  const tomorrowTasks = state.tasks.filter((task) => isTaskOnDate(task, tomorrow) && task.status !== "done").sort(bySchedule);
   const overdue = state.tasks.filter((task) => isOverdue(task)).sort(bySchedule);
   const doneToday = state.tasks.filter((task) => task.completedAt?.slice(0, 10) === today);
   const activeProjects = state.projects.filter((project) => ["active", "focus"].includes(project.status));
@@ -553,7 +631,7 @@ function renderToday() {
 
   return `
     <section class="view">
-      ${renderViewHeader("Today", "오늘의 실행", formatLongDate(new Date()), `
+      ${renderViewHeader("Today", "대시보드", formatLongDate(new Date()), `
         <button class="button secondary" type="button" data-action="new-journal">오늘 리뷰</button>
       `)}
       <div class="metric-grid">
@@ -562,8 +640,8 @@ function renderToday() {
         ${renderMetric("지연", overdue.length, "재배치")}
         ${renderMetric("진행 프로젝트", activeProjects.length, "active/focus")}
       </div>
-      <div class="grid cols-2">
-        <div class="panel">
+      <div class="grid cols-2 today-dashboard-grid">
+        <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
           ${panelHeader("오늘 할 일", "시간순")}
           <div class="stack">${todayTasks.length ? todayTasks.map((task) => renderTaskCard(task, false, { todayList: true, todayInline: true })).join("") : empty("오늘 할 일이 없습니다.")}</div>
         </div>
@@ -575,7 +653,11 @@ function renderToday() {
           ${panelHeader("지연 항목", "Tasks에서 재배치")}
           <div class="stack">${overdue.length ? overdue.map((task) => renderTaskCard(task, false, { todayInline: true })).join("") : empty("지연된 항목이 없습니다.")}</div>
         </div>
-        <div class="panel">
+        <div class="panel today-drop-zone" data-today-task-zone="tomorrow" data-drop-date="${tomorrow}">
+          ${panelHeader("내일 할 일", compactDateLabel(tomorrow))}
+          <div class="stack">${tomorrowTasks.length ? tomorrowTasks.map((task) => renderTaskCard(task, false, { todayInline: true })).join("") : empty("내일 할 일이 없습니다.")}</div>
+        </div>
+        <div class="panel today-resource-panel">
           ${panelHeader("고정 자료", "빠른 참조")}
           <div class="stack">${pinnedResources.length ? pinnedResources.map(renderResourceCard).join("") : empty("고정된 자료가 없습니다.")}</div>
         </div>
@@ -631,7 +713,7 @@ function renderTasks() {
 
   return `
     <section class="view">
-      ${renderViewHeader("Tasks", "확인과 날짜 배치", `${unplannedOnly.length}개 미계획 / ${scheduled.length + todayTasks.length + tomorrowTasks.length + overdue.length}개 배정`, `
+      ${renderViewHeader("할 일 배치", "확인과 날짜 배치", `${unplannedOnly.length}개 미계획 / ${scheduled.length + todayTasks.length + tomorrowTasks.length + overdue.length}개 배정`, `
         <input class="input" style="width:220px" data-action-input="search" value="${esc(ui.search)}" placeholder="검색">
         <button class="button secondary" type="button" data-action="new-task">새 할 일</button>
       `)}
@@ -661,6 +743,7 @@ function renderProjects() {
       ${renderViewHeader("Projects", "프로젝트", `${state.projects.length}개`, `
         <button class="button secondary" type="button" data-action="new-project">새 프로젝트</button>
       `)}
+      ${renderProjectCalendarPanel()}
       <div class="project-board">
         ${renderProjectSection("진행중", active, "움직이는 프로젝트")}
         ${renderProjectSection("계획", planned, "준비 중인 프로젝트")}
@@ -668,6 +751,84 @@ function renderProjects() {
       </div>
     </section>
   `;
+}
+
+function renderProjectCalendarPanel() {
+  const mode = ui.projectCalendarMode === "month" ? "month" : "week";
+  const anchor = selectedProjectCalendarDate();
+  const title = mode === "month" ? monthLabel(anchor) : projectWeekRangeLabel(anchor);
+  const events = getProjectCalendarEvents();
+  return `
+    <div class="panel project-calendar-panel">
+      <div class="calendar-panel-header project-calendar-header">
+        <div>
+          <h2 class="panel-title">프로젝트 기간</h2>
+          <span class="calendar-panel-subtitle">${esc(title)} · ${events.length}개 기간</span>
+        </div>
+        <div class="project-calendar-controls">
+          <div class="project-calendar-mode" aria-label="프로젝트 캘린더 보기">
+            <button class="button secondary ${mode === "week" ? "is-active" : ""}" type="button" data-project-calendar-mode="week">주간</button>
+            <button class="button secondary ${mode === "month" ? "is-active" : ""}" type="button" data-project-calendar-mode="month">월간</button>
+          </div>
+          <div class="calendar-month-nav" aria-label="프로젝트 캘린더 이동">
+            <button class="button secondary calendar-month-button" type="button" data-project-calendar-nav="prev" aria-label="이전">‹</button>
+            <button class="button secondary calendar-month-current" type="button" data-project-calendar-nav="today">${esc(title)}</button>
+            <button class="button secondary calendar-month-button" type="button" data-project-calendar-nav="next" aria-label="다음">›</button>
+          </div>
+        </div>
+      </div>
+      <div class="project-calendar-body" data-project-calendar-body="${mode}">
+        ${mode === "month" ? renderProjectCalendarMonth(anchor, events) : renderProjectCalendarWeek(anchor, events)}
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectCalendarWeek(anchor, events) {
+  const today = dateKey(new Date());
+  const start = startOfWeek(anchor);
+  const days = Array.from({ length: 7 }, (_, index) => addDays(start, index));
+  return `
+    <div class="project-calendar-week">
+      ${days.map((day) => renderProjectCalendarDay(day, events, { today, large: true })).join("")}
+    </div>
+  `;
+}
+
+function renderProjectCalendarMonth(anchor, events) {
+  const today = dateKey(new Date());
+  const currentMonth = monthKey(anchor);
+  const days = monthGridDays(anchor);
+  return `
+    <div class="project-calendar-weekdays">
+      ${Array.from({ length: 7 }, (_, index) => `<span>${weekday(addDays(startOfWeek(anchor), index))}</span>`).join("")}
+    </div>
+    <div class="project-calendar-month">
+      ${days.map((day) => renderProjectCalendarDay(day, events, { today, outside: monthKey(day) !== currentMonth })).join("")}
+    </div>
+  `;
+}
+
+function renderProjectCalendarDay(day, events, options = {}) {
+  const key = dateKey(day);
+  const dayEvents = events.filter((event) => calendarEventOccursOn(event, key)).sort(byCalendarEventTime);
+  const visibleEvents = dayEvents.slice(0, options.large ? 7 : 4);
+  const overflow = dayEvents.length - visibleEvents.length;
+  return `
+    <div class="project-calendar-day ${options.large ? "is-large" : ""} ${options.outside ? "is-outside" : ""} ${key === options.today ? "is-today" : ""}">
+      <div class="project-calendar-date"><span>${options.large ? weekday(day) : ""}</span><strong>${options.large ? compactDateLabel(key) : key.slice(8)}</strong></div>
+      <div class="project-calendar-bars">
+        ${visibleEvents.map((event) => renderProjectCalendarPill(event, key)).join("")}
+        ${overflow > 0 ? `<span class="project-calendar-more">+${overflow}</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectCalendarPill(event, date) {
+  const starts = event.startDate === date;
+  const ends = event.endDate === date;
+  return `<span class="project-calendar-pill ${starts ? "is-start" : ""} ${ends ? "is-end" : ""}" title="${esc(event.title)}">${esc(event.title)}</span>`;
 }
 
 function renderGoals() {
@@ -699,17 +860,20 @@ function renderBoxes() {
 }
 
 function renderResources() {
-  const resources = state.resources.filter((resource) => matchesSearch(resource.title) && resource.importance !== "archived");
+  const allResources = state.resources.filter((resource) => matchesSearch(resource.title));
+  const resources = allResources.filter((resource) => resource.importance !== "archived");
+  const archived = allResources.filter((resource) => resource.importance === "archived");
   return `
     <section class="view">
-      ${renderViewHeader("Resources", "자료와 노트", `${resources.length}개`, `
+      ${renderViewHeader("Resources", "자료와 노트", `${resources.length}개 활성 / ${archived.length}개 보관`, `
         <input class="input" style="width:220px" data-action-input="search" value="${esc(ui.search)}" placeholder="검색">
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      <div class="grid cols-3">
+      <div class="grid cols-4">
         ${renderResourceColumn("고정", resources.filter((resource) => resource.pinned))}
         ${renderResourceColumn("나중에 보기", resources.filter((resource) => resource.readLater))}
         ${renderResourceColumn("전체", resources)}
+        ${renderResourceColumn("아카이브", archived)}
       </div>
     </section>
   `;
@@ -746,84 +910,118 @@ function renderJournal() {
   `;
 }
 
-function renderObstacles() {
-  const open = state.obstacles.filter((obstacle) => ["open", "watching"].includes(obstacle.status));
-  const closed = state.obstacles.filter((obstacle) => ["mitigated", "resolved", "archived"].includes(obstacle.status));
-  return `
-    <section class="view">
-      ${renderViewHeader("Issues", "병목과 리스크", `${open.length}개 열림`, `
-        <button class="button secondary" type="button" data-action="new-obstacle">새 이슈</button>
-      `)}
-      <div class="grid cols-2">
-        <div class="panel">
-          ${panelHeader("열림", `${open.length}개`)}
-          <div class="stack">${open.length ? open.map(renderObstacleCard).join("") : empty("열린 이슈가 없습니다.")}</div>
-        </div>
-        <div class="panel">
-          ${panelHeader("완화/해결", `${closed.length}개`)}
-          <div class="stack">${closed.length ? closed.map(renderObstacleCard).join("") : empty("해결된 이슈가 없습니다.")}</div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
 function renderCalendar() {
-  const localEvents = getLocalCalendarEvents();
+  const selectedMonth = selectedCalendarMonthDate();
+  const taskEvents = getTaskCalendarEvents();
+  const projectEvents = getProjectCalendarEvents();
   const googleEvents = getGoogleCalendarEvents();
   const combinedEvents = getCombinedCalendarEvents();
   const weekStart = startOfWeek(new Date());
   return `
     <section class="view">
-      ${renderViewHeader("Calendar", "내부 일정과 Google Calendar", `내부 ${localEvents.length}개 / Google ${googleEvents.length}개`, `
-        <button class="button secondary" type="button" data-action="connect-google">Google 연결</button>
-        <button class="button secondary" type="button" data-action="fetch-google">Google 불러오기</button>
-        <button class="button secondary" type="button" data-action="sync-google">내부 일정 내보내기</button>
-      `)}
+      ${renderViewHeader("Calendar", "캘린더", `${combinedEvents.length} visible events`)}
       <div class="calendar-layout">
+        ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
+        ${renderCalendarControls(taskEvents, projectEvents, googleEvents)}
+
         <div class="panel calendar-week-panel">
-          ${panelHeader("이번 주", `${formatLongDate(weekStart)}부터`)}
+          ${panelHeader("This Week", `${formatLongDate(weekStart)}부터`)}
           <div class="calendar-week-grid">${renderWeekDays()}</div>
         </div>
 
-        <div class="panel calendar-google-panel">
-          ${panelHeader("Google Calendar", googleCalendarStatusLabel())}
-          <div class="calendar-setup-grid">
-            <label class="field">
-              <span>OAuth Client ID</span>
-              <input class="input" data-setting="googleClientId" value="${esc(state.settings.googleClientId)}" placeholder="Google Cloud OAuth Client ID">
-            </label>
-            <label class="field">
-              <span>Calendar ID</span>
-              <input class="input" data-setting="googleCalendarId" value="${esc(state.settings.googleCalendarId)}" placeholder="primary">
-            </label>
-            <div class="calendar-sync-actions">
-              <button class="button" type="button" data-action="connect-google">Google 연결</button>
-              <button class="button secondary" type="button" data-action="fetch-google">Google 일정 불러오기</button>
-              <button class="button secondary" type="button" data-action="sync-google">내부 일정 내보내기</button>
-            </div>
-            <div class="calendar-sync-summary">
-              <strong>연동 상태</strong>
-              <div class="card-meta">
-                ${badge(state.settings.googleConnectedAt ? "토큰 연결됨" : "토큰 필요", state.settings.googleConnectedAt ? "teal" : "amber")}
-                ${badge(state.settings.googleCalendarId || "primary", "blue")}
-                ${state.settings.lastGoogleFetchAt ? badge(`불러오기 ${formatDateTime(state.settings.lastGoogleFetchAt)}`, "teal") : ""}
-                ${state.settings.lastGoogleSyncAt ? badge(`내보내기 ${formatDateTime(state.settings.lastGoogleSyncAt)}`, "violet") : ""}
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div class="panel calendar-combined-panel">
-          ${panelHeader("통합 캘린더", `${monthLabel(new Date())} · ${combinedEvents.length}개 일정`)}
+          ${renderCalendarMonthPanelHeader(selectedMonth, combinedEvents.length)}
           <div class="calendar-source-legend" aria-label="캘린더 소스">
-            <span><i class="source-dot local"></i>SYGMA</span>
+            <span><i class="source-dot task"></i>Tasks</span>
+            <span><i class="source-dot project"></i>Projects</span>
             <span><i class="source-dot google"></i>Google</span>
           </div>
           ${renderCombinedCalendar()}
         </div>
       </div>
     </section>
+  `;
+}
+
+function renderGoogleConnectPanel() {
+  const configured = googleBackendStatus.configured;
+  return `
+    <div class="panel calendar-connect-panel">
+      <div class="calendar-connect-copy">
+        <span class="eyebrow">Google Calendar</span>
+        <h2 class="panel-title">Google 로그인으로 캘린더 연결</h2>
+        <p>${configured ? "로그인하면 Google 캘린더 목록과 일정을 바로 불러옵니다." : "서버 환경변수에 Google OAuth Client ID와 Client Secret을 등록해야 로그인할 수 있습니다."}</p>
+      </div>
+      <button class="button calendar-google-login" type="button" data-action="connect-google"${configured ? "" : " disabled"}>Google로 로그인</button>
+    </div>
+  `;
+}
+
+function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
+  const googleCalendars = getGoogleCalendarOptions();
+  return `
+    <div class="panel calendar-control-panel">
+      ${panelHeader("Visible Calendars", googleCalendarStatusLabel())}
+      <div class="calendar-filter-grid">
+        <div class="calendar-filter-group">
+          <strong class="calendar-filter-title">Personal Web</strong>
+          <div class="calendar-toggle-list">
+            ${renderCalendarSourceToggle("tasks", "Tasks", taskEvents.length)}
+            ${renderCalendarSourceToggle("projects", "Projects", projectEvents.length)}
+          </div>
+        </div>
+        <div class="calendar-filter-group">
+          <strong class="calendar-filter-title">Google Calendar</strong>
+          <div class="calendar-toggle-list calendar-google-toggle-list">
+            ${googleCalendars.length ? googleCalendars.map((calendar) => renderGoogleCalendarToggle(calendar, googleEvents)).join("") : `<div class="calendar-empty-state">No imported calendars</div>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderCalendarMonthPanelHeader(selectedMonth, eventCount) {
+  const label = monthLabelEnglish(selectedMonth);
+  return `
+    <div class="calendar-panel-header">
+      <div>
+        <h2 class="panel-title">${esc(label)}</h2>
+        <span class="calendar-panel-subtitle">${esc(calendarCountLabel(eventCount))}</span>
+      </div>
+      <div class="calendar-month-nav" aria-label="Calendar month navigation">
+        <button class="button secondary calendar-month-button" type="button" data-calendar-month="prev" aria-label="Previous month">‹</button>
+        <button class="button secondary calendar-month-current" type="button" data-calendar-month="today">${esc(label)}</button>
+        <button class="button secondary calendar-month-button" type="button" data-calendar-month="next" aria-label="Next month">›</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCalendarSourceToggle(source, label, count) {
+  return `
+    <label class="calendar-toggle">
+      <input type="checkbox" data-calendar-source="${esc(source)}" ${calendarSourceVisible(source) ? "checked" : ""}>
+      <span class="calendar-toggle-mark"></span>
+      <span class="calendar-toggle-text">
+        <strong>${esc(label)}</strong>
+        <small>${esc(calendarCountLabel(count))}</small>
+      </span>
+    </label>
+  `;
+}
+
+function renderGoogleCalendarToggle(calendar, googleEvents) {
+  const count = googleEvents.filter((event) => event.calendarId === calendar.id).length;
+  return `
+    <label class="calendar-toggle calendar-google-toggle"${calendarColorStyle(calendar)}>
+      <input type="checkbox" data-google-calendar-toggle="${esc(calendar.id)}" ${googleCalendarVisible(calendar.id) ? "checked" : ""}>
+      <span class="calendar-toggle-mark"></span>
+      <span class="calendar-toggle-text">
+        <strong>${esc(calendar.summary || calendar.id)}</strong>
+        <small>${esc(calendarCountLabel(count))}</small>
+      </span>
+    </label>
   `;
 }
 
@@ -852,7 +1050,7 @@ function renderDatabase() {
           <div class="stack">
             ${renderMetric("Tasks", state.tasks.length, "할 일")}
             ${renderMetric("Resources", state.resources.length, "본문 blocks")}
-            ${renderMetric("Blocks", totalBlocks(), "자료/회고/이슈 본문")}
+            ${renderMetric("Blocks", totalBlocks(), "자료/회고 본문")}
           </div>
         </div>
         <div class="panel">
@@ -973,14 +1171,19 @@ function renderTaskCard(task, draggable = false, options = {}) {
           ${options.scheduleHold ? `<button class="schedule-hint" type="button" data-scheduler-open="${task.id}">${scheduleLabel}</button>` : ""}
           <div class="card-meta">
             ${task.scheduledStart ? badge(formatDateTime(task.scheduledStart), "blue") : ""}
-            ${task.dueDate && !task.scheduledStart ? badge(`날짜 ${task.dueDate}`, isOverdue(task) ? "rose" : "amber") : ""}
+            ${task.dueDate && !task.scheduledStart ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
             ${["waiting", "someday"].includes(task.status) ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
             ${task.projectId ? badge(nameOf("projects", task.projectId), "violet") : ""}
           </div>
         </div>
-        ${inline ? `<span class="task-chevron" aria-hidden="true"></span>` : ""}
+        ${
+          inline
+            ? `<button class="task-toggle-hitarea" type="button" data-task-inline-toggle="${task.id}" data-task-toggle-hitarea aria-label="${expanded ? "상세 닫기" : "상세 열기"}" aria-expanded="${expanded ? "true" : "false"}">
+                <span class="task-chevron" aria-hidden="true"></span>
+              </button>`
+            : ""
+        }
       </div>
-      ${inline ? `<span class="task-inline-separator" aria-hidden="true"></span>` : ""}
       ${
         inline
           ? `<div class="task-detail-shell" aria-hidden="${expanded ? "false" : "true"}">
@@ -996,14 +1199,10 @@ function renderTaskCard(task, draggable = false, options = {}) {
 
 function renderTaskInlineDetail(task) {
   const resource = task.resourceId ? state.resources.find((entry) => entry.id === task.resourceId) : null;
+  const propsOpen = Boolean(ui.todayTaskPropsOpen?.[task.id]);
   return `
     <div class="task-inline-grid">
-      <div class="task-inline-fields">
-        <div class="task-inline-section-head">
-          <strong>상세 정보</strong>
-        </div>
-        ${renderTaskPropertyFields(task, { includeTitle: true, className: "task-inline-field-grid" })}
-      </div>
+      ${renderTodayTaskProperties(task, propsOpen)}
       <div class="task-inline-resource-panel">
         <div class="task-inline-section-head">
           <strong>관련 자료</strong>
@@ -1023,13 +1222,153 @@ function renderTaskInlineDetail(task) {
   `;
 }
 
+function renderTodayTaskProperties(task, propsOpen) {
+  const activeField = ui.todayTaskActiveProperty?.[task.id] || "";
+  return `
+    <div class="task-inline-fields ${propsOpen ? "is-open" : ""}" data-task-props="${task.id}">
+      <button class="task-props-toggle ${propsOpen ? "is-open" : ""}" type="button" data-task-props-toggle="${task.id}" aria-expanded="${propsOpen ? "true" : "false"}">
+        <strong>상세 정보</strong>
+        <span>${propsOpen ? "닫기" : "열기"}</span>
+      </button>
+      <div class="task-props-body" aria-hidden="${propsOpen ? "false" : "true"}">
+        ${
+          propsOpen
+            ? activeField
+              ? renderTaskPropertyEditor(task, activeField)
+              : renderTaskPropertySummaryList(task)
+            : ""
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderTaskPropertySummaryList(task) {
+  const properties = [
+    ["title", "제목", task.title || "제목 없음"],
+    ["dueDate", "날짜", taskDateDisplay(task.dueDate)],
+    ["boxId", "박스", task.boxId ? nameOf("boxes", task.boxId) : "미지정"],
+    ["goalId", "목표", task.goalId ? nameOf("goals", task.goalId) : "없음"],
+    ["projectId", "프로젝트", task.projectId ? nameOf("projects", task.projectId) : "없음"],
+  ];
+  return `
+    <div class="task-property-list">
+      ${properties.map(([field, label, value]) => `
+        <button class="task-property-row" type="button" data-task-property-edit="${task.id}" data-task-property-field="${field}">
+          <span>${esc(label)}</span>
+          <strong>${esc(value)}</strong>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderTaskPropertyEditor(task, field) {
+  const labels = {
+    title: "제목",
+    dueDate: "날짜",
+    boxId: "박스",
+    goalId: "목표",
+    projectId: "프로젝트",
+  };
+  const hints = {
+    title: "표시 이름",
+    dueDate: "실행 날짜",
+    boxId: "관리 영역",
+    goalId: "목표 연결",
+    projectId: "실행 맥락",
+  };
+  return `
+    <div class="task-property-editor">
+      <div class="task-property-editor-head">
+        <button type="button" data-task-property-back="${task.id}" aria-label="상세 정보로 돌아가기">‹</button>
+        <strong>${esc(labels[field] || "속성")}</strong>
+      </div>
+      ${
+        field === "title"
+          ? renderTaskTitleEditor(task)
+          : `<div class="task-property-flow-row">
+              <div class="task-property-flow-label">
+                <span>${esc(labels[field] || "속성")}</span>
+                <small>${esc(hints[field] || "")}</small>
+              </div>
+              ${renderTaskPropertyChoices(task, field)}
+            </div>`
+      }
+    </div>
+  `;
+}
+
+function renderTaskTitleEditor(task) {
+  return `
+    <div class="task-title-editor">
+      <input class="input" data-task-inline-title="${task.id}" value="${esc(task.title || "")}" aria-label="Task 제목">
+      <button class="button ghost" type="button" data-task-property-back="${task.id}">완료</button>
+    </div>
+  `;
+}
+
+function renderTaskPropertyChoices(task, field) {
+  if (field === "dueDate") {
+    return `
+      <div class="task-date-choice-grid">
+        ${taskDateChoices().map((choice) => renderTaskPropertyChoice(task, field, choice.value, choice.label, choice.meta)).join("")}
+      </div>
+    `;
+  }
+  const collections = {
+    boxId: { empty: "미지정", emptyMeta: "관리 영역 없음", items: state.boxes, nameField: "name" },
+    goalId: { empty: "없음", emptyMeta: "목표 없이 진행", items: state.goals, nameField: "name" },
+    projectId: { empty: "없음", emptyMeta: "독립 실행", items: state.projects, nameField: "name" },
+  };
+  const config = collections[field];
+  if (!config) return "";
+  return `
+    <div class="task-property-choice-grid">
+      ${renderTaskPropertyChoice(task, field, "", config.empty, config.emptyMeta)}
+      ${config.items.map((item) => renderTaskPropertyChoice(task, field, item.id, item[config.nameField], taskRelationChoiceMeta(field, item))).join("")}
+    </div>
+  `;
+}
+
+function renderTaskPropertyChoice(task, field, value, label, meta = "") {
+  const selected = String(task[field] || "") === String(value || "");
+  return `
+    <button class="task-property-choice ${selected ? "is-selected" : ""}" type="button" data-task-property-value="${task.id}" data-task-property-field="${field}" data-task-property-next="${esc(value)}">
+      <span>${esc(label)}</span>
+      ${meta ? `<small>${esc(meta)}</small>` : ""}
+    </button>
+  `;
+}
+
+function taskDateChoices() {
+  const today = dateKey(new Date());
+  const tomorrow = dateKey(addDays(new Date(), 1));
+  const scheduled = dateKey(addDays(new Date(), 2));
+  const nextWeek = dateKey(addDays(new Date(), 7));
+  return [
+    { value: today, label: "오늘", meta: taskDateDisplay(today) },
+    { value: tomorrow, label: "내일", meta: taskDateDisplay(tomorrow) },
+    { value: scheduled, label: "예정", meta: taskDateDisplay(scheduled) },
+    { value: nextWeek, label: "다음 주", meta: taskDateDisplay(nextWeek) },
+    { value: "", label: "날짜 없음", meta: "배치하지 않음" },
+  ];
+}
+
+function taskRelationChoiceMeta(field, item) {
+  if (field === "boxId") return item.visibility === "pinned" ? "고정" : "";
+  if (field === "goalId") return STATUSES.goal[item.status] || item.status || "";
+  if (field === "projectId") return projectFlowMeta(item);
+  return "";
+}
+
 function renderProjectItem(project) {
   const stats = projectStats(project);
   const expanded = ui.expandedProjectId === project.id;
   const statusColor = project.status === "focus" ? "blue" : ["completed"].includes(project.status) ? "teal" : ["paused", "canceled"].includes(project.status) ? "rose" : "violet";
   return `
     <article class="project-item ${expanded ? "is-expanded" : ""}" data-project-item="${project.id}">
-      <button class="project-row" type="button" data-project-toggle="${project.id}" aria-expanded="${expanded ? "true" : "false"}">
+      <div class="project-row" role="button" tabindex="0" data-project-toggle="${project.id}" aria-expanded="${expanded ? "true" : "false"}">
         <div class="project-main">
           <div class="project-title-line">
             <h3>${esc(project.name)}</h3>
@@ -1055,8 +1394,12 @@ function renderProjectItem(project) {
           <span>종료</span>
           <strong>${esc(projectDateLabel(project.endDate))}</strong>
         </div>
+        <div class="project-actions" aria-label="${esc(project.name)} 관리">
+          <button class="project-action-button" type="button" data-project-edit="${project.id}" aria-label="프로젝트 수정">수정</button>
+          <button class="project-action-button is-danger" type="button" data-project-delete="${project.id}" aria-label="프로젝트 삭제">삭제</button>
+        </div>
         <span class="project-chevron" aria-hidden="true"></span>
-      </button>
+      </div>
       <div class="project-detail-shell" aria-hidden="${expanded ? "false" : "true"}">
         <div class="project-detail">
           ${renderProjectDetail(project, stats)}
@@ -1073,6 +1416,7 @@ function renderProjectDetail(project, stats) {
   const remainingTasks = stats.tasks.filter((task) => task.status !== "done" && task.status !== "canceled");
   const doneTasks = stats.tasks.filter((task) => task.status === "done");
   return `
+    ${ui.editingProjectId === project.id ? renderInlineEditPanel("projects", project, "프로젝트 수정") : ""}
     <div class="project-detail-grid">
       <div class="project-detail-overview">
         <div class="project-relation-strip">
@@ -1103,6 +1447,25 @@ function renderProjectRelation(label, value) {
       <small>${esc(label)}</small>
       <strong>${esc(value)}</strong>
     </span>
+  `;
+}
+
+function renderInlineEditPanel(type, item, title) {
+  const nameField = type === "projects" || type === "goals" || type === "boxes" ? "name" : "title";
+  const nameLabel = type === "habits" ? "루틴명" : type === "projects" ? "프로젝트명" : "제목";
+  return `
+    <section class="inline-edit-panel" data-inline-owner-type="${type}" data-inline-owner-id="${item.id}" aria-label="${esc(title)}">
+      <div class="inline-edit-head">
+        <div>
+          <span>수정</span>
+          <strong>${esc(title)}</strong>
+        </div>
+      </div>
+      <div class="field-grid">
+        ${textField(nameLabel, nameField, item[nameField] || "")}
+      </div>
+      ${renderDetailFields(type, item)}
+    </section>
   `;
 }
 
@@ -1143,10 +1506,7 @@ function renderProjectTaskLine(task) {
 }
 
 function renderGoalCard(goal) {
-  const projects = state.projects.filter((project) => project.goalId === goal.id);
-  const projectTasks = state.tasks.filter((task) => task.goalId === goal.id);
-  const completedTasks = projectTasks.filter((task) => task.status === "done").length;
-  const progress = projectTasks.length ? Math.round((completedTasks / projectTasks.length) * 100) : projects.length ? 10 : 0;
+  const stats = goalStats(goal);
   return `
     <article class="card" data-select-type="goals" data-select-id="${goal.id}">
       <h3 class="card-title">${esc(goal.name)}</h3>
@@ -1155,34 +1515,59 @@ function renderGoalCard(goal) {
         ${goal.boxId ? badge(nameOf("boxes", goal.boxId), "teal") : ""}
         ${goal.targetDate ? badge(goal.targetDate, "amber") : ""}
       </div>
-      <div class="progress" style="margin-top:12px"><span style="width:${progress}%"></span></div>
+      <div class="progress entity-progress"><span style="width:${stats.progress}%"></span></div>
+      <div class="entity-stat-grid">
+        ${renderEntityStat("진행률", `${stats.progress}%`, `${stats.doneTasks}/${stats.totalTasks} 완료`)}
+        ${renderEntityStat("프로젝트", stats.projects.length, `${stats.activeProjects} 진행`)}
+        ${renderEntityStat("자료", stats.resources.length, `${stats.importantResources} 중요`)}
+        ${renderEntityStat("지연", stats.overdueTasks, "할 일")}
+      </div>
+      <p class="entity-insight">${esc(goalInsight(goal, stats))}</p>
     </article>
   `;
 }
 
 function renderBoxCard(box) {
-  const goals = state.goals.filter((goal) => goal.boxId === box.id).length;
-  const projects = state.projects.filter((project) => project.boxId === box.id).length;
-  const tasks = state.tasks.filter((task) => task.boxId === box.id && task.status !== "done").length;
+  const stats = boxStats(box);
   return `
-    <article class="card" data-select-type="boxes" data-select-id="${box.id}">
+    <article class="card" data-select-type="boxes" data-select-id="${box.id}" data-delete-drag-type="boxes" data-delete-drag-id="${box.id}">
       <h3 class="card-title">${esc(box.name)}</h3>
       <div class="card-meta">
         ${badge(box.visibility, box.visibility === "pinned" ? "blue" : "teal")}
-        ${badge(`${goals} 목표`, "violet")}
-        ${badge(`${projects} 프로젝트`, "amber")}
-        ${badge(`${tasks} 할 일`, "teal")}
+        ${badge(`${stats.goals.length} 목표`, "violet")}
+        ${badge(`${stats.projects.length} 프로젝트`, "amber")}
+        ${badge(`${stats.activeTasks} 할 일`, "teal")}
       </div>
+      <div class="progress entity-progress"><span style="width:${stats.progress}%"></span></div>
+      <div class="entity-stat-grid">
+        ${renderEntityStat("진행률", `${stats.progress}%`, `${stats.doneTasks}/${stats.totalTasks} 완료`)}
+        ${renderEntityStat("루틴", stats.activeHabits, "활성")}
+        ${renderEntityStat("자료", stats.resources.length, `${stats.pinnedResources} 고정`)}
+        ${renderEntityStat("프로젝트", stats.projects.length, "연결")}
+      </div>
+      <p class="entity-insight">${esc(boxInsight(box, stats))}</p>
     </article>
+  `;
+}
+
+function renderEntityStat(label, value, meta = "") {
+  return `
+    <span class="entity-stat">
+      <small>${esc(label)}</small>
+      <strong>${esc(value)}</strong>
+      ${meta ? `<em>${esc(meta)}</em>` : ""}
+    </span>
   `;
 }
 
 function renderResourceCard(resource) {
   return `
-    <article class="card" data-select-type="resources" data-select-id="${resource.id}">
+    <article class="card" data-select-type="resources" data-select-id="${resource.id}" data-delete-drag-type="resources" data-delete-drag-id="${resource.id}">
       <h3 class="card-title">${esc(resource.title)}</h3>
       <p class="resource-preview">${esc(blockText(resource).slice(0, 112)) || "비어 있는 자료"}</p>
       <div class="card-meta">
+        ${resource.importance === "archived" ? badge("아카이브", "rose") : ""}
+        ${resource.importance === "important" ? badge("중요", "amber") : ""}
         ${resource.pinned ? badge("고정", "blue") : ""}
         ${resource.readLater ? badge("나중에 보기", "amber") : ""}
         ${resource.projectId ? badge(nameOf("projects", resource.projectId), "violet") : ""}
@@ -1228,11 +1613,15 @@ function renderHabitItem(habit) {
           <strong class="${monthStats.completed >= Math.ceil(monthStats.total * 0.7) ? "teal" : "amber"}" data-habit-month-inline="${habit.id}" data-habit-month="${monthKey(new Date(today))}">${monthStats.completed}/${monthStats.total}</strong>
           <span>month</span>
         </div>
-        <button class="habit-edit-button" type="button" data-habit-edit="${habit.id}" aria-label="루틴 상세 편집">✎</button>
+        <div class="habit-actions" aria-label="${esc(habit.title)} 관리">
+          <button class="habit-edit-button" type="button" data-habit-edit="${habit.id}" aria-label="루틴 상세 편집">✎</button>
+          <button class="habit-delete-button" type="button" data-habit-delete="${habit.id}" aria-label="루틴 삭제">삭제</button>
+        </div>
         <span class="project-chevron habit-chevron" aria-hidden="true"></span>
       </div>
       <div class="habit-detail-shell" aria-hidden="${expanded ? "false" : "true"}">
         <div class="habit-detail">
+          ${ui.editingHabitId === habit.id ? renderInlineEditPanel("habits", habit, "루틴 수정") : ""}
           ${renderHabitCalendar(habit, today)}
         </div>
       </div>
@@ -1325,25 +1714,11 @@ function renderJournalCard(journal) {
   `;
 }
 
-function renderObstacleCard(obstacle) {
-  return `
-    <article class="card" data-select-type="obstacles" data-select-id="${obstacle.id}">
-      <h3 class="card-title">${esc(obstacle.title)}</h3>
-      <p class="resource-preview">${esc(blockText(obstacle).slice(0, 120))}</p>
-      <div class="card-meta">
-        ${badge(STATUSES.obstacle[obstacle.status] || obstacle.status, obstacle.status === "open" ? "rose" : "teal")}
-        ${badge(`S${obstacle.severity || 1}`, obstacle.severity >= 4 ? "rose" : "amber")}
-        ${obstacle.projectId ? badge(nameOf("projects", obstacle.projectId), "violet") : ""}
-      </div>
-    </article>
-  `;
-}
-
 function renderCaptureCard(capture) {
   const processed = capture.status === "processed";
   const draft = getCaptureDraft(capture.id);
   return `
-    <article class="card capture-card ${draft ? "is-configuring" : ""}" data-select-type="captures" data-select-id="${capture.id}">
+    <article class="card capture-card ${draft ? "is-configuring" : ""}" data-select-type="captures" data-select-id="${capture.id}" data-delete-drag-type="captures" data-delete-drag-id="${capture.id}">
       <h3 class="card-title">${esc(capture.title)}</h3>
       ${capture.url ? `<p class="resource-preview">${esc(capture.url)}</p>` : ""}
       <div class="card-meta">
@@ -1547,7 +1922,7 @@ function captureTargetLabel(type) {
 
 function renderWeekDays() {
   const start = startOfWeek(new Date());
-  const events = getLocalCalendarEvents();
+  const events = getCombinedCalendarEvents();
   return Array.from({ length: 7 }, (_, index) => addDays(start, index))
     .map((day) => {
       const key = dateKey(day);
@@ -1564,12 +1939,13 @@ function renderWeekDays() {
 
 function renderCombinedCalendar() {
   const today = dateKey(new Date());
-  const currentMonth = monthKey(new Date());
+  const selectedMonth = selectedCalendarMonthDate();
+  const currentMonth = monthKey(selectedMonth);
   const events = getCombinedCalendarEvents();
-  const days = monthGridDays(new Date());
+  const days = calendarMonthGridDays(selectedMonth);
   return `
     <div class="calendar-month-weekdays">
-      ${Array.from({ length: 7 }, (_, index) => `<span>${weekday(addDays(startOfWeek(new Date()), index))}</span>`).join("")}
+      ${Array.from({ length: 7 }, (_, index) => `<span>${weekday(addDays(startOfSundayWeek(selectedMonth), index))}</span>`).join("")}
     </div>
     <div class="calendar-month-grid">
       ${days.map((day) => {
@@ -1579,7 +1955,7 @@ function renderCombinedCalendar() {
         const overflow = dayEvents.length - visibleEvents.length;
         return `
           <div class="calendar-month-day ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === today ? "is-today" : ""}">
-            <div class="calendar-month-date"><span>${key.slice(8)}</span><small>${weekday(day)}</small></div>
+            <div class="calendar-month-date"><span>${key.slice(8)}</span></div>
             <div class="calendar-event-list">
               ${visibleEvents.map((event) => renderCalendarEvent(event, { compact: true })).join("")}
               ${overflow > 0 ? `<span class="calendar-event-more">+${overflow}</span>` : ""}
@@ -1596,7 +1972,7 @@ function renderCalendarEvent(event, options = {}) {
   const attrs = event.selectType && event.selectId ? `data-select-type="${event.selectType}" data-select-id="${event.selectId}"` : "";
   const link = event.htmlLink ? `<a class="calendar-event-open" href="${esc(event.htmlLink)}" target="_blank" rel="noreferrer" aria-label="Google Calendar에서 열기">↗</a>` : "";
   return `
-    <article class="calendar-event ${event.source === "google" ? "is-google" : "is-local"} ${options.compact ? "is-compact" : ""}" ${attrs}>
+    <article class="calendar-event ${calendarEventSourceClass(event)} ${options.compact ? "is-compact" : ""}" ${attrs}>
       <span class="calendar-event-time">${esc(calendarEventTimeLabel(event))}</span>
       <strong>${esc(event.title || "(제목 없음)")}</strong>
       ${link}
@@ -1605,6 +1981,13 @@ function renderCalendarEvent(event, options = {}) {
 }
 
 function getLocalCalendarEvents() {
+  const events = [];
+  if (calendarSourceVisible("tasks")) events.push(...getTaskCalendarEvents());
+  if (calendarSourceVisible("projects")) events.push(...getProjectCalendarEvents());
+  return events;
+}
+
+function getTaskCalendarEvents() {
   return state.tasks
     .filter((task) => (task.scheduledStart || task.dueDate) && task.status !== "done" && task.status !== "canceled")
     .map((task) => {
@@ -1613,7 +1996,7 @@ function getLocalCalendarEvents() {
       const end = task.scheduledEnd || (task.scheduledStart ? new Date(new Date(task.scheduledStart).getTime() + (task.estimatedMinutes || 60) * 60000).toISOString() : `${task.dueDate}T23:59`);
       return {
         id: task.id,
-        source: "local",
+        source: "task",
         title: task.title,
         start,
         end,
@@ -1626,12 +2009,45 @@ function getLocalCalendarEvents() {
     });
 }
 
+function getProjectCalendarEvents() {
+  return state.projects
+    .filter((project) => (project.startDate || project.endDate) && project.status !== "canceled")
+    .map((project) => {
+      const startDate = project.startDate || project.endDate;
+      const rawEndDate = project.endDate || project.startDate;
+      const endDate = rawEndDate < startDate ? startDate : rawEndDate;
+      return {
+        id: project.id,
+        source: "project",
+        title: project.name,
+        start: `${startDate}T00:00`,
+        end: `${endDate}T23:59`,
+        startDate,
+        endDate,
+        allDay: true,
+        selectType: "projects",
+        selectId: project.id,
+      };
+    });
+}
+
 function getGoogleCalendarEvents() {
   return (state.googleEvents || []).filter((event) => event.status !== "cancelled");
 }
 
+function getVisibleGoogleCalendarEvents() {
+  return getGoogleCalendarEvents().filter((event) => googleCalendarVisible(event.calendarId || "primary"));
+}
+
 function getCombinedCalendarEvents() {
-  return [...getLocalCalendarEvents(), ...getGoogleCalendarEvents()];
+  return [...getLocalCalendarEvents(), ...getVisibleGoogleCalendarEvents()];
+}
+
+function calendarEventSourceClass(event) {
+  if (event.source === "google") return "is-google";
+  if (event.source === "project") return "is-project";
+  if (event.source === "task") return "is-task";
+  return "is-local";
 }
 
 function calendarEventOccursOn(event, date) {
@@ -1654,53 +2070,171 @@ function calendarEventTimeLabel(event) {
 }
 
 function googleCalendarStatusLabel() {
-  if (state.settings.lastGoogleFetchAt) return `불러오기 ${formatDateTime(state.settings.lastGoogleFetchAt)}`;
-  if (state.settings.lastGoogleSyncAt) return `내보내기 ${formatDateTime(state.settings.lastGoogleSyncAt)}`;
-  return state.settings.googleConnectedAt ? "연결됨" : "미연결";
+  const calendars = getGoogleCalendarOptions();
+  if (state.settings.lastGoogleFetchAt) return `Updated ${formatDateTime(state.settings.lastGoogleFetchAt)}`;
+  return calendars.length ? `${calendars.length} Google calendars` : "Local calendar";
 }
 
-function combinedCalendarRange() {
-  const days = monthGridDays(new Date());
+function combinedCalendarRange(monthDate = selectedCalendarMonthDate()) {
+  const days = calendarMonthGridDays(monthDate);
   return {
     start: dateKey(days[0]),
     endExclusive: dateKey(addDays(days[days.length - 1], 1)),
   };
 }
 
+function selectedCalendarMonthDate() {
+  return parseMonthKey(ui.calendarMonth || monthKey(new Date()));
+}
+
+function selectedProjectCalendarDate() {
+  return parseDateOnly(ui.projectCalendarAnchor || dateKey(new Date()));
+}
+
+function setProjectCalendarMode(mode) {
+  const nextMode = mode === "month" ? "month" : "week";
+  if (ui.projectCalendarMode === nextMode) return;
+  const previousHeight = measureProjectCalendarBodyHeight();
+  ui.projectCalendarMode = nextMode;
+  renderView({ soft: true });
+  animateProjectCalendarBodyResize(previousHeight);
+}
+
+function changeProjectCalendarAnchor(direction) {
+  const mode = ui.projectCalendarMode === "month" ? "month" : "week";
+  const current = selectedProjectCalendarDate();
+  const previousHeight = measureProjectCalendarBodyHeight();
+  if (direction === "today") {
+    ui.projectCalendarAnchor = dateKey(new Date());
+  } else if (direction === "prev") {
+    ui.projectCalendarAnchor = dateKey(mode === "month" ? addMonths(current, -1) : addDays(current, -7));
+  } else if (direction === "next") {
+    ui.projectCalendarAnchor = dateKey(mode === "month" ? addMonths(current, 1) : addDays(current, 7));
+  }
+  renderView({ soft: true });
+  animateProjectCalendarBodyResize(previousHeight);
+}
+
+function projectWeekRangeLabel(anchor) {
+  const start = startOfWeek(anchor);
+  const end = addDays(start, 6);
+  return `${compactDateLabel(dateKey(start))} - ${compactDateLabel(dateKey(end))}`;
+}
+
+function measureProjectCalendarBodyHeight() {
+  const body = document.querySelector(".project-calendar-body");
+  return body ? body.getBoundingClientRect().height : null;
+}
+
+function animateProjectCalendarBodyResize(previousHeight) {
+  if (previousHeight === null || previousHeight === undefined || ui.view !== "projects") return;
+  window.clearTimeout(projectCalendarResizeTimer);
+  const body = document.querySelector(".project-calendar-body");
+  if (!body) return;
+  const nextHeight = body.getBoundingClientRect().height;
+  if (Math.abs(nextHeight - previousHeight) < 1) return;
+  body.classList.remove("is-resizing");
+  body.style.transition = "none";
+  body.style.overflow = "hidden";
+  body.style.height = `${previousHeight}px`;
+  body.getBoundingClientRect();
+  body.style.transition = "";
+  body.classList.add("is-resizing");
+  requestAnimationFrame(() => {
+    let completed = false;
+    const finish = (event) => {
+      if (event && (event.target !== body || event.propertyName !== "height")) return;
+      if (completed) return;
+      completed = true;
+      window.clearTimeout(projectCalendarResizeTimer);
+      body.removeEventListener("transitionend", finish);
+      body.classList.remove("is-resizing");
+      body.style.height = "";
+      body.style.overflow = "";
+    };
+    body.addEventListener("transitionend", finish);
+    body.style.height = `${nextHeight}px`;
+    projectCalendarResizeTimer = window.setTimeout(finish, 720);
+  });
+}
+
+function changeCalendarMonth(direction) {
+  const current = selectedCalendarMonthDate();
+  if (direction === "today") {
+    ui.calendarMonth = monthKey(new Date());
+  } else if (direction === "prev") {
+    ui.calendarMonth = monthKey(addMonths(current, -1));
+  } else if (direction === "next") {
+    ui.calendarMonth = monthKey(addMonths(current, 1));
+  }
+  renderView({ soft: true });
+  if (googleBackendStatus.connected) fetchGoogleCalendarEvents({ silent: true });
+}
+
+function googleCalendarSessionConnected() {
+  return Boolean(googleBackendStatus.connected);
+}
+
+function calendarSourceVisible(source) {
+  const sources = normalizeCalendarSources(state.settings.calendarSources);
+  return sources[source] !== false;
+}
+
+function setCalendarSourceVisible(source, visible) {
+  state.settings.calendarSources = normalizeCalendarSources(state.settings.calendarSources);
+  state.settings.calendarSources[source] = Boolean(visible);
+  saveState();
+  renderView({ soft: true });
+}
+
+function googleCalendarVisible(calendarId) {
+  if (!calendarId) return true;
+  const visible = state.settings.visibleGoogleCalendars || {};
+  return visible[calendarId] !== false;
+}
+
+function setGoogleCalendarVisible(calendarId, visible) {
+  if (!calendarId) return;
+  state.settings.visibleGoogleCalendars = {
+    ...(state.settings.visibleGoogleCalendars || {}),
+    [calendarId]: Boolean(visible),
+  };
+  saveState();
+  renderView({ soft: true });
+}
+
+function getGoogleCalendarOptions() {
+  const calendarsById = new Map();
+  (state.googleCalendars || []).forEach((calendar) => {
+    const normalized = normalizeGoogleCalendarEntry(calendar);
+    if (normalized?.id) calendarsById.set(normalized.id, normalized);
+  });
+  (state.googleEvents || []).forEach((event) => {
+    const calendarId = event.calendarId || "primary";
+    if (!calendarsById.has(calendarId)) {
+      calendarsById.set(calendarId, fallbackGoogleCalendar(calendarId, event.calendarSummary || calendarId));
+    }
+  });
+  return Array.from(calendarsById.values()).sort((a, b) => {
+    if (Boolean(a.primary) !== Boolean(b.primary)) return a.primary ? -1 : 1;
+    return (a.summary || a.id).localeCompare(b.summary || b.id);
+  });
+}
+
+function calendarCountLabel(count) {
+  return `${count} ${count === 1 ? "event" : "events"}`;
+}
+
+function calendarColorStyle(calendar) {
+  const color = String(calendar.backgroundColor || "").trim();
+  if (!/^#[0-9a-f]{3,8}$/i.test(color)) return "";
+  return ` style="--calendar-color: ${esc(color)}"`;
+}
+
 function renderDetail(options = {}) {
   updateTaskSchedulingMode();
   const resourceNotes = renderResourceNotes(options);
-  if (!ui.selected) {
-    els.detailRoot.innerHTML = resourceNotes;
-    decorateButtons(els.detailRoot);
-    return;
-  }
-  const { type, id: selectedId } = ui.selected;
-  const item = getCollection(type).find((entry) => entry.id === selectedId);
-  if (!item) {
-    ui.selected = null;
-    els.detailRoot.innerHTML = resourceNotes;
-    decorateButtons(els.detailRoot);
-    return;
-  }
-
-  const titleField = titleFieldFor(type);
-  els.detailRoot.innerHTML = `
-    <aside class="detail" aria-label="상세 편집">
-      <div class="detail-head">
-        <input class="detail-title" data-detail-title="${titleField}" value="${esc(item[titleField] || "")}" aria-label="제목">
-        <div class="toolbar">
-          <button class="button ghost" type="button" data-action="delete-selected">삭제</button>
-          <button class="button ghost" type="button" data-action="close-detail">닫기</button>
-        </div>
-      </div>
-      <div class="detail-body">
-        ${renderDetailFields(type, item)}
-        ${item.blocks ? renderBlockEditor(type, item.id, item.blocks) : ""}
-      </div>
-    </aside>
-    ${resourceNotes}
-  `;
+  els.detailRoot.innerHTML = resourceNotes;
   decorateButtons(els.detailRoot);
 }
 
@@ -1818,17 +2352,6 @@ function renderDetailFields(type, item) {
       </div>
     `;
   }
-  if (type === "obstacles") {
-    return `
-      <div class="field-grid">
-        ${selectField("상태", "status", item.status, STATUSES.obstacle)}
-        ${numberField("심각도", "severity", item.severity || 1)}
-        ${relationField("박스", "boxId", item.boxId, state.boxes, "name")}
-        ${relationField("프로젝트", "projectId", item.projectId, state.projects, "name")}
-        ${relationField("할 일", "taskId", item.taskId, state.tasks, "title")}
-      </div>
-    `;
-  }
   if (type === "captures") {
     return `
       <div class="field-grid">
@@ -1924,12 +2447,18 @@ function renderOverlays() {
     ${ui.commandOpen ? renderCommandMenu() : ""}
     ${ui.slash ? renderSlashMenu() : ""}
     ${ui.scheduler ? renderTaskScheduler() : ""}
+    ${ui.deleteDrag ? renderDeleteDragOverlay() : ""}
+    ${ui.projectDeleteConfirmId ? renderProjectDeleteConfirm() : ""}
+    ${ui.habitDeleteConfirmId ? renderHabitDeleteConfirm() : ""}
+    ${ui.view === "today" ? renderTodayFloatingDrop() : ""}
+    ${ui.todayTaskDrag ? renderTodayTaskDragGhost() : ""}
   `;
   decorateButtons(els.overlayRoot);
 }
 
 function updateTaskSchedulingMode() {
   app.classList.toggle("is-task-scheduling", Boolean(ui.scheduler?.dragging && ui.view === "tasks"));
+  app.classList.toggle("is-delete-dragging", Boolean(ui.deleteDrag));
   app.classList.toggle("has-docked-resource", ui.resourceNotes.some((note) => note.mode === "docked"));
 }
 
@@ -1994,6 +2523,12 @@ function renderTaskScheduler() {
       <div class="task-scheduler-month-zone is-next" aria-hidden="true">
         <span>${esc(monthSideLabel(nextMonth))}</span>
       </div>
+      <button class="task-scheduler-delete-zone ${scheduler.dragOverAction === "delete" ? "is-drop-target" : ""}" type="button" data-scheduler-action="delete" aria-label="Task 삭제">
+        <span>
+          <strong>삭제</strong>
+          <em>완전히 제거</em>
+        </span>
+      </button>
     </div>
     ${
       scheduler.dragging
@@ -2003,6 +2538,117 @@ function renderTaskScheduler() {
           </div>`
         : ""
     }
+  `;
+}
+
+function renderDeleteDragOverlay() {
+  const drag = ui.deleteDrag;
+  if (!drag) return "";
+  const label = deleteDragTypeLabel(drag.type);
+  const actions = dragActionTargets(drag.type, drag.id);
+  return `
+    <div class="task-scheduler-backdrop delete-drag-backdrop" aria-hidden="true"></div>
+    <div class="delete-drag-stage ${actions.length > 1 ? "is-multi-action" : ""}" role="dialog" aria-label="${esc(label)} 이동">
+      ${actions.map((action) => `
+        <button class="${action.tone === "delete" ? "task-scheduler-delete-zone delete-drop-zone" : "task-scheduler-lane delete-drop-zone"} ${drag.targetAction === action.action ? "is-drop-target" : ""}" type="button" data-delete-drop data-drag-action="${action.action}">
+          <span>
+            <strong>${esc(action.title)}</strong>
+            <em>${esc(action.meta)}</em>
+          </span>
+          ${action.count !== undefined ? `<small>${action.count}</small>` : ""}
+        </button>
+      `).join("")}
+    </div>
+    <div class="schedule-drag-ghost delete-drag-ghost" style="left:${drag.dragX}px;top:${drag.dragY}px;width:${drag.dragWidth}px">
+      <strong>${esc(drag.title || label)}</strong>
+      <span>${actions.length > 1 ? "원하는 영역에 놓기" : "삭제 영역에 놓기"}</span>
+    </div>
+  `;
+}
+
+function renderHabitDeleteConfirm() {
+  const habit = state.habits.find((entry) => entry.id === ui.habitDeleteConfirmId);
+  if (!habit) return "";
+  return `
+    <div class="confirm-backdrop habit-confirm-backdrop" aria-hidden="true"></div>
+    <section class="confirm-dialog habit-delete-confirm" role="dialog" aria-modal="true" aria-label="루틴 삭제 확인">
+      <div class="confirm-dialog-head">
+        <div>
+          <span class="confirm-kicker">Habits</span>
+          <h2>루틴을 삭제할까요?</h2>
+        </div>
+      </div>
+      <p class="confirm-copy"><strong>${esc(habit.title)}</strong> 루틴과 체크 기록이 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.</p>
+      <div class="confirm-actions">
+        <button class="button secondary" type="button" data-habit-delete-cancel>취소</button>
+        <button class="button danger" type="button" data-habit-delete-confirm="${habit.id}">삭제</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderProjectDeleteConfirm() {
+  const project = state.projects.find((entry) => entry.id === ui.projectDeleteConfirmId);
+  if (!project) return "";
+  const stats = projectStats(project);
+  const resourceCount = state.resources.filter((resource) => resource.projectId === project.id).length;
+  return `
+    <div class="confirm-backdrop project-confirm-backdrop" aria-hidden="true"></div>
+    <section class="confirm-dialog project-delete-confirm" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인">
+      <div class="confirm-dialog-head">
+        <div>
+          <span class="confirm-kicker">Projects</span>
+          <h2>프로젝트를 삭제할까요?</h2>
+        </div>
+      </div>
+      <p class="confirm-copy"><strong>${esc(project.name)}</strong> 프로젝트가 삭제됩니다. 연결된 ${stats.total}개 할 일과 ${resourceCount}개 자료는 삭제하지 않고 프로젝트 연결만 해제합니다.</p>
+      <div class="confirm-actions">
+        <button class="button secondary" type="button" data-project-delete-cancel>취소</button>
+        <button class="button danger" type="button" data-project-delete-confirm="${project.id}">삭제</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderTodayTaskDragGhost() {
+  const drag = ui.todayTaskDrag;
+  const task = state.tasks.find((entry) => entry.id === drag?.taskId);
+  if (!drag || !task) return "";
+  return `
+    <div class="today-drag-ghost" style="--drag-x:${drag.dragX}px;--drag-y:${drag.dragY}px;width:${drag.dragWidth}px" aria-hidden="true">
+      ${renderTodayDragCard(task)}
+    </div>
+  `;
+}
+
+function renderTodayDragCard(task) {
+  const done = task.status === "done";
+  return `
+    <article class="card task-inline-item today-drag-card ${done ? "done" : ""}">
+      <div class="task-row">
+        <span class="check ${done ? "is-done" : ""}" aria-hidden="true"></span>
+        <div>
+          <h3 class="card-title">${esc(task.title)}</h3>
+          <div class="card-meta">
+            ${task.scheduledStart ? badge(formatDateTime(task.scheduledStart), "blue") : ""}
+            ${task.dueDate && !task.scheduledStart ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
+            ${["waiting", "someday"].includes(task.status) ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
+            ${task.projectId ? badge(nameOf("projects", task.projectId), "violet") : ""}
+          </div>
+        </div>
+        <span class="task-chevron" aria-hidden="true"></span>
+      </div>
+    </article>
+  `;
+}
+
+function renderTodayFloatingDrop() {
+  const scheduledDate = dateKey(addDays(new Date(), 2));
+  return `
+    <div class="today-floating-drop" data-drop-date="${scheduledDate}" aria-hidden="${ui.todayTaskDrag ? "false" : "true"}">
+      <strong>예정</strong>
+      <span>${compactDateLabel(scheduledDate)}</span>
+    </div>
   `;
 }
 
@@ -2031,7 +2677,6 @@ function renderCommandMenu() {
     ["new-resource", "≡", "새 자료", "block editor 노트"],
     ["new-habit", "◌", "새 루틴", "반복 관리"],
     ["new-journal", "✎", "새 리뷰", "회고"],
-    ["new-obstacle", "!", "새 이슈", "병목/리스크"],
     ["new-box", "□", "새 박스", "삶의 영역"],
   ];
   return `
@@ -2125,6 +2770,33 @@ function handleClick(event) {
     return;
   }
 
+  const calendarMonthButton = event.target.closest("[data-calendar-month]");
+  if (calendarMonthButton) {
+    event.preventDefault();
+    changeCalendarMonth(calendarMonthButton.dataset.calendarMonth);
+    return;
+  }
+
+  const projectCalendarMode = event.target.closest("[data-project-calendar-mode]");
+  if (projectCalendarMode) {
+    event.preventDefault();
+    setProjectCalendarMode(projectCalendarMode.dataset.projectCalendarMode);
+    return;
+  }
+
+  const projectCalendarNav = event.target.closest("[data-project-calendar-nav]");
+  if (projectCalendarNav) {
+    event.preventDefault();
+    changeProjectCalendarAnchor(projectCalendarNav.dataset.projectCalendarNav);
+    return;
+  }
+
+  if (event.target.closest("[data-delete-drag-type]") && ui.suppressDeleteClickUntil > Date.now()) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     handleAction(actionButton.dataset.action);
@@ -2182,19 +2854,50 @@ function handleClick(event) {
     return;
   }
 
-  const todayTaskToggle = event.target.closest("[data-task-inline-toggle]");
-  if (todayTaskToggle && ui.view === "today" && !event.target.closest("button")) {
+  const taskPropsToggle = event.target.closest("[data-task-props-toggle]");
+  if (taskPropsToggle) {
     event.preventDefault();
     event.stopPropagation();
-    toggleTodayTaskDetail(todayTaskToggle.dataset.taskInlineToggle);
+    toggleTodayTaskProperties(taskPropsToggle.dataset.taskPropsToggle);
     return;
   }
 
-  const projectToggle = event.target.closest("[data-project-toggle]");
-  if (projectToggle) {
+  const taskPropertyBack = event.target.closest("[data-task-property-back]");
+  if (taskPropertyBack) {
     event.preventDefault();
     event.stopPropagation();
-    toggleProjectDetail(projectToggle.dataset.projectToggle);
+    setTodayTaskActiveProperty(taskPropertyBack.dataset.taskPropertyBack, "", {
+      outgoing: taskPropertyBack.closest(".task-property-editor"),
+    });
+    return;
+  }
+
+  const taskPropertyEdit = event.target.closest("[data-task-property-edit]");
+  if (taskPropertyEdit) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTodayTaskActiveProperty(taskPropertyEdit.dataset.taskPropertyEdit, taskPropertyEdit.dataset.taskPropertyField || "", {
+      outgoing: taskPropertyEdit.closest(".task-property-list"),
+    });
+    return;
+  }
+
+  const taskPropertyValue = event.target.closest("[data-task-property-value]");
+  if (taskPropertyValue) {
+    event.preventDefault();
+    event.stopPropagation();
+    updateTodayTaskProperty(taskPropertyValue.dataset.taskPropertyValue, taskPropertyValue.dataset.taskPropertyField || "", taskPropertyValue.dataset.taskPropertyNext || "", {
+      choice: taskPropertyValue,
+    });
+    return;
+  }
+
+  const todayTaskToggle = event.target.closest("[data-task-inline-toggle]");
+  if (todayTaskToggle && ui.view === "today" && (!event.target.closest("button") || todayTaskToggle.matches("[data-task-toggle-hitarea]"))) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (ui.suppressTaskClickUntil > Date.now()) return;
+    toggleTodayTaskDetail(todayTaskToggle.dataset.taskInlineToggle);
     return;
   }
 
@@ -2206,8 +2909,72 @@ function handleClick(event) {
     return;
   }
 
+  const projectEdit = event.target.closest("[data-project-edit]");
+  if (projectEdit) {
+    event.preventDefault();
+    event.stopPropagation();
+    openProjectEditor(projectEdit.dataset.projectEdit);
+    return;
+  }
+
+  const projectDelete = event.target.closest("[data-project-delete]");
+  if (projectDelete) {
+    event.preventDefault();
+    event.stopPropagation();
+    openProjectDeleteConfirm(projectDelete.dataset.projectDelete);
+    return;
+  }
+
+  const projectDeleteCancel = event.target.closest("[data-project-delete-cancel]");
+  if (projectDeleteCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeProjectDeleteConfirm();
+    return;
+  }
+
+  const projectDeleteConfirm = event.target.closest("[data-project-delete-confirm]");
+  if (projectDeleteConfirm) {
+    event.preventDefault();
+    event.stopPropagation();
+    confirmProjectDelete(projectDeleteConfirm.dataset.projectDeleteConfirm);
+    return;
+  }
+
+  const projectToggle = event.target.closest("[data-project-toggle]");
+  if (projectToggle && !event.target.closest("[data-project-edit], [data-project-delete], .project-actions")) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleProjectDetail(projectToggle.dataset.projectToggle);
+    return;
+  }
+
+  const habitDelete = event.target.closest("[data-habit-delete]");
+  if (habitDelete) {
+    event.preventDefault();
+    event.stopPropagation();
+    openHabitDeleteConfirm(habitDelete.dataset.habitDelete);
+    return;
+  }
+
+  const habitDeleteCancel = event.target.closest("[data-habit-delete-cancel]");
+  if (habitDeleteCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeHabitDeleteConfirm();
+    return;
+  }
+
+  const habitDeleteConfirm = event.target.closest("[data-habit-delete-confirm]");
+  if (habitDeleteConfirm) {
+    event.preventDefault();
+    event.stopPropagation();
+    confirmHabitDelete(habitDeleteConfirm.dataset.habitDeleteConfirm);
+    return;
+  }
+
   const habitToggle = event.target.closest("[data-habit-toggle]");
-  if (habitToggle) {
+  if (habitToggle && !event.target.closest("[data-habit-edit], [data-habit-delete], .habit-actions")) {
     event.preventDefault();
     event.stopPropagation();
     toggleHabitDetail(habitToggle.dataset.habitToggle);
@@ -2313,15 +3080,11 @@ function handleClick(event) {
 
   const select = event.target.closest("[data-select-type]");
   if (select && !event.target.closest("button")) {
+    event.preventDefault();
+    event.stopPropagation();
     if (select.dataset.selectType === "resources") {
       openResourceNote(select.dataset.selectId);
-      return;
     }
-    ui.selected = { type: select.dataset.selectType, id: select.dataset.selectId };
-    ui.commandOpen = false;
-    ui.slash = null;
-    renderDetail();
-    renderOverlays();
     return;
   }
 
@@ -2374,12 +3137,6 @@ function handleAction(action) {
   ui.commandOpen = false;
   renderOverlays();
 
-  if (action === "close-detail") {
-    ui.selected = null;
-    renderDetail();
-    return;
-  }
-  if (action === "delete-selected") return deleteSelected();
   if (action === "new-task") return createTask();
   if (action === "new-project") return createProject();
   if (action === "new-goal") return createGoal();
@@ -2387,7 +3144,6 @@ function handleAction(action) {
   if (action === "new-resource") return createResource();
   if (action === "new-habit") return createHabit();
   if (action === "new-journal") return createJournal();
-  if (action === "new-obstacle") return createObstacle();
   if (action === "new-capture") return createCapture();
   if (action === "connect-google") return connectGoogle();
   if (action === "fetch-google") return fetchGoogleCalendarEvents();
@@ -2440,13 +3196,14 @@ function handleInput(event) {
     return;
   }
 
-  const titleInput = event.target.closest("[data-detail-title]");
-  if (titleInput && ui.selected) {
-    const item = selectedItem();
-    if (!item) return;
-    item[titleInput.dataset.detailTitle] = titleInput.value;
+  const inlineTaskTitle = event.target.closest("[data-task-inline-title]");
+  if (inlineTaskTitle) {
+    const task = state.tasks.find((entry) => entry.id === inlineTaskTitle.dataset.taskInlineTitle);
+    if (!task) return;
+    task.title = inlineTaskTitle.value;
     saveState();
-    renderView({ soft: true });
+    const cardTitle = inlineTaskTitle.closest(".task-inline-item")?.querySelector(".card-title");
+    if (cardTitle) cardTitle.textContent = task.title || "제목 없음";
     return;
   }
 
@@ -2464,6 +3221,18 @@ function handleInput(event) {
 }
 
 function handleChange(event) {
+  const calendarSource = event.target.closest("[data-calendar-source]");
+  if (calendarSource) {
+    setCalendarSourceVisible(calendarSource.dataset.calendarSource, calendarSource.checked);
+    return;
+  }
+
+  const googleCalendarToggle = event.target.closest("[data-google-calendar-toggle]");
+  if (googleCalendarToggle) {
+    setGoogleCalendarVisible(googleCalendarToggle.dataset.googleCalendarToggle, googleCalendarToggle.checked);
+    return;
+  }
+
   const field = event.target.closest("[data-field]");
   if (!field) return;
   const resourceNote = field.closest("[data-resource-note]");
@@ -2473,15 +3242,13 @@ function handleChange(event) {
     ? state.resources.find((entry) => entry.id === resourceNote.dataset.resourceNote)
     : inlineOwner
       ? getCollection(inlineType).find((entry) => entry.id === inlineOwner.dataset.inlineOwnerId)
-    : ui.selected
-      ? selectedItem()
       : null;
   if (!item) return;
   let value = field.value;
   if (value === "true") value = true;
   if (value === "false") value = false;
   if (field.type === "number") value = Number(value);
-  const ownerType = resourceNote ? "resources" : inlineType || ui.selected?.type || "";
+  const ownerType = resourceNote ? "resources" : inlineType || "";
   applyFieldValue(ownerType, item, field.dataset.field, value);
   saveState();
   renderView({ soft: true });
@@ -2571,7 +3338,6 @@ function openResourceNote(resourceId, options = {}) {
       showProps: false,
     });
   }
-  ui.selected = null;
   ui.commandOpen = false;
   ui.slash = null;
   renderDetail();
@@ -3050,6 +3816,36 @@ function handlePointerDown(event) {
     return;
   }
 
+  const todayTaskDragRow = event.target.closest(".today-dashboard-grid [data-task-inline-toggle]");
+  if (ui.view === "today" && todayTaskDragRow && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
+    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    const card = todayTaskDragRow.closest("[data-today-task-id]");
+    const task = state.tasks.find((entry) => entry.id === card?.dataset.todayTaskId);
+    if (!card || !task || ["done", "canceled"].includes(task.status)) return;
+    window.getSelection()?.removeAllRanges();
+    ui.pendingTodayTaskDrag = {
+      taskId: task.id,
+      pointerId: event.pointerId ?? "mouse",
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    return;
+  }
+
+  const deleteDragCard = event.target.closest("[data-delete-drag-type][data-delete-drag-id]");
+  if (deleteDragCard && ["inbox", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, a, [contenteditable='true']")) {
+    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    window.getSelection()?.removeAllRanges();
+    ui.pendingDeleteDrag = {
+      type: deleteDragCard.dataset.deleteDragType,
+      id: deleteDragCard.dataset.deleteDragId,
+      pointerId: event.pointerId ?? "mouse",
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    return;
+  }
+
   const schedulerButton = event.target.closest("[data-scheduler-open]");
   if (schedulerButton) {
     if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
@@ -3079,7 +3875,6 @@ function handlePointerDown(event) {
 
 function beginScheduleDrag(task, card, event) {
   cancelScheduleDrag();
-  ui.selected = null;
   renderDetail();
   ui.scheduleHoldTaskId = task.id;
   ui.suppressTaskClickUntil = Date.now() + 1600;
@@ -3108,7 +3903,7 @@ function cancelScheduleDrag() {
   }
   ui.scheduleHoldTaskId = "";
   stopSchedulerMonthHover();
-  document.querySelectorAll(".task-scheduler-day.is-drop-target, .task-scheduler-lane.is-drop-target").forEach((target) => target.classList.remove("is-drop-target"));
+  document.querySelectorAll(".task-scheduler-day.is-drop-target, .task-scheduler-lane.is-drop-target, .task-scheduler-delete-zone.is-drop-target").forEach((target) => target.classList.remove("is-drop-target"));
   if (hadDrag) markScheduleDragEnded();
   if (ui.scheduler?.dragging) {
     closeTaskScheduler();
@@ -3128,8 +3923,437 @@ function handleSchedulePointerExit(event) {
 function handleScheduleVisibilityChange() {
   if (document.visibilityState === "hidden") {
     cancelScheduleDrag();
+    cancelTodayTaskDrag();
+    cancelDeleteDrag();
     resetNavShortcutState({ closeAutoOpened: true });
   }
+}
+
+function handleTodayTaskPointerMove(event) {
+  maybeStartPendingTodayTaskDrag(event);
+  if (!ui.todayTaskDrag) return;
+  if (!isActiveTodayTaskPointer(event)) return;
+  event.preventDefault();
+  updateTodayTaskDragPosition(event.clientX, event.clientY);
+}
+
+function maybeStartPendingTodayTaskDrag(event) {
+  const pending = ui.pendingTodayTaskDrag;
+  if (!pending) return;
+  if (event.pointerId !== undefined && pending.pointerId !== event.pointerId) return;
+  if (event.buttons !== undefined && event.buttons === 0) {
+    ui.pendingTodayTaskDrag = null;
+    return;
+  }
+  const dx = event.clientX - pending.startX;
+  const dy = event.clientY - pending.startY;
+  if (Math.hypot(dx, dy) < 8) return;
+  const card = document.querySelector(`[data-today-task-id="${pending.taskId}"]`);
+  const task = state.tasks.find((entry) => entry.id === pending.taskId);
+  ui.pendingTodayTaskDrag = null;
+  if (!card || !task) return;
+  event.preventDefault();
+  event.stopPropagation();
+  beginTodayTaskDrag(task, card, event);
+}
+
+function beginTodayTaskDrag(task, card, event) {
+  cancelTodayTaskDrag();
+  const rect = card.getBoundingClientRect();
+  const offsetX = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
+  const offsetY = Math.min(Math.max(event.clientY - rect.top, 0), rect.height);
+  try {
+    if (event.pointerId !== undefined && card.setPointerCapture) card.setPointerCapture(event.pointerId);
+  } catch (_) {}
+  ui.todayTaskDrag = {
+    taskId: task.id,
+    pointerId: event.pointerId ?? "mouse",
+    dragX: rect.left,
+    dragY: rect.top,
+    dragWidth: rect.width,
+    offsetX,
+    offsetY,
+    targetDate: "",
+  };
+  ui.suppressTaskClickUntil = Date.now() + 900;
+  window.getSelection()?.removeAllRanges();
+  app.classList.add("is-today-task-dragging");
+  card.classList.add("is-holding");
+  renderOverlays();
+  updateTodayTaskDragPosition(event.clientX, event.clientY);
+}
+
+function updateTodayTaskDragPosition(clientX, clientY) {
+  if (!ui.todayTaskDrag) return;
+  ui.todayTaskDrag.dragX = clientX - (ui.todayTaskDrag.offsetX || 0);
+  ui.todayTaskDrag.dragY = clientY - (ui.todayTaskDrag.offsetY || 0);
+  const ghost = document.querySelector(".today-drag-ghost");
+  if (ghost) {
+    ghost.style.setProperty("--drag-x", `${ui.todayTaskDrag.dragX}px`);
+    ghost.style.setProperty("--drag-y", `${ui.todayTaskDrag.dragY}px`);
+  }
+  setTodayTaskDropTarget(todayTaskTargetFromPoint(clientX, clientY));
+}
+
+function todayTaskTargetFromPoint(clientX, clientY) {
+  const element = document
+    .elementsFromPoint(clientX, clientY)
+    .map((entry) => entry.closest?.("[data-drop-date]"))
+    .find(Boolean);
+  if (!element) return {};
+  return {
+    element,
+    date: element.dataset.dropDate || "",
+  };
+}
+
+function setTodayTaskDropTarget(target = {}) {
+  if (!ui.todayTaskDrag) return;
+  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((entry) => entry.classList.remove("is-over"));
+  if (target.date) target.element?.classList.add("is-over");
+  ui.todayTaskDrag.targetDate = target.date || "";
+}
+
+function finishTodayTaskDrag(event) {
+  if (!ui.todayTaskDrag) {
+    if (ui.pendingTodayTaskDrag && (event?.pointerId === undefined || ui.pendingTodayTaskDrag.pointerId === event.pointerId)) ui.pendingTodayTaskDrag = null;
+    return;
+  }
+  if (!isActiveTodayTaskPointer(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const task = state.tasks.find((entry) => entry.id === ui.todayTaskDrag.taskId);
+  const targetDate = ui.todayTaskDrag.targetDate || todayTaskTargetFromPoint(event.clientX, event.clientY).date || "";
+  const targetElement = targetDate ? document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-date]") : null;
+  clearTodayTaskDragState();
+  ui.suppressTaskClickUntil = Date.now() + 900;
+  if (!task || !targetDate) {
+    renderOverlays();
+    return;
+  }
+  moveTaskToDate(task, targetDate);
+  saveState();
+  showToast(targetElement?.classList.contains("today-floating-drop") ? "예정으로 옮겼습니다." : `${compactDateLabel(targetDate)}로 옮겼습니다.`);
+  renderView({ soft: true, animateCards: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function cancelTodayTaskDrag() {
+  ui.pendingTodayTaskDrag = null;
+  if (!ui.todayTaskDrag) return;
+  clearTodayTaskDragState();
+  renderOverlays();
+}
+
+function clearTodayTaskDragState() {
+  ui.pendingTodayTaskDrag = null;
+  if (ui.todayTaskDrag?.taskId) {
+    document.querySelector(`[data-today-task-id="${ui.todayTaskDrag.taskId}"]`)?.classList.remove("is-holding");
+  }
+  ui.todayTaskDrag = null;
+  app.classList.remove("is-today-task-dragging");
+  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((entry) => entry.classList.remove("is-over"));
+}
+
+function isActiveTodayTaskPointer(event) {
+  if (!ui.todayTaskDrag) return false;
+  if (event?.pointerId !== undefined) return ui.todayTaskDrag.pointerId === event.pointerId;
+  if (event?.type === "mouseup") return true;
+  return ui.todayTaskDrag.pointerId === "mouse";
+}
+
+function handleDeleteDragPointerMove(event) {
+  maybeStartPendingDeleteDrag(event);
+  if (!ui.deleteDrag) return;
+  if (!isActiveDeleteDragPointer(event)) return;
+  event.preventDefault();
+  updateDeleteDragPosition(event.clientX, event.clientY);
+}
+
+function maybeStartPendingDeleteDrag(event) {
+  const pending = ui.pendingDeleteDrag;
+  if (!pending) return;
+  if (event.pointerId !== undefined && pending.pointerId !== event.pointerId) return;
+  if (event.buttons !== undefined && event.buttons === 0) {
+    ui.pendingDeleteDrag = null;
+    return;
+  }
+  const dx = event.clientX - pending.startX;
+  const dy = event.clientY - pending.startY;
+  if (Math.hypot(dx, dy) < 8) return;
+  const card = document.querySelector(`[data-delete-drag-type="${pending.type}"][data-delete-drag-id="${pending.id}"]`);
+  const item = getCollection(pending.type).find((entry) => entry.id === pending.id);
+  ui.pendingDeleteDrag = null;
+  if (!card || !item) return;
+  event.preventDefault();
+  event.stopPropagation();
+  beginDeleteDrag(pending.type, pending.id, card, event);
+}
+
+function beginDeleteDrag(type, itemId, card, event) {
+  cancelDeleteDrag();
+  const rect = card.getBoundingClientRect();
+  const offsetX = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
+  const offsetY = Math.min(Math.max(event.clientY - rect.top, 0), rect.height);
+  try {
+    if (event.pointerId !== undefined && card.setPointerCapture) card.setPointerCapture(event.pointerId);
+  } catch (_) {}
+  ui.deleteDrag = {
+    type,
+    id: itemId,
+    title: deleteDragItemTitle(type, itemId),
+    pointerId: event.pointerId ?? "mouse",
+    dragX: rect.left,
+    dragY: rect.top,
+    dragWidth: Math.min(320, Math.max(220, rect.width)),
+    offsetX,
+    offsetY,
+    targetAction: "",
+  };
+  ui.suppressDeleteClickUntil = Date.now() + 900;
+  window.getSelection()?.removeAllRanges();
+  card.classList.add("is-holding");
+  renderOverlays();
+  updateDeleteDragPosition(event.clientX, event.clientY);
+}
+
+function updateDeleteDragPosition(clientX, clientY) {
+  if (!ui.deleteDrag) return;
+  ui.deleteDrag.dragX = clientX - (ui.deleteDrag.offsetX || 0);
+  ui.deleteDrag.dragY = clientY - (ui.deleteDrag.offsetY || 0);
+  const ghost = document.querySelector(".delete-drag-ghost");
+  if (ghost) {
+    ghost.style.left = `${ui.deleteDrag.dragX}px`;
+    ghost.style.top = `${ui.deleteDrag.dragY}px`;
+  }
+  setDeleteDropTarget(deleteTargetFromPoint(clientX, clientY));
+}
+
+function deleteTargetFromPoint(clientX, clientY) {
+  const element = document
+    .elementsFromPoint(clientX, clientY)
+    .map((entry) => entry.closest?.("[data-delete-drop]"))
+    .find(Boolean);
+  return element ? { element, action: element.dataset.dragAction || "delete" } : {};
+}
+
+function setDeleteDropTarget(target = {}) {
+  if (!ui.deleteDrag) return;
+  document.querySelectorAll(".delete-drop-zone.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
+  if (target.element) target.element.classList.add("is-drop-target");
+  ui.deleteDrag.targetAction = target.action || "";
+}
+
+function finishDeleteDrag(event) {
+  if (!ui.deleteDrag) {
+    if (ui.pendingDeleteDrag && (event?.pointerId === undefined || ui.pendingDeleteDrag.pointerId === event.pointerId)) ui.pendingDeleteDrag = null;
+    return;
+  }
+  if (!isActiveDeleteDragPointer(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const pointTarget = deleteTargetFromPoint(event.clientX, event.clientY);
+  const action = pointTarget.action || "";
+  const target = action
+    ? {
+        element: pointTarget.element || document.querySelector(`[data-delete-drop][data-drag-action="${cssEscape(action)}"]`),
+        action,
+      }
+    : {};
+  if (!target.element) {
+    clearDeleteDragState();
+    renderOverlays();
+    return;
+  }
+  target.element.classList.add("is-drop-target");
+  animateDeleteDragDrop(() => {
+    const current = ui.deleteDrag;
+    clearDeleteDragState();
+    if (!current) {
+      renderOverlays();
+      return;
+    }
+    commitDragAction(current.type, current.id, action);
+    renderOverlays();
+  });
+}
+
+function cancelDeleteDrag(event) {
+  if (event?.pointerId !== undefined && ui.deleteDrag?.pointerId !== event.pointerId) return;
+  ui.pendingDeleteDrag = null;
+  if (!ui.deleteDrag) return;
+  clearDeleteDragState();
+  renderOverlays();
+}
+
+function clearDeleteDragState() {
+  ui.pendingDeleteDrag = null;
+  if (ui.deleteDrag?.id) {
+    document
+      .querySelector(`[data-delete-drag-type="${ui.deleteDrag.type}"][data-delete-drag-id="${ui.deleteDrag.id}"]`)
+      ?.classList.remove("is-holding");
+  }
+  ui.deleteDrag = null;
+  ui.suppressDeleteClickUntil = Date.now() + 800;
+  document.querySelectorAll(".delete-drop-zone.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
+}
+
+function isActiveDeleteDragPointer(event) {
+  if (!ui.deleteDrag) return false;
+  if (event?.pointerId !== undefined) return ui.deleteDrag.pointerId === event.pointerId;
+  if (event?.type === "mouseup") return true;
+  return ui.deleteDrag.pointerId === "mouse";
+}
+
+function animateDeleteDragDrop(done) {
+  const ghost = document.querySelector(".delete-drag-ghost");
+  const target = document.querySelector(".delete-drop-zone.is-drop-target");
+  if (!ghost || !target) {
+    done();
+    return;
+  }
+  const ghostRect = ghost.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const translateX = targetRect.left + targetRect.width / 2 - ghostRect.left - ghostRect.width / 2;
+  const translateY = targetRect.top + targetRect.height / 2 - ghostRect.top - ghostRect.height / 2;
+  ghost.classList.add("is-dropping");
+  ghost.style.left = `${ghostRect.left}px`;
+  ghost.style.top = `${ghostRect.top}px`;
+  ghost.style.width = `${ghostRect.width}px`;
+  ghost.style.transform = `translate(${translateX}px, ${translateY}px) scale(0.54)`;
+  ghost.style.opacity = "0";
+  target.classList.add("is-receiving");
+  window.setTimeout(() => {
+    target.classList.remove("is-receiving");
+    done();
+  }, 260);
+}
+
+function dragActionTargets(type, itemId) {
+  if (type === "boxes") {
+    return [
+      {
+        action: "pinBox",
+        title: "고정",
+        meta: "고정 Box로",
+        count: state.boxes.filter((box) => box.visibility === "pinned" && box.id !== itemId).length,
+      },
+      {
+        action: "normalBox",
+        title: "일반",
+        meta: "일반 Box로",
+        count: state.boxes.filter((box) => box.visibility === "normal" && box.id !== itemId).length,
+      },
+      {
+        action: "archiveBox",
+        title: "아카이브",
+        meta: "보관 영역으로",
+        count: state.boxes.filter((box) => box.visibility === "archived" && box.id !== itemId).length,
+      },
+      {
+        action: "delete",
+        title: "삭제",
+        meta: "완전히 제거",
+        tone: "delete",
+      },
+    ];
+  }
+  if (type === "resources") {
+    return [
+      {
+        action: "pin",
+        title: "고정",
+        meta: "고정 자료로",
+        count: state.resources.filter((resource) => resource.pinned && resource.id !== itemId && resource.importance !== "archived").length,
+      },
+      {
+        action: "readLater",
+        title: "나중에 보기",
+        meta: "읽을 자료로",
+        count: state.resources.filter((resource) => resource.readLater && resource.id !== itemId && resource.importance !== "archived").length,
+      },
+      {
+        action: "normalResource",
+        title: "일반",
+        meta: "일반 자료로",
+        count: state.resources.filter((resource) => !resource.pinned && !resource.readLater && resource.id !== itemId && resource.importance !== "archived").length,
+      },
+      {
+        action: "archiveResource",
+        title: "아카이브",
+        meta: "보관 자료로",
+        count: state.resources.filter((resource) => resource.importance === "archived" && resource.id !== itemId).length,
+      },
+      {
+        action: "delete",
+        title: "삭제",
+        meta: "완전히 제거",
+        tone: "delete",
+      },
+    ];
+  }
+  return [
+    {
+      action: "delete",
+      title: "삭제",
+      meta: `${deleteDragTypeLabel(type)} 완전히 제거`,
+      tone: "delete",
+    },
+  ];
+}
+
+function commitDragAction(type, itemId, action) {
+  if (type === "boxes" && ["pinBox", "normalBox", "archiveBox"].includes(action)) {
+    const box = state.boxes.find((entry) => entry.id === itemId);
+    if (!box) return false;
+    const nextVisibility = action === "pinBox" ? "pinned" : action === "archiveBox" ? "archived" : "normal";
+    box.visibility = nextVisibility;
+    saveState();
+    showToast(`${nextVisibility === "pinned" ? "고정" : nextVisibility === "archived" ? "아카이브" : "일반"} Box로 옮겼습니다.`);
+    renderView({ soft: true, animateCards: true });
+    renderDetail();
+    return true;
+  }
+  if (type === "resources" && ["pin", "readLater", "normalResource", "archiveResource"].includes(action)) {
+    const resource = state.resources.find((entry) => entry.id === itemId);
+    if (!resource) return false;
+    if (action === "pin") {
+      resource.pinned = true;
+      resource.readLater = false;
+      if (resource.importance === "archived") resource.importance = "normal";
+      showToast("고정 자료로 옮겼습니다.");
+    } else if (action === "readLater") {
+      resource.readLater = true;
+      resource.pinned = false;
+      if (resource.importance === "archived") resource.importance = "normal";
+      showToast("나중에 보기로 옮겼습니다.");
+    } else if (action === "archiveResource") {
+      resource.importance = "archived";
+      resource.pinned = false;
+      resource.readLater = false;
+      showToast("아카이브로 옮겼습니다.");
+    } else {
+      resource.importance = "normal";
+      resource.pinned = false;
+      resource.readLater = false;
+      showToast("일반 자료로 옮겼습니다.");
+    }
+    saveState();
+    renderView({ soft: true, animateCards: true });
+    renderDetail();
+    return true;
+  }
+  if (action === "delete") {
+    const removed = deleteEntity(type, itemId);
+    if (!removed) return false;
+    saveState();
+    showToast(`${deleteDragTypeLabel(type)}을 삭제했습니다.`);
+    renderView({ soft: true, animateCards: true });
+    renderDetail();
+    return true;
+  }
+  return false;
 }
 
 function handleSchedulePointerMove(event) {
@@ -3245,7 +4469,7 @@ function schedulerTargetFromElement(element) {
 
 function setScheduleDropTarget(target = {}) {
   if (!ui.scheduler || (ui.scheduler.dragOverTarget === target.targetKey && (!target.element || target.element.classList.contains("is-drop-target")))) return;
-  document.querySelectorAll(".task-scheduler-day.is-drop-target, .task-scheduler-lane.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
+  document.querySelectorAll(".task-scheduler-day.is-drop-target, .task-scheduler-lane.is-drop-target, .task-scheduler-delete-zone.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
   if (target.targetKey) target.element?.classList.add("is-drop-target");
   ui.scheduler.dragOverDate = target.date || "";
   ui.scheduler.dragOverAction = target.action || "";
@@ -3538,10 +4762,6 @@ function handleDocumentKeydown(event) {
       renderOverlays();
       return;
     }
-    if (ui.selected) {
-      ui.selected = null;
-      renderDetail();
-    }
   }
 }
 
@@ -3573,11 +4793,18 @@ function handleDocumentClick(event) {
 
 function handleDragStart(event) {
   if (handleNavDragStart(event)) return;
+  if (ui.view === "today" && event.target.closest("[data-today-task-id]")) {
+    event.preventDefault();
+    return;
+  }
   const card = event.target.closest("[data-task-id]");
   if (!card) return;
   ui.draggedTaskId = card.dataset.taskId;
   event.dataTransfer.setData("text/plain", card.dataset.taskId);
   event.dataTransfer.effectAllowed = "move";
+  if (ui.view === "today" && card.closest("[data-today-task-zone='today']")) {
+    app.classList.add("is-today-task-dragging");
+  }
 }
 
 function handleDragOver(event) {
@@ -3603,11 +4830,18 @@ function handleDrop(event) {
   const taskId = event.dataTransfer.getData("text/plain") || ui.draggedTaskId;
   const task = state.tasks.find((entry) => entry.id === taskId);
   if (!task) return;
-  scheduleTask(task, zone.dataset.dropDate);
+  moveTaskToDate(task, zone.dataset.dropDate);
   saveState();
-  showToast("일정에 배치했습니다.");
+  showToast(zone.classList.contains("today-floating-drop") ? "예정으로 옮겼습니다." : `${compactDateLabel(zone.dataset.dropDate)}로 옮겼습니다.`);
+  clearTaskDrag();
   renderView({ soft: true });
   renderDetail();
+}
+
+function clearTaskDrag() {
+  ui.draggedTaskId = "";
+  app.classList.remove("is-today-task-dragging");
+  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((zone) => zone.classList.remove("is-over"));
 }
 
 function handleNavDragStart(event) {
@@ -3840,22 +5074,6 @@ function createJournal(title = `${dateKey(new Date())} 리뷰`, options = {}) {
   return journal;
 }
 
-function createObstacle(title = "새 이슈", options = {}) {
-  const obstacle = {
-    id: id(),
-    title,
-    status: "open",
-    severity: 2,
-    boxId: state.boxes[0]?.id || "",
-    projectId: "",
-    taskId: "",
-    blocks: blocks("원인, 영향, 다음 조치를 정리하세요."),
-  };
-  state.obstacles.push(obstacle);
-  afterCreate("obstacles", obstacle.id, options.navigate === false ? ui.view : "obstacles");
-  return obstacle;
-}
-
 function createCapture(title = "새 수집", options = {}) {
   const capture = {
     id: id(),
@@ -3873,11 +5091,15 @@ function createCapture(title = "새 수집", options = {}) {
 }
 
 function afterCreate(type, itemId, view) {
-  ui.selected = { type, id: itemId };
-  if (type === "projects") ui.expandedProjectId = itemId;
-  if (type === "habits") ui.expandedHabitId = itemId;
+  if (type === "projects") {
+    ui.expandedProjectId = itemId;
+    ui.editingProjectId = itemId;
+  }
+  if (type === "habits") {
+    ui.expandedHabitId = itemId;
+    ui.editingHabitId = itemId;
+  }
   if (type === "resources") {
-    ui.selected = null;
     openResourceNote(itemId);
   }
   if (ui.view !== view) {
@@ -3892,6 +5114,7 @@ function afterCreate(type, itemId, view) {
 
 function toggleProjectDetail(projectId) {
   const nextExpandedId = ui.expandedProjectId === projectId ? "" : projectId;
+  if (!nextExpandedId && ui.editingProjectId === projectId) ui.editingProjectId = "";
   if (ui.view === "projects") {
     app.querySelectorAll("[data-project-item]").forEach((item) => {
       const expanded = nextExpandedId === item.dataset.projectItem;
@@ -3902,40 +5125,237 @@ function toggleProjectDetail(projectId) {
       detail?.setAttribute("aria-hidden", String(!expanded));
     });
     ui.expandedProjectId = nextExpandedId;
-    ui.selected = null;
     renderDetail();
     return;
   }
   ui.expandedProjectId = nextExpandedId;
-  ui.selected = null;
   renderView({ soft: true });
   renderDetail();
+}
+
+function openProjectEditor(projectId) {
+  if (!state.projects.some((project) => project.id === projectId)) return;
+  ui.expandedProjectId = projectId;
+  ui.editingProjectId = ui.editingProjectId === projectId ? "" : projectId;
+  renderView({ soft: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openProjectDeleteConfirm(projectId) {
+  if (!state.projects.some((project) => project.id === projectId)) return;
+  ui.projectDeleteConfirmId = projectId;
+  renderOverlays();
+}
+
+function closeProjectDeleteConfirm() {
+  ui.projectDeleteConfirmId = "";
+  renderOverlays();
+}
+
+function confirmProjectDelete(projectId) {
+  const targetId = projectId || ui.projectDeleteConfirmId;
+  const removed = deleteEntity("projects", targetId);
+  ui.projectDeleteConfirmId = "";
+  if (!removed) {
+    renderOverlays();
+    return;
+  }
+  saveState();
+  showToast("프로젝트를 삭제했습니다.");
+  renderView({ soft: true, animateCards: true });
+  renderDetail();
+  renderOverlays();
 }
 
 function toggleTodayTaskDetail(taskId) {
   const nextExpandedId = ui.expandedTodayTaskId === taskId ? "" : taskId;
+  ui.todayTaskPropsOpen = { ...ui.todayTaskPropsOpen, [taskId]: false };
+  ui.todayTaskActiveProperty = { ...ui.todayTaskActiveProperty, [taskId]: "" };
   if (ui.view === "today") {
     app.querySelectorAll("[data-today-task-id]").forEach((item) => {
       const expanded = nextExpandedId === item.dataset.todayTaskId;
       item.classList.toggle("is-expanded", expanded);
-      const row = item.querySelector("[data-task-inline-toggle]");
       const detail = item.querySelector(".task-detail-shell");
-      row?.setAttribute("aria-expanded", String(expanded));
+      item.querySelectorAll("[data-task-inline-toggle]").forEach((toggle) => {
+        toggle.setAttribute("aria-expanded", String(expanded));
+      });
       detail?.setAttribute("aria-hidden", String(!expanded));
     });
     ui.expandedTodayTaskId = nextExpandedId;
-    ui.selected = null;
     renderDetail();
     return;
   }
   ui.expandedTodayTaskId = nextExpandedId;
-  ui.selected = null;
   renderView({ soft: true });
   renderDetail();
 }
 
+function toggleTodayTaskProperties(taskId) {
+  const previousBodyHeight = measureTodayTaskPropsBodyHeight(findTodayTaskPropsRoot(taskId));
+  clearTodayTaskPropertyTransition(taskId);
+  const nextOpen = !ui.todayTaskPropsOpen?.[taskId];
+  ui.todayTaskPropsOpen = { ...ui.todayTaskPropsOpen, [taskId]: nextOpen };
+  ui.todayTaskActiveProperty = { ...ui.todayTaskActiveProperty, [taskId]: "" };
+  renderView({ soft: true });
+  animateTodayTaskPropsBodyResize(taskId, previousBodyHeight);
+  renderDetail();
+}
+
+function setTodayTaskActiveProperty(taskId, field, options = {}) {
+  const nextField = field || "";
+  const currentField = ui.todayTaskActiveProperty?.[taskId] || "";
+  if (ui.view === "today" && taskId && (nextField !== currentField || options.outgoing)) {
+    const root = findTodayTaskPropsRoot(taskId);
+    const previousBodyHeight = measureTodayTaskPropsBodyHeight(root);
+    const outgoing = options.outgoing || root?.querySelector(currentField ? ".task-property-editor" : ".task-property-list");
+    if (outgoing) {
+      clearTodayTaskPropertyTransition(taskId);
+      outgoing.classList.add("is-leaving");
+      const delay = 300;
+      const timer = window.setTimeout(() => {
+        todayTaskPropertyTransitionTimers.delete(taskId);
+        applyTodayTaskActiveProperty(taskId, nextField, { previousBodyHeight });
+      }, delay);
+      todayTaskPropertyTransitionTimers.set(taskId, timer);
+      return;
+    }
+  }
+  clearTodayTaskPropertyTransition(taskId);
+  applyTodayTaskActiveProperty(taskId, nextField, {
+    previousBodyHeight: options.previousBodyHeight,
+  });
+}
+
+function applyTodayTaskActiveProperty(taskId, field, options = {}) {
+  ui.todayTaskPropsOpen = { ...ui.todayTaskPropsOpen, [taskId]: true };
+  ui.todayTaskActiveProperty = { ...ui.todayTaskActiveProperty, [taskId]: field };
+  renderView({ soft: true });
+  animateTodayTaskPropsBodyResize(taskId, options.previousBodyHeight);
+  renderDetail();
+}
+
+function clearTodayTaskPropertyTransition(taskId) {
+  const timer = todayTaskPropertyTransitionTimers.get(taskId);
+  if (timer) {
+    window.clearTimeout(timer);
+    todayTaskPropertyTransitionTimers.delete(taskId);
+  }
+  clearTodayTaskPropertyResize(taskId);
+}
+
+function clearTodayTaskPropertyTransitions() {
+  todayTaskPropertyTransitionTimers.forEach((timer) => window.clearTimeout(timer));
+  todayTaskPropertyTransitionTimers.clear();
+  todayTaskPropertyResizeTimers.forEach((timer) => window.clearTimeout(timer));
+  todayTaskPropertyResizeTimers.clear();
+}
+
+function updateTodayTaskProperty(taskId, field, value, options = {}) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  if (!task || !field) return;
+  const previousBodyHeight = measureTodayTaskPropsBodyHeight(options.choice?.closest("[data-task-props]"));
+  const commit = () => commitTodayTaskPropertyUpdate(taskId, field, value, { previousBodyHeight });
+  if (ui.view === "today" && options.choice && animateTodayTaskPropertyChoiceCommit(taskId, field, value, options.choice, commit)) return;
+  commit();
+}
+
+function commitTodayTaskPropertyUpdate(taskId, field, value, options = {}) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  if (!task || !field) return;
+  applyTaskFieldValue(task, field, value);
+  saveState();
+  ui.todayTaskPropsOpen = { ...ui.todayTaskPropsOpen, [taskId]: true };
+  ui.todayTaskActiveProperty = { ...ui.todayTaskActiveProperty, [taskId]: "" };
+  renderView({ soft: true });
+  animateTodayTaskPropsBodyResize(taskId, options.previousBodyHeight);
+  renderDetail();
+}
+
+function findTodayTaskPropsRoot(taskId) {
+  return Array.from(app.querySelectorAll("[data-task-props]")).find((node) => node.dataset.taskProps === taskId) || null;
+}
+
+function measureTodayTaskPropsBodyHeight(root) {
+  const body = root?.querySelector(".task-props-body");
+  return body ? body.getBoundingClientRect().height : null;
+}
+
+function animateTodayTaskPropsBodyResize(taskId, previousHeight = null) {
+  if (previousHeight === null || previousHeight === undefined || ui.view !== "today") return;
+  clearTodayTaskPropertyResize(taskId);
+  const body = findTodayTaskPropsRoot(taskId)?.querySelector(".task-props-body");
+  if (!body) return;
+  const nextHeight = body.getBoundingClientRect().height;
+  if (Math.abs(nextHeight - previousHeight) < 1) return;
+  body.classList.remove("is-resizing");
+  body.style.transition = "none";
+  body.style.overflow = "hidden";
+  body.style.height = `${previousHeight}px`;
+  body.getBoundingClientRect();
+  body.style.transition = "";
+  body.classList.add("is-resizing");
+  requestAnimationFrame(() => {
+    let completed = false;
+    let timer = 0;
+    const finish = (event) => {
+      if (event && (event.target !== body || event.propertyName !== "height")) return;
+      if (completed) return;
+      completed = true;
+      window.clearTimeout(timer);
+      todayTaskPropertyResizeTimers.delete(taskId);
+      body.removeEventListener("transitionend", finish);
+      body.classList.remove("is-resizing");
+      body.style.height = "";
+      body.style.overflow = "";
+    };
+    body.addEventListener("transitionend", finish);
+    body.style.height = `${nextHeight}px`;
+    timer = window.setTimeout(finish, 620);
+    todayTaskPropertyResizeTimers.set(taskId, timer);
+  });
+}
+
+function clearTodayTaskPropertyResize(taskId) {
+  const timer = todayTaskPropertyResizeTimers.get(taskId);
+  if (!timer) return;
+  window.clearTimeout(timer);
+  todayTaskPropertyResizeTimers.delete(taskId);
+}
+
+function animateTodayTaskPropertyChoiceCommit(taskId, field, value, choice, onComplete) {
+  const editor = choice.closest(".task-property-editor");
+  const group = choice.closest(".task-property-choice-grid, .task-date-choice-grid");
+  if (!editor || !group || editor.classList.contains("is-committing-choice") || editor.classList.contains("is-leaving")) return false;
+  const choices = Array.from(group.querySelectorAll(".task-property-choice"));
+  const selected =
+    choices.find((entry) => {
+      return entry.dataset.taskPropertyValue === taskId && entry.dataset.taskPropertyField === field && entry.dataset.taskPropertyNext === value;
+    }) || choice;
+  const selectedRect = selected.getBoundingClientRect();
+  const groupRect = group.getBoundingClientRect();
+  selected.style.setProperty("--choice-slide-x", `${Math.round((groupRect.left - selectedRect.left) * 100) / 100}px`);
+  editor.classList.add("is-committing-choice");
+  selected.classList.add("is-choice-sliding", "is-selected");
+  choices.forEach((entry) => {
+    if (entry !== selected) entry.classList.add("is-choice-fading");
+  });
+  let done = false;
+  const finish = (event) => {
+    if (event && event.propertyName !== "transform") return;
+    if (done) return;
+    done = true;
+    selected.removeEventListener("transitionend", finish);
+    onComplete();
+  };
+  selected.addEventListener("transitionend", finish);
+  window.setTimeout(finish, 520);
+  return true;
+}
+
 function toggleHabitDetail(habitId) {
   const nextExpandedId = ui.expandedHabitId === habitId ? "" : habitId;
+  if (!nextExpandedId && ui.editingHabitId === habitId) ui.editingHabitId = "";
   if (ui.view === "habits") {
     app.querySelectorAll("[data-habit-item]").forEach((item) => {
       const expanded = nextExpandedId === item.dataset.habitItem;
@@ -3946,20 +5366,47 @@ function toggleHabitDetail(habitId) {
       detail?.setAttribute("aria-hidden", String(!expanded));
     });
     ui.expandedHabitId = nextExpandedId;
-    ui.selected = null;
     renderDetail();
     return;
   }
   ui.expandedHabitId = nextExpandedId;
-  ui.selected = null;
   renderView({ soft: true });
   renderDetail();
 }
 
 function openHabitEditor(habitId) {
-  ui.selected = { type: "habits", id: habitId };
+  if (!state.habits.some((habit) => habit.id === habitId)) return;
+  ui.expandedHabitId = habitId;
+  ui.editingHabitId = ui.editingHabitId === habitId ? "" : habitId;
   ui.commandOpen = false;
   ui.slash = null;
+  renderView({ soft: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openHabitDeleteConfirm(habitId) {
+  if (!state.habits.some((habit) => habit.id === habitId)) return;
+  ui.habitDeleteConfirmId = habitId;
+  renderOverlays();
+}
+
+function closeHabitDeleteConfirm() {
+  ui.habitDeleteConfirmId = "";
+  renderOverlays();
+}
+
+function confirmHabitDelete(habitId) {
+  const targetId = habitId || ui.habitDeleteConfirmId;
+  const removed = deleteEntity("habits", targetId);
+  ui.habitDeleteConfirmId = "";
+  if (!removed) {
+    renderOverlays();
+    return;
+  }
+  saveState();
+  showToast("루틴을 삭제했습니다.");
+  renderView({ soft: true, animateCards: true });
   renderDetail();
   renderOverlays();
 }
@@ -3978,7 +5425,6 @@ function convertCapture(captureId, targetType) {
   capture.convertedTo = targetType;
   capture.convertedId = created?.id || "";
   capture.processedAt = new Date().toISOString();
-  ui.selected = created && targetType !== "resources" ? { type: targetType, id: created.id } : null;
   if (created && targetType === "resources") openResourceNote(created.id);
   saveState();
   showToast("분류했습니다.");
@@ -4077,7 +5523,6 @@ function saveTaskFlow(captureId) {
   capture.processedAt = new Date().toISOString();
   delete ui.captureDrafts[captureId];
   ui.view = targetType;
-  ui.selected = targetType === "resources" ? null : { type: targetType, id: created.id };
   if (targetType === "projects") ui.expandedProjectId = created.id;
   updateNav();
   saveState();
@@ -4431,19 +5876,6 @@ function normalizeTaskRelations(task, changedField) {
   }
 }
 
-function deleteSelected() {
-  if (!ui.selected) return;
-  const collection = getCollection(ui.selected.type);
-  const index = collection.findIndex((entry) => entry.id === ui.selected.id);
-  if (index < 0) return;
-  collection.splice(index, 1);
-  ui.selected = null;
-  saveState();
-  renderView({ soft: true });
-  renderDetail();
-  showToast("삭제했습니다.");
-}
-
 function toggleTaskDone(taskId, button) {
   const task = state.tasks.find((entry) => entry.id === taskId);
   if (!task) return;
@@ -4466,7 +5898,6 @@ function toggleTaskDone(taskId, button) {
   }
   window.setTimeout(() => {
     renderView({ soft: true, animateCards: ui.view === "today" });
-    if (ui.selected?.type === "tasks" && ui.selected.id === taskId) renderDetail();
   }, 220);
 }
 
@@ -4503,7 +5934,6 @@ function toggleHabitDone(habitId, date, button) {
       monthProgress.classList.toggle("amber", stats.completed < Math.ceil(stats.total * 0.7));
     });
   }
-  if (ui.selected?.type === "habits" && ui.selected.id === habitId) renderDetail();
 }
 
 function setHabitDayVisualState(dayButton, completed) {
@@ -4527,6 +5957,11 @@ function scheduleTask(task, date) {
   task.scheduledStart = `${date}T09:00`;
   task.scheduledEnd = `${date}T10:00`;
   task.status = "scheduled";
+  task.completedAt = "";
+}
+
+function moveTaskToDate(task, date) {
+  setTaskDate(task, date);
   task.completedAt = "";
 }
 
@@ -4585,7 +6020,6 @@ function commitScheduledTask(task, date) {
   saveState();
   showToast(`${date.slice(5)}에 배치했습니다.`);
   renderView({ soft: true, animateCards: ui.view === "tasks" });
-  if (ui.selected?.type === "tasks" && ui.selected.id === task.id) renderDetail();
   renderOverlays();
 }
 
@@ -4599,7 +6033,6 @@ function commitTaskScheduleAction(task, action) {
     saveState();
     showToast("미계획으로 옮겼습니다.");
     renderView({ soft: true, animateCards: ui.view === "tasks" });
-    if (ui.selected?.type === "tasks" && ui.selected.id === task.id) renderDetail();
     renderOverlays();
     return;
   }
@@ -4611,14 +6044,24 @@ function commitTaskScheduleAction(task, action) {
     saveState();
     showToast("완료로 옮겼습니다.");
     renderView({ soft: true, animateCards: ui.view === "tasks" });
-    if (ui.selected?.type === "tasks" && ui.selected.id === task.id) renderDetail();
+    renderOverlays();
+    return;
+  }
+  if (action === "delete") {
+    stopSchedulerMonthHover();
+    ui.scheduler = null;
+    deleteEntity("tasks", task.id);
+    saveState();
+    showToast("할 일을 삭제했습니다.");
+    renderView({ soft: true, animateCards: ui.view === "tasks" });
+    renderDetail();
     renderOverlays();
   }
 }
 
 function animateSchedulerDrop(done) {
   const ghost = document.querySelector(".schedule-drag-ghost");
-  const target = document.querySelector(".task-scheduler-lane.is-drop-target, .task-scheduler-day.is-drop-target");
+  const target = document.querySelector(".task-scheduler-lane.is-drop-target, .task-scheduler-day.is-drop-target, .task-scheduler-delete-zone.is-drop-target");
   if (!ghost || !target) {
     done();
     return;
@@ -4640,9 +6083,71 @@ function animateSchedulerDrop(done) {
   }, 260);
 }
 
-function selectedItem() {
-  if (!ui.selected) return null;
-  return getCollection(ui.selected.type).find((entry) => entry.id === ui.selected.id);
+function deleteEntity(type, itemId) {
+  const collection = getCollection(type);
+  const index = collection.findIndex((entry) => entry.id === itemId);
+  if (index < 0) return null;
+  const [removed] = collection.splice(index, 1);
+  cleanupDeletedEntityReferences(type, itemId);
+  return removed;
+}
+
+function cleanupDeletedEntityReferences(type, itemId) {
+  if (type === "captures") {
+    delete ui.captureDrafts[itemId];
+  }
+  if (type === "tasks") {
+    if (ui.expandedTodayTaskId === itemId) ui.expandedTodayTaskId = "";
+    delete ui.todayTaskPropsOpen[itemId];
+    delete ui.todayTaskActiveProperty[itemId];
+  }
+  if (type === "boxes") {
+    [...state.goals, ...state.projects, ...state.tasks, ...state.resources, ...state.habits].forEach((entry) => {
+      if (entry.boxId === itemId) entry.boxId = "";
+    });
+  }
+  if (type === "projects") {
+    [...state.tasks, ...state.resources, ...state.habits].forEach((entry) => {
+      if (entry.projectId === itemId) entry.projectId = "";
+    });
+    if (ui.expandedProjectId === itemId) ui.expandedProjectId = "";
+    if (ui.editingProjectId === itemId) ui.editingProjectId = "";
+    if (ui.projectDeleteConfirmId === itemId) ui.projectDeleteConfirmId = "";
+  }
+  if (type === "resources") {
+    state.tasks.forEach((task) => {
+      if (task.resourceId === itemId) task.resourceId = "";
+    });
+    ui.resourceNotes = ui.resourceNotes.filter((note) => note.id !== itemId);
+  }
+  if (type === "habits") {
+    state.habitInstances = state.habitInstances.filter((instance) => instance.habitId !== itemId);
+    if (ui.expandedHabitId === itemId) ui.expandedHabitId = "";
+    if (ui.editingHabitId === itemId) ui.editingHabitId = "";
+    if (ui.habitDeleteConfirmId === itemId) ui.habitDeleteConfirmId = "";
+  }
+  state.captures.forEach((capture) => {
+    if (capture.convertedTo === type && capture.convertedId === itemId) {
+      capture.convertedTo = "";
+      capture.convertedId = "";
+    }
+  });
+}
+
+function deleteDragItemTitle(type, itemId) {
+  const item = getCollection(type).find((entry) => entry.id === itemId);
+  if (!item) return "";
+  return item.title || item.name || "(제목 없음)";
+}
+
+function deleteDragTypeLabel(type) {
+  return {
+    captures: "수집 항목",
+    boxes: "Box",
+    tasks: "할 일",
+    resources: "자료",
+    habits: "루틴",
+  }[type] || "항목";
 }
 
 function getCollection(type) {
@@ -4654,12 +6159,7 @@ function getCollection(type) {
   if (type === "resources") return state.resources;
   if (type === "habits") return state.habits;
   if (type === "journals") return state.journals;
-  if (type === "obstacles") return state.obstacles;
   return [];
-}
-
-function titleFieldFor(type) {
-  return ["projects", "goals", "boxes"].includes(type) ? "name" : "title";
 }
 
 function updateBlockText(blockContent) {
@@ -5008,76 +6508,106 @@ function applySlashSelection() {
   changeBlockType(slash.ownerType, slash.ownerId, slash.blockId, types[selectedIndex]);
 }
 
-async function connectGoogle() {
-  if (!state.settings.googleClientId.trim()) {
-    showToast("OAuth Client ID가 필요합니다.");
-    return;
+async function apiJson(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || "요청에 실패했습니다.");
   }
+  return payload;
+}
+
+async function refreshGoogleBackendStatus(options = {}) {
   try {
-    await loadScript(GOOGLE_SCRIPT_SRC);
-    const tokenClient = google.accounts.oauth2.initTokenClient({
-      client_id: state.settings.googleClientId.trim(),
-      scope: GOOGLE_SCOPE,
-      callback: (response) => {
-        if (response.error) {
-          showToast(`Google 연결 실패: ${response.error}`);
-          return;
-        }
-        googleAccessToken = response.access_token;
-        state.settings.googleConnectedAt = new Date().toISOString();
-        saveState();
-        showToast("Google Calendar 연결 완료");
-        renderView({ soft: true });
-      },
-    });
-    tokenClient.requestAccessToken({ prompt: "consent" });
+    const payload = await apiJson("/api/google/status");
+    googleBackendStatus = {
+      configured: Boolean(payload.configured),
+      connected: Boolean(payload.connected),
+      loading: false,
+    };
+    if (payload.connected) {
+      state.settings.googleConnectedAt = payload.connectedAt || state.settings.googleConnectedAt || new Date().toISOString();
+      saveState();
+      if (options.fetchEvents) await fetchGoogleCalendarEvents({ silent: true });
+    } else if (state.settings.googleConnectedAt) {
+      state.settings.googleConnectedAt = "";
+      saveState();
+    }
   } catch {
-    showToast("Google 스크립트를 불러오지 못했습니다.");
+    googleBackendStatus = { configured: false, connected: false, loading: false };
+  }
+  if (ui.view === "calendar" && !options.skipRender) renderView({ soft: true });
+}
+
+async function connectGoogle() {
+  try {
+    const status = await apiJson("/api/google/status");
+    googleBackendStatus = {
+      configured: Boolean(status.configured),
+      connected: Boolean(status.connected),
+      loading: false,
+    };
+    if (!googleBackendStatus.configured) {
+      showToast("서버에 GOOGLE_CLIENT_ID와 GOOGLE_CLIENT_SECRET을 설정해야 합니다.");
+      renderView({ soft: true });
+      return;
+    }
+    window.sessionStorage.setItem("sygma-google-return-view", ui.view || "calendar");
+    window.location.href = `/api/google/auth/start?returnTo=${encodeURIComponent("/?google=connected")}`;
+  } catch {
+    showToast("Google 로그인 준비 상태를 확인하지 못했습니다.");
   }
 }
 
 async function fetchGoogleCalendarEvents(options = {}) {
-  if (!googleAccessToken) {
-    showToast("먼저 Google을 연결하세요.");
+  if (!googleBackendStatus.connected) {
+    await refreshGoogleBackendStatus({ silent: true, skipRender: true });
+  }
+  if (!googleBackendStatus.connected) {
+    if (!options.silent) showToast("먼저 Google로 로그인하세요.");
+    renderView({ soft: true });
     return;
   }
-  const calendarId = state.settings.googleCalendarId || "primary";
-  const encodedCalendarId = encodeURIComponent(calendarId);
+
   const range = combinedCalendarRange();
   const params = new URLSearchParams({
     timeMin: new Date(`${range.start}T00:00:00`).toISOString(),
     timeMax: new Date(`${range.endExclusive}T00:00:00`).toISOString(),
-    singleEvents: "true",
-    orderBy: "startTime",
-    maxResults: "2500",
   });
 
   try {
-    const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodedCalendarId}/events?${params}`, {
-      headers: { Authorization: `Bearer ${googleAccessToken}` },
-    });
-    if (!response.ok) {
-      showToast("Google 일정을 불러오지 못했습니다.");
-      return;
-    }
-    const payload = await response.json();
-    state.googleEvents = (payload.items || []).map((event) => normalizeGoogleApiEvent(event, calendarId)).filter(Boolean);
+    const payload = await apiJson(`/api/google/calendar-data?${params}`);
+    const calendars = (payload.calendars || []).map(normalizeGoogleCalendarEntry).filter(Boolean);
+    state.googleCalendars = calendars;
+    ensureGoogleCalendarVisibility(calendars);
+    state.googleEvents = (payload.events || [])
+      .map((entry) => normalizeGoogleApiEvent(entry.event, entry.calendar))
+      .filter(Boolean);
     state.settings.lastGoogleFetchAt = new Date().toISOString();
     saveState();
     if (!options.silent) showToast(`${state.googleEvents.length}개 Google 일정을 불러왔습니다.`);
     renderView({ soft: true });
   } catch {
-    showToast("Google Calendar API 요청에 실패했습니다.");
+    if (!options.silent) showToast("Google Calendar API 요청에 실패했습니다.");
   }
 }
 
 async function syncGoogleCalendar() {
-  if (!googleAccessToken) {
-    showToast("먼저 Google을 연결하세요.");
+  if (!googleBackendStatus.connected) {
+    await refreshGoogleBackendStatus({ silent: true, skipRender: true });
+  }
+  if (!googleBackendStatus.connected) {
+    showToast("먼저 Google로 로그인하세요.");
     return;
   }
   const calendarId = state.settings.googleCalendarId || "primary";
-  const encodedCalendarId = encodeURIComponent(calendarId);
+  const calendar = getGoogleCalendarOptions().find((entry) => entry.id === calendarId) || fallbackGoogleCalendar(calendarId);
   const tasks = state.tasks.filter((task) => task.scheduledStart && task.status !== "done" && !task.googleEventId);
   if (!tasks.length) {
     showToast("동기화할 예정 작업이 없습니다.");
@@ -5088,48 +6618,31 @@ async function syncGoogleCalendar() {
   for (const task of tasks) {
     const start = new Date(task.scheduledStart);
     const end = task.scheduledEnd ? new Date(task.scheduledEnd) : new Date(start.getTime() + (task.estimatedMinutes || 30) * 60000);
-    const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodedCalendarId}/events`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${googleAccessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        summary: task.title,
-        description: blockText(task),
-        start: { dateTime: start.toISOString() },
-        end: { dateTime: end.toISOString() },
-      }),
-    });
-    if (response.ok) {
-      const event = await response.json();
-      task.googleEventId = event.id;
-      const normalized = normalizeGoogleApiEvent(event, calendarId);
+    try {
+      const payload = await apiJson("/api/google/events", {
+        method: "POST",
+        body: JSON.stringify({
+          calendarId,
+          event: {
+            summary: task.title,
+            description: blockText(task),
+            start: { dateTime: start.toISOString() },
+            end: { dateTime: end.toISOString() },
+          },
+        }),
+      });
+      task.googleEventId = payload.event.id;
+      const normalized = normalizeGoogleApiEvent(payload.event, calendar);
       if (normalized) {
         state.googleEvents = [...(state.googleEvents || []).filter((entry) => entry.id !== normalized.id), normalized];
       }
       synced += 1;
-    }
+    } catch {}
   }
   state.settings.lastGoogleSyncAt = new Date().toISOString();
   saveState();
   showToast(`${synced}개 작업을 Google Calendar로 보냈습니다.`);
   renderView({ soft: true });
-}
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = src;
-    script.async = true;
-    script.onload = resolve;
-    script.onerror = reject;
-    document.head.append(script);
-  });
 }
 
 function exportJson() {
@@ -5145,13 +6658,17 @@ function exportJson() {
 
 function resetDemoData() {
   state = createSeedState();
-  googleAccessToken = "";
-  ui.selected = null;
+  googleBackendStatus = {
+    ...googleBackendStatus,
+    connected: false,
+  };
   ui.resourceNotes = [];
   ui.resourceDrag = null;
   ui.blockDrag = null;
   ui.editorMarquee = null;
   ui.expandedTodayTaskId = "";
+  ui.todayTaskPropsOpen = {};
+  ui.todayTaskActiveProperty = {};
   ui.blockSelection = { ownerType: "", ownerId: "", ids: [] };
   ui.activeBlockId = "";
   ui.search = "";
@@ -5159,7 +6676,7 @@ function resetDemoData() {
   renderView({ soft: true });
   renderDetail();
   renderOverlays();
-  showToast("최소 데이터로 재생성했습니다.");
+  showToast("통계 더미 데이터로 재생성했습니다.");
 }
 
 function loadState() {
@@ -5182,12 +6699,21 @@ function normalizeState(next) {
   const seeded = createSeedState();
   const tasks = (next.tasks || seeded.tasks).map(({ kind, ...task }) => task);
   const journals = (next.journals || seeded.journals).map(({ kind, ...journal }) => journal);
+  const shouldSeedStatsDemo = !next.settings?.statsDemoDataSeeded;
   const settings = { ...seeded.settings, ...(next.settings || {}) };
   settings.navOrder = normalizeNavOrder(settings.navOrder);
-  return {
-    ...seeded,
-    ...next,
+  settings.calendarSources = normalizeCalendarSources(settings.calendarSources);
+  settings.visibleGoogleCalendars = { ...(settings.visibleGoogleCalendars || {}) };
+  const googleCalendars = (next.googleCalendars || seeded.googleCalendars).map(normalizeGoogleCalendarEntry).filter(Boolean);
+  googleCalendars.forEach((calendar) => {
+    if (settings.visibleGoogleCalendars[calendar.id] === undefined) {
+      settings.visibleGoogleCalendars[calendar.id] = calendar.selected !== false && !calendar.hidden;
+    }
+  });
+  const normalized = {
     version: 3,
+    createdAt: next.createdAt || seeded.createdAt,
+    updatedAt: next.updatedAt || seeded.updatedAt,
     settings,
     captures: next.captures || seeded.captures,
     boxes: next.boxes || seeded.boxes,
@@ -5198,10 +6724,11 @@ function normalizeState(next) {
     habits: next.habits || seeded.habits,
     habitInstances: next.habitInstances || seeded.habitInstances,
     journals,
-    obstacles: next.obstacles || seeded.obstacles,
+    googleCalendars,
     googleEvents: next.googleEvents || seeded.googleEvents,
     links: next.links || seeded.links,
   };
+  return ensureStatsDemoData(normalized, { force: shouldSeedStatsDemo });
 }
 
 function saveState() {
@@ -5210,7 +6737,7 @@ function saveState() {
 }
 
 function createSeedState() {
-  return createMinimalSeedState();
+  return ensureStatsDemoData(createMinimalSeedState(), { force: true });
 }
 
 function createMinimalSeedState() {
@@ -5229,11 +6756,13 @@ function createMinimalSeedState() {
       appMode: "local",
       notionSyncMode: "one-time-final",
       navOrder: defaultNavOrder(),
-      googleClientId: "",
       googleCalendarId: "primary",
       googleConnectedAt: "",
       lastGoogleFetchAt: "",
       lastGoogleSyncAt: "",
+      calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
+      visibleGoogleCalendars: {},
+      statsDemoDataSeeded: false,
     },
     captures: [
       {
@@ -5293,10 +6822,120 @@ function createMinimalSeedState() {
     habits: [],
     habitInstances: [],
     journals: [],
-    obstacles: [],
+    googleCalendars: [],
     googleEvents: [],
     links: [],
   };
+}
+
+function ensureStatsDemoData(targetState, options = {}) {
+  targetState.settings = targetState.settings || {};
+  if (!options.force && targetState.settings.statsDemoDataSeeded) return targetState;
+  const today = parseDateOnly(dateKey(new Date()));
+  const day = (offset) => dateKey(addDays(today, offset));
+  const demoBoxes = [
+    { id: "demo-box-growth", name: "성장 시스템", visibility: "pinned", color: "teal", blocks: blocks("학습, 제품 실험, 장기 역량을 묶어 관리합니다.") },
+    { id: "demo-box-work", name: "업무 운영", visibility: "normal", color: "blue", blocks: blocks("반복 운영과 프로젝트 납기를 관리합니다.") },
+    { id: "demo-box-health", name: "건강 루틴", visibility: "normal", color: "teal", blocks: blocks("몸 상태와 회복 루틴을 관리합니다.") },
+    { id: "demo-box-life", name: "생활 기반", visibility: "normal", color: "amber", blocks: blocks("개인 정리와 생활 유지 업무를 모읍니다.") },
+  ];
+  const demoGoals = [
+    { id: "demo-goal-product", boxId: "demo-box-growth", name: "개인 운영체계 고도화", status: "focus", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3) + 1}Q`, targetDate: day(54), blocks: blocks("개인 웹의 분류, 실행, 회고 루프를 안정화합니다.") },
+    { id: "demo-goal-automation", boxId: "demo-box-work", name: "반복 업무 자동화", status: "active", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3) + 1}Q`, targetDate: day(36), blocks: blocks("반복 처리 시간을 줄이고 지표 추적을 자동화합니다.") },
+    { id: "demo-goal-health", boxId: "demo-box-health", name: "주 5회 회복 루틴", status: "active", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3) + 1}Q`, targetDate: day(72), blocks: blocks("수면, 운동, 회복 루틴을 꾸준히 유지합니다.") },
+    { id: "demo-goal-knowledge", boxId: "demo-box-growth", name: "지식 베이스 정리", status: "not_started", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3) + 1}Q`, targetDate: day(90), blocks: blocks("자료를 구조화해 프로젝트 의사결정에 연결합니다.") },
+    { id: "demo-goal-house", boxId: "demo-box-life", name: "생활 정리 시스템", status: "active", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3) + 1}Q`, targetDate: day(28), blocks: blocks("정리, 청소, 구매 주기를 안정화합니다.") },
+    { id: "demo-goal-archive", boxId: "demo-box-work", name: "지난 분기 정산", status: "completed", year: String(today.getFullYear()), quarter: `${Math.floor(today.getMonth() / 3)}Q`, targetDate: day(-18), blocks: blocks("지난 분기 프로젝트와 운영 기록을 마감했습니다.") },
+  ];
+  const demoProjects = [
+    { id: "demo-project-ui", goalId: "demo-goal-product", boxId: "demo-box-growth", name: "대시보드 UI 실험", status: "focus", startDate: day(-5), endDate: day(12), blocks: blocks("오늘 화면과 분류 흐름을 더 빠르게 만듭니다.") },
+    { id: "demo-project-calendar", goalId: "demo-goal-product", boxId: "demo-box-growth", name: "캘린더 연동 정리", status: "active", startDate: day(-2), endDate: day(20), blocks: blocks("Task와 Project 기간을 한눈에 보이게 정리합니다.") },
+    { id: "demo-project-ops", goalId: "demo-goal-automation", boxId: "demo-box-work", name: "운영 리포트 자동화", status: "active", startDate: day(-11), endDate: day(10), blocks: blocks("반복 리포트 생성과 확인 루틴을 자동화합니다.") },
+    { id: "demo-project-inbox", goalId: "demo-goal-automation", boxId: "demo-box-work", name: "Inbox 분류 규칙 개선", status: "planned", startDate: day(4), endDate: day(18), blocks: blocks("수집 항목을 목표와 프로젝트에 자연스럽게 연결합니다.") },
+    { id: "demo-project-run", goalId: "demo-goal-health", boxId: "demo-box-health", name: "아침 운동 루틴", status: "active", startDate: day(-16), endDate: day(44), blocks: blocks("짧고 지속 가능한 운동 단위를 유지합니다.") },
+    { id: "demo-project-sleep", goalId: "demo-goal-health", boxId: "demo-box-health", name: "수면 로그 개선", status: "planned", startDate: day(1), endDate: day(30), blocks: blocks("수면 기록을 회복 지표와 연결합니다.") },
+    { id: "demo-project-notes", goalId: "demo-goal-knowledge", boxId: "demo-box-growth", name: "자료 태그 재정리", status: "unplanned", startDate: day(14), endDate: day(34), blocks: blocks("Resource를 실행 맥락별로 재배치합니다.") },
+    { id: "demo-project-house", goalId: "demo-goal-house", boxId: "demo-box-life", name: "집 정리 체크리스트", status: "active", startDate: day(-4), endDate: day(9), blocks: blocks("생활 유지 항목을 반복 가능하게 만듭니다.") },
+    { id: "demo-project-review", goalId: "demo-goal-archive", boxId: "demo-box-work", name: "분기 리뷰 마감", status: "completed", startDate: day(-42), endDate: day(-8), blocks: blocks("완료된 리뷰 프로젝트입니다.") },
+    { id: "demo-project-paused", goalId: "demo-goal-knowledge", boxId: "demo-box-growth", name: "장기 리서치 보류", status: "paused", startDate: day(-20), endDate: day(62), blocks: blocks("우선순위 조정으로 잠시 보류합니다.") },
+  ];
+  const demoTasks = Array.from({ length: 36 }, (_, index) => {
+    const project = demoProjects[index % demoProjects.length];
+    const status = index % 9 === 0 ? "waiting" : index % 7 === 0 ? "done" : index % 5 === 0 ? "doing" : "todo";
+    const offset = index % 7 === 0 ? -index : index % 6 === 0 ? -2 : index - 10;
+    return {
+      id: `demo-task-${String(index + 1).padStart(2, "0")}`,
+      title: `${project.name} ${index % 7 === 0 ? "완료 점검" : "실행 항목"} ${index + 1}`,
+      status,
+      boxId: project.boxId,
+      goalId: project.goalId,
+      projectId: project.id,
+      resourceId: "",
+      dueDate: day(offset),
+      scheduledStart: "",
+      scheduledEnd: "",
+      estimatedMinutes: 20 + (index % 5) * 15,
+      actualMinutes: status === "done" ? 25 + (index % 3) * 20 : 0,
+      completedAt: status === "done" ? new Date(day(offset)).toISOString() : "",
+      googleEventId: "",
+      blocks: blocks("통계 확인용 더미 Task입니다."),
+    };
+  });
+  const demoResources = Array.from({ length: 14 }, (_, index) => {
+    const project = demoProjects[index % demoProjects.length];
+    return {
+      id: `demo-resource-${String(index + 1).padStart(2, "0")}`,
+      title: `${project.name} 참고 자료 ${index + 1}`,
+      type: index % 3 === 0 ? "scrap" : index % 3 === 1 ? "note" : "thought",
+      importance: index % 4 === 0 ? "important" : "normal",
+      pinned: index % 5 === 0,
+      readLater: index % 5 === 1,
+      url: "",
+      boxId: project.boxId,
+      goalId: project.goalId,
+      projectId: project.id,
+      blocks: blocks("통계 확인용 Resource입니다."),
+    };
+  });
+  const demoHabits = [
+    { id: "demo-habit-walk", title: "20분 걷기", cadence: "daily", target: "퇴근 전 짧게 움직이기", status: "active", boxId: "demo-box-health", projectId: "demo-project-run", blocks: blocks("몸 상태를 매일 확인합니다.") },
+    { id: "demo-habit-review", title: "하루 리뷰", cadence: "daily", target: "오늘 실행 흐름 기록", status: "active", boxId: "demo-box-growth", projectId: "demo-project-ui", blocks: blocks("짧게 회고합니다.") },
+    { id: "demo-habit-clean", title: "10분 정리", cadence: "weekdays", target: "생활 기반 유지", status: "active", boxId: "demo-box-life", projectId: "demo-project-house", blocks: blocks("작게 정리합니다.") },
+    { id: "demo-habit-reading", title: "자료 1개 정리", cadence: "weekly", target: "Resource를 실행 맥락에 연결", status: "paused", boxId: "demo-box-growth", projectId: "demo-project-notes", blocks: blocks("주간 자료 정리입니다.") },
+  ];
+  const demoHabitInstances = demoHabits.flatMap((habit, habitIndex) => {
+    return Array.from({ length: 18 }, (_, index) => {
+      const date = day(index - 17);
+      const completed = (index + habitIndex) % (habitIndex + 2) !== 0;
+      return {
+        id: `${habit.id}-${date}`,
+        habitId: habit.id,
+        date,
+        completed,
+        completedAt: completed ? new Date(date).toISOString() : "",
+      };
+    });
+  });
+  addMissingById(targetState.boxes, demoBoxes);
+  addMissingById(targetState.goals, demoGoals);
+  addMissingById(targetState.projects, demoProjects);
+  addMissingById(targetState.tasks, demoTasks);
+  addMissingById(targetState.resources, demoResources);
+  addMissingById(targetState.habits, demoHabits);
+  addMissingById(targetState.habitInstances, demoHabitInstances);
+  targetState.settings.statsDemoDataSeeded = true;
+  return targetState;
+}
+
+function addMissingById(collection, items) {
+  if (!Array.isArray(collection)) return;
+  const existingIds = new Set(collection.map((item) => item.id));
+  items.forEach((item) => {
+    if (!existingIds.has(item.id)) {
+      collection.push(item);
+      existingIds.add(item.id);
+    }
+  });
 }
 
 function blocks(text = "") {
@@ -5319,6 +6958,66 @@ function projectStats(project) {
   };
 }
 
+function goalStats(goal) {
+  const projects = state.projects.filter((project) => project.goalId === goal.id);
+  const tasks = state.tasks.filter((task) => task.goalId === goal.id || projects.some((project) => project.id === task.projectId));
+  const resources = state.resources.filter((resource) => resource.goalId === goal.id || projects.some((project) => project.id === resource.projectId));
+  const totalTasks = tasks.length;
+  const doneTasks = tasks.filter((task) => task.status === "done").length;
+  const activeProjects = projects.filter((project) => ["active", "focus"].includes(project.status)).length;
+  const completedProjects = projects.filter((project) => project.status === "completed").length;
+  const overdueTasks = tasks.filter(isOverdue).length;
+  return {
+    projects,
+    tasks,
+    resources,
+    totalTasks,
+    doneTasks,
+    activeProjects,
+    completedProjects,
+    overdueTasks,
+    importantResources: resources.filter((resource) => resource.importance === "important").length,
+    progress: totalTasks ? Math.round((doneTasks / totalTasks) * 100) : projects.length ? Math.round((completedProjects / projects.length) * 100) : goal.status === "completed" ? 100 : 0,
+  };
+}
+
+function boxStats(box) {
+  const goals = state.goals.filter((goal) => goal.boxId === box.id);
+  const projects = state.projects.filter((project) => project.boxId === box.id || goals.some((goal) => goal.id === project.goalId));
+  const tasks = state.tasks.filter((task) => task.boxId === box.id || goals.some((goal) => goal.id === task.goalId) || projects.some((project) => project.id === task.projectId));
+  const resources = state.resources.filter((resource) => resource.boxId === box.id || goals.some((goal) => goal.id === resource.goalId) || projects.some((project) => project.id === resource.projectId));
+  const habits = state.habits.filter((habit) => habit.boxId === box.id || projects.some((project) => project.id === habit.projectId));
+  const totalTasks = tasks.length;
+  const doneTasks = tasks.filter((task) => task.status === "done").length;
+  return {
+    goals,
+    projects,
+    tasks,
+    resources,
+    habits,
+    totalTasks,
+    doneTasks,
+    activeTasks: tasks.filter((task) => !["done", "canceled"].includes(task.status)).length,
+    overdueTasks: tasks.filter(isOverdue).length,
+    activeHabits: habits.filter((habit) => habit.status === "active").length,
+    pinnedResources: resources.filter((resource) => resource.pinned).length,
+    progress: totalTasks ? Math.round((doneTasks / totalTasks) * 100) : projects.length ? Math.round((projects.filter((project) => project.status === "completed").length / projects.length) * 100) : 0,
+  };
+}
+
+function goalInsight(goal, stats) {
+  if (stats.overdueTasks) return `${stats.overdueTasks}개 지연 항목을 먼저 정리해야 합니다.`;
+  if (!stats.projects.length) return "아직 실행 프로젝트가 연결되지 않았습니다.";
+  if (goal.targetDate) return `${compactDateLabel(goal.targetDate)}까지 ${stats.activeProjects}개 프로젝트가 움직이고 있습니다.`;
+  return `${stats.projects.length}개 프로젝트와 ${stats.resources.length}개 자료가 연결되어 있습니다.`;
+}
+
+function boxInsight(box, stats) {
+  if (stats.overdueTasks) return `${stats.overdueTasks}개 지연 할 일을 재배치하면 흐름이 안정됩니다.`;
+  if (stats.activeHabits) return `${stats.activeHabits}개 루틴이 이 영역을 반복적으로 지탱합니다.`;
+  return `${stats.goals.length}개 목표와 ${stats.projects.length}개 프로젝트가 연결되어 있습니다.`;
+}
+
 function projectDateLabel(date) {
   if (!date) return "미정";
   return compactDateLabel(date);
@@ -5335,6 +7034,12 @@ function compactDateLabel(value) {
   if (!year || !month || !day) return String(value);
   const currentYear = new Date().getFullYear();
   return year === currentYear ? `${month}월 ${day}일` : `${year}.${month}.${day}`;
+}
+
+function taskDateDisplay(value) {
+  const [year, month, day] = String(value || "").slice(0, 10).split("-").map(Number);
+  if (!year || !month || !day) return "날짜 없음";
+  return `${year}년 ${month}월 ${day}일`;
 }
 
 function nameOf(type, itemId) {
@@ -5440,7 +7145,7 @@ function countOf(key) {
 }
 
 function totalBlocks() {
-  return [...state.boxes, ...state.goals, ...state.projects, ...state.tasks, ...state.resources, ...state.habits, ...state.journals, ...state.obstacles].reduce(
+  return [...state.boxes, ...state.goals, ...state.projects, ...state.tasks, ...state.resources, ...state.habits, ...state.journals].reduce(
     (sum, item) => sum + (item.blocks?.length || 0),
     0
   );
@@ -5474,10 +7179,23 @@ function monthLabel(date) {
   return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(date);
 }
 
+function monthLabelEnglish(date) {
+  return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "long" }).format(date);
+}
+
 function monthGridDays(date) {
   const first = new Date(date.getFullYear(), date.getMonth(), 1);
   const start = startOfWeek(first);
   return Array.from({ length: 42 }, (_, index) => addDays(start, index));
+}
+
+function calendarMonthGridDays(date) {
+  const first = new Date(date.getFullYear(), date.getMonth(), 1);
+  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+  const start = addDays(startOfSundayWeek(first), -7);
+  const end = addDays(startOfSundayWeek(last), 13);
+  const totalDays = Math.round((end - start) / 86400000) + 1;
+  return Array.from({ length: totalDays }, (_, index) => addDays(start, index));
 }
 
 function habitCalendarMonthDays(date) {
@@ -5550,7 +7268,56 @@ function parseDateOnly(value) {
   return new Date(year, month - 1, day);
 }
 
-function normalizeGoogleApiEvent(event, calendarId = state.settings.googleCalendarId || "primary") {
+function normalizeCalendarSources(sources = {}) {
+  return {
+    ...DEFAULT_CALENDAR_SOURCES,
+    ...(sources || {}),
+  };
+}
+
+function fallbackGoogleCalendar(calendarId = "primary", summary = "") {
+  const id = calendarId || "primary";
+  return {
+    id,
+    summary: summary || (id === "primary" ? "Primary" : id),
+    primary: id === "primary",
+    selected: true,
+    hidden: false,
+    backgroundColor: "",
+    foregroundColor: "",
+    accessRole: "",
+  };
+}
+
+function normalizeGoogleCalendarEntry(entry) {
+  if (!entry) return null;
+  if (typeof entry === "string") return fallbackGoogleCalendar(entry);
+  const calendarId = entry.id || entry.calendarId || "primary";
+  return {
+    id: calendarId,
+    summary: entry.summary || entry.name || entry.calendarSummary || (calendarId === "primary" ? "Primary" : calendarId),
+    primary: Boolean(entry.primary),
+    selected: entry.selected !== false,
+    hidden: Boolean(entry.hidden),
+    backgroundColor: entry.backgroundColor || "",
+    foregroundColor: entry.foregroundColor || "",
+    accessRole: entry.accessRole || "",
+  };
+}
+
+function ensureGoogleCalendarVisibility(calendars) {
+  const visibleGoogleCalendars = { ...(state.settings.visibleGoogleCalendars || {}) };
+  calendars.forEach((calendar) => {
+    if (calendar?.id && visibleGoogleCalendars[calendar.id] === undefined) {
+      visibleGoogleCalendars[calendar.id] = calendar.selected !== false && !calendar.hidden;
+    }
+  });
+  state.settings.visibleGoogleCalendars = visibleGoogleCalendars;
+}
+
+function normalizeGoogleApiEvent(event, calendar = fallbackGoogleCalendar(state.settings.googleCalendarId || "primary")) {
+  const calendarRecord = normalizeGoogleCalendarEntry(calendar) || fallbackGoogleCalendar();
+  const calendarId = calendarRecord.id;
   const startValue = event?.start?.dateTime || event?.start?.date || "";
   if (!startValue) return null;
   const endValue = event.end?.dateTime || event.end?.date || startValue;
@@ -5561,6 +7328,9 @@ function normalizeGoogleApiEvent(event, calendarId = state.settings.googleCalend
   return {
     id: event.id || `${calendarId}:${startValue}:${event.summary || ""}`,
     calendarId,
+    calendarSummary: calendarRecord.summary,
+    backgroundColor: calendarRecord.backgroundColor,
+    foregroundColor: calendarRecord.foregroundColor,
     source: "google",
     title: event.summary || "(제목 없음)",
     start: startValue,
@@ -5584,6 +7354,11 @@ function esc(value = "") {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function cssEscape(value = "") {
+  if (window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
 function showToast(message) {

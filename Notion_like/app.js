@@ -70,7 +70,6 @@ let state = loadState();
 let googleAccessToken = "";
 let ui = {
   view: "today",
-  selected: null,
   commandOpen: false,
   slash: null,
   search: "",
@@ -376,7 +375,6 @@ function render() {
       </main>
     </div>
     <button class="fab" type="button" data-action="open-command" aria-label="빠른 생성">+</button>
-    ${ui.selected ? renderDetail() : ""}
     ${ui.commandOpen ? renderCommandMenu() : ""}
     ${ui.slash ? renderSlashMenu() : ""}
   `;
@@ -898,25 +896,6 @@ function renderWeekDays() {
     .join("");
 }
 
-function renderDetail() {
-  const { type, id: selectedId } = ui.selected;
-  const item = getCollection(type).find((entry) => entry.id === selectedId);
-  if (!item) return "";
-  const titleField = ["tasks", "resources", "journals", "captures"].includes(type) ? "title" : "name";
-  return `
-    <aside class="detail" aria-label="상세 편집">
-      <div class="detail-head">
-        <input class="detail-title" data-detail-title="${titleField}" value="${esc(item[titleField] || "")}">
-        <button class="button ghost" type="button" data-action="close-detail">닫기</button>
-      </div>
-      <div class="detail-body">
-        ${renderDetailFields(type, item)}
-        ${item.blocks ? renderBlockEditor(type, item.id, item.blocks) : ""}
-      </div>
-    </aside>
-  `;
-}
-
 function renderDetailFields(type, item) {
   if (type === "tasks") {
     return `
@@ -1105,7 +1084,6 @@ function handleClick(event) {
   const viewButton = event.target.closest("[data-view]");
   if (viewButton) {
     ui.view = viewButton.dataset.view;
-    ui.selected = null;
     ui.search = "";
     render();
     return;
@@ -1133,8 +1111,8 @@ function handleClick(event) {
 
   const select = event.target.closest("[data-select-type]");
   if (select && !event.target.closest("button")) {
-    ui.selected = { type: select.dataset.selectType, id: select.dataset.selectId };
-    render();
+    ui.commandOpen = false;
+    ui.slash = null;
     return;
   }
 
@@ -1155,11 +1133,6 @@ function handleAction(action) {
   ui.commandOpen = false;
   if (action === "open-command") {
     ui.commandOpen = true;
-    render();
-    return;
-  }
-  if (action === "close-detail") {
-    ui.selected = null;
     render();
     return;
   }
@@ -1204,14 +1177,6 @@ function handleInput(event) {
     return;
   }
 
-  const titleInput = event.target.closest("[data-detail-title]");
-  if (titleInput && ui.selected) {
-    const item = selectedItem();
-    item[titleInput.dataset.detailTitle] = titleInput.value;
-    saveState();
-    return;
-  }
-
   const blockContent = event.target.closest("[data-block-content]");
   if (blockContent) {
     updateBlockText(blockContent);
@@ -1227,16 +1192,7 @@ function handleInput(event) {
 
 function handleChange(event) {
   const field = event.target.closest("[data-field]");
-  if (field && ui.selected) {
-    const item = selectedItem();
-    let value = field.value;
-    if (value === "true") value = true;
-    if (value === "false") value = false;
-    if (field.type === "number") value = Number(value);
-    item[field.dataset.field] = value;
-    saveState();
-    render();
-  }
+  if (!field) return;
 }
 
 function handleKeydown(event) {
@@ -1270,10 +1226,9 @@ function handleDocumentKeydown(event) {
     ui.commandOpen = !ui.commandOpen;
     render();
   }
-  if (event.key === "Escape" && (ui.commandOpen || ui.selected || ui.slash)) {
+  if (event.key === "Escape" && (ui.commandOpen || ui.slash)) {
     ui.commandOpen = false;
     ui.slash = null;
-    ui.selected = null;
     render();
   }
 }
@@ -1334,7 +1289,6 @@ function createTask(title = "새 할 일") {
   };
   state.tasks.push(task);
   ui.view = "tasks";
-  ui.selected = { type: "tasks", id: task.id };
   saveState();
   render();
 }
@@ -1352,7 +1306,6 @@ function createProject(name = "새 프로젝트") {
   };
   state.projects.push(project);
   ui.view = "projects";
-  ui.selected = { type: "projects", id: project.id };
   saveState();
   render();
 }
@@ -1370,7 +1323,6 @@ function createGoal(name = "새 목표") {
   };
   state.goals.push(goal);
   ui.view = "goals";
-  ui.selected = { type: "goals", id: goal.id };
   saveState();
   render();
 }
@@ -1385,7 +1337,6 @@ function createBox(name = "새 박스") {
   };
   state.boxes.push(box);
   ui.view = "boxes";
-  ui.selected = { type: "boxes", id: box.id };
   saveState();
   render();
 }
@@ -1409,7 +1360,6 @@ function createResource(title = "새 자료") {
   };
   state.resources.push(resource);
   ui.view = "resources";
-  ui.selected = { type: "resources", id: resource.id };
   saveState();
   render();
 }
@@ -1430,7 +1380,6 @@ function createJournal(title = `${dateKey(new Date())} 리뷰`) {
   };
   state.journals.push(journal);
   ui.view = "journal";
-  ui.selected = { type: "journals", id: journal.id };
   saveState();
   render();
 }
@@ -1475,10 +1424,6 @@ function toggleTaskDone(taskId) {
   }
   saveState();
   render();
-}
-
-function selectedItem() {
-  return getCollection(ui.selected.type).find((entry) => entry.id === ui.selected.id);
 }
 
 function getCollection(type) {

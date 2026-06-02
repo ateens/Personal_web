@@ -1,9 +1,9 @@
-const CACHE_NAME = "sygma-local-os-v1";
+const CACHE_NAME = "sygma-local-os-v2";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
+  "./styles.css?v=20260601-2",
+  "./app.js?v=20260601-2",
   "./manifest.json",
   "./icons/app-icon.svg",
 ];
