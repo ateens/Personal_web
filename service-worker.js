@@ -1,7 +1,7 @@
-const CACHE_NAME = "sygma-personal-web-v203";
+const CACHE_NAME = "sygma-personal-web-v292";
 const ASSETS = [
-  "./styles.css?v=20260602-05",
-  "./app.js?v=20260602-05",
+  "./styles.css?v=20260603-17",
+  "./app.js?v=20260603-17",
   "./manifest.json",
   "./icons/app-icon.svg"
 ];

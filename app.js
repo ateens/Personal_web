@@ -1,9 +1,11 @@
-const STORAGE_KEY = "sygma-personal-web-state-v2";
+const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
 const DEFAULT_CALENDAR_SOURCES = {
   tasks: true,
   projects: true,
   google: true,
 };
+const CALENDAR_SOURCE_KEYS = Object.keys(DEFAULT_CALENDAR_SOURCES);
+const CALENDAR_SOURCE_KEY_SET = new Set(CALENDAR_SOURCE_KEYS);
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
@@ -21,9 +23,62 @@ const NAV_ITEMS = [
   ["calendar", "Calendar", "◷"],
   ["database", "DB", "◇"],
 ];
+const DEFAULT_NAV_ORDER = NAV_ITEMS.map(([key]) => key);
+const NAV_ITEMS_BY_KEY = new Map(NAV_ITEMS.map((item) => [item[0], item]));
+const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 
 const NAV_SHORTCUT_HOLD_MS = 500;
 const NAV_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "q", "w"];
+const VIEW_CONTROL_DEFAULTS = {
+  today: { search: "", filter: "all", sort: "date", mode: "overview" },
+  inbox: { search: "", filter: "all", sort: "recent", mode: "board" },
+  tasks: { search: "", filter: "all", sort: "date", mode: "board" },
+  projects: { search: "", filter: "all", sort: "status", mode: "board" },
+  goals: { search: "", filter: "all", sort: "target", mode: "cards" },
+  boxes: { search: "", filter: "all", sort: "activity", mode: "columns" },
+  resources: { search: "", filter: "active", sort: "updated", mode: "library", type: "all", toggles: { pinned: false, readLater: false, important: false, linked: false } },
+  habits: { search: "", filter: "all", sort: "progress", mode: "list" },
+  journal: { search: "", filter: "all", sort: "date", mode: "cards" },
+  calendar: { search: "", filter: "all", sort: "time", mode: "calendar" },
+  database: { search: "", filter: "all", sort: "rows", mode: "grid" },
+};
+const VIEW_FILTER_OPTIONS = {
+  today: [["all", "전체"], ["active", "진행"], ["overdue", "지연"], ["done", "완료"]],
+  inbox: [["all", "전체"], ["inbox", "미분류"], ["processed", "처리됨"]],
+  tasks: [["all", "전체"], ["unplanned", "미계획"], ["today", "오늘"], ["tomorrow", "내일"], ["scheduled", "예정"], ["overdue", "지연"], ["done", "완료"]],
+  projects: [["all", "전체"], ["active", "진행"], ["planned", "계획"], ["closed", "완료/중단"]],
+  goals: [["all", "전체"], ["active", "진행"], ["focus", "집중"], ["completed", "완료"], ["paused", "중단"]],
+  boxes: [["all", "전체"], ["pinned", "고정"], ["normal", "일반"], ["archived", "아카이브"]],
+  resources: [["all", "전체"], ["active", "활성"], ["important", "중요"], ["pinned", "고정"], ["readLater", "나중에 보기"], ["linked", "연결됨"], ["archived", "아카이브"]],
+  habits: [["all", "전체"], ["active", "활성"], ["paused", "중단"], ["archived", "보관"], ["daily", "매일"], ["weekly", "주간"]],
+  journal: [["all", "전체"], ["high", "만족 높음"], ["low", "점검 필요"], ["dated", "날짜 있음"]],
+  calendar: [["all", "전체"], ["task", "Tasks"], ["project", "Projects"], ["google", "Google"]],
+  database: [["all", "전체"], ["core", "핵심"], ["activity", "활동"], ["integration", "연동"]],
+};
+const VIEW_SORT_OPTIONS = {
+  today: [["date", "시간순"], ["title", "이름순"], ["status", "상태순"]],
+  inbox: [["recent", "최근순"], ["title", "이름순"], ["status", "상태순"]],
+  tasks: [["date", "날짜순"], ["status", "상태순"], ["title", "이름순"], ["project", "프로젝트순"]],
+  projects: [["status", "상태순"], ["end", "종료일순"], ["name", "이름순"], ["progress", "진행률순"]],
+  goals: [["target", "목표일순"], ["status", "상태순"], ["name", "이름순"], ["progress", "진행률순"]],
+  boxes: [["activity", "활동순"], ["visibility", "표시순"], ["name", "이름순"], ["progress", "진행률순"]],
+  resources: [["updated", "최근 수정"], ["title", "이름순"], ["importance", "중요도"], ["type", "유형순"], ["project", "프로젝트순"]],
+  habits: [["progress", "달성률순"], ["status", "상태순"], ["title", "이름순"], ["cadence", "주기순"]],
+  journal: [["date", "날짜순"], ["score", "만족도순"], ["title", "이름순"]],
+  calendar: [["time", "시간순"], ["source", "소스순"], ["title", "이름순"]],
+  database: [["rows", "행 많은 순"], ["name", "이름순"], ["relations", "관계 많은 순"]],
+};
+const VIEW_MODE_OPTIONS = {
+  resources: [["library", "Library"], ["list", "List"], ["map", "Map"]],
+  calendar: [["calendar", "Calendar"], ["agenda", "Agenda"]],
+  database: [["grid", "Grid"], ["list", "List"]],
+};
+const RESOURCE_TOGGLE_FILTERS = [
+  ["pinned", "고정"],
+  ["readLater", "나중에"],
+  ["important", "중요"],
+  ["linked", "연결"],
+];
 
 const BLOCK_TYPES = {
   paragraph: ["텍스트", "T"],
@@ -39,6 +94,51 @@ const BLOCK_TYPES = {
   divider: ["구분선", "—"],
   code: ["코드", "</>"],
 };
+const BLOCK_TYPE_ENTRIES = Object.entries(BLOCK_TYPES);
+const BLOCK_TYPE_KEYS = Object.keys(BLOCK_TYPES);
+const BLOCK_TYPE_COUNT = BLOCK_TYPE_KEYS.length;
+const MARKDOWN_SHORTCUTS = [
+  [/^#\s$/, "heading1", ""],
+  [/^##\s$/, "heading2", ""],
+  [/^###\s$/, "heading3", ""],
+  [/^[-*]\s$/, "bullet", ""],
+  [/^1[.)]\s$/, "numbered", ""],
+  [/^\[\s?\]\s$/, "todo", ""],
+  [/^>\s$/, "toggle", ""],
+  [/^!\s$/, "callout", ""],
+  [/^```$/, "code", ""],
+  [/^---$/, "divider", ""],
+];
+const CONTINUED_BLOCK_TYPES = new Set(["bullet", "numbered", "todo"]);
+const KOREAN_MONTH_FORMATTER = new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" });
+const ENGLISH_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "long" });
+const KOREAN_WEEKDAY_FORMATTER = new Intl.DateTimeFormat("ko-KR", { weekday: "short" });
+const KOREAN_LONG_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  weekday: "long",
+});
+const KOREAN_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const KOREAN_TIME_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const COMMAND_MENU_ITEMS = [
+  ["new-task", "✓", "새 할 일", "실행 항목"],
+  ["new-project", "▦", "새 프로젝트", "작업 묶음"],
+  ["new-goal", "◎", "새 목표", "결과 목표"],
+  ["new-resource", "≡", "새 자료", "block editor 노트"],
+  ["new-habit", "◌", "새 루틴", "반복 관리"],
+  ["new-journal", "✎", "새 리뷰", "회고"],
+  ["new-box", "□", "새 박스", "삶의 영역"],
+];
+const SCHEDULER_WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
 
 const STATUSES = {
   task: {
@@ -145,16 +245,81 @@ const DB_SCHEMA = [
   {
     key: "settings",
     label: "Settings",
-    fields: ["appMode", "notionSyncMode", "navOrder", "calendarSources", "visibleGoogleCalendars", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
-    relations: ["PWA", "Google Calendar", "final Notion export"],
+    fields: ["navOrder", "calendarSources", "visibleGoogleCalendars", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
+    relations: ["PWA", "Google Calendar", "PostgreSQL sync"],
   },
 ];
+const TASK_PROPERTY_SUMMARY_FIELDS = [
+  ["title", "제목"],
+  ["dueDate", "날짜"],
+  ["boxId", "박스"],
+  ["goalId", "목표"],
+  ["projectId", "프로젝트"],
+];
+const TASK_PROPERTY_LABELS = {
+  title: "제목",
+  dueDate: "날짜",
+  boxId: "박스",
+  goalId: "목표",
+  projectId: "프로젝트",
+};
+const TASK_PROPERTY_HINTS = {
+  title: "표시 이름",
+  dueDate: "실행 날짜",
+  boxId: "관리 영역",
+  goalId: "목표 연결",
+  projectId: "실행 맥락",
+};
+const TASK_PROPERTY_COLLECTIONS = {
+  boxId: { empty: "미지정", emptyMeta: "관리 영역 없음", collectionKey: "boxes", nameField: "name" },
+  goalId: { empty: "없음", emptyMeta: "목표 없이 진행", collectionKey: "goals", nameField: "name" },
+  projectId: { empty: "없음", emptyMeta: "독립 실행", collectionKey: "projects", nameField: "name" },
+};
+const TASK_DATE_CHOICE_DEFS = [
+  [0, "오늘"],
+  [1, "내일"],
+  [2, "예정"],
+  [7, "다음 주"],
+];
+const CAPTURE_CONVERT_TYPES = [
+  ["tasks", "Task"],
+  ["projects", "Project"],
+  ["resources", "Resource"],
+  ["goals", "Goal"],
+  ["boxes", "Box"],
+];
+const RESOURCE_TYPE_CAPTURE_OPTIONS = [
+  { value: "note", label: "노트", meta: "정리된 자료" },
+  { value: "quick_note", label: "간단 메모", meta: "빠른 기록" },
+  { value: "scrap", label: "스크랩", meta: "외부 자료" },
+  { value: "thought", label: "생각", meta: "아이디어" },
+  { value: "reflection", label: "회고", meta: "돌아보기" },
+];
+const COMPACT_CALENDAR_EVENT_OPTIONS = { compact: true };
 
+let localStateHadStoredState = false;
+let remoteStateSaveTimer = 0;
+let remoteStateSavePending = false;
+let remoteStateSaveInFlight = false;
+let localStateChangedBeforeDatabaseReady = false;
+const REMOTE_STATE_SAVE_DELAY_MS = 450;
+const REMOTE_STATE_RETRY_DELAY_MS = 3000;
 let state = loadState();
+const collectionIndexCache = new Map();
+let habitInstanceIndexCache = null;
+let relationIndexCache = null;
 let googleBackendStatus = {
   configured: true,
   connected: Boolean(state.settings.googleConnectedAt),
   loading: true,
+};
+let databaseBackendStatus = {
+  configured: false,
+  connected: false,
+  loading: true,
+  saving: false,
+  error: "",
+  lastSyncedAt: "",
 };
 let els = {};
 let navCloseTimer = 0;
@@ -172,6 +337,9 @@ let ui = {
   navShortcutHints: false,
   navOpenedByShortcut: false,
   navDragKey: "",
+  pendingNavDrag: null,
+  navPointerDrag: null,
+  suppressNavClickUntil: 0,
   slash: null,
   scheduler: null,
   resourceNotes: [],
@@ -248,27 +416,32 @@ function init() {
   document.addEventListener("keydown", handleDocumentKeydown);
   document.addEventListener("keyup", handleDocumentKeyup);
   document.addEventListener("click", handleDocumentClick);
+  document.addEventListener("pointermove", handleNavPointerMove, true);
   document.addEventListener("pointermove", handleBlockPointerMove, true);
   document.addEventListener("pointermove", handleEditorMarqueePointerMove, true);
   document.addEventListener("pointermove", handleResourcePointerMove, true);
   document.addEventListener("pointermove", handleTodayTaskPointerMove, true);
   document.addEventListener("pointermove", handleDeleteDragPointerMove, true);
   document.addEventListener("pointermove", handleSchedulePointerMove, true);
+  document.addEventListener("mousemove", handleNavPointerMove, true);
   document.addEventListener("mousemove", handleTodayTaskPointerMove, true);
   document.addEventListener("mousemove", handleDeleteDragPointerMove, true);
   document.addEventListener("mousemove", handleSchedulePointerMove, true);
+  document.addEventListener("pointerup", finishNavPointerDrag, true);
   document.addEventListener("pointerup", finishBlockDrag, true);
   document.addEventListener("pointerup", finishEditorMarqueeDrag, true);
   document.addEventListener("pointerup", finishResourceDrag, true);
   document.addEventListener("pointerup", finishTodayTaskDrag, true);
   document.addEventListener("pointerup", finishDeleteDrag, true);
   document.addEventListener("pointerup", finishScheduleDrag, true);
+  document.addEventListener("pointercancel", cancelNavPointerDrag, true);
   document.addEventListener("pointercancel", cancelBlockDrag, true);
   document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
   document.addEventListener("pointercancel", cancelResourceDrag, true);
   document.addEventListener("pointercancel", cancelTodayTaskDrag, true);
   document.addEventListener("pointercancel", cancelDeleteDrag, true);
   document.addEventListener("pointercancel", cancelScheduleDrag, true);
+  document.addEventListener("mouseup", finishNavPointerDrag, true);
   document.addEventListener("mouseup", finishTodayTaskDrag, true);
   document.addEventListener("mouseup", finishDeleteDrag, true);
   document.addEventListener("mouseup", finishScheduleDrag, true);
@@ -281,15 +454,20 @@ function init() {
   window.addEventListener("resize", updateTopbarStickiness);
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("pointerup", finishScheduleDrag, true);
+  window.addEventListener("pointerup", finishNavPointerDrag, true);
   window.addEventListener("pointerup", finishTodayTaskDrag, true);
   window.addEventListener("pointerup", finishDeleteDrag, true);
+  window.addEventListener("mouseup", finishNavPointerDrag, true);
   window.addEventListener("mouseup", finishTodayTaskDrag, true);
   window.addEventListener("mouseup", finishDeleteDrag, true);
   window.addEventListener("mouseup", finishScheduleDrag, true);
   window.addEventListener("blur", cancelScheduleDrag);
   window.addEventListener("blur", cancelTodayTaskDrag);
   window.addEventListener("blur", cancelDeleteDrag);
+  window.addEventListener("blur", cancelNavPointerDrag);
   window.addEventListener("blur", resetNavShortcutState);
+  document.addEventListener("visibilitychange", handleVisibilityStateSave);
+  window.addEventListener("pagehide", handlePageHideStateSave);
 
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker
@@ -305,21 +483,22 @@ function init() {
   updateTopbarStickiness();
   if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
-  refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
+  initializeDatabaseState().finally(() => {
+    refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
+  });
 }
 
 function handleGoogleRedirectResult() {
   const params = new URLSearchParams(window.location.search);
   const result = params.get("google");
+  const returnView = params.get("view");
   if (!result) return { connected: false, failed: false };
   params.delete("google");
+  params.delete("view");
   const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
   window.history.replaceState({}, "", nextUrl || "/");
-  if (result === "connected") {
-    ui.view = window.sessionStorage.getItem("sygma-google-return-view") || "calendar";
-    window.sessionStorage.removeItem("sygma-google-return-view");
-    return { connected: true, failed: false };
-  }
+  if (defaultNavOrder().includes(returnView)) ui.view = returnView;
+  if (result === "connected") return { connected: true, failed: false };
   return { connected: false, failed: true };
 }
 
@@ -336,7 +515,7 @@ function renderShell() {
           <div class="brand">
             <div class="brand-mark">S</div>
             <div>
-              <div class="brand-title">SYGMA Local</div>
+              <div class="brand-title">SYGMA OS</div>
               <div class="brand-subtitle">Personal web OS</div>
             </div>
           </div>
@@ -346,7 +525,7 @@ function renderShell() {
           </nav>
           <div class="sidebar-footer">
             <div class="sync-chip">
-              <span>${state.settings.appMode === "local" ? "Local first" : "Sync"}</span>
+              <span>PostgreSQL</span>
               <span class="sync-dot"></span>
             </div>
           </div>
@@ -365,18 +544,20 @@ function renderShell() {
 }
 
 function renderNavButtons() {
-  return orderedNavItems()
-    .map(([key, label, icon], index) => {
-      const shortcutKey = navShortcutKeyForIndex(index);
-      return `
-        <button class="nav-button" type="button" draggable="true" data-view="${key}" data-nav-key="${key}"${shortcutKey ? ` data-nav-shortcut="${shortcutKey}"` : ""}>
-          <span class="nav-icon">${icon}</span>
-          <span class="nav-label">${esc(label)}</span>
-          ${shortcutKey ? `<span class="nav-shortcut" aria-hidden="true">${esc(shortcutKey)}</span>` : ""}
-        </button>
-      `;
-    })
-    .join("");
+  let buttons = "";
+  const items = orderedNavItems();
+  for (let index = 0; index < items.length; index += 1) {
+    const [key, label, icon] = items[index];
+    const shortcutKey = navShortcutKeyForIndex(index);
+    buttons += `
+      <button class="nav-button" type="button" data-view="${key}" data-nav-key="${key}"${shortcutKey ? ` data-nav-shortcut="${shortcutKey}"` : ""}>
+        <span class="nav-icon">${icon}</span>
+        <span class="nav-label">${esc(label)}</span>
+        ${shortcutKey ? `<span class="nav-shortcut" aria-hidden="true">${esc(shortcutKey)}</span>` : ""}
+      </button>
+    `;
+  }
+  return buttons;
 }
 
 function renderNav() {
@@ -389,26 +570,34 @@ function renderNav() {
 }
 
 function defaultNavOrder() {
-  return NAV_ITEMS.map(([key]) => key);
+  return [...DEFAULT_NAV_ORDER];
 }
 
 function normalizeNavOrder(order = []) {
-  const validKeys = new Set(defaultNavOrder());
   const normalized = [];
+  const normalizedKeys = new Set();
   if (Array.isArray(order)) {
-    order.forEach((key) => {
-      if (validKeys.has(key) && !normalized.includes(key)) normalized.push(key);
-    });
+    for (const key of order) {
+      if (!NAV_KEY_SET.has(key) || normalizedKeys.has(key)) continue;
+      normalized.push(key);
+      normalizedKeys.add(key);
+    }
   }
-  defaultNavOrder().forEach((key) => {
-    if (!normalized.includes(key)) normalized.push(key);
-  });
+  for (const key of DEFAULT_NAV_ORDER) {
+    if (normalizedKeys.has(key)) continue;
+    normalized.push(key);
+    normalizedKeys.add(key);
+  }
   return normalized;
 }
 
 function orderedNavItems() {
-  const itemsByKey = new Map(NAV_ITEMS.map((item) => [item[0], item]));
-  return normalizeNavOrder(state?.settings?.navOrder).map((key) => itemsByKey.get(key)).filter(Boolean);
+  const items = [];
+  for (const key of normalizeNavOrder(state?.settings?.navOrder)) {
+    const item = NAV_ITEMS_BY_KEY.get(key);
+    if (item) items.push(item);
+  }
+  return items;
 }
 
 function renderTopbar() {
@@ -582,23 +771,22 @@ function renderView({ transition = false, soft = false, animateCards = false } =
 }
 
 function captureCardRects() {
-  return new Map(
-    Array.from(els.viewRoot.querySelectorAll(".card[data-task-id]")).map((card) => [
-      card.dataset.taskId,
-      card.getBoundingClientRect(),
-    ])
-  );
+  const rects = new Map();
+  els.viewRoot.querySelectorAll(".card[data-task-id]").forEach((card) => {
+    rects.set(card.dataset.taskId, card.getBoundingClientRect());
+  });
+  return rects;
 }
 
 function animateCardReorder(previousRects) {
-  const cards = Array.from(els.viewRoot.querySelectorAll(".card[data-task-id]"));
-  cards.forEach((card) => {
+  const cards = els.viewRoot.querySelectorAll(".card[data-task-id]");
+  for (const card of cards) {
     const previous = previousRects.get(card.dataset.taskId);
-    if (!previous) return;
+    if (!previous) continue;
     const next = card.getBoundingClientRect();
     const dx = previous.left - next.left;
     const dy = previous.top - next.top;
-    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
 
     card.classList.add("is-reordering");
     card.style.transition = "none";
@@ -611,55 +799,53 @@ function animateCardReorder(previousRects) {
         card.classList.remove("is-reordering");
       }, 420);
     });
-  });
+  }
 }
 
 function renderToday() {
   const today = dateKey(new Date());
   const tomorrow = dateKey(addDays(new Date(), 1));
-  const activeTodayTasks = state.tasks.filter((task) => isTaskOnDate(task, today) && task.status !== "done").sort(bySchedule);
-  const completedTodayTasks = state.tasks
-    .filter((task) => isTaskOnDate(task, today) && task.status === "done")
-    .sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
+  const controlledTasks = controlledItems("tasks", state.tasks, "today", { today, tomorrow });
+  const { activeTodayTasks, completedTodayTasks, tomorrowTasks, overdue, doneToday } = todayTaskBuckets(today, tomorrow, controlledTasks);
   const todayTasks = [...activeTodayTasks, ...completedTodayTasks];
-  const tomorrowTasks = state.tasks.filter((task) => isTaskOnDate(task, tomorrow) && task.status !== "done").sort(bySchedule);
-  const overdue = state.tasks.filter((task) => isOverdue(task)).sort(bySchedule);
-  const doneToday = state.tasks.filter((task) => task.completedAt?.slice(0, 10) === today);
-  const activeProjects = state.projects.filter((project) => ["active", "focus"].includes(project.status));
-  const pinnedResources = state.resources.filter((resource) => resource.pinned && resource.importance !== "archived");
-  const habits = state.habits.filter((habit) => habit.status === "active");
+  const { activeProjectCount, pinnedResources, activeHabits } = todayDashboardCollections(
+    controlledItems("resources", state.resources, "today"),
+    controlledItems("habits", state.habits, "today", { today }),
+    controlledItems("projects", state.projects, "today")
+  );
 
   return `
     <section class="view">
       ${renderViewHeader("Today", "대시보드", formatLongDate(new Date()), `
         <button class="button secondary" type="button" data-action="new-journal">오늘 리뷰</button>
       `)}
+      ${renderViewControls("today", { count: controlledTasks.length, total: state.tasks.length, placeholder: "오늘 항목 검색" })}
       <div class="metric-grid">
         ${renderMetric("오늘 할 일", activeTodayTasks.length, "예정/날짜")}
         ${renderMetric("완료", doneToday.length, "오늘 체크")}
         ${renderMetric("지연", overdue.length, "재배치")}
-        ${renderMetric("진행 프로젝트", activeProjects.length, "active/focus")}
+        ${renderMetric("진행 프로젝트", activeProjectCount, "active/focus")}
       </div>
       <div class="grid cols-2 today-dashboard-grid">
         <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
           ${panelHeader("오늘 할 일", "시간순")}
-          <div class="stack">${todayTasks.length ? todayTasks.map((task) => renderTaskCard(task, false, { todayList: true, todayInline: true })).join("") : empty("오늘 할 일이 없습니다.")}</div>
+          <div class="stack">${renderTaskCards(todayTasks, { todayList: true, todayInline: true }, "오늘 할 일이 없습니다.")}</div>
         </div>
         <div class="panel">
-          ${panelHeader("오늘 루틴", `${habits.length}개`)}
-          <div class="stack">${habits.length ? habits.map((habit) => renderHabitCard(habit, today)).join("") : empty("활성 루틴이 없습니다.")}</div>
+          ${panelHeader("오늘 루틴", `${activeHabits.length}개`)}
+          <div class="stack">${renderHabitCards(activeHabits, today, "활성 루틴이 없습니다.")}</div>
         </div>
         <div class="panel">
           ${panelHeader("지연 항목", "Tasks에서 재배치")}
-          <div class="stack">${overdue.length ? overdue.map((task) => renderTaskCard(task, false, { todayInline: true })).join("") : empty("지연된 항목이 없습니다.")}</div>
+          <div class="stack">${renderTaskCards(overdue, { todayInline: true }, "지연된 항목이 없습니다.")}</div>
         </div>
         <div class="panel today-drop-zone" data-today-task-zone="tomorrow" data-drop-date="${tomorrow}">
           ${panelHeader("내일 할 일", compactDateLabel(tomorrow))}
-          <div class="stack">${tomorrowTasks.length ? tomorrowTasks.map((task) => renderTaskCard(task, false, { todayInline: true })).join("") : empty("내일 할 일이 없습니다.")}</div>
+          <div class="stack">${renderTaskCards(tomorrowTasks, { todayInline: true }, "내일 할 일이 없습니다.")}</div>
         </div>
         <div class="panel today-resource-panel">
           ${panelHeader("고정 자료", "빠른 참조")}
-          <div class="stack">${pinnedResources.length ? pinnedResources.map(renderResourceCard).join("") : empty("고정된 자료가 없습니다.")}</div>
+          <div class="stack">${renderResourceCards(pinnedResources, "고정된 자료가 없습니다.")}</div>
         </div>
       </div>
     </section>
@@ -667,26 +853,23 @@ function renderToday() {
 }
 
 function renderInbox() {
-  const inbox = state.captures.filter((capture) => capture.status === "inbox");
-  const processed = state.captures
-    .filter((capture) => capture.status === "processed")
-    .slice()
-    .sort((a, b) => (b.processedAt || "").localeCompare(a.processedAt || ""))
-    .slice(0, 8);
+  const captures = controlledItems("captures", state.captures, "inbox");
+  const captureBuckets = captureStatusBuckets(captures);
 
   return `
     <section class="view">
-      ${renderViewHeader("Inbox", "수집과 분류", `${inbox.length}개 대기`, `
+      ${renderViewHeader("Inbox", "수집과 분류", `${captureBuckets.inbox.length}개 대기`, `
         <button class="button secondary" type="button" data-action="new-capture">수집 추가</button>
       `)}
+      ${renderViewControls("inbox", { count: captures.length, total: state.captures.length, placeholder: "수집 항목 검색" })}
       <div class="grid cols-2">
         <div class="panel">
-          ${panelHeader("미분류", `${inbox.length}개`)}
-          <div class="stack">${inbox.length ? inbox.map(renderCaptureCard).join("") : empty("분류할 수집 항목이 없습니다.")}</div>
+          ${panelHeader("미분류", `${captureBuckets.inbox.length}개`)}
+          <div class="stack">${renderCaptureCards(captureBuckets.inbox, "분류할 수집 항목이 없습니다.")}</div>
         </div>
         <div class="panel">
           ${panelHeader("최근 처리", "변환 기록")}
-          <div class="stack">${processed.length ? processed.map(renderCaptureCard).join("") : empty("처리된 항목이 없습니다.")}</div>
+          <div class="stack">${renderCaptureCards(captureBuckets.processed, "처리된 항목이 없습니다.")}</div>
         </div>
       </div>
     </section>
@@ -696,27 +879,17 @@ function renderInbox() {
 function renderTasks() {
   const today = dateKey(new Date());
   const tomorrow = dateKey(addDays(new Date(), 1));
-  const filtered = state.tasks.filter((task) => matchesSearch(task.title));
-  const active = filtered.filter((task) => task.status !== "done" && task.status !== "canceled");
-  const overdue = active.filter((task) => isOverdue(task));
-  const todayTasks = active.filter((task) => isTaskOnDate(task, today)).sort(bySchedule);
-  const tomorrowTasks = active.filter((task) => isTaskOnDate(task, tomorrow)).sort(bySchedule);
-  const scheduled = active
-    .filter((task) => (task.scheduledStart || task.dueDate) && !isTaskOnDate(task, today) && !isTaskOnDate(task, tomorrow) && !overdue.includes(task))
-    .sort(bySchedule);
-  const unplannedOnly = active.filter((task) => !task.scheduledStart && !task.dueDate);
-  const completed = filtered
-    .filter((task) => task.status === "done")
-    .slice()
-    .sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""))
-    .slice(0, 14);
+  const control = viewControl("tasks");
+  const filteredTasks = controlledItems("tasks", state.tasks, "tasks", { today, tomorrow });
+  const { todayTasks, tomorrowTasks, scheduled, overdue, unplannedOnly, completed } = taskBoardBuckets(filteredTasks, today, tomorrow, "");
+  sortTaskBoardBuckets({ todayTasks, tomorrowTasks, scheduled, overdue, unplannedOnly, completed }, control, { today, tomorrow });
 
   return `
     <section class="view">
       ${renderViewHeader("할 일 배치", "확인과 날짜 배치", `${unplannedOnly.length}개 미계획 / ${scheduled.length + todayTasks.length + tomorrowTasks.length + overdue.length}개 배정`, `
-        <input class="input" style="width:220px" data-action-input="search" value="${esc(ui.search)}" placeholder="검색">
         <button class="button secondary" type="button" data-action="new-task">새 할 일</button>
       `)}
+      ${renderViewControls("tasks", { count: filteredTasks.length, total: state.tasks.length, placeholder: "할 일 검색" })}
       <div class="grid cols-3">
         ${renderTaskColumn("미계획", unplannedOnly, { scheduleHold: true, emptyText: "날짜를 정할 Task가 없습니다." })}
         ${renderTaskColumn("오늘", todayTasks, { scheduleHold: true, emptyText: "오늘 배치된 Task가 없습니다." })}
@@ -728,26 +901,27 @@ function renderTasks() {
       </div>
       <div class="panel" style="margin-top:46px">
         ${panelHeader("완료", "최근")}
-        <div class="stack">${completed.length ? completed.map(renderTaskCard).join("") : empty("완료한 업무가 없습니다.")}</div>
+        <div class="stack">${renderTaskCards(completed, {}, "완료한 업무가 없습니다.")}</div>
       </div>
     </section>
   `;
 }
 
 function renderProjects() {
-  const active = state.projects.filter((project) => ["active", "focus"].includes(project.status));
-  const planned = state.projects.filter((project) => ["planned", "unplanned"].includes(project.status));
-  const closed = state.projects.filter((project) => ["completed", "paused", "canceled"].includes(project.status));
+  const statsByProjectId = projectStatsIndex();
+  const projects = controlledItems("projects", state.projects, "projects", { statsByProjectId });
+  const projectBuckets = projectStatusBuckets(projects);
   return `
     <section class="view">
       ${renderViewHeader("Projects", "프로젝트", `${state.projects.length}개`, `
         <button class="button secondary" type="button" data-action="new-project">새 프로젝트</button>
       `)}
+      ${renderViewControls("projects", { count: projects.length, total: state.projects.length, placeholder: "프로젝트 검색" })}
       ${renderProjectCalendarPanel()}
       <div class="project-board">
-        ${renderProjectSection("진행중", active, "움직이는 프로젝트")}
-        ${renderProjectSection("계획", planned, "준비 중인 프로젝트")}
-        ${renderProjectSection("완료/중단", closed, "닫힌 프로젝트")}
+        ${renderProjectSection("진행중", projectBuckets.active, "움직이는 프로젝트", statsByProjectId)}
+        ${renderProjectSection("계획", projectBuckets.planned, "준비 중인 프로젝트", statsByProjectId)}
+        ${renderProjectSection("완료/중단", projectBuckets.closed, "닫힌 프로젝트", statsByProjectId)}
       </div>
     </section>
   `;
@@ -787,10 +961,11 @@ function renderProjectCalendarPanel() {
 function renderProjectCalendarWeek(anchor, events) {
   const today = dateKey(new Date());
   const start = startOfWeek(anchor);
-  const days = Array.from({ length: 7 }, (_, index) => addDays(start, index));
+  const days = dateRange(start, 7);
+  const eventsByDate = calendarEventsByDate(events, days);
   return `
     <div class="project-calendar-week">
-      ${days.map((day) => renderProjectCalendarDay(day, events, { today, large: true })).join("")}
+      ${renderProjectCalendarDays(days, eventsByDate, { today, large: true })}
     </div>
   `;
 }
@@ -799,30 +974,52 @@ function renderProjectCalendarMonth(anchor, events) {
   const today = dateKey(new Date());
   const currentMonth = monthKey(anchor);
   const days = monthGridDays(anchor);
+  const eventsByDate = calendarEventsByDate(events, days);
   return `
     <div class="project-calendar-weekdays">
-      ${Array.from({ length: 7 }, (_, index) => `<span>${weekday(addDays(startOfWeek(anchor), index))}</span>`).join("")}
+      ${renderWeekdayLabels(startOfWeek(anchor))}
     </div>
     <div class="project-calendar-month">
-      ${days.map((day) => renderProjectCalendarDay(day, events, { today, outside: monthKey(day) !== currentMonth })).join("")}
+      ${renderProjectCalendarDays(days, eventsByDate, { today, currentMonth })}
     </div>
   `;
 }
 
-function renderProjectCalendarDay(day, events, options = {}) {
+function renderProjectCalendarDays(days, eventsByDate, options = {}) {
+  let html = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    html += renderProjectCalendarDay(day, eventsByDate.get(key) || [], {
+      today: options.today,
+      large: options.large,
+      outside: options.currentMonth ? monthKey(day) !== options.currentMonth : false,
+    });
+  }
+  return html;
+}
+
+function renderProjectCalendarDay(day, dayEvents = [], options = {}) {
   const key = dateKey(day);
-  const dayEvents = events.filter((event) => calendarEventOccursOn(event, key)).sort(byCalendarEventTime);
-  const visibleEvents = dayEvents.slice(0, options.large ? 7 : 4);
-  const overflow = dayEvents.length - visibleEvents.length;
+  const maxEvents = options.large ? 7 : 4;
+  const overflow = Math.max(0, dayEvents.length - maxEvents);
   return `
     <div class="project-calendar-day ${options.large ? "is-large" : ""} ${options.outside ? "is-outside" : ""} ${key === options.today ? "is-today" : ""}">
       <div class="project-calendar-date"><span>${options.large ? weekday(day) : ""}</span><strong>${options.large ? compactDateLabel(key) : key.slice(8)}</strong></div>
       <div class="project-calendar-bars">
-        ${visibleEvents.map((event) => renderProjectCalendarPill(event, key)).join("")}
+        ${renderProjectCalendarPills(dayEvents, key, maxEvents)}
         ${overflow > 0 ? `<span class="project-calendar-more">+${overflow}</span>` : ""}
       </div>
     </div>
   `;
+}
+
+function renderProjectCalendarPills(events, date, limit) {
+  let html = "";
+  const count = Math.min(events.length, limit);
+  for (let index = 0; index < count; index += 1) {
+    html += renderProjectCalendarPill(events[index], date);
+  }
+  return html;
 }
 
 function renderProjectCalendarPill(event, date) {
@@ -832,82 +1029,104 @@ function renderProjectCalendarPill(event, date) {
 }
 
 function renderGoals() {
+  const statsByGoalId = goalStatsIndex();
+  const goals = controlledItems("goals", state.goals, "goals", { statsByGoalId });
   return `
     <section class="view">
       ${renderViewHeader("Goals", "목표", `${state.goals.length}개`, `
         <button class="button secondary" type="button" data-action="new-goal">새 목표</button>
       `)}
+      ${renderViewControls("goals", { count: goals.length, total: state.goals.length, placeholder: "목표 검색" })}
       <div class="grid cols-2">
-        ${state.goals.map(renderGoalCard).join("") || empty("목표가 없습니다.")}
+        ${renderGoalCards(goals, statsByGoalId)}
       </div>
     </section>
   `;
 }
 
+function renderGoalCards(goals, statsByGoalId) {
+  if (!goals.length) return empty("목표가 없습니다.");
+  let html = "";
+  for (const goal of goals) {
+    html += renderGoalCard(goal, statsByGoalId);
+  }
+  return html;
+}
+
 function renderBoxes() {
+  const statsByBoxId = boxStatsIndex();
+  const boxes = controlledItems("boxes", state.boxes, "boxes", { statsByBoxId });
+  const boxBuckets = boxVisibilityBuckets(boxes);
   return `
     <section class="view">
       ${renderViewHeader("Boxes", "삶의 영역", `${state.boxes.length}개`, `
         <button class="button secondary" type="button" data-action="new-box">새 박스</button>
       `)}
+      ${renderViewControls("boxes", { count: boxes.length, total: state.boxes.length, placeholder: "박스 검색" })}
       <div class="grid cols-3">
-        ${renderBoxColumn("고정", state.boxes.filter((box) => box.visibility === "pinned"))}
-        ${renderBoxColumn("일반", state.boxes.filter((box) => box.visibility === "normal"))}
-        ${renderBoxColumn("아카이브", state.boxes.filter((box) => box.visibility === "archived"))}
+        ${renderBoxColumn("고정", boxBuckets.pinned, statsByBoxId)}
+        ${renderBoxColumn("일반", boxBuckets.normal, statsByBoxId)}
+        ${renderBoxColumn("아카이브", boxBuckets.archived, statsByBoxId)}
       </div>
     </section>
   `;
 }
 
 function renderResources() {
-  const allResources = state.resources.filter((resource) => matchesSearch(resource.title));
-  const resources = allResources.filter((resource) => resource.importance !== "archived");
-  const archived = allResources.filter((resource) => resource.importance === "archived");
+  const control = viewControl("resources");
+  const resources = controlledItems("resources", state.resources, "resources");
+  const resourceBuckets = resourceDisplayBuckets(resources, "");
   return `
     <section class="view">
-      ${renderViewHeader("Resources", "자료와 노트", `${resources.length}개 활성 / ${archived.length}개 보관`, `
-        <input class="input" style="width:220px" data-action-input="search" value="${esc(ui.search)}" placeholder="검색">
+      ${renderViewHeader("Resources", "자료와 노트", `${resourceBuckets.active.length}개 활성 / ${resourceBuckets.archived.length}개 보관`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      <div class="grid cols-4">
-        ${renderResourceColumn("고정", resources.filter((resource) => resource.pinned))}
-        ${renderResourceColumn("나중에 보기", resources.filter((resource) => resource.readLater))}
-        ${renderResourceColumn("전체", resources)}
-        ${renderResourceColumn("아카이브", archived)}
-      </div>
+      ${renderViewControls("resources", { count: resources.length, total: state.resources.length, placeholder: "자료, 본문, 연결 검색" })}
+      ${renderResourceVault(resources, resourceBuckets, control)}
     </section>
   `;
 }
 
 function renderHabits() {
   ui.habitDayCount = habitVisibleDayCount();
+  const today = dateKey(new Date());
+  const habits = controlledItems("habits", state.habits, "habits", { today });
+  const habitBuckets = habitStatusBuckets(habits);
   return `
     <section class="view">
-      ${renderViewHeader("Habits", "루틴", `${state.habits.filter((habit) => habit.status === "active").length}개 활성`, `
+      ${renderViewHeader("Habits", "루틴", `${habitBuckets.active.length}개 활성`, `
         <button class="button secondary" type="button" data-action="new-habit">새 루틴</button>
       `)}
+      ${renderViewControls("habits", { count: habits.length, total: state.habits.length, placeholder: "루틴 검색" })}
       <div class="habit-list">
-        ${state.habits.map(renderHabitItem).join("") || empty("루틴이 없습니다.")}
+        ${renderHabitItems(habitBuckets.all, today, "루틴이 없습니다.")}
       </div>
     </section>
   `;
 }
 
 function renderJournal() {
+  const journals = controlledItems("journals", state.journals, "journal");
   return `
     <section class="view">
       ${renderViewHeader("Journal", "회고", `${state.journals.length}개`, `
         <button class="button secondary" type="button" data-action="new-journal">새 리뷰</button>
       `)}
+      ${renderViewControls("journal", { count: journals.length, total: state.journals.length, placeholder: "회고 검색" })}
       <div class="grid cols-2">
-        ${state.journals
-          .slice()
-          .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
-          .map(renderJournalCard)
-          .join("") || empty("회고가 없습니다.")}
+        ${renderJournalCards(journals)}
       </div>
     </section>
   `;
+}
+
+function renderJournalCards(journals = state.journals) {
+  if (!journals.length) return empty("회고가 없습니다.");
+  let html = "";
+  for (const journal of journals) {
+    html += renderJournalCard(journal);
+  }
+  return html;
 }
 
 function renderCalendar() {
@@ -915,18 +1134,21 @@ function renderCalendar() {
   const taskEvents = getTaskCalendarEvents();
   const projectEvents = getProjectCalendarEvents();
   const googleEvents = getGoogleCalendarEvents();
-  const combinedEvents = getCombinedCalendarEvents();
+  const visibleGoogleEvents = getVisibleGoogleCalendarEvents();
+  const combinedEvents = controlledItems("calendar", combinedCalendarSourceEvents(taskEvents, projectEvents, visibleGoogleEvents), "calendar");
+  const control = viewControl("calendar");
   const weekStart = startOfWeek(new Date());
   return `
     <section class="view">
       ${renderViewHeader("Calendar", "캘린더", `${combinedEvents.length} visible events`)}
+      ${renderViewControls("calendar", { count: combinedEvents.length, total: taskEvents.length + projectEvents.length + visibleGoogleEvents.length, placeholder: "일정 검색" })}
       <div class="calendar-layout">
         ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
         ${renderCalendarControls(taskEvents, projectEvents, googleEvents)}
 
         <div class="panel calendar-week-panel">
           ${panelHeader("This Week", `${formatLongDate(weekStart)}부터`)}
-          <div class="calendar-week-grid">${renderWeekDays()}</div>
+          <div class="calendar-week-grid">${renderWeekDays(combinedEvents)}</div>
         </div>
 
         <div class="panel calendar-combined-panel">
@@ -936,11 +1158,23 @@ function renderCalendar() {
             <span><i class="source-dot project"></i>Projects</span>
             <span><i class="source-dot google"></i>Google</span>
           </div>
-          ${renderCombinedCalendar()}
+          ${control.mode === "agenda" ? renderCalendarAgenda(combinedEvents) : renderCombinedCalendar(combinedEvents)}
         </div>
       </div>
     </section>
   `;
+}
+
+function combinedCalendarSourceEvents(taskEvents, projectEvents, visibleGoogleEvents) {
+  const events = [];
+  if (calendarSourceVisible("tasks")) {
+    for (const event of taskEvents) events.push(event);
+  }
+  if (calendarSourceVisible("projects")) {
+    for (const event of projectEvents) events.push(event);
+  }
+  for (const event of visibleGoogleEvents) events.push(event);
+  return events;
 }
 
 function renderGoogleConnectPanel() {
@@ -959,6 +1193,7 @@ function renderGoogleConnectPanel() {
 
 function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
   const googleCalendars = getGoogleCalendarOptions();
+  const googleEventCounts = eventCountsByCalendarId(googleEvents);
   return `
     <div class="panel calendar-control-panel">
       ${panelHeader("Visible Calendars", googleCalendarStatusLabel())}
@@ -973,12 +1208,21 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
         <div class="calendar-filter-group">
           <strong class="calendar-filter-title">Google Calendar</strong>
           <div class="calendar-toggle-list calendar-google-toggle-list">
-            ${googleCalendars.length ? googleCalendars.map((calendar) => renderGoogleCalendarToggle(calendar, googleEvents)).join("") : `<div class="calendar-empty-state">No imported calendars</div>`}
+            ${renderGoogleCalendarToggles(googleCalendars, googleEventCounts)}
           </div>
         </div>
       </div>
     </div>
   `;
+}
+
+function renderGoogleCalendarToggles(calendars, eventCounts) {
+  if (!calendars.length) return `<div class="calendar-empty-state">No imported calendars</div>`;
+  let html = "";
+  for (const calendar of calendars) {
+    html += renderGoogleCalendarToggle(calendar, eventCounts);
+  }
+  return html;
 }
 
 function renderCalendarMonthPanelHeader(selectedMonth, eventCount) {
@@ -1011,8 +1255,8 @@ function renderCalendarSourceToggle(source, label, count) {
   `;
 }
 
-function renderGoogleCalendarToggle(calendar, googleEvents) {
-  const count = googleEvents.filter((event) => event.calendarId === calendar.id).length;
+function renderGoogleCalendarToggle(calendar, googleEventCounts) {
+  const count = googleEventCounts.get(calendar.id) || 0;
   return `
     <label class="calendar-toggle calendar-google-toggle"${calendarColorStyle(calendar)}>
       <input type="checkbox" data-google-calendar-toggle="${esc(calendar.id)}" ${googleCalendarVisible(calendar.id) ? "checked" : ""}>
@@ -1025,41 +1269,42 @@ function renderGoogleCalendarToggle(calendar, googleEvents) {
   `;
 }
 
+function eventCountsByCalendarId(events) {
+  const counts = new Map();
+  for (const event of events) {
+    const calendarId = event.calendarId || "primary";
+    counts.set(calendarId, (counts.get(calendarId) || 0) + 1);
+  }
+  return counts;
+}
+
 function renderDatabase() {
+  const models = [];
+  for (const node of DB_SCHEMA) models.push(node);
+  const visibleModels = controlledItems("database", models, "database");
+  const control = viewControl("database");
   return `
     <section class="view">
-      ${renderViewHeader("DB", "로컬 데이터 모델", `v${state.version} · ${formatDateTime(state.updatedAt)}`, `
+      ${renderViewHeader("DB", "PostgreSQL 데이터 모델", `v${state.version} · ${formatDateTime(state.updatedAt)}`, `
         <button class="button secondary" type="button" data-action="export-json">JSON 내보내기</button>
-        <button class="button secondary" type="button" data-action="notion-final-sync">Notion 최종 동기화</button>
       `)}
-      <div class="model-grid">
-        ${DB_SCHEMA.map((node) => `
-          <article class="model-node">
-            <h3 class="card-title">${node.label}</h3>
-            <div class="card-meta">${badge(`${countOf(node.key)} rows`, "blue")}</div>
-            <ul class="model-fields">
-              ${node.fields.map((field) => `<li>${esc(field)}</li>`).join("")}
-            </ul>
-            <p class="resource-preview">${node.relations.map(esc).join(" · ")}</p>
-          </article>
-        `).join("")}
+      ${renderViewControls("database", { count: visibleModels.length, total: DB_SCHEMA.length, placeholder: "테이블/필드 검색" })}
+      <div class="${control.mode === "list" ? "model-list" : "model-grid"}">
+        ${renderDatabaseModelGrid(visibleModels)}
       </div>
       <div class="grid cols-2" style="margin-top:46px">
         <div class="panel">
-          ${panelHeader("로컬 저장소", "localStorage")}
+          ${panelHeader("PostgreSQL 저장소", databaseStatusLabel())}
           <div class="stack">
             ${renderMetric("Tasks", state.tasks.length, "할 일")}
             ${renderMetric("Resources", state.resources.length, "본문 blocks")}
             ${renderMetric("Blocks", totalBlocks(), "자료/회고 본문")}
+            <div class="resource-preview">${esc(databaseStatusDescription())}</div>
           </div>
         </div>
         <div class="panel">
-          ${panelHeader("설정", "PWA / 동기화")}
+          ${panelHeader("설정", "PWA / PostgreSQL")}
           <div class="stack">
-            <label class="field">
-              <span>Notion sync mode</span>
-              <input class="input" data-setting="notionSyncMode" value="${esc(state.settings.notionSyncMode)}">
-            </label>
             <label class="field">
               <span>Google Calendar ID</span>
               <input class="input" data-setting="googleCalendarId" value="${esc(state.settings.googleCalendarId)}">
@@ -1072,6 +1317,53 @@ function renderDatabase() {
   `;
 }
 
+function renderDatabaseModelGrid(nodes = DB_SCHEMA) {
+  let html = "";
+  for (const node of nodes) {
+    html += `
+      <article class="model-node">
+        <h3 class="card-title">${node.label}</h3>
+        <div class="card-meta">${badge(`${countOf(node.key)} rows`, "blue")}</div>
+        <ul class="model-fields">
+          ${renderDatabaseModelFields(node.fields)}
+        </ul>
+        <p class="resource-preview">${renderDatabaseModelRelations(node.relations)}</p>
+      </article>
+    `;
+  }
+  return html;
+}
+
+function renderDatabaseModelFields(fields) {
+  let html = "";
+  for (const field of fields) {
+    html += `<li>${esc(field)}</li>`;
+  }
+  return html;
+}
+
+function renderDatabaseModelRelations(relations) {
+  let html = "";
+  for (const relation of relations) {
+    html = html ? `${html} · ${esc(relation)}` : esc(relation);
+  }
+  return html;
+}
+
+function databaseStatusLabel() {
+  if (databaseBackendStatus.loading) return "확인 중";
+  if (databaseBackendStatus.saving) return "저장 중";
+  if (databaseBackendStatus.connected) return databaseBackendStatus.lastSyncedAt ? `마지막 ${formatDateTime(databaseBackendStatus.lastSyncedAt)}` : "연결됨";
+  if (!databaseBackendStatus.configured) return "DATABASE_URL 필요";
+  return "연결 실패";
+}
+
+function databaseStatusDescription() {
+  if (databaseBackendStatus.loading) return "PostgreSQL 연결 상태를 확인하고 있습니다.";
+  if (databaseBackendStatus.connected) return "앱 상태 전체가 PostgreSQL app_state JSONB 레코드에 저장됩니다. 기존 localStorage 데이터는 마이그레이션 후 제거됩니다.";
+  return databaseBackendStatus.error || "PostgreSQL 연결이 필요합니다. DB 연결 전 변경 사항은 영구 저장되지 않습니다.";
+}
+
 function renderViewHeader(eyebrow, title, copy, actions = "") {
   return `
     <header class="view-header">
@@ -1082,6 +1374,139 @@ function renderViewHeader(eyebrow, title, copy, actions = "") {
       <div class="toolbar">${actions}</div>
     </header>
   `;
+}
+
+function renderViewControls(view, meta = {}) {
+  const control = viewControl(view);
+  const filterOptions = VIEW_FILTER_OPTIONS[view] || VIEW_FILTER_OPTIONS.today;
+  const sortOptions = VIEW_SORT_OPTIONS[view] || VIEW_SORT_OPTIONS.today;
+  const modeOptions = VIEW_MODE_OPTIONS[view] || [];
+  const count = meta.count ?? 0;
+  const total = meta.total ?? count;
+  return `
+    <div class="view-controls" data-view-controls="${view}">
+      <label class="view-control-search">
+        <span>검색</span>
+        <input class="input" data-view-control-search="${view}" value="${esc(control.search || "")}" placeholder="${esc(meta.placeholder || "검색")}">
+      </label>
+      <label class="view-control-select">
+        <span>필터</span>
+        <select class="select" data-view-control-field="${view}" data-control-field="filter">
+          ${renderControlOptions(filterOptions, control.filter)}
+        </select>
+      </label>
+      <label class="view-control-select">
+        <span>정렬</span>
+        <select class="select" data-view-control-field="${view}" data-control-field="sort">
+          ${renderControlOptions(sortOptions, control.sort)}
+        </select>
+      </label>
+      ${modeOptions.length ? renderViewModeButtons(view, modeOptions, control.mode) : ""}
+      <span class="view-control-count">${esc(count)} / ${esc(total)}</span>
+      ${view === "resources" ? renderResourceControlExtras(control) : ""}
+    </div>
+  `;
+}
+
+function renderControlOptions(options, selectedValue) {
+  let html = "";
+  for (const [value, label] of options) {
+    html += `<option value="${esc(value)}" ${selectedValue === value ? "selected" : ""}>${esc(label)}</option>`;
+  }
+  return html;
+}
+
+function renderViewModeButtons(view, options, selectedValue) {
+  let html = "";
+  for (const [value, label] of options) {
+    html += `
+      <button class="view-mode-button ${selectedValue === value ? "is-active" : ""}" type="button" data-view-control-mode="${view}" data-control-mode="${esc(value)}" aria-pressed="${selectedValue === value ? "true" : "false"}">
+        ${esc(label)}
+      </button>
+    `;
+  }
+  return `<div class="view-mode-group" aria-label="보기 방식">${html}</div>`;
+}
+
+function renderResourceControlExtras(control) {
+  return `
+    <div class="resource-toggle-group" aria-label="자료 빠른 필터">
+      ${renderResourceToggleFilters(control)}
+    </div>
+    <div class="resource-type-strip" aria-label="자료 유형 필터">
+      ${renderResourceTypeFilters(control)}
+    </div>
+  `;
+}
+
+function renderResourceToggleFilters(control) {
+  let html = "";
+  const toggles = control.toggles || {};
+  for (const [key, label] of RESOURCE_TOGGLE_FILTERS) {
+    html += `
+      <label class="view-toggle-pill ${toggles[key] ? "is-active" : ""}">
+        <input type="checkbox" data-view-control-toggle="resources" data-control-toggle="${esc(key)}" ${toggles[key] ? "checked" : ""}>
+        <span>${esc(label)}</span>
+      </label>
+    `;
+  }
+  return html;
+}
+
+function renderResourceTypeFilters(control) {
+  let html = renderResourceTypeButton("all", "All", control.type === "all");
+  const seen = new Set(["all"]);
+  for (const resource of state.resources) {
+    const type = resource.type || "note";
+    if (seen.has(type)) continue;
+    seen.add(type);
+    html += renderResourceTypeButton(type, type, control.type === type);
+  }
+  return html;
+}
+
+function renderResourceTypeButton(value, label, active) {
+  return `
+    <button class="resource-type-chip ${active ? "is-active" : ""}" type="button" data-resource-type-filter="${esc(value)}" aria-pressed="${active ? "true" : "false"}">
+      ${esc(label)}
+    </button>
+  `;
+}
+
+function viewControl(view = ui.view) {
+  if (!state.settings.viewControls) state.settings.viewControls = defaultViewControls();
+  const current = state.settings.viewControls[view];
+  if (isPlainObject(current)) return current;
+  const next = defaultViewControl(view);
+  state.settings.viewControls[view] = next;
+  return next;
+}
+
+function updateViewControl(view, field, value, options = {}) {
+  if (!view || !field) return;
+  const control = viewControl(view);
+  if (field === "filter" && !optionValueAllowed(VIEW_FILTER_OPTIONS[view], value)) return;
+  if (field === "sort" && !optionValueAllowed(VIEW_SORT_OPTIONS[view], value)) return;
+  if (field === "mode" && !optionValueAllowed(VIEW_MODE_OPTIONS[view], value)) return;
+  control[field] = value;
+  saveState();
+  renderView({ soft: true });
+}
+
+function updateViewControlToggle(view, toggle, checked) {
+  if (!view || !toggle) return;
+  const control = viewControl(view);
+  control.toggles ||= {};
+  control.toggles[toggle] = Boolean(checked);
+  saveState();
+  renderView({ soft: true });
+}
+
+function updateResourceTypeFilter(type) {
+  const control = viewControl("resources");
+  control.type = type || "all";
+  saveState();
+  renderView({ soft: true });
 }
 
 function renderMetric(label, value, sub) {
@@ -1108,12 +1533,12 @@ function renderTaskColumn(title, tasks, options = {}) {
   return `
     <div class="panel">
       ${panelHeader(title, `${tasks.length}개`)}
-      <div class="stack">${tasks.length ? tasks.map((task) => renderTaskCard(task, false, options)).join("") : empty(options.emptyText || "항목이 없습니다.")}</div>
+      <div class="stack">${renderTaskCards(tasks, options, options.emptyText || "항목이 없습니다.")}</div>
     </div>
   `;
 }
 
-function renderProjectSection(title, projects, subtitle = "") {
+function renderProjectSection(title, projects, subtitle = "", statsByProjectId = null) {
   return `
     <section class="project-section">
       <div class="project-section-head">
@@ -1124,17 +1549,17 @@ function renderProjectSection(title, projects, subtitle = "") {
         <strong>${projects.length}</strong>
       </div>
       <div class="project-list">
-        ${projects.length ? projects.map(renderProjectItem).join("") : empty("프로젝트가 없습니다.")}
+        ${renderProjectItems(projects, statsByProjectId, "프로젝트가 없습니다.")}
       </div>
     </section>
   `;
 }
 
-function renderBoxColumn(title, boxes) {
+function renderBoxColumn(title, boxes, statsByBoxId = null) {
   return `
     <div class="panel">
       ${panelHeader(title, `${boxes.length}개`)}
-      <div class="stack">${boxes.length ? boxes.map(renderBoxCard).join("") : empty("박스가 없습니다.")}</div>
+      <div class="stack">${renderBoxCards(boxes, statsByBoxId, "박스가 없습니다.")}</div>
     </div>
   `;
 }
@@ -1143,9 +1568,571 @@ function renderResourceColumn(title, resources) {
   return `
     <div class="panel">
       ${panelHeader(title, `${resources.length}개`)}
-      <div class="stack">${resources.length ? resources.map(renderResourceCard).join("") : empty("자료가 없습니다.")}</div>
+      <div class="stack">${renderResourceCards(resources, "자료가 없습니다.")}</div>
     </div>
   `;
+}
+
+function renderResourceVault(resources, buckets, control) {
+  return `
+    <div class="resource-vault" data-resource-view="${esc(control.mode || "library")}">
+      <aside class="resource-vault-sidebar">
+        <div class="resource-vault-title">
+          <span>Vault</span>
+          <strong>${resources.length}</strong>
+        </div>
+        ${renderResourceVaultStats(resources, buckets)}
+        ${renderResourceVaultTypes(resources, control)}
+      </aside>
+      <div class="resource-vault-main">
+        ${control.mode === "map" ? renderResourceMap(resources) : control.mode === "list" ? renderResourceList(resources) : renderResourceLibrary(buckets)}
+      </div>
+    </div>
+  `;
+}
+
+function renderResourceVaultStats(resources, buckets) {
+  return `
+    <div class="resource-vault-stats">
+      ${renderResourceVaultStat("활성", buckets.active.length)}
+      ${renderResourceVaultStat("고정", buckets.pinned.length)}
+      ${renderResourceVaultStat("읽기", buckets.readLater.length)}
+      ${renderResourceVaultStat("보관", buckets.archived.length)}
+    </div>
+  `;
+}
+
+function renderResourceVaultStat(label, value) {
+  return `<span><small>${esc(label)}</small><strong>${esc(value)}</strong></span>`;
+}
+
+function renderResourceVaultTypes(resources, control) {
+  const counts = new Map();
+  for (const resource of resources) {
+    const type = resource.type || "note";
+    counts.set(type, (counts.get(type) || 0) + 1);
+  }
+  let html = `<button class="resource-type-row ${control.type === "all" ? "is-active" : ""}" type="button" data-resource-type-filter="all"><span>All</span><strong>${resources.length}</strong></button>`;
+  for (const [type, count] of counts) {
+    html += `<button class="resource-type-row ${control.type === type ? "is-active" : ""}" type="button" data-resource-type-filter="${esc(type)}"><span>${esc(type)}</span><strong>${count}</strong></button>`;
+  }
+  return `<div class="resource-type-list">${html}</div>`;
+}
+
+function renderResourceLibrary(buckets) {
+  return `
+    <div class="grid cols-4 resource-library-grid">
+      ${renderResourceColumn("고정", buckets.pinned)}
+      ${renderResourceColumn("나중에 보기", buckets.readLater)}
+      ${renderResourceColumn("전체", buckets.active)}
+      ${renderResourceColumn("아카이브", buckets.archived)}
+    </div>
+  `;
+}
+
+function renderResourceList(resources) {
+  if (!resources.length) return empty("자료가 없습니다.");
+  let html = "";
+  for (const resource of resources) {
+    html += `
+      <button class="resource-list-row" type="button" data-open-resource="${resource.id}">
+        <span class="resource-list-mark ${resource.importance === "important" ? "is-important" : ""}"></span>
+        <strong>${esc(resource.title)}</strong>
+        <small>${esc(resource.type || "resource")}</small>
+        <em>${esc(nameOf("projects", resource.projectId) || nameOf("goals", resource.goalId) || nameOf("boxes", resource.boxId) || "연결 없음")}</em>
+      </button>
+    `;
+  }
+  return `<div class="resource-list">${html}</div>`;
+}
+
+function renderResourceMap(resources) {
+  if (!resources.length) return empty("자료가 없습니다.");
+  const clusters = resourceMapClusters(resources);
+  return `
+    <div class="resource-map">
+      ${renderResourceMapCluster("중요", clusters.important)}
+      ${renderResourceMapCluster("프로젝트 연결", clusters.project)}
+      ${renderResourceMapCluster("읽기 대기", clusters.readLater)}
+      ${renderResourceMapCluster("기타", clusters.other)}
+    </div>
+  `;
+}
+
+function resourceMapClusters(resources) {
+  const clusters = { important: [], project: [], readLater: [], other: [] };
+  for (const resource of resources) {
+    if (resource.importance === "important") clusters.important.push(resource);
+    else if (resource.projectId || resource.goalId || resource.boxId) clusters.project.push(resource);
+    else if (resource.readLater) clusters.readLater.push(resource);
+    else clusters.other.push(resource);
+  }
+  return clusters;
+}
+
+function renderResourceMapCluster(title, resources) {
+  return `
+    <section class="resource-map-cluster">
+      <h2>${esc(title)} <span>${resources.length}</span></h2>
+      <div class="resource-map-nodes">
+        ${renderResourceMapNodes(resources)}
+      </div>
+    </section>
+  `;
+}
+
+function renderResourceMapNodes(resources) {
+  if (!resources.length) return `<span class="project-muted">비어 있음</span>`;
+  let html = "";
+  for (const resource of resources) {
+    html += `
+      <button class="resource-map-node" type="button" data-open-resource="${resource.id}">
+        <strong>${esc(resource.title)}</strong>
+        <small>${esc(resource.type || "resource")}</small>
+      </button>
+    `;
+  }
+  return html;
+}
+
+function renderTaskCards(tasks, options = {}, emptyText = "항목이 없습니다.") {
+  if (!tasks.length) return empty(emptyText);
+  let html = "";
+  for (const task of tasks) {
+    html += renderTaskCard(task, false, options);
+  }
+  return html;
+}
+
+function renderResourceCards(resources, emptyText = "자료가 없습니다.") {
+  if (!resources.length) return empty(emptyText);
+  let html = "";
+  for (const resource of resources) {
+    html += renderResourceCard(resource);
+  }
+  return html;
+}
+
+function renderCaptureCards(captures, emptyText = "항목이 없습니다.") {
+  if (!captures.length) return empty(emptyText);
+  let html = "";
+  for (const capture of captures) {
+    html += renderCaptureCard(capture);
+  }
+  return html;
+}
+
+function renderHabitCards(habits, today, emptyText = "루틴이 없습니다.") {
+  if (!habits.length) return empty(emptyText);
+  let html = "";
+  for (const habit of habits) {
+    html += renderHabitCard(habit, today, false, today);
+  }
+  return html;
+}
+
+function renderHabitItems(habits, today, emptyText = "루틴이 없습니다.") {
+  if (!habits.length) return empty(emptyText);
+  let html = "";
+  for (const habit of habits) {
+    html += renderHabitItem(habit, today);
+  }
+  return html;
+}
+
+function renderProjectItems(projects, statsByProjectId = null, emptyText = "프로젝트가 없습니다.") {
+  if (!projects.length) return empty(emptyText);
+  let html = "";
+  for (const project of projects) {
+    html += renderProjectItem(project, statsByProjectId);
+  }
+  return html;
+}
+
+function renderBoxCards(boxes, statsByBoxId = null, emptyText = "박스가 없습니다.") {
+  if (!boxes.length) return empty(emptyText);
+  let html = "";
+  for (const box of boxes) {
+    html += renderBoxCard(box, statsByBoxId);
+  }
+  return html;
+}
+
+function controlledItems(type, items, view, context = {}) {
+  const control = viewControl(view);
+  const query = (control.search || "").trim().toLowerCase();
+  const result = [];
+  for (const item of items) {
+    if (!matchesControlledSearch(type, item, query)) continue;
+    if (!matchesControlledFilter(type, item, control, context)) continue;
+    result.push(item);
+  }
+  sortControlledItems(type, result, control.sort, context);
+  return result;
+}
+
+function matchesControlledSearch(type, item, query) {
+  if (!query) return true;
+  return controlledSearchText(type, item).toLowerCase().includes(query);
+}
+
+function controlledSearchText(type, item) {
+  if (!item) return "";
+  if (type === "tasks") return `${item.title || ""} ${STATUSES.task[item.status] || item.status || ""} ${nameOf("projects", item.projectId)} ${nameOf("goals", item.goalId)} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  if (type === "captures") return `${item.title || ""} ${item.url || ""} ${item.status || ""} ${item.convertedTo || ""}`;
+  if (type === "projects") return `${item.name || ""} ${STATUSES.project[item.status] || item.status || ""} ${nameOf("goals", item.goalId)} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  if (type === "goals") return `${item.name || ""} ${STATUSES.goal[item.status] || item.status || ""} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  if (type === "boxes") return `${item.name || ""} ${item.visibility || ""} ${blockText(item)}`;
+  if (type === "resources") return `${item.title || ""} ${item.type || ""} ${item.importance || ""} ${nameOf("projects", item.projectId)} ${nameOf("goals", item.goalId)} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  if (type === "habits") return `${item.title || ""} ${item.target || ""} ${item.cadence || ""} ${item.status || ""} ${nameOf("projects", item.projectId)} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  if (type === "journals") return `${item.title || ""} ${item.date || ""} ${item.satisfaction || ""} ${blockText(item)}`;
+  if (type === "calendar") return `${item.title || ""} ${item.source || ""} ${item.calendarSummary || ""}`;
+  if (type === "database") return `${item.label || ""} ${item.key || ""} ${databaseModelRelationsText(item)}`;
+  return `${item.name || ""} ${item.title || ""}`;
+}
+
+function matchesControlledFilter(type, item, control, context = {}) {
+  const filter = control.filter || "all";
+  if (type === "tasks") return matchesTaskFilter(item, filter, context);
+  if (type === "captures") return filter === "all" || item.status === filter;
+  if (type === "projects") return filter === "all" || projectFilterKey(item) === filter || item.status === filter;
+  if (type === "goals") return filter === "all" || item.status === filter || (filter === "active" && (item.status === "active" || item.status === "focus"));
+  if (type === "boxes") return filter === "all" || item.visibility === filter || (filter === "normal" && !item.visibility);
+  if (type === "resources") return matchesResourceFilter(item, control);
+  if (type === "habits") return filter === "all" || item.status === filter || item.cadence === filter;
+  if (type === "journals") return matchesJournalFilter(item, filter);
+  if (type === "calendar") return filter === "all" || item.source === filter;
+  if (type === "database") return filter === "all" || databaseModelGroup(item) === filter;
+  return true;
+}
+
+function matchesTaskFilter(task, filter, context = {}) {
+  if (filter === "all") return true;
+  if (filter === "done") return task.status === "done";
+  if (filter === "overdue") return isOverdueOnDate(task, context.today || dateKey(new Date()));
+  if (filter === "today") return isTaskOnDate(task, context.today || dateKey(new Date()));
+  if (filter === "tomorrow") return isTaskOnDate(task, context.tomorrow || dateKey(addDays(new Date(), 1)));
+  if (filter === "scheduled") return Boolean(task.scheduledStart || task.dueDate) && task.status !== "done" && task.status !== "canceled";
+  if (filter === "unplanned") return !task.scheduledStart && !task.dueDate && task.status !== "done" && task.status !== "canceled";
+  if (filter === "active") return task.status !== "done" && task.status !== "canceled";
+  return task.status === filter;
+}
+
+function projectFilterKey(project) {
+  if (project.status === "active" || project.status === "focus") return "active";
+  if (project.status === "planned" || project.status === "unplanned") return "planned";
+  if (project.status === "completed" || project.status === "paused" || project.status === "canceled") return "closed";
+  return project.status || "all";
+}
+
+function matchesResourceFilter(resource, control) {
+  const filter = control.filter || "all";
+  const toggles = control.toggles || {};
+  if (control.type && control.type !== "all" && (resource.type || "note") !== control.type) return false;
+  if (toggles.pinned && !resource.pinned) return false;
+  if (toggles.readLater && !resource.readLater) return false;
+  if (toggles.important && resource.importance !== "important") return false;
+  if (toggles.linked && !(resource.projectId || resource.goalId || resource.boxId || resource.url)) return false;
+  if (filter === "all") return true;
+  if (filter === "active") return resource.importance !== "archived";
+  if (filter === "archived") return resource.importance === "archived";
+  if (filter === "important") return resource.importance === "important";
+  if (filter === "pinned") return Boolean(resource.pinned);
+  if (filter === "readLater") return Boolean(resource.readLater);
+  if (filter === "linked") return Boolean(resource.projectId || resource.goalId || resource.boxId || resource.url);
+  return true;
+}
+
+function matchesJournalFilter(journal, filter) {
+  if (filter === "all") return true;
+  if (filter === "high") return Number(journal.satisfaction || 0) >= 8;
+  if (filter === "low") return Number(journal.satisfaction || 0) > 0 && Number(journal.satisfaction || 0) <= 5;
+  if (filter === "dated") return Boolean(journal.date);
+  return true;
+}
+
+function sortControlledItems(type, items, sort, context = {}) {
+  if (sort === "title" || sort === "name") {
+    items.sort((a, b) => itemTitle(type, a).localeCompare(itemTitle(type, b)));
+    return;
+  }
+  if (type === "tasks") sortTasks(items, sort, context);
+  if (type === "captures") sortCaptures(items, sort);
+  if (type === "projects") sortProjects(items, sort, context.statsByProjectId);
+  if (type === "goals") sortGoals(items, sort, context.statsByGoalId);
+  if (type === "boxes") sortBoxes(items, sort, context.statsByBoxId);
+  if (type === "resources") sortResources(items, sort);
+  if (type === "habits") sortHabits(items, sort, context.today || dateKey(new Date()));
+  if (type === "journals") sortJournals(items, sort);
+  if (type === "calendar") sortCalendarItems(items, sort);
+  if (type === "database") sortDatabaseModels(items, sort);
+}
+
+function itemTitle(type, item) {
+  if (type === "projects" || type === "goals" || type === "boxes") return item.name || "";
+  if (type === "database") return item.label || item.key || "";
+  return item.title || "";
+}
+
+function sortTasks(tasks, sort, context = {}) {
+  if (sort === "status") tasks.sort((a, b) => (a.status || "").localeCompare(b.status || "") || bySchedule(a, b));
+  else if (sort === "project") tasks.sort((a, b) => nameOf("projects", a.projectId).localeCompare(nameOf("projects", b.projectId)) || bySchedule(a, b));
+  else tasks.sort(bySchedule);
+}
+
+function sortCaptures(captures, sort) {
+  if (sort === "status") captures.sort((a, b) => (a.status || "").localeCompare(b.status || "") || (b.processedAt || b.createdAt || "").localeCompare(a.processedAt || a.createdAt || ""));
+  else captures.sort((a, b) => (b.processedAt || b.createdAt || "").localeCompare(a.processedAt || a.createdAt || ""));
+}
+
+function sortProjects(projects, sort, statsByProjectId = projectStatsIndex()) {
+  if (sort === "end") projects.sort((a, b) => (a.endDate || "9999-12-31").localeCompare(b.endDate || "9999-12-31"));
+  else if (sort === "progress") projects.sort((a, b) => (statsByProjectId.get(b.id)?.progress || 0) - (statsByProjectId.get(a.id)?.progress || 0));
+  else projects.sort((a, b) => (a.status || "").localeCompare(b.status || "") || (a.endDate || "").localeCompare(b.endDate || ""));
+}
+
+function sortGoals(goals, sort, statsByGoalId = goalStatsIndex()) {
+  if (sort === "status") goals.sort((a, b) => (a.status || "").localeCompare(b.status || "") || itemTitle("goals", a).localeCompare(itemTitle("goals", b)));
+  else if (sort === "progress") goals.sort((a, b) => (statsByGoalId.get(b.id)?.progress || 0) - (statsByGoalId.get(a.id)?.progress || 0));
+  else goals.sort((a, b) => (a.targetDate || "9999-12-31").localeCompare(b.targetDate || "9999-12-31"));
+}
+
+function sortBoxes(boxes, sort, statsByBoxId = boxStatsIndex()) {
+  if (sort === "visibility") boxes.sort((a, b) => (a.visibility || "normal").localeCompare(b.visibility || "normal") || itemTitle("boxes", a).localeCompare(itemTitle("boxes", b)));
+  else if (sort === "progress") boxes.sort((a, b) => (statsByBoxId.get(b.id)?.progress || 0) - (statsByBoxId.get(a.id)?.progress || 0));
+  else boxes.sort((a, b) => (statsByBoxId.get(b.id)?.activeTasks || 0) - (statsByBoxId.get(a.id)?.activeTasks || 0));
+}
+
+function sortResources(resources, sort) {
+  if (sort === "importance") resources.sort((a, b) => resourceImportanceRank(b) - resourceImportanceRank(a) || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
+  else if (sort === "type") resources.sort((a, b) => (a.type || "").localeCompare(b.type || "") || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
+  else if (sort === "project") resources.sort((a, b) => nameOf("projects", a.projectId).localeCompare(nameOf("projects", b.projectId)) || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
+  else resources.sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "") || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
+}
+
+function resourceImportanceRank(resource) {
+  if (resource.importance === "important") return 3;
+  if (resource.pinned) return 2;
+  if (resource.readLater) return 1;
+  return 0;
+}
+
+function sortHabits(habits, sort, today = dateKey(new Date())) {
+  if (sort === "status") habits.sort((a, b) => (a.status || "").localeCompare(b.status || "") || itemTitle("habits", a).localeCompare(itemTitle("habits", b)));
+  else if (sort === "cadence") habits.sort((a, b) => (a.cadence || "").localeCompare(b.cadence || "") || itemTitle("habits", a).localeCompare(itemTitle("habits", b)));
+  else habits.sort((a, b) => habitDoneCount(b.id, habitPreviewDays(today)) - habitDoneCount(a.id, habitPreviewDays(today)));
+}
+
+function sortJournals(journals, sort) {
+  if (sort === "score") journals.sort((a, b) => Number(b.satisfaction || 0) - Number(a.satisfaction || 0) || (b.date || "").localeCompare(a.date || ""));
+  else journals.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+}
+
+function sortCalendarItems(events, sort) {
+  if (sort === "source") events.sort((a, b) => (a.source || "").localeCompare(b.source || "") || byCalendarEventTime(a, b));
+  else if (sort === "title") events.sort((a, b) => (a.title || "").localeCompare(b.title || "") || byCalendarEventTime(a, b));
+  else events.sort(byCalendarEventTime);
+}
+
+function sortDatabaseModels(nodes, sort) {
+  if (sort === "name") nodes.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  else if (sort === "relations") nodes.sort((a, b) => (b.relations?.length || 0) - (a.relations?.length || 0));
+  else nodes.sort((a, b) => countOf(b.key) - countOf(a.key));
+}
+
+function databaseModelGroup(node) {
+  if (node.key === "googleCalendars" || node.key === "googleEvents" || node.key === "links") return "integration";
+  if (node.key === "captures" || node.key === "tasks" || node.key === "habitInstances" || node.key === "journals") return "activity";
+  return "core";
+}
+
+function databaseModelRelationsText(node) {
+  let text = "";
+  for (const relation of node.relations || []) {
+    text = text ? `${text} ${relation}` : relation;
+  }
+  return text;
+}
+
+function captureStatusBuckets(captures = state.captures) {
+  const buckets = { inbox: [], processed: [] };
+  for (const capture of captures) {
+    if (capture.status === "processed") {
+      buckets.processed.push(capture);
+    } else if (capture.status === "inbox") {
+      buckets.inbox.push(capture);
+    }
+  }
+  buckets.processed.sort((a, b) => (b.processedAt || "").localeCompare(a.processedAt || ""));
+  buckets.processed = buckets.processed.slice(0, 8);
+  return buckets;
+}
+
+function todayDashboardCollections(resources = state.resources, habits = state.habits, projects = state.projects) {
+  const collections = { activeProjectCount: 0, pinnedResources: [], activeHabits: [] };
+  for (const project of projects) {
+    if (project.status === "active" || project.status === "focus") collections.activeProjectCount += 1;
+  }
+  for (const resource of resources) {
+    if (resource.pinned && resource.importance !== "archived") collections.pinnedResources.push(resource);
+  }
+  for (const habit of habits) {
+    if (habit.status === "active") collections.activeHabits.push(habit);
+  }
+  return collections;
+}
+
+function projectStatusBuckets(projects = state.projects) {
+  const buckets = { active: [], planned: [], closed: [] };
+  for (const project of projects) {
+    if (project.status === "active" || project.status === "focus") {
+      buckets.active.push(project);
+    } else if (project.status === "planned" || project.status === "unplanned") {
+      buckets.planned.push(project);
+    } else if (project.status === "completed" || project.status === "paused" || project.status === "canceled") {
+      buckets.closed.push(project);
+    }
+  }
+  return buckets;
+}
+
+function boxVisibilityBuckets(boxes = state.boxes, excludedId = "") {
+  const buckets = { pinned: [], normal: [], archived: [] };
+  for (const box of boxes) {
+    if (box.id === excludedId) continue;
+    if (box.visibility === "pinned") {
+      buckets.pinned.push(box);
+    } else if (box.visibility === "archived") {
+      buckets.archived.push(box);
+    } else {
+      buckets.normal.push(box);
+    }
+  }
+  return buckets;
+}
+
+function resourceDisplayBuckets(resources = state.resources, searchQuery = "", excludedId = "") {
+  const buckets = { active: [], archived: [], pinned: [], readLater: [], normal: [] };
+  for (const resource of resources) {
+    if (resource.id === excludedId || !matchesSearch(resource.title, searchQuery)) continue;
+    if (resource.importance === "archived") {
+      buckets.archived.push(resource);
+      continue;
+    }
+    buckets.active.push(resource);
+    if (resource.pinned) buckets.pinned.push(resource);
+    if (resource.readLater) buckets.readLater.push(resource);
+    if (!resource.pinned && !resource.readLater) buckets.normal.push(resource);
+  }
+  return buckets;
+}
+
+function habitStatusBuckets(habits = state.habits) {
+  const buckets = { all: [], active: [] };
+  for (const habit of habits) {
+    buckets.all.push(habit);
+    if (habit.status === "active") buckets.active.push(habit);
+  }
+  return buckets;
+}
+
+function captureRelationCandidates({ boxId = "", goalId = "", projectId = "", effectiveBoxId = "" } = {}) {
+  const index = relationIndex();
+  return {
+    goals: effectiveBoxId ? index.goalsByBoxId.get(effectiveBoxId) || [] : state.goals,
+    projects: effectiveBoxId ? index.projectsByBoxId.get(effectiveBoxId) || [] : state.projects,
+    resources: projectId
+      ? index.resourcesByProjectId.get(projectId) || []
+      : goalId
+        ? index.resourcesByGoalId.get(goalId) || []
+        : boxId
+          ? index.resourcesByBoxId.get(boxId) || []
+          : state.resources,
+  };
+}
+
+function relationIndex() {
+  const cached = relationIndexCache;
+  if (
+    cached?.goals === state.goals &&
+    cached?.projects === state.projects &&
+    cached?.tasks === state.tasks &&
+    cached?.resources === state.resources &&
+    cached?.habits === state.habits &&
+    cached.goalCount === state.goals.length &&
+    cached.projectCount === state.projects.length &&
+    cached.taskCount === state.tasks.length &&
+    cached.resourceCount === state.resources.length &&
+    cached.habitCount === state.habits.length
+  ) {
+    return cached;
+  }
+  const goalsByBoxId = new Map();
+  const goalsById = new Map();
+  for (const goal of state.goals) {
+    if (goal.id) goalsById.set(goal.id, goal);
+    addGroupedItem(goalsByBoxId, goal.boxId, goal);
+  }
+  const projectsByGoalId = new Map();
+  const projectsByBoxId = new Map();
+  for (const project of state.projects) {
+    addGroupedItem(projectsByGoalId, project.goalId, project);
+    addGroupedItem(projectsByBoxId, project.boxId, project);
+    const inheritedBoxId = goalsById.get(project.goalId)?.boxId;
+    if (inheritedBoxId && inheritedBoxId !== project.boxId) addGroupedItem(projectsByBoxId, inheritedBoxId, project);
+  }
+  const tasksByProjectId = new Map();
+  const tasksByGoalId = new Map();
+  const tasksByBoxId = new Map();
+  for (const task of state.tasks) {
+    addGroupedItem(tasksByProjectId, task.projectId, task);
+    addGroupedItem(tasksByGoalId, task.goalId, task);
+    addGroupedItem(tasksByBoxId, task.boxId, task);
+  }
+  const resourcesByProjectId = new Map();
+  const resourcesByGoalId = new Map();
+  const resourcesByBoxId = new Map();
+  for (const resource of state.resources) {
+    addGroupedItem(resourcesByProjectId, resource.projectId, resource);
+    addGroupedItem(resourcesByGoalId, resource.goalId, resource);
+    addGroupedItem(resourcesByBoxId, resource.boxId, resource);
+  }
+  const habitsByProjectId = new Map();
+  const habitsByBoxId = new Map();
+  for (const habit of state.habits) {
+    addGroupedItem(habitsByProjectId, habit.projectId, habit);
+    addGroupedItem(habitsByBoxId, habit.boxId, habit);
+  }
+  relationIndexCache = {
+    goals: state.goals,
+    projects: state.projects,
+    tasks: state.tasks,
+    resources: state.resources,
+    habits: state.habits,
+    goalCount: state.goals.length,
+    projectCount: state.projects.length,
+    taskCount: state.tasks.length,
+    resourceCount: state.resources.length,
+    habitCount: state.habits.length,
+    goalsByBoxId,
+    projectsByBoxId,
+    projectsByGoalId,
+    tasksByProjectId,
+    tasksByGoalId,
+    tasksByBoxId,
+    resourcesByProjectId,
+    resourcesByGoalId,
+    resourcesByBoxId,
+    habitsByProjectId,
+    habitsByBoxId,
+  };
+  return relationIndexCache;
+}
+
+function addGroupedItem(grouped, key, item) {
+  if (!key) return;
+  if (!grouped.has(key)) grouped.set(key, []);
+  grouped.get(key).push(item);
 }
 
 function renderTaskCard(task, draggable = false, options = {}) {
@@ -1198,7 +2185,7 @@ function renderTaskCard(task, draggable = false, options = {}) {
 }
 
 function renderTaskInlineDetail(task) {
-  const resource = task.resourceId ? state.resources.find((entry) => entry.id === task.resourceId) : null;
+  const resource = task.resourceId ? itemById("resources", task.resourceId) : null;
   const propsOpen = Boolean(ui.todayTaskPropsOpen?.[task.id]);
   return `
     <div class="task-inline-grid">
@@ -1244,53 +2231,47 @@ function renderTodayTaskProperties(task, propsOpen) {
 }
 
 function renderTaskPropertySummaryList(task) {
-  const properties = [
-    ["title", "제목", task.title || "제목 없음"],
-    ["dueDate", "날짜", taskDateDisplay(task.dueDate)],
-    ["boxId", "박스", task.boxId ? nameOf("boxes", task.boxId) : "미지정"],
-    ["goalId", "목표", task.goalId ? nameOf("goals", task.goalId) : "없음"],
-    ["projectId", "프로젝트", task.projectId ? nameOf("projects", task.projectId) : "없음"],
-  ];
+  let rows = "";
+  for (const [field, label] of TASK_PROPERTY_SUMMARY_FIELDS) {
+    rows += `
+      <button class="task-property-row" type="button" data-task-property-edit="${task.id}" data-task-property-field="${field}">
+        <span>${esc(label)}</span>
+        <strong>${esc(taskPropertySummaryValue(task, field))}</strong>
+      </button>
+    `;
+  }
   return `
     <div class="task-property-list">
-      ${properties.map(([field, label, value]) => `
-        <button class="task-property-row" type="button" data-task-property-edit="${task.id}" data-task-property-field="${field}">
-          <span>${esc(label)}</span>
-          <strong>${esc(value)}</strong>
-        </button>
-      `).join("")}
+      ${rows}
     </div>
   `;
 }
 
+function taskPropertySummaryValue(task, field) {
+  if (field === "title") return task.title || "제목 없음";
+  if (field === "dueDate") return taskDateDisplay(task.dueDate);
+  if (field === "boxId") return task.boxId ? nameOf("boxes", task.boxId) : "미지정";
+  if (field === "goalId") return task.goalId ? nameOf("goals", task.goalId) : "없음";
+  if (field === "projectId") return task.projectId ? nameOf("projects", task.projectId) : "없음";
+  return "";
+}
+
 function renderTaskPropertyEditor(task, field) {
-  const labels = {
-    title: "제목",
-    dueDate: "날짜",
-    boxId: "박스",
-    goalId: "목표",
-    projectId: "프로젝트",
-  };
-  const hints = {
-    title: "표시 이름",
-    dueDate: "실행 날짜",
-    boxId: "관리 영역",
-    goalId: "목표 연결",
-    projectId: "실행 맥락",
-  };
+  const label = TASK_PROPERTY_LABELS[field] || "속성";
+  const hint = TASK_PROPERTY_HINTS[field] || "";
   return `
     <div class="task-property-editor">
       <div class="task-property-editor-head">
         <button type="button" data-task-property-back="${task.id}" aria-label="상세 정보로 돌아가기">‹</button>
-        <strong>${esc(labels[field] || "속성")}</strong>
+        <strong>${esc(label)}</strong>
       </div>
       ${
         field === "title"
           ? renderTaskTitleEditor(task)
           : `<div class="task-property-flow-row">
               <div class="task-property-flow-label">
-                <span>${esc(labels[field] || "속성")}</span>
-                <small>${esc(hints[field] || "")}</small>
+                <span>${esc(label)}</span>
+                <small>${esc(hint)}</small>
               </div>
               ${renderTaskPropertyChoices(task, field)}
             </div>`
@@ -1309,24 +2290,32 @@ function renderTaskTitleEditor(task) {
 }
 
 function renderTaskPropertyChoices(task, field) {
-  if (field === "dueDate") {
-    return `
-      <div class="task-date-choice-grid">
-        ${taskDateChoices().map((choice) => renderTaskPropertyChoice(task, field, choice.value, choice.label, choice.meta)).join("")}
-      </div>
-    `;
-  }
-  const collections = {
-    boxId: { empty: "미지정", emptyMeta: "관리 영역 없음", items: state.boxes, nameField: "name" },
-    goalId: { empty: "없음", emptyMeta: "목표 없이 진행", items: state.goals, nameField: "name" },
-    projectId: { empty: "없음", emptyMeta: "독립 실행", items: state.projects, nameField: "name" },
-  };
-  const config = collections[field];
+  if (field === "dueDate") return renderTaskDatePropertyChoices(task, field);
+  const config = TASK_PROPERTY_COLLECTIONS[field];
   if (!config) return "";
+  const items = state[config.collectionKey] || [];
+  let choices = renderTaskPropertyChoice(task, field, "", config.empty, config.emptyMeta);
+  for (const item of items) {
+    choices += renderTaskPropertyChoice(task, field, item.id, item[config.nameField], taskRelationChoiceMeta(field, item));
+  }
   return `
     <div class="task-property-choice-grid">
-      ${renderTaskPropertyChoice(task, field, "", config.empty, config.emptyMeta)}
-      ${config.items.map((item) => renderTaskPropertyChoice(task, field, item.id, item[config.nameField], taskRelationChoiceMeta(field, item))).join("")}
+      ${choices}
+    </div>
+  `;
+}
+
+function renderTaskDatePropertyChoices(task, field) {
+  const base = new Date();
+  let choices = "";
+  for (const [offset, label] of TASK_DATE_CHOICE_DEFS) {
+    const value = dateKey(addDays(base, offset));
+    choices += renderTaskPropertyChoice(task, field, value, label, taskDateDisplay(value));
+  }
+  choices += renderTaskPropertyChoice(task, field, "", "날짜 없음", "배치하지 않음");
+  return `
+    <div class="task-date-choice-grid">
+      ${choices}
     </div>
   `;
 }
@@ -1341,20 +2330,6 @@ function renderTaskPropertyChoice(task, field, value, label, meta = "") {
   `;
 }
 
-function taskDateChoices() {
-  const today = dateKey(new Date());
-  const tomorrow = dateKey(addDays(new Date(), 1));
-  const scheduled = dateKey(addDays(new Date(), 2));
-  const nextWeek = dateKey(addDays(new Date(), 7));
-  return [
-    { value: today, label: "오늘", meta: taskDateDisplay(today) },
-    { value: tomorrow, label: "내일", meta: taskDateDisplay(tomorrow) },
-    { value: scheduled, label: "예정", meta: taskDateDisplay(scheduled) },
-    { value: nextWeek, label: "다음 주", meta: taskDateDisplay(nextWeek) },
-    { value: "", label: "날짜 없음", meta: "배치하지 않음" },
-  ];
-}
-
 function taskRelationChoiceMeta(field, item) {
   if (field === "boxId") return item.visibility === "pinned" ? "고정" : "";
   if (field === "goalId") return STATUSES.goal[item.status] || item.status || "";
@@ -1362,8 +2337,8 @@ function taskRelationChoiceMeta(field, item) {
   return "";
 }
 
-function renderProjectItem(project) {
-  const stats = projectStats(project);
+function renderProjectItem(project, statsByProjectId = null) {
+  const stats = statsByProjectId?.get(project.id) || projectStats(project);
   const expanded = ui.expandedProjectId === project.id;
   const statusColor = project.status === "focus" ? "blue" : ["completed"].includes(project.status) ? "teal" : ["paused", "canceled"].includes(project.status) ? "rose" : "violet";
   return `
@@ -1412,9 +2387,8 @@ function renderProjectItem(project) {
 function renderProjectDetail(project, stats) {
   const boxName = project.boxId ? nameOf("boxes", project.boxId) : "";
   const goalName = project.goalId ? nameOf("goals", project.goalId) : "";
-  const resources = state.resources.filter((resource) => resource.projectId === project.id);
-  const remainingTasks = stats.tasks.filter((task) => task.status !== "done" && task.status !== "canceled");
-  const doneTasks = stats.tasks.filter((task) => task.status === "done");
+  const resources = stats.resources || [];
+  const { remainingTasks, doneTasks } = projectDetailTaskGroups(stats.tasks);
   return `
     ${ui.editingProjectId === project.id ? renderInlineEditPanel("projects", project, "프로젝트 수정") : ""}
     <div class="project-detail-grid">
@@ -1430,7 +2404,7 @@ function renderProjectDetail(project, stats) {
       <div class="project-resource-panel">
         <strong>관련 자료</strong>
         <div class="project-resource-list">
-          ${resources.length ? resources.map(renderProjectResource).join("") : `<span class="project-muted">연결된 자료 없음</span>`}
+          ${renderProjectResources(resources)}
         </div>
       </div>
     </div>
@@ -1439,6 +2413,18 @@ function renderProjectDetail(project, stats) {
       ${renderProjectTaskGroup("완료된 Task", doneTasks, "done")}
     </div>
   `;
+}
+
+function projectDetailTaskGroups(tasks = []) {
+  const groups = { remainingTasks: [], doneTasks: [] };
+  for (const task of tasks) {
+    if (task.status === "done") {
+      groups.doneTasks.push(task);
+      continue;
+    }
+    if (task.status !== "canceled") groups.remainingTasks.push(task);
+  }
+  return groups;
 }
 
 function renderProjectRelation(label, value) {
@@ -1486,10 +2472,28 @@ function renderProjectTaskGroup(title, tasks, tone) {
         <span>${tasks.length}</span>
       </div>
       <div class="project-task-list">
-        ${tasks.length ? tasks.map(renderProjectTaskLine).join("") : `<span class="project-muted">해당 Task 없음</span>`}
+        ${renderProjectTaskLines(tasks)}
       </div>
     </div>
   `;
+}
+
+function renderProjectResources(resources) {
+  if (!resources.length) return `<span class="project-muted">연결된 자료 없음</span>`;
+  let html = "";
+  for (const resource of resources) {
+    html += renderProjectResource(resource);
+  }
+  return html;
+}
+
+function renderProjectTaskLines(tasks) {
+  if (!tasks.length) return `<span class="project-muted">해당 Task 없음</span>`;
+  let html = "";
+  for (const task of tasks) {
+    html += renderProjectTaskLine(task);
+  }
+  return html;
 }
 
 function renderProjectTaskLine(task) {
@@ -1505,8 +2509,8 @@ function renderProjectTaskLine(task) {
   `;
 }
 
-function renderGoalCard(goal) {
-  const stats = goalStats(goal);
+function renderGoalCard(goal, statsByGoalId = null) {
+  const stats = statsByGoalId?.get(goal.id) || goalStats(goal);
   return `
     <article class="card" data-select-type="goals" data-select-id="${goal.id}">
       <h3 class="card-title">${esc(goal.name)}</h3>
@@ -1527,8 +2531,8 @@ function renderGoalCard(goal) {
   `;
 }
 
-function renderBoxCard(box) {
-  const stats = boxStats(box);
+function renderBoxCard(box, statsByBoxId = null) {
+  const stats = statsByBoxId?.get(box.id) || boxStats(box);
   return `
     <article class="card" data-select-type="boxes" data-select-id="${box.id}" data-delete-drag-type="boxes" data-delete-drag-id="${box.id}">
       <h3 class="card-title">${esc(box.name)}</h3>
@@ -1577,10 +2581,9 @@ function renderResourceCard(resource) {
   `;
 }
 
-function renderHabitItem(habit) {
-  const today = dateKey(new Date());
+function renderHabitItem(habit, today = dateKey(new Date())) {
   const days = habitPreviewDays(today);
-  const completed = days.filter((date) => habitDone(habit.id, date)).length;
+  const completed = habitDoneCount(habit.id, days);
   const expanded = ui.expandedHabitId === habit.id;
   const statusLabel = { active: "활성", paused: "중단", archived: "보관" }[habit.status] || habit.status;
   const statusColor = habit.status === "active" ? "teal" : habit.status === "paused" ? "amber" : "rose";
@@ -1602,7 +2605,7 @@ function renderHabitItem(habit) {
         <div class="habit-preview" aria-label="${esc(habit.title)} ${esc(habitRangeLabel(days))} 체크">
           <div class="habit-range-caption">${esc(habitRangeLabel(days))}</div>
           <div class="habit-days habit-days-inline" style="--habit-day-count:${days.length}" role="group">
-            ${days.map((date) => renderHabitDayButton(habit, date)).join("")}
+            ${renderHabitDayButtons(habit, days, today)}
           </div>
         </div>
         <div class="habit-stat">
@@ -1622,16 +2625,16 @@ function renderHabitItem(habit) {
       <div class="habit-detail-shell" aria-hidden="${expanded ? "false" : "true"}">
         <div class="habit-detail">
           ${ui.editingHabitId === habit.id ? renderInlineEditPanel("habits", habit, "루틴 수정") : ""}
-          ${renderHabitCalendar(habit, today)}
+          ${renderHabitCalendar(habit, today, today)}
         </div>
       </div>
     </article>
   `;
 }
 
-function renderHabitDayButton(habit, date) {
+function renderHabitDayButton(habit, date, today = dateKey(new Date())) {
   return `
-    <button class="habit-day ${habitDone(habit.id, date) ? "is-done" : ""} ${date === dateKey(new Date()) ? "is-today" : ""}" type="button" data-toggle-habit="${habit.id}" data-habit-date="${date}" aria-label="${date}">
+    <button class="habit-day ${habitDone(habit.id, date) ? "is-done" : ""} ${date === today ? "is-today" : ""}" type="button" data-toggle-habit="${habit.id}" data-habit-date="${date}" aria-label="${date}">
       <span class="habit-day-fill" aria-hidden="true"></span>
       <span>${weekday(new Date(date))}</span>
       <strong>${date.slice(8)}</strong>
@@ -1639,7 +2642,7 @@ function renderHabitDayButton(habit, date) {
   `;
 }
 
-function renderHabitCalendar(habit, currentDate) {
+function renderHabitCalendar(habit, currentDate, today = dateKey(new Date())) {
   const monthDate = new Date(currentDate);
   const currentMonth = monthKey(monthDate);
   const days = habitCalendarMonthDays(monthDate);
@@ -1654,43 +2657,25 @@ function renderHabitCalendar(habit, currentDate) {
         <span class="badge ${stats.completed >= Math.ceil(stats.total * 0.7) ? "teal" : "amber"}" data-habit-month-progress="${habit.id}" data-habit-month="${currentMonth}">${stats.completed}/${stats.total}</span>
       </div>
       <div class="habit-calendar-weekdays">
-        ${Array.from({ length: 7 }, (_, index) => {
-          const day = addDays(startOfSundayWeek(monthDate), index);
-          return `<span class="${weekendClass(day)}">${weekday(day)}</span>`;
-        }).join("")}
+        ${renderWeekdayLabels(startOfSundayWeek(monthDate), true)}
       </div>
       <div class="habit-calendar-grid">
-        ${days.map((day) => {
-          const key = dateKey(day);
-          const done = habitDone(habit.id, key);
-          return `
-            <button class="habit-calendar-day ${weekendClass(day)} ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === dateKey(new Date()) ? "is-today" : ""} ${done ? "is-done" : ""}" type="button" data-toggle-habit="${habit.id}" data-habit-date="${key}" aria-label="${key}">
-              <span class="habit-day-fill" aria-hidden="true"></span>
-              <span class="habit-calendar-date">${key.slice(8)}</span>
-            </button>
-          `;
-        }).join("")}
+        ${renderHabitCalendarDays(habit, days, currentMonth, today)}
       </div>
     </div>
   `;
 }
 
-function renderHabitCard(habit, currentDate, expanded = false) {
+function renderHabitCard(habit, currentDate, expanded = false, today = dateKey(new Date())) {
   const start = startOfWeek(new Date(currentDate));
-  const days = Array.from({ length: 7 }, (_, index) => dateKey(addDays(start, index)));
-  const completed = days.filter((date) => habitDone(habit.id, date)).length;
+  const days = dateKeyRange(start, 7);
+  const completed = habitDoneCount(habit.id, days);
   return `
     <article class="card" data-select-type="habits" data-select-id="${habit.id}" data-habit-card="${habit.id}">
       <h3 class="card-title">${esc(habit.title)}</h3>
       <p class="resource-preview">${esc(habit.target || "")}</p>
       <div class="habit-days" role="group" aria-label="${esc(habit.title)} 주간 체크">
-        ${days.map((date) => `
-          <button class="habit-day ${habitDone(habit.id, date) ? "is-done" : ""} ${date === dateKey(new Date()) ? "is-today" : ""}" type="button" data-toggle-habit="${habit.id}" data-habit-date="${date}" aria-label="${date}">
-            <span class="habit-day-fill" aria-hidden="true"></span>
-            <span>${weekday(new Date(date))}</span>
-            <strong>${date.slice(8)}</strong>
-          </button>
-        `).join("")}
+        ${renderHabitDayButtons(habit, days, today)}
       </div>
       <div class="card-meta">
         <span class="badge ${completed >= 5 ? "teal" : "amber"}" data-habit-progress="${habit.id}">${completed}/7</span>
@@ -1699,6 +2684,29 @@ function renderHabitCard(habit, currentDate, expanded = false) {
       </div>
     </article>
   `;
+}
+
+function renderHabitDayButtons(habit, days, today) {
+  let html = "";
+  for (const date of days) {
+    html += renderHabitDayButton(habit, date, today);
+  }
+  return html;
+}
+
+function renderHabitCalendarDays(habit, days, currentMonth, today) {
+  let html = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    const done = habitDone(habit.id, key);
+    html += `
+      <button class="habit-calendar-day ${weekendClass(day)} ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === today ? "is-today" : ""} ${done ? "is-done" : ""}" type="button" data-toggle-habit="${habit.id}" data-habit-date="${key}" aria-label="${key}">
+        <span class="habit-day-fill" aria-hidden="true"></span>
+        <span class="habit-calendar-date">${key.slice(8)}</span>
+      </button>
+    `;
+  }
+  return html;
 }
 
 function renderJournalCard(journal) {
@@ -1735,30 +2743,31 @@ function renderCaptureCard(capture) {
 }
 
 function renderCaptureConvertActions(capture, draft) {
-  const options = [
-    ["tasks", "Task"],
-    ["projects", "Project"],
-    ["resources", "Resource"],
-    ["goals", "Goal"],
-    ["boxes", "Box"],
-  ];
+  let options = "";
+  for (const [type, label] of CAPTURE_CONVERT_TYPES) {
+    options += `
+      <button class="button ghost ${draft?.type === type ? "is-active" : ""}" type="button" data-convert="${type}" data-capture-id="${capture.id}" aria-pressed="${draft?.type === type ? "true" : "false"}">${label}</button>
+    `;
+  }
   return `
     <div class="toolbar capture-type-toolbar" aria-label="분류 유형">
-      ${options.map(([type, label]) => `
-        <button class="button ghost ${draft?.type === type ? "is-active" : ""}" type="button" data-convert="${type}" data-capture-id="${capture.id}" aria-pressed="${draft?.type === type ? "true" : "false"}">${label}</button>
-      `).join("")}
+      ${options}
     </div>
   `;
 }
 
 function renderTaskCaptureFlow(capture, draft) {
   const steps = getTaskCaptureSteps(draft);
-  const visibleSteps = steps.slice(0, Math.min(draft.stepIndex + 1, steps.length));
+  const visibleCount = Math.min(draft.stepIndex + 1, steps.length);
+  let rows = "";
+  for (let index = 0; index < visibleCount; index += 1) {
+    rows += renderTaskCaptureStep(capture.id, draft, steps[index], index);
+  }
   const readyToSave = draft.stepIndex >= steps.length;
   const targetLabel = captureTargetLabel(draft.type);
   return `
     <div class="capture-flow" data-task-flow="${capture.id}" aria-label="${esc(targetLabel)} 속성 선택">
-      ${visibleSteps.map((step, index) => renderTaskCaptureStep(capture.id, draft, step, index)).join("")}
+      ${rows}
       ${
         readyToSave
           ? `<div class="capture-flow-save" data-flow-index="${steps.length}" style="--flow-index:${steps.length}">
@@ -1781,6 +2790,7 @@ function renderTaskCaptureStep(captureId, draft, step, index) {
   const selectedValue = draft.values[step.key] || "";
   const active = index === draft.stepIndex;
   const selectedOption = taskStepOption(step, selectedValue);
+  const options = active ? renderTaskCaptureStepOptions(captureId, step, selectedValue) : "";
   if (!active) {
     return `
       <div class="capture-flow-row is-complete" data-flow-index="${index}" style="--flow-index:${index}">
@@ -1802,15 +2812,23 @@ function renderTaskCaptureStep(captureId, draft, step, index) {
         <small>${esc(step.hint)}</small>
       </div>
       <div class="capture-flow-options" role="group" aria-label="${esc(step.label)} 선택">
-        ${step.options.map((option) => `
-          <button class="capture-flow-option ${option.value === selectedValue ? "is-selected" : ""}" type="button" data-task-flow-choice="${captureId}" data-flow-step="${step.key}" data-flow-value="${esc(option.value)}">
-            <span>${esc(option.label)}</span>
-            ${option.meta ? `<small>${esc(option.meta)}</small>` : ""}
-          </button>
-        `).join("")}
+        ${options}
       </div>
     </div>
   `;
+}
+
+function renderTaskCaptureStepOptions(captureId, step, selectedValue) {
+  let options = "";
+  for (const option of step.options) {
+    options += `
+      <button class="capture-flow-option ${option.value === selectedValue ? "is-selected" : ""}" type="button" data-task-flow-choice="${captureId}" data-flow-step="${step.key}" data-flow-value="${esc(option.value)}">
+        <span>${esc(option.label)}</span>
+        ${option.meta ? `<small>${esc(option.meta)}</small>` : ""}
+      </button>
+    `;
+  }
+  return options;
 }
 
 function getCaptureDraft(captureId) {
@@ -1823,55 +2841,40 @@ function getTaskCaptureSteps(draft) {
   const boxId = values.boxId || "";
   const goalId = values.goalId || "";
   const projectId = values.projectId || "";
-  const selectedGoal = state.goals.find((goal) => goal.id === goalId);
-  const selectedProject = state.projects.find((project) => project.id === projectId);
+  const selectedGoal = itemById("goals", goalId);
+  const selectedProject = itemById("projects", projectId);
   const effectiveBoxId = boxId || selectedGoal?.boxId || selectedProject?.boxId || "";
-
-  const goals = effectiveBoxId ? state.goals.filter((goal) => goal.boxId === effectiveBoxId) : state.goals;
-  const projects = effectiveBoxId ? state.projects.filter((project) => projectBelongsToBox(project, effectiveBoxId)) : state.projects;
-  const resources = projectId
-    ? state.resources.filter((resource) => resource.projectId === projectId)
-    : goalId
-      ? state.resources.filter((resource) => resource.goalId === goalId)
-      : boxId
-        ? state.resources.filter((resource) => resource.boxId === boxId)
-        : state.resources;
+  const { goals, projects, resources } = captureRelationCandidates({ boxId, goalId, projectId, effectiveBoxId });
 
   const boxStep = {
       key: "boxId",
       label: "Box",
       hint: "관리 영역",
-      options: [{ value: "", label: "미지정", meta: "나중에 연결" }, ...state.boxes.map((box) => ({ value: box.id, label: box.name, meta: box.visibility === "pinned" ? "고정" : "" }))],
+      options: boxCaptureOptions(),
   };
   const goalStep = {
       key: "goalId",
       label: "Goal",
       hint: "목표 연결",
-      options: [{ value: "", label: "없음", meta: type === "tasks" ? "단독 Task" : "목표 없이 연결" }, ...goals.map((goal) => ({ value: goal.id, label: goal.name, meta: STATUSES.goal[goal.status] || goal.status }))],
+      options: goalCaptureOptions(goals, type),
   };
   const projectStep = {
       key: "projectId",
       label: "Project",
       hint: "실행 맥락",
-      options: [{ value: "", label: "없음", meta: type === "resources" ? "프로젝트 없이 보관" : "독립 실행" }, ...projects.map((project) => ({ value: project.id, label: project.name, meta: projectFlowMeta(project) }))],
+      options: projectCaptureOptions(projects, type),
   };
   const resourceStep = {
       key: "resourceId",
       label: "Resource",
       hint: "참고 자료",
-      options: [{ value: "", label: "없음", meta: "자료 없이 진행" }, ...resources.map((resource) => ({ value: resource.id, label: resource.title, meta: resource.type || "" }))],
+      options: resourceCaptureOptions(resources),
   };
   const resourceTypeStep = {
       key: "resourceType",
       label: "분류",
       hint: "자료 유형",
-      options: [
-        { value: "note", label: "노트", meta: "정리된 자료" },
-        { value: "quick_note", label: "간단 메모", meta: "빠른 기록" },
-        { value: "scrap", label: "스크랩", meta: "외부 자료" },
-        { value: "thought", label: "생각", meta: "아이디어" },
-        { value: "reflection", label: "회고", meta: "돌아보기" },
-      ],
+      options: RESOURCE_TYPE_CAPTURE_OPTIONS,
   };
 
   if (type === "boxes") return [];
@@ -1881,21 +2884,50 @@ function getTaskCaptureSteps(draft) {
   return [boxStep, goalStep, projectStep, resourceStep];
 }
 
-function projectBelongsToBox(project, boxId) {
-  if (!boxId) return true;
-  if (project.boxId === boxId) return true;
-  const goal = state.goals.find((entry) => entry.id === project.goalId);
-  return goal?.boxId === boxId;
+function boxCaptureOptions() {
+  const options = [{ value: "", label: "미지정", meta: "나중에 연결" }];
+  for (const box of state.boxes) {
+    options.push({ value: box.id, label: box.name, meta: box.visibility === "pinned" ? "고정" : "" });
+  }
+  return options;
+}
+
+function goalCaptureOptions(goals, type) {
+  const options = [{ value: "", label: "없음", meta: type === "tasks" ? "단독 Task" : "목표 없이 연결" }];
+  for (const goal of goals) {
+    options.push({ value: goal.id, label: goal.name, meta: STATUSES.goal[goal.status] || goal.status });
+  }
+  return options;
+}
+
+function projectCaptureOptions(projects, type) {
+  const options = [{ value: "", label: "없음", meta: type === "resources" ? "프로젝트 없이 보관" : "독립 실행" }];
+  for (const project of projects) {
+    options.push({ value: project.id, label: project.name, meta: projectFlowMeta(project) });
+  }
+  return options;
+}
+
+function resourceCaptureOptions(resources) {
+  const options = [{ value: "", label: "없음", meta: "자료 없이 진행" }];
+  for (const resource of resources) {
+    options.push({ value: resource.id, label: resource.title, meta: resource.type || "" });
+  }
+  return options;
 }
 
 function projectFlowMeta(project) {
   const goalName = project.goalId ? nameOf("goals", project.goalId) : "";
   const status = STATUSES.project[project.status] || project.status || "";
-  return [goalName, status].filter(Boolean).join(" · ");
+  if (goalName && status) return `${goalName} · ${status}`;
+  return goalName || status;
 }
 
 function taskStepOption(step, value) {
-  return step.options.find((option) => option.value === value) || step.options[0] || { label: "미지정", meta: "" };
+  for (const option of step.options) {
+    if (option.value === value) return option;
+  }
+  return step.options[0] || { label: "미지정", meta: "" };
 }
 
 function taskStepOptionLabel(step, value) {
@@ -1905,9 +2937,12 @@ function taskStepOptionLabel(step, value) {
 function taskCaptureSummary(draft) {
   const steps = getTaskCaptureSteps(draft);
   if (!steps.length) return "상위 연결 없음";
-  return steps
-    .map((step) => `${step.label}: ${taskStepOptionLabel(step, draft.values[step.key] || "")}`)
-    .join(" · ");
+  let summary = "";
+  for (const step of steps) {
+    const label = `${step.label}: ${taskStepOptionLabel(step, draft.values[step.key] || "")}`;
+    summary = summary ? `${summary} · ${label}` : label;
+  }
+  return summary;
 }
 
 function captureTargetLabel(type) {
@@ -1920,52 +2955,85 @@ function captureTargetLabel(type) {
   }[type] || "항목";
 }
 
-function renderWeekDays() {
+function renderWeekDays(events = getCombinedCalendarEvents()) {
   const start = startOfWeek(new Date());
-  const events = getCombinedCalendarEvents();
-  return Array.from({ length: 7 }, (_, index) => addDays(start, index))
-    .map((day) => {
-      const key = dateKey(day);
-      const dayEvents = events.filter((event) => calendarEventOccursOn(event, key)).sort(byCalendarEventTime);
-      return `
-        <div class="day ${key === dateKey(new Date()) ? "is-today" : ""}">
-          <div class="day-title"><span>${weekday(day)}</span><span>${key.slice(5)}</span></div>
-          <div class="calendar-event-list">${dayEvents.length ? dayEvents.map(renderCalendarEvent).join("") : `<div class="resource-preview">비어 있음</div>`}</div>
-        </div>
-      `;
-    })
-    .join("");
+  const days = dateRange(start, 7);
+  const eventsByDate = calendarEventsByDate(events, days);
+  const today = dateKey(new Date());
+  let html = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    const dayEvents = eventsByDate.get(key) || [];
+    html += `
+      <div class="day ${key === today ? "is-today" : ""}">
+        <div class="day-title"><span>${weekday(day)}</span><span>${key.slice(5)}</span></div>
+        <div class="calendar-event-list">${renderCalendarEvents(dayEvents, { emptyHtml: `<div class="resource-preview">비어 있음</div>` })}</div>
+      </div>
+    `;
+  }
+  return html;
 }
 
-function renderCombinedCalendar() {
+function renderCombinedCalendar(events = getCombinedCalendarEvents()) {
   const today = dateKey(new Date());
   const selectedMonth = selectedCalendarMonthDate();
   const currentMonth = monthKey(selectedMonth);
-  const events = getCombinedCalendarEvents();
   const days = calendarMonthGridDays(selectedMonth);
+  const eventsByDate = calendarEventsByDate(events, days);
   return `
     <div class="calendar-month-weekdays">
-      ${Array.from({ length: 7 }, (_, index) => `<span>${weekday(addDays(startOfSundayWeek(selectedMonth), index))}</span>`).join("")}
+      ${renderWeekdayLabels(startOfSundayWeek(selectedMonth))}
     </div>
     <div class="calendar-month-grid">
-      ${days.map((day) => {
-        const key = dateKey(day);
-        const dayEvents = events.filter((event) => calendarEventOccursOn(event, key)).sort(byCalendarEventTime);
-        const visibleEvents = dayEvents.slice(0, 4);
-        const overflow = dayEvents.length - visibleEvents.length;
-        return `
-          <div class="calendar-month-day ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === today ? "is-today" : ""}">
-            <div class="calendar-month-date"><span>${key.slice(8)}</span></div>
-            <div class="calendar-event-list">
-              ${visibleEvents.map((event) => renderCalendarEvent(event, { compact: true })).join("")}
-              ${overflow > 0 ? `<span class="calendar-event-more">+${overflow}</span>` : ""}
-              ${dayEvents.length ? "" : `<span class="calendar-empty-dot"></span>`}
-            </div>
-          </div>
-        `;
-      }).join("")}
+      ${renderCombinedCalendarDays(days, eventsByDate, currentMonth, today)}
     </div>
   `;
+}
+
+function renderCalendarAgenda(events = getCombinedCalendarEvents()) {
+  if (!events.length) return empty("표시할 일정이 없습니다.");
+  let html = "";
+  for (const event of events) {
+    html += `
+      <div class="calendar-agenda-row">
+        <span class="source-dot ${esc(event.source || "local")}"></span>
+        <strong>${esc(event.title || "(제목 없음)")}</strong>
+        <small>${esc(calendarEventTimeLabel(event) || event.startDate || "")}</small>
+      </div>
+    `;
+  }
+  return `<div class="calendar-agenda">${html}</div>`;
+}
+
+function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today) {
+  let html = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    const dayEvents = eventsByDate.get(key) || [];
+    const overflow = Math.max(0, dayEvents.length - 4);
+    html += `
+      <div class="calendar-month-day ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === today ? "is-today" : ""}">
+        <div class="calendar-month-date"><span>${key.slice(8)}</span></div>
+        <div class="calendar-event-list">
+          ${renderCalendarEvents(dayEvents, { compact: true, limit: 4 })}
+          ${overflow > 0 ? `<span class="calendar-event-more">+${overflow}</span>` : ""}
+          ${dayEvents.length ? "" : `<span class="calendar-empty-dot"></span>`}
+        </div>
+      </div>
+    `;
+  }
+  return html;
+}
+
+function renderCalendarEvents(events, { compact = false, limit = Infinity, emptyHtml = "" } = {}) {
+  if (!events.length) return emptyHtml;
+  let html = "";
+  const count = Math.min(events.length, limit);
+  const options = compact ? COMPACT_CALENDAR_EVENT_OPTIONS : undefined;
+  for (let index = 0; index < count; index += 1) {
+    html += renderCalendarEvent(events[index], options);
+  }
+  return html;
 }
 
 function renderCalendarEvent(event, options = {}) {
@@ -1988,55 +3056,63 @@ function getLocalCalendarEvents() {
 }
 
 function getTaskCalendarEvents() {
-  return state.tasks
-    .filter((task) => (task.scheduledStart || task.dueDate) && task.status !== "done" && task.status !== "canceled")
-    .map((task) => {
-      const allDay = !task.scheduledStart;
-      const start = task.scheduledStart || `${task.dueDate}T00:00`;
-      const end = task.scheduledEnd || (task.scheduledStart ? new Date(new Date(task.scheduledStart).getTime() + (task.estimatedMinutes || 60) * 60000).toISOString() : `${task.dueDate}T23:59`);
-      return {
-        id: task.id,
-        source: "task",
-        title: task.title,
-        start,
-        end,
-        startDate: task.scheduledStart ? dateKey(new Date(task.scheduledStart)) : task.dueDate,
-        endDate: task.scheduledStart ? dateKey(new Date(end)) : task.dueDate,
-        allDay,
-        selectType: "tasks",
-        selectId: task.id,
-      };
+  const events = [];
+  for (const task of state.tasks) {
+    if (!(task.scheduledStart || task.dueDate) || task.status === "done" || task.status === "canceled") continue;
+    const allDay = !task.scheduledStart;
+    const start = task.scheduledStart || `${task.dueDate}T00:00`;
+    const end = task.scheduledEnd || (task.scheduledStart ? new Date(new Date(task.scheduledStart).getTime() + (task.estimatedMinutes || 60) * 60000).toISOString() : `${task.dueDate}T23:59`);
+    events.push({
+      id: task.id,
+      source: "task",
+      title: task.title,
+      start,
+      end,
+      startDate: task.scheduledStart ? dateKey(new Date(task.scheduledStart)) : task.dueDate,
+      endDate: task.scheduledStart ? dateKey(new Date(end)) : task.dueDate,
+      allDay,
+      selectType: "tasks",
+      selectId: task.id,
     });
+  }
+  return events;
 }
 
 function getProjectCalendarEvents() {
-  return state.projects
-    .filter((project) => (project.startDate || project.endDate) && project.status !== "canceled")
-    .map((project) => {
-      const startDate = project.startDate || project.endDate;
-      const rawEndDate = project.endDate || project.startDate;
-      const endDate = rawEndDate < startDate ? startDate : rawEndDate;
-      return {
-        id: project.id,
-        source: "project",
-        title: project.name,
-        start: `${startDate}T00:00`,
-        end: `${endDate}T23:59`,
-        startDate,
-        endDate,
-        allDay: true,
-        selectType: "projects",
-        selectId: project.id,
-      };
+  const events = [];
+  for (const project of state.projects) {
+    if (!(project.startDate || project.endDate) || project.status === "canceled") continue;
+    const startDate = project.startDate || project.endDate;
+    const rawEndDate = project.endDate || project.startDate;
+    const endDate = rawEndDate < startDate ? startDate : rawEndDate;
+    events.push({
+      id: project.id,
+      source: "project",
+      title: project.name,
+      start: `${startDate}T00:00`,
+      end: `${endDate}T23:59`,
+      startDate,
+      endDate,
+      allDay: true,
+      selectType: "projects",
+      selectId: project.id,
     });
+  }
+  return events;
 }
 
-function getGoogleCalendarEvents() {
-  return (state.googleEvents || []).filter((event) => event.status !== "cancelled");
+function getGoogleCalendarEvents({ visibleOnly = false } = {}) {
+  const events = [];
+  for (const event of state.googleEvents || []) {
+    if (event.status === "cancelled") continue;
+    if (visibleOnly && !googleCalendarVisible(event.calendarId || "primary")) continue;
+    events.push(event);
+  }
+  return events;
 }
 
 function getVisibleGoogleCalendarEvents() {
-  return getGoogleCalendarEvents().filter((event) => googleCalendarVisible(event.calendarId || "primary"));
+  return getGoogleCalendarEvents({ visibleOnly: true });
 }
 
 function getCombinedCalendarEvents() {
@@ -2050,10 +3126,34 @@ function calendarEventSourceClass(event) {
   return "is-local";
 }
 
-function calendarEventOccursOn(event, date) {
-  const start = event.startDate || dateKey(new Date(event.start));
-  const end = event.endDate || start;
-  return date >= start && date <= end;
+function calendarEventsByDate(events, days) {
+  const byDate = new Map();
+  let firstKey = "";
+  let lastKey = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    if (!firstKey) firstKey = key;
+    lastKey = key;
+    byDate.set(key, []);
+  }
+  if (!firstKey) return byDate;
+  for (const event of events) {
+    const start = event.startDate || dateKey(new Date(event.start));
+    const end = event.endDate || start;
+    if (end < firstKey || start > lastKey) continue;
+    const endKey = end < lastKey ? end : lastKey;
+    let cursor = parseDateOnly(start > firstKey ? start : firstKey);
+    let key = dateKey(cursor);
+    while (key <= endKey) {
+      byDate.get(key)?.push(event);
+      cursor = addDays(cursor, 1);
+      key = dateKey(cursor);
+    }
+  }
+  for (const dayEvents of byDate.values()) {
+    dayEvents.sort(byCalendarEventTime);
+  }
+  return byDate;
 }
 
 function byCalendarEventTime(a, b) {
@@ -2205,17 +3305,21 @@ function setGoogleCalendarVisible(calendarId, visible) {
 
 function getGoogleCalendarOptions() {
   const calendarsById = new Map();
-  (state.googleCalendars || []).forEach((calendar) => {
+  for (const calendar of state.googleCalendars || []) {
     const normalized = normalizeGoogleCalendarEntry(calendar);
     if (normalized?.id) calendarsById.set(normalized.id, normalized);
-  });
-  (state.googleEvents || []).forEach((event) => {
+  }
+  for (const event of state.googleEvents || []) {
     const calendarId = event.calendarId || "primary";
     if (!calendarsById.has(calendarId)) {
       calendarsById.set(calendarId, fallbackGoogleCalendar(calendarId, event.calendarSummary || calendarId));
     }
-  });
-  return Array.from(calendarsById.values()).sort((a, b) => {
+  }
+  const calendars = [];
+  for (const calendar of calendarsById.values()) {
+    calendars.push(calendar);
+  }
+  return calendars.sort((a, b) => {
     if (Boolean(a.primary) !== Boolean(b.primary)) return a.primary ? -1 : 1;
     return (a.summary || a.id).localeCompare(b.summary || b.id);
   });
@@ -2239,12 +3343,12 @@ function renderDetail(options = {}) {
 }
 
 function renderResourceNotes(options = {}) {
-  return ui.resourceNotes
-    .map((note) => {
-      const resource = state.resources.find((entry) => entry.id === note.id);
-      return resource ? renderResourceNote(resource, note, options) : "";
-    })
-    .join("");
+  let html = "";
+  for (const note of ui.resourceNotes) {
+    const resource = itemById("resources", note.id);
+    if (resource) html += renderResourceNote(resource, note, options);
+  }
+  return html;
 }
 
 function renderResourceNote(resource, note, options = {}) {
@@ -2379,20 +3483,20 @@ function renderTaskPropertyFields(task, options = {}) {
 }
 
 function renderBlockEditor(type, ownerId, blocksList) {
-  const owner = getCollection(type).find((entry) => entry.id === ownerId);
+  const owner = itemById(type, ownerId);
   const safeBlocks = ensureEditableBlocks(owner || { blocks: blocksList });
   return `
     <div class="panel" style="box-shadow:none;background:rgba(255,255,255,.48)">
       ${panelHeader("본문", "Block editor")}
       <div class="block-editor" data-owner-type="${type}" data-owner-id="${ownerId}">
-        ${safeBlocks.map((block) => renderBlock(block, type, ownerId)).join("")}
+        ${renderBlocks(safeBlocks, type, ownerId)}
       </div>
     </div>
   `;
 }
 
 function renderInlineBlockEditor(type, ownerId, blocksList) {
-  const owner = getCollection(type).find((entry) => entry.id === ownerId);
+  const owner = itemById(type, ownerId);
   const safeBlocks = ensureEditableBlocks(owner || { blocks: blocksList });
   return `
     <div class="task-inline-notes">
@@ -2401,10 +3505,18 @@ function renderInlineBlockEditor(type, ownerId, blocksList) {
         <span>Block editor</span>
       </div>
       <div class="block-editor" data-owner-type="${type}" data-owner-id="${ownerId}">
-        ${safeBlocks.map((block) => renderBlock(block, type, ownerId)).join("")}
+        ${renderBlocks(safeBlocks, type, ownerId)}
       </div>
     </div>
   `;
+}
+
+function renderBlocks(blocksList, ownerType, ownerId) {
+  let html = "";
+  for (const block of blocksList) {
+    html += renderBlock(block, ownerType, ownerId);
+  }
+  return html;
 }
 
 function renderBlock(block, ownerType = "", ownerId = "") {
@@ -2464,28 +3576,22 @@ function updateTaskSchedulingMode() {
 
 function renderTaskScheduler() {
   const scheduler = ui.scheduler;
-  const task = state.tasks.find((entry) => entry.id === scheduler?.taskId);
+  const task = itemById("tasks", scheduler?.taskId);
   if (!scheduler || !task) return "";
   const monthDate = parseMonthKey(scheduler.month);
   const today = dateKey(new Date());
   const scheduledDate = task.scheduledStart?.slice(0, 10) || task.dueDate || "";
   const days = monthGridDays(monthDate);
   const laneTargets = schedulerLaneTargets(task.id);
+  const dayTaskCounts = schedulerTaskCountsByDate(task.id);
   const prevMonth = addMonths(monthDate, -1);
   const nextMonth = addMonths(monthDate, 1);
+  const dragOverTarget = scheduler.dragOverTarget;
   return `
     <div class="task-scheduler-backdrop" aria-hidden="true"></div>
     <div class="task-scheduler-stage ${scheduler.monthEdge ? `is-edge-${scheduler.monthEdge}` : ""}" role="dialog" aria-label="Task 날짜 배치">
       <div class="task-scheduler-lanes" aria-label="Task 배치 칸">
-        ${laneTargets.map((lane) => `
-          <button class="task-scheduler-lane ${lane.targetKey === scheduler.dragOverTarget ? "is-drop-target" : ""}" type="button" ${lane.date ? `data-scheduler-date="${lane.date}"` : ""} ${lane.action ? `data-scheduler-action="${lane.action}"` : ""} data-scheduler-lane="${lane.key}">
-            <span>
-              <strong>${esc(lane.title)}</strong>
-              <em>${esc(lane.meta)}</em>
-            </span>
-            <small>${lane.count}</small>
-          </button>
-        `).join("")}
+        ${renderSchedulerLanes(laneTargets, dragOverTarget)}
       </div>
       <div class="task-scheduler-month-zone is-prev" aria-hidden="true">
         <span>${esc(monthSideLabel(prevMonth))}</span>
@@ -2504,20 +3610,10 @@ function renderTaskScheduler() {
           </div>
         </div>
         <div class="task-scheduler-weekdays">
-          ${["월", "화", "수", "목", "금", "토", "일"].map((day) => `<span>${day}</span>`).join("")}
+          ${renderSchedulerWeekdayLabels()}
         </div>
         <div class="task-scheduler-grid">
-          ${days.map((day) => {
-            const key = dateKey(day);
-            const outside = day.getMonth() !== monthDate.getMonth();
-            const count = state.tasks.filter((entry) => isTaskOnDate(entry, key) && entry.status !== "done" && entry.id !== task.id).length;
-            return `
-              <button class="task-scheduler-day ${outside ? "is-outside" : ""} ${key === today ? "is-today" : ""} ${key === scheduledDate ? "is-selected" : ""} ${`date:${key}` === scheduler.dragOverTarget ? "is-drop-target" : ""}" type="button" data-scheduler-date="${key}">
-                <span>${day.getDate()}</span>
-                ${count ? `<small>${count}</small>` : ""}
-              </button>
-            `;
-          }).join("")}
+          ${renderSchedulerMonthDays(days, monthDate, today, scheduledDate, dayTaskCounts, dragOverTarget)}
         </div>
       </div>
       <div class="task-scheduler-month-zone is-next" aria-hidden="true">
@@ -2541,6 +3637,46 @@ function renderTaskScheduler() {
   `;
 }
 
+function renderSchedulerLanes(lanes, dragOverTarget) {
+  let html = "";
+  for (const lane of lanes) {
+    html += `
+      <button class="task-scheduler-lane ${lane.targetKey === dragOverTarget ? "is-drop-target" : ""}" type="button" ${lane.date ? `data-scheduler-date="${lane.date}"` : ""} ${lane.action ? `data-scheduler-action="${lane.action}"` : ""} data-scheduler-lane="${lane.key}">
+        <span>
+          <strong>${esc(lane.title)}</strong>
+          <em>${esc(lane.meta)}</em>
+        </span>
+        <small>${lane.count}</small>
+      </button>
+    `;
+  }
+  return html;
+}
+
+function renderSchedulerWeekdayLabels() {
+  let html = "";
+  for (const day of SCHEDULER_WEEKDAY_LABELS) {
+    html += `<span>${day}</span>`;
+  }
+  return html;
+}
+
+function renderSchedulerMonthDays(days, monthDate, today, scheduledDate, dayTaskCounts, dragOverTarget) {
+  let html = "";
+  for (const day of days) {
+    const key = dateKey(day);
+    const outside = day.getMonth() !== monthDate.getMonth();
+    const count = dayTaskCounts.get(key) || 0;
+    html += `
+      <button class="task-scheduler-day ${outside ? "is-outside" : ""} ${key === today ? "is-today" : ""} ${key === scheduledDate ? "is-selected" : ""} ${`date:${key}` === dragOverTarget ? "is-drop-target" : ""}" type="button" data-scheduler-date="${key}">
+        <span>${day.getDate()}</span>
+        ${count ? `<small>${count}</small>` : ""}
+      </button>
+    `;
+  }
+  return html;
+}
+
 function renderDeleteDragOverlay() {
   const drag = ui.deleteDrag;
   if (!drag) return "";
@@ -2549,15 +3685,7 @@ function renderDeleteDragOverlay() {
   return `
     <div class="task-scheduler-backdrop delete-drag-backdrop" aria-hidden="true"></div>
     <div class="delete-drag-stage ${actions.length > 1 ? "is-multi-action" : ""}" role="dialog" aria-label="${esc(label)} 이동">
-      ${actions.map((action) => `
-        <button class="${action.tone === "delete" ? "task-scheduler-delete-zone delete-drop-zone" : "task-scheduler-lane delete-drop-zone"} ${drag.targetAction === action.action ? "is-drop-target" : ""}" type="button" data-delete-drop data-drag-action="${action.action}">
-          <span>
-            <strong>${esc(action.title)}</strong>
-            <em>${esc(action.meta)}</em>
-          </span>
-          ${action.count !== undefined ? `<small>${action.count}</small>` : ""}
-        </button>
-      `).join("")}
+      ${renderDeleteDragActions(actions, drag.targetAction)}
     </div>
     <div class="schedule-drag-ghost delete-drag-ghost" style="left:${drag.dragX}px;top:${drag.dragY}px;width:${drag.dragWidth}px">
       <strong>${esc(drag.title || label)}</strong>
@@ -2566,8 +3694,24 @@ function renderDeleteDragOverlay() {
   `;
 }
 
+function renderDeleteDragActions(actions, targetAction) {
+  let html = "";
+  for (const action of actions) {
+    html += `
+      <button class="${action.tone === "delete" ? "task-scheduler-delete-zone delete-drop-zone" : "task-scheduler-lane delete-drop-zone"} ${targetAction === action.action ? "is-drop-target" : ""}" type="button" data-delete-drop data-drag-action="${action.action}">
+        <span>
+          <strong>${esc(action.title)}</strong>
+          <em>${esc(action.meta)}</em>
+        </span>
+        ${action.count !== undefined ? `<small>${action.count}</small>` : ""}
+      </button>
+    `;
+  }
+  return html;
+}
+
 function renderHabitDeleteConfirm() {
-  const habit = state.habits.find((entry) => entry.id === ui.habitDeleteConfirmId);
+  const habit = itemById("habits", ui.habitDeleteConfirmId);
   if (!habit) return "";
   return `
     <div class="confirm-backdrop habit-confirm-backdrop" aria-hidden="true"></div>
@@ -2588,10 +3732,10 @@ function renderHabitDeleteConfirm() {
 }
 
 function renderProjectDeleteConfirm() {
-  const project = state.projects.find((entry) => entry.id === ui.projectDeleteConfirmId);
+  const project = itemById("projects", ui.projectDeleteConfirmId);
   if (!project) return "";
   const stats = projectStats(project);
-  const resourceCount = state.resources.filter((resource) => resource.projectId === project.id).length;
+  const resourceCount = relationIndex().resourcesByProjectId.get(project.id)?.length || 0;
   return `
     <div class="confirm-backdrop project-confirm-backdrop" aria-hidden="true"></div>
     <section class="confirm-dialog project-delete-confirm" role="dialog" aria-modal="true" aria-label="프로젝트 삭제 확인">
@@ -2612,7 +3756,7 @@ function renderProjectDeleteConfirm() {
 
 function renderTodayTaskDragGhost() {
   const drag = ui.todayTaskDrag;
-  const task = state.tasks.find((entry) => entry.id === drag?.taskId);
+  const task = itemById("tasks", drag?.taskId);
   if (!drag || !task) return "";
   return `
     <div class="today-drag-ghost" style="--drag-x:${drag.dragX}px;--drag-y:${drag.dragY}px;width:${drag.dragWidth}px" aria-hidden="true">
@@ -2654,43 +3798,46 @@ function renderTodayFloatingDrop() {
 
 function renderSlashMenu() {
   const { x, y, ownerType, ownerId, blockId, selectedIndex = 0 } = ui.slash;
-  const entries = Object.entries(BLOCK_TYPES);
   return `
     <div class="slash-menu" style="left:${x}px;top:${y}px" role="menu" aria-label="블록 서식">
-      ${entries
-        .map(([type, [label, icon]], index) => `
-          <button class="menu-item ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-slash-index="${index}" data-block-type="${type}" data-owner-type="${ownerType}" data-owner-id="${ownerId}" data-block-id="${blockId}" ${index === selectedIndex ? `aria-current="true"` : ""}>
-            <span class="menu-icon">${icon}</span>
-            <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(type)}</span></span>
-          </button>
-        `)
-        .join("")}
+      ${renderSlashMenuItems(ownerType, ownerId, blockId, selectedIndex)}
     </div>
   `;
 }
 
+function renderSlashMenuItems(ownerType, ownerId, blockId, selectedIndex) {
+  let items = "";
+  for (let index = 0; index < BLOCK_TYPE_COUNT; index += 1) {
+    const [type, [label, icon]] = BLOCK_TYPE_ENTRIES[index];
+    items += `
+      <button class="menu-item ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-slash-index="${index}" data-block-type="${type}" data-owner-type="${ownerType}" data-owner-id="${ownerId}" data-block-id="${blockId}" ${index === selectedIndex ? `aria-current="true"` : ""}>
+        <span class="menu-icon">${icon}</span>
+        <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(type)}</span></span>
+      </button>
+    `;
+  }
+  return items;
+}
+
 function renderCommandMenu() {
-  const commands = [
-    ["new-task", "✓", "새 할 일", "실행 항목"],
-    ["new-project", "▦", "새 프로젝트", "작업 묶음"],
-    ["new-goal", "◎", "새 목표", "결과 목표"],
-    ["new-resource", "≡", "새 자료", "block editor 노트"],
-    ["new-habit", "◌", "새 루틴", "반복 관리"],
-    ["new-journal", "✎", "새 리뷰", "회고"],
-    ["new-box", "□", "새 박스", "삶의 영역"],
-  ];
   return `
     <div class="command-menu" style="right:24px;bottom:92px">
-      ${commands
-        .map(([action, icon, title, desc]) => `
-          <button class="menu-item" type="button" data-action="${action}">
-            <span class="menu-icon">${icon}</span>
-            <span class="menu-text"><strong>${title}</strong><span>${desc}</span></span>
-          </button>
-        `)
-        .join("")}
+      ${renderCommandMenuItems()}
     </div>
   `;
+}
+
+function renderCommandMenuItems() {
+  let items = "";
+  for (const [action, icon, title, desc] of COMMAND_MENU_ITEMS) {
+    items += `
+      <button class="menu-item" type="button" data-action="${action}">
+        <span class="menu-icon">${icon}</span>
+        <span class="menu-text"><strong>${title}</strong><span>${desc}</span></span>
+      </button>
+    `;
+  }
+  return items;
 }
 
 function textField(label, field, value) {
@@ -2722,9 +3869,7 @@ function selectField(label, field, value, options) {
     <label class="field">
       <span>${esc(label)}</span>
       <select class="select" data-field="${field}">
-        ${Object.entries(options)
-          .map(([key, text]) => `<option value="${esc(key)}" ${value === key ? "selected" : ""}>${esc(text)}</option>`)
-          .join("")}
+        ${renderSelectOptions(options, value)}
       </select>
     </label>
   `;
@@ -2735,18 +3880,38 @@ function relationField(label, field, value, items, nameField) {
     <label class="field">
       <span>${esc(label)}</span>
       <select class="select" data-field="${field}">
-        <option value="">없음</option>
-        ${items
-          .map((item) => `<option value="${item.id}" ${value === item.id ? "selected" : ""}>${esc(item[nameField])}</option>`)
-          .join("")}
+        ${renderRelationOptions(items, value, nameField)}
       </select>
     </label>
   `;
 }
 
+function renderSelectOptions(options, value) {
+  let html = "";
+  for (const key in options) {
+    if (!Object.prototype.hasOwnProperty.call(options, key)) continue;
+    html += `<option value="${esc(key)}" ${value === key ? "selected" : ""}>${esc(options[key])}</option>`;
+  }
+  return html;
+}
+
+function renderRelationOptions(items, value, nameField) {
+  let html = `<option value="">없음</option>`;
+  for (const item of items) {
+    html += `<option value="${item.id}" ${value === item.id ? "selected" : ""}>${esc(item[nameField])}</option>`;
+  }
+  return html;
+}
+
 function handleClick(event) {
   const clickedBlockContent = event.target.closest("[data-block-content]");
   if (clickedBlockContent) activateBlockContent(clickedBlockContent);
+
+  if (event.target.closest("[data-nav-key]") && ui.suppressNavClickUntil > Date.now()) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
 
   if (
     event.target.closest("[data-schedule-hold], [data-scheduler-open]") &&
@@ -2788,6 +3953,20 @@ function handleClick(event) {
   if (projectCalendarNav) {
     event.preventDefault();
     changeProjectCalendarAnchor(projectCalendarNav.dataset.projectCalendarNav);
+    return;
+  }
+
+  const viewMode = event.target.closest("[data-view-control-mode]");
+  if (viewMode) {
+    event.preventDefault();
+    updateViewControl(viewMode.dataset.viewControlMode, "mode", viewMode.dataset.controlMode || "");
+    return;
+  }
+
+  const resourceTypeFilter = event.target.closest("[data-resource-type-filter]");
+  if (resourceTypeFilter) {
+    event.preventDefault();
+    updateResourceTypeFilter(resourceTypeFilter.dataset.resourceTypeFilter || "all");
     return;
   }
 
@@ -3149,7 +4328,6 @@ function handleAction(action) {
   if (action === "fetch-google") return fetchGoogleCalendarEvents();
   if (action === "sync-google") return syncGoogleCalendar();
   if (action === "export-json") return exportJson();
-  if (action === "notion-final-sync") return showToast("최종 1회 Notion 동기화 지점입니다. 지금은 로컬 DB가 기준입니다.");
   if (action === "reset-demo-data") return resetDemoData();
 }
 
@@ -3179,6 +4357,12 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const viewSearch = event.target.closest("[data-view-control-search]");
+  if (viewSearch) {
+    updateViewControl(viewSearch.dataset.viewControlSearch, "search", viewSearch.value, { save: true });
+    return;
+  }
+
   const search = event.target.closest("[data-action-input='search']");
   if (search) {
     ui.search = search.value;
@@ -3188,7 +4372,7 @@ function handleInput(event) {
 
   const resourceTitle = event.target.closest("[data-resource-title]");
   if (resourceTitle) {
-    const resource = state.resources.find((entry) => entry.id === resourceTitle.dataset.resourceTitle);
+    const resource = itemById("resources", resourceTitle.dataset.resourceTitle);
     if (!resource) return;
     resource.title = resourceTitle.value;
     saveState();
@@ -3198,7 +4382,7 @@ function handleInput(event) {
 
   const inlineTaskTitle = event.target.closest("[data-task-inline-title]");
   if (inlineTaskTitle) {
-    const task = state.tasks.find((entry) => entry.id === inlineTaskTitle.dataset.taskInlineTitle);
+    const task = itemById("tasks", inlineTaskTitle.dataset.taskInlineTitle);
     if (!task) return;
     task.title = inlineTaskTitle.value;
     saveState();
@@ -3221,6 +4405,18 @@ function handleInput(event) {
 }
 
 function handleChange(event) {
+  const viewControlField = event.target.closest("[data-view-control-field]");
+  if (viewControlField) {
+    updateViewControl(viewControlField.dataset.viewControlField, viewControlField.dataset.controlField || "", viewControlField.value);
+    return;
+  }
+
+  const viewControlToggle = event.target.closest("[data-view-control-toggle]");
+  if (viewControlToggle) {
+    updateViewControlToggle(viewControlToggle.dataset.viewControlToggle, viewControlToggle.dataset.controlToggle || "", viewControlToggle.checked);
+    return;
+  }
+
   const calendarSource = event.target.closest("[data-calendar-source]");
   if (calendarSource) {
     setCalendarSourceVisible(calendarSource.dataset.calendarSource, calendarSource.checked);
@@ -3239,9 +4435,9 @@ function handleChange(event) {
   const inlineOwner = field.closest("[data-inline-owner-type][data-inline-owner-id]");
   const inlineType = inlineOwner?.dataset.inlineOwnerType || "";
   const item = resourceNote
-    ? state.resources.find((entry) => entry.id === resourceNote.dataset.resourceNote)
+    ? itemById("resources", resourceNote.dataset.resourceNote)
     : inlineOwner
-      ? getCollection(inlineType).find((entry) => entry.id === inlineOwner.dataset.inlineOwnerId)
+      ? itemById(inlineType, inlineOwner.dataset.inlineOwnerId)
       : null;
   if (!item) return;
   let value = field.value;
@@ -3322,9 +4518,9 @@ function deactivateActiveBlockContent() {
 }
 
 function openResourceNote(resourceId, options = {}) {
-  const resource = state.resources.find((entry) => entry.id === resourceId);
+  const resource = itemById("resources", resourceId);
   if (!resource) return;
-  const existing = ui.resourceNotes.find((note) => note.id === resourceId);
+  const existing = resourceNoteById(resourceId);
   if (existing) {
     existing.z = ++ui.resourceNoteZ;
     if (options.mode) existing.mode = options.mode;
@@ -3343,32 +4539,41 @@ function openResourceNote(resourceId, options = {}) {
   renderDetail();
 }
 
+function resourceNoteById(resourceId) {
+  for (const note of ui.resourceNotes) {
+    if (note.id === resourceId) return note;
+  }
+  return null;
+}
+
+function undockOtherResourceNotes(resourceId) {
+  for (const note of ui.resourceNotes) {
+    if (note.id !== resourceId && note.mode === "docked") {
+      note.mode = "floating";
+      note.x = Math.max(40, window.innerWidth * 0.08);
+      note.y = 80;
+    }
+  }
+}
+
 function closeResourceNote(resourceId) {
-  ui.resourceNotes = ui.resourceNotes.filter((note) => note.id !== resourceId);
+  removeByFieldInPlace(ui.resourceNotes, "id", resourceId);
   if (ui.resourceDrag?.id === resourceId) ui.resourceDrag = null;
   renderDetail();
 }
 
-function bringResourceNote(resourceId) {
-  const note = ui.resourceNotes.find((entry) => entry.id === resourceId);
-  if (!note) return;
+function bringResourceNote(resourceId, note = resourceNoteById(resourceId)) {
+  if (!note) return null;
   note.z = ++ui.resourceNoteZ;
   const element = document.querySelector(`[data-resource-note="${resourceId}"]`);
   if (element) element.style.zIndex = note.z;
+  return note;
 }
 
 function setResourceNoteMode(resourceId, mode, position = {}) {
-  const note = ui.resourceNotes.find((entry) => entry.id === resourceId);
+  const note = resourceNoteById(resourceId);
   if (!note) return;
-  if (mode === "docked") {
-    ui.resourceNotes.forEach((entry) => {
-      if (entry.id !== resourceId && entry.mode === "docked") {
-        entry.mode = "floating";
-        entry.x = Math.max(40, window.innerWidth * 0.08);
-        entry.y = 80;
-      }
-    });
-  }
+  if (mode === "docked") undockOtherResourceNotes(resourceId);
   note.mode = mode;
   if (position.x !== undefined) note.x = position.x;
   if (position.y !== undefined) note.y = position.y;
@@ -3377,7 +4582,7 @@ function setResourceNoteMode(resourceId, mode, position = {}) {
 }
 
 function toggleResourceProps(resourceId) {
-  const note = ui.resourceNotes.find((entry) => entry.id === resourceId);
+  const note = resourceNoteById(resourceId);
   if (!note) return;
   note.showProps = !note.showProps;
   const element = document.querySelector(`[data-resource-note="${resourceId}"]`);
@@ -3394,13 +4599,14 @@ function toggleResourceProps(resourceId) {
 }
 
 function beginResourceDrag(resourceId, event) {
-  const note = ui.resourceNotes.find((entry) => entry.id === resourceId);
+  const note = resourceNoteById(resourceId);
   const element = document.querySelector(`[data-resource-note="${resourceId}"]`);
   if (!note || !element) return;
-  bringResourceNote(resourceId);
+  bringResourceNote(resourceId, note);
   const rect = element.getBoundingClientRect();
   ui.resourceDrag = {
     id: resourceId,
+    note,
     pointerId: event.pointerId ?? "mouse",
     offsetX: event.clientX - rect.left,
     offsetY: event.clientY - rect.top,
@@ -3421,7 +4627,7 @@ function handleResourcePointerMove(event) {
   if (!drag) return;
   if (event.pointerId !== undefined && drag.pointerId !== event.pointerId) return;
   event.preventDefault();
-  const note = ui.resourceNotes.find((entry) => entry.id === drag.id);
+  const note = drag.note;
   if (!note) return;
   const nextX = event.clientX - drag.offsetX;
   const nextY = event.clientY - drag.offsetY;
@@ -3429,20 +4635,14 @@ function handleResourcePointerMove(event) {
   if (shouldDock) {
     if (note.mode !== "docked") {
       note.mode = "docked";
-      ui.resourceNotes.forEach((entry) => {
-        if (entry.id !== note.id && entry.mode === "docked") {
-          entry.mode = "floating";
-          entry.x = Math.max(40, window.innerWidth * 0.08);
-          entry.y = 80;
-        }
-      });
+      undockOtherResourceNotes(note.id);
     }
   } else {
     note.mode = "floating";
     note.x = Math.min(window.innerWidth - 360, Math.max(24, nextX));
     note.y = Math.min(window.innerHeight - 180, Math.max(24, nextY));
   }
-  ui.resourceNotes.forEach(syncResourceNoteElement);
+  syncResourceNoteElements();
 }
 
 function finishResourceDrag(event) {
@@ -3474,6 +4674,12 @@ function syncResourceNoteElement(note) {
     element.style.top = "";
   }
   updateTaskSchedulingMode();
+}
+
+function syncResourceNoteElements() {
+  for (const note of ui.resourceNotes) {
+    syncResourceNoteElement(note);
+  }
 }
 
 function beginBlockDrag(blockId, event) {
@@ -3543,19 +4749,26 @@ function cancelBlockDrag(event) {
 function blockDragTargetFromPoint(ownerType, ownerId, clientX, clientY) {
   const editor = document.querySelector(`.block-editor[data-owner-type="${ownerType}"][data-owner-id="${ownerId}"]`);
   if (!editor) return {};
-  const dragIds = ui.blockDrag?.dragIds || [ui.blockDrag?.blockId].filter(Boolean);
-  const blocksList = Array.from(editor.querySelectorAll(".block")).filter((block) => !dragIds.includes(block.dataset.blockId));
-  if (!blocksList.length) return {};
   const editorRect = editor.getBoundingClientRect();
   const editorGutter = Number.parseFloat(getComputedStyle(editor).getPropertyValue("--resource-editor-gutter")) || 112;
   if (clientX < editorRect.left - editorGutter || clientX > editorRect.right + editorGutter || clientY < editorRect.top - 80 || clientY > editorRect.bottom + 120) {
     return {};
   }
-  const matched = blocksList.find((entry) => {
-    const rect = entry.getBoundingClientRect();
-    return clientY >= rect.top && clientY <= rect.bottom;
+  const dragIds = new Set(ui.blockDrag?.dragIds || []);
+  if (!dragIds.size && ui.blockDrag?.blockId) dragIds.add(ui.blockDrag.blockId);
+  let firstBlock = null;
+  let lastBlock = null;
+  let matched = null;
+  editor.querySelectorAll(".block").forEach((block) => {
+    if (dragIds.has(block.dataset.blockId)) return;
+    if (!firstBlock) firstBlock = block;
+    lastBlock = block;
+    if (matched) return;
+    const rect = block.getBoundingClientRect();
+    if (clientY >= rect.top && clientY <= rect.bottom) matched = block;
   });
-  const targetBlock = matched || (clientY < blocksList[0].getBoundingClientRect().top ? blocksList[0] : blocksList[blocksList.length - 1]);
+  if (!firstBlock) return {};
+  const targetBlock = matched || (clientY < firstBlock.getBoundingClientRect().top ? firstBlock : lastBlock);
   const rect = targetBlock.getBoundingClientRect();
   return {
     element: targetBlock,
@@ -3587,25 +4800,35 @@ function cleanupBlockDragClasses() {
 
 function moveBlocks(ownerType, ownerId, blockIds, targetId, position) {
   if (!blockIds.length || blockIds.includes(targetId)) return;
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return;
   const moveSet = new Set(blockIds);
-  const moving = item.blocks.filter((block) => moveSet.has(block.id));
+  const moving = [];
+  const remaining = [];
+  const movedIds = [];
+  item.blocks.forEach((block) => {
+    if (moveSet.has(block.id)) {
+      moving.push(block);
+      movedIds.push(block.id);
+    } else {
+      remaining.push(block);
+    }
+  });
   if (!moving.length) return;
-  item.blocks = item.blocks.filter((block) => !moveSet.has(block.id));
+  item.blocks = remaining;
   const targetIndex = item.blocks.findIndex((entry) => entry.id === targetId);
   if (targetIndex < 0) {
     item.blocks.push(...moving);
   } else {
     item.blocks.splice(position === "before" ? targetIndex : targetIndex + 1, 0, ...moving);
   }
-  ui.blockSelection = moving.length > 1 ? { ownerType, ownerId, ids: moving.map((block) => block.id) } : { ownerType: "", ownerId: "", ids: [] };
+  ui.blockSelection = movedIds.length > 1 ? { ownerType, ownerId, ids: movedIds } : { ownerType: "", ownerId: "", ids: [] };
   saveState();
   renderDetail({ soft: true });
   renderView({ soft: true });
   requestAnimationFrame(() => {
-    if (moving.length > 1) {
-      restoreBlockSelection(ownerType, ownerId, moving.map((block) => block.id));
+    if (movedIds.length > 1) {
+      restoreBlockSelection(ownerType, ownerId, movedIds);
     } else {
       focusBlockContent(moving[0].id);
     }
@@ -3613,9 +4836,13 @@ function moveBlocks(ownerType, ownerId, blockIds, targetId, position) {
 }
 
 function orderedSelectedBlockIds(editor) {
-  return Array.from(editor.querySelectorAll(".block"))
-    .map((block) => block.dataset.blockId)
-    .filter((id) => ui.blockSelection.ids.includes(id));
+  const selected = new Set(ui.blockSelection.ids);
+  const ids = [];
+  editor.querySelectorAll(".block").forEach((block) => {
+    const blockId = block.dataset.blockId;
+    if (selected.has(blockId)) ids.push(blockId);
+  });
+  return ids;
 }
 
 function restoreBlockSelection(ownerType, ownerId, ids) {
@@ -3763,9 +4990,24 @@ function clearBlockSelection() {
 function deleteSelectedBlocks() {
   const selection = ui.blockSelection;
   if (!selection.ids.length) return;
-  const item = getCollection(selection.ownerType).find((entry) => entry.id === selection.ownerId);
+  const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) return;
-  item.blocks = item.blocks.filter((block) => !selection.ids.includes(block.id));
+  const selectedIds = new Set(selection.ids);
+  let writeIndex = 0;
+  let removed = false;
+  for (const block of item.blocks) {
+    if (selectedIds.has(block.id)) {
+      removed = true;
+      continue;
+    }
+    item.blocks[writeIndex] = block;
+    writeIndex += 1;
+  }
+  if (!removed) {
+    clearBlockSelection();
+    return;
+  }
+  item.blocks.length = writeIndex;
   ensureEditableBlocks(item);
   clearBlockSelection();
   saveState();
@@ -3792,6 +5034,19 @@ function canStartEditorMarqueeDrag(resourceNote, event) {
 }
 
 function handlePointerDown(event) {
+  const navButton = event.target.closest("[data-nav-key]");
+  if (navButton && (ui.navOpen || ui.navDocked)) {
+    if (event.type === "mousedown" && (ui.pendingNavDrag || ui.navPointerDrag)) return;
+    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    ui.pendingNavDrag = {
+      key: navButton.dataset.navKey,
+      pointerId: event.pointerId ?? "mouse",
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    return;
+  }
+
   const resourceDragHandle = event.target.closest("[data-resource-drag]");
   if (resourceDragHandle && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if (ui.resourceDrag && event.type === "mousedown") return;
@@ -3820,7 +5075,7 @@ function handlePointerDown(event) {
   if (ui.view === "today" && todayTaskDragRow && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
     const card = todayTaskDragRow.closest("[data-today-task-id]");
-    const task = state.tasks.find((entry) => entry.id === card?.dataset.todayTaskId);
+    const task = itemById("tasks", card?.dataset.todayTaskId);
     if (!card || !task || ["done", "canceled"].includes(task.status)) return;
     window.getSelection()?.removeAllRanges();
     ui.pendingTodayTaskDrag = {
@@ -3850,7 +5105,7 @@ function handlePointerDown(event) {
   if (schedulerButton) {
     if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
     const card = schedulerButton.closest("[data-schedule-hold]");
-    const task = state.tasks.find((entry) => entry.id === schedulerButton.dataset.schedulerOpen);
+    const task = itemById("tasks", schedulerButton.dataset.schedulerOpen);
     if (!card || !task || ["done", "canceled"].includes(task.status)) return;
     ui.pendingScheduleDrag = {
       taskId: task.id,
@@ -3866,7 +5121,7 @@ function handlePointerDown(event) {
   if (event.type === "mousedown" && Date.now() - ui.lastSchedulePointerAt < 500) return;
   if (event.type === "pointerdown") ui.lastSchedulePointerAt = Date.now();
   if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
-  const task = state.tasks.find((entry) => entry.id === card.dataset.scheduleHold);
+  const task = itemById("tasks", card.dataset.scheduleHold);
   if (!task || ["done", "canceled"].includes(task.status)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -3949,7 +5204,7 @@ function maybeStartPendingTodayTaskDrag(event) {
   const dy = event.clientY - pending.startY;
   if (Math.hypot(dx, dy) < 8) return;
   const card = document.querySelector(`[data-today-task-id="${pending.taskId}"]`);
-  const task = state.tasks.find((entry) => entry.id === pending.taskId);
+  const task = itemById("tasks", pending.taskId);
   ui.pendingTodayTaskDrag = null;
   if (!card || !task) return;
   event.preventDefault();
@@ -3996,10 +5251,7 @@ function updateTodayTaskDragPosition(clientX, clientY) {
 }
 
 function todayTaskTargetFromPoint(clientX, clientY) {
-  const element = document
-    .elementsFromPoint(clientX, clientY)
-    .map((entry) => entry.closest?.("[data-drop-date]"))
-    .find(Boolean);
+  const element = closestElementFromPoint(clientX, clientY, "[data-drop-date]");
   if (!element) return {};
   return {
     element,
@@ -4022,7 +5274,7 @@ function finishTodayTaskDrag(event) {
   if (!isActiveTodayTaskPointer(event)) return;
   event.preventDefault();
   event.stopPropagation();
-  const task = state.tasks.find((entry) => entry.id === ui.todayTaskDrag.taskId);
+  const task = itemById("tasks", ui.todayTaskDrag.taskId);
   const targetDate = ui.todayTaskDrag.targetDate || todayTaskTargetFromPoint(event.clientX, event.clientY).date || "";
   const targetElement = targetDate ? document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-date]") : null;
   clearTodayTaskDragState();
@@ -4083,7 +5335,7 @@ function maybeStartPendingDeleteDrag(event) {
   const dy = event.clientY - pending.startY;
   if (Math.hypot(dx, dy) < 8) return;
   const card = document.querySelector(`[data-delete-drag-type="${pending.type}"][data-delete-drag-id="${pending.id}"]`);
-  const item = getCollection(pending.type).find((entry) => entry.id === pending.id);
+  const item = itemById(pending.type, pending.id);
   ui.pendingDeleteDrag = null;
   if (!card || !item) return;
   event.preventDefault();
@@ -4131,11 +5383,16 @@ function updateDeleteDragPosition(clientX, clientY) {
 }
 
 function deleteTargetFromPoint(clientX, clientY) {
-  const element = document
-    .elementsFromPoint(clientX, clientY)
-    .map((entry) => entry.closest?.("[data-delete-drop]"))
-    .find(Boolean);
+  const element = closestElementFromPoint(clientX, clientY, "[data-delete-drop]");
   return element ? { element, action: element.dataset.dragAction || "delete" } : {};
+}
+
+function closestElementFromPoint(clientX, clientY, selector) {
+  for (const entry of document.elementsFromPoint(clientX, clientY)) {
+    const element = entry.closest?.(selector);
+    if (element) return element;
+  }
+  return null;
 }
 
 function setDeleteDropTarget(target = {}) {
@@ -4232,24 +5489,25 @@ function animateDeleteDragDrop(done) {
 
 function dragActionTargets(type, itemId) {
   if (type === "boxes") {
+    const boxBuckets = boxVisibilityBuckets(state.boxes, itemId);
     return [
       {
         action: "pinBox",
         title: "고정",
         meta: "고정 Box로",
-        count: state.boxes.filter((box) => box.visibility === "pinned" && box.id !== itemId).length,
+        count: boxBuckets.pinned.length,
       },
       {
         action: "normalBox",
         title: "일반",
         meta: "일반 Box로",
-        count: state.boxes.filter((box) => box.visibility === "normal" && box.id !== itemId).length,
+        count: boxBuckets.normal.length,
       },
       {
         action: "archiveBox",
         title: "아카이브",
         meta: "보관 영역으로",
-        count: state.boxes.filter((box) => box.visibility === "archived" && box.id !== itemId).length,
+        count: boxBuckets.archived.length,
       },
       {
         action: "delete",
@@ -4260,30 +5518,31 @@ function dragActionTargets(type, itemId) {
     ];
   }
   if (type === "resources") {
+    const resourceBuckets = resourceDisplayBuckets(state.resources, "", itemId);
     return [
       {
         action: "pin",
         title: "고정",
         meta: "고정 자료로",
-        count: state.resources.filter((resource) => resource.pinned && resource.id !== itemId && resource.importance !== "archived").length,
+        count: resourceBuckets.pinned.length,
       },
       {
         action: "readLater",
         title: "나중에 보기",
         meta: "읽을 자료로",
-        count: state.resources.filter((resource) => resource.readLater && resource.id !== itemId && resource.importance !== "archived").length,
+        count: resourceBuckets.readLater.length,
       },
       {
         action: "normalResource",
         title: "일반",
         meta: "일반 자료로",
-        count: state.resources.filter((resource) => !resource.pinned && !resource.readLater && resource.id !== itemId && resource.importance !== "archived").length,
+        count: resourceBuckets.normal.length,
       },
       {
         action: "archiveResource",
         title: "아카이브",
         meta: "보관 자료로",
-        count: state.resources.filter((resource) => resource.importance === "archived" && resource.id !== itemId).length,
+        count: resourceBuckets.archived.length,
       },
       {
         action: "delete",
@@ -4305,7 +5564,7 @@ function dragActionTargets(type, itemId) {
 
 function commitDragAction(type, itemId, action) {
   if (type === "boxes" && ["pinBox", "normalBox", "archiveBox"].includes(action)) {
-    const box = state.boxes.find((entry) => entry.id === itemId);
+    const box = itemById("boxes", itemId);
     if (!box) return false;
     const nextVisibility = action === "pinBox" ? "pinned" : action === "archiveBox" ? "archived" : "normal";
     box.visibility = nextVisibility;
@@ -4316,7 +5575,7 @@ function commitDragAction(type, itemId, action) {
     return true;
   }
   if (type === "resources" && ["pin", "readLater", "normalResource", "archiveResource"].includes(action)) {
-    const resource = state.resources.find((entry) => entry.id === itemId);
+    const resource = itemById("resources", itemId);
     if (!resource) return false;
     if (action === "pin") {
       resource.pinned = true;
@@ -4421,7 +5680,7 @@ function maybeStartPendingScheduleDrag(event) {
   const dx = event.clientX - pending.startX;
   const dy = event.clientY - pending.startY;
   if (Math.hypot(dx, dy) < 8) return;
-  const task = state.tasks.find((entry) => entry.id === pending.taskId);
+  const task = itemById("tasks", pending.taskId);
   const card = document.querySelector(`[data-schedule-hold="${pending.taskId}"]`);
   ui.pendingScheduleDrag = null;
   if (!task || !card) return;
@@ -4828,7 +6087,7 @@ function handleDrop(event) {
   event.preventDefault();
   zone.classList.remove("is-over");
   const taskId = event.dataTransfer.getData("text/plain") || ui.draggedTaskId;
-  const task = state.tasks.find((entry) => entry.id === taskId);
+  const task = itemById("tasks", taskId);
   if (!task) return;
   moveTaskToDate(task, zone.dataset.dropDate);
   saveState();
@@ -4844,10 +6103,95 @@ function clearTaskDrag() {
   document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((zone) => zone.classList.remove("is-over"));
 }
 
+function handleNavPointerMove(event) {
+  const pending = ui.pendingNavDrag;
+  if (pending && navPointerMatches(pending, event)) {
+    const distance = Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY);
+    if (distance < 6) return;
+    beginNavPointerDrag(pending, event);
+  }
+
+  const drag = ui.navPointerDrag;
+  if (!drag || !navPointerMatches(drag, event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  updateNavPointerDropTarget(event);
+}
+
+function beginNavPointerDrag(pending, event) {
+  ui.pendingNavDrag = null;
+  ui.navPointerDrag = {
+    key: pending.key,
+    pointerId: pending.pointerId,
+    targetKey: "",
+    position: "",
+  };
+  ui.navDragKey = pending.key;
+  els.navTrack?.querySelector(`[data-nav-key="${cssEscape(pending.key)}"]`)?.classList.add("is-nav-dragging");
+  updateNavPointerDropTarget(event);
+}
+
+function updateNavPointerDropTarget(event) {
+  const target = navDropTargetFromPointer(event);
+  if (!target) {
+    ui.navPointerDrag.targetKey = "";
+    ui.navPointerDrag.position = "";
+    clearNavDropMarkers();
+    return;
+  }
+  ui.navPointerDrag.targetKey = target.button.dataset.navKey;
+  ui.navPointerDrag.position = target.position;
+  setNavDropMarker(target.button, target.position);
+}
+
+function finishNavPointerDrag(event) {
+  const pending = ui.pendingNavDrag;
+  if (pending && navPointerMatches(pending, event)) {
+    ui.pendingNavDrag = null;
+    return;
+  }
+
+  const drag = ui.navPointerDrag;
+  if (!drag || !navPointerMatches(drag, event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const target = navDropTargetFromPointer(event) || navStoredPointerDropTarget(drag);
+  if (target) {
+    reorderNav(drag.key, target.button.dataset.navKey, target.position);
+  }
+  ui.suppressNavClickUntil = Date.now() + 450;
+  cancelNavPointerDrag();
+}
+
+function cancelNavPointerDrag() {
+  ui.pendingNavDrag = null;
+  ui.navPointerDrag = null;
+  clearNavDrag();
+}
+
+function navPointerMatches(drag, event) {
+  return drag.pointerId === (event.pointerId ?? "mouse");
+}
+
+function navDropTargetFromPointer(event) {
+  if (!els.navTrack) return null;
+  const rect = els.navTrack.getBoundingClientRect();
+  const withinX = event.clientX >= rect.left - 28 && event.clientX <= rect.right + 28;
+  const withinY = event.clientY >= rect.top - 34 && event.clientY <= rect.bottom + 34;
+  if (!withinX || !withinY) return null;
+  return navDropTargetFromTrack(event, els.navTrack);
+}
+
+function navStoredPointerDropTarget(drag) {
+  if (!drag.targetKey) return null;
+  const button = els.navTrack?.querySelector(`[data-nav-key="${cssEscape(drag.targetKey)}"]`);
+  return button ? { button, position: drag.position || "before" } : null;
+}
+
 function handleNavDragStart(event) {
   const button = event.target.closest("[data-nav-key]");
   if (!button) return false;
-  if (!ui.navShortcutHints) {
+  if (!ui.navOpen && !ui.navDocked) {
     event.preventDefault();
     return true;
   }
@@ -4869,6 +6213,13 @@ function handleNavDragOver(event) {
   event.preventDefault();
   if (button && button.dataset.navKey !== ui.navDragKey) {
     setNavDropMarker(button, navDropPositionForEvent(event, button));
+  } else if (track) {
+    const target = navDropTargetFromTrack(event, track);
+    if (target) {
+      setNavDropMarker(target.button, target.position);
+    } else {
+      clearNavDropMarkers();
+    }
   } else {
     clearNavDropMarkers();
   }
@@ -4891,6 +6242,9 @@ function handleNavDrop(event) {
   event.preventDefault();
   if (button && button.dataset.navKey !== ui.navDragKey) {
     reorderNav(ui.navDragKey, button.dataset.navKey, navDropPositionForEvent(event, button));
+  } else if (track) {
+    const target = navDropTargetFromTrack(event, track);
+    if (target) reorderNav(ui.navDragKey, target.button.dataset.navKey, target.position);
   }
   clearNavDrag();
   return true;
@@ -4899,6 +6253,19 @@ function handleNavDrop(event) {
 function navDropPositionForEvent(event, button) {
   const rect = button.getBoundingClientRect();
   return event.clientY > rect.top + rect.height / 2 ? "after" : "before";
+}
+
+function navDropTargetFromTrack(event, track) {
+  let lastButton = null;
+  for (const button of track.querySelectorAll("[data-nav-key]")) {
+    if (button.dataset.navKey === ui.navDragKey) continue;
+    lastButton = button;
+    const rect = button.getBoundingClientRect();
+    if (event.clientY <= rect.top + rect.height / 2) {
+      return { button, position: "before" };
+    }
+  }
+  return lastButton ? { button: lastButton, position: "after" } : null;
 }
 
 function setNavDropMarker(button, position) {
@@ -4921,6 +6288,7 @@ function clearNavDrag() {
 
 function reorderNav(dragKey, targetKey, position = "before") {
   const order = normalizeNavOrder(state.settings.navOrder);
+  const previousOrder = order.join("|");
   if (!dragKey || !targetKey || dragKey === targetKey) return false;
   const fromIndex = order.indexOf(dragKey);
   if (fromIndex < 0 || !order.includes(targetKey)) return false;
@@ -4928,7 +6296,9 @@ function reorderNav(dragKey, targetKey, position = "before") {
   const targetIndex = order.indexOf(targetKey);
   const insertIndex = position === "after" ? targetIndex + 1 : targetIndex;
   order.splice(insertIndex, 0, dragKey);
-  state.settings.navOrder = normalizeNavOrder(order);
+  const nextOrder = normalizeNavOrder(order);
+  if (nextOrder.join("|") === previousOrder) return false;
+  state.settings.navOrder = nextOrder;
   saveState();
   renderNav();
   showToast("목차 순서를 변경했습니다.");
@@ -5134,7 +6504,7 @@ function toggleProjectDetail(projectId) {
 }
 
 function openProjectEditor(projectId) {
-  if (!state.projects.some((project) => project.id === projectId)) return;
+  if (!collectionIdMap("projects").has(projectId)) return;
   ui.expandedProjectId = projectId;
   ui.editingProjectId = ui.editingProjectId === projectId ? "" : projectId;
   renderView({ soft: true });
@@ -5143,7 +6513,7 @@ function openProjectEditor(projectId) {
 }
 
 function openProjectDeleteConfirm(projectId) {
-  if (!state.projects.some((project) => project.id === projectId)) return;
+  if (!collectionIdMap("projects").has(projectId)) return;
   ui.projectDeleteConfirmId = projectId;
   renderOverlays();
 }
@@ -5252,7 +6622,7 @@ function clearTodayTaskPropertyTransitions() {
 }
 
 function updateTodayTaskProperty(taskId, field, value, options = {}) {
-  const task = state.tasks.find((entry) => entry.id === taskId);
+  const task = itemById("tasks", taskId);
   if (!task || !field) return;
   const previousBodyHeight = measureTodayTaskPropsBodyHeight(options.choice?.closest("[data-task-props]"));
   const commit = () => commitTodayTaskPropertyUpdate(taskId, field, value, { previousBodyHeight });
@@ -5261,7 +6631,7 @@ function updateTodayTaskProperty(taskId, field, value, options = {}) {
 }
 
 function commitTodayTaskPropertyUpdate(taskId, field, value, options = {}) {
-  const task = state.tasks.find((entry) => entry.id === taskId);
+  const task = itemById("tasks", taskId);
   if (!task || !field) return;
   applyTaskFieldValue(task, field, value);
   saveState();
@@ -5273,7 +6643,7 @@ function commitTodayTaskPropertyUpdate(taskId, field, value, options = {}) {
 }
 
 function findTodayTaskPropsRoot(taskId) {
-  return Array.from(app.querySelectorAll("[data-task-props]")).find((node) => node.dataset.taskProps === taskId) || null;
+  return app.querySelector(`[data-task-props="${cssEscape(taskId)}"]`);
 }
 
 function measureTodayTaskPropsBodyHeight(root) {
@@ -5327,19 +6697,22 @@ function animateTodayTaskPropertyChoiceCommit(taskId, field, value, choice, onCo
   const editor = choice.closest(".task-property-editor");
   const group = choice.closest(".task-property-choice-grid, .task-date-choice-grid");
   if (!editor || !group || editor.classList.contains("is-committing-choice") || editor.classList.contains("is-leaving")) return false;
-  const choices = Array.from(group.querySelectorAll(".task-property-choice"));
-  const selected =
-    choices.find((entry) => {
-      return entry.dataset.taskPropertyValue === taskId && entry.dataset.taskPropertyField === field && entry.dataset.taskPropertyNext === value;
-    }) || choice;
+  const choices = group.querySelectorAll(".task-property-choice");
+  let selected = choice;
+  for (const entry of choices) {
+    if (entry.dataset.taskPropertyValue === taskId && entry.dataset.taskPropertyField === field && entry.dataset.taskPropertyNext === value) {
+      selected = entry;
+      break;
+    }
+  }
   const selectedRect = selected.getBoundingClientRect();
   const groupRect = group.getBoundingClientRect();
   selected.style.setProperty("--choice-slide-x", `${Math.round((groupRect.left - selectedRect.left) * 100) / 100}px`);
   editor.classList.add("is-committing-choice");
   selected.classList.add("is-choice-sliding", "is-selected");
-  choices.forEach((entry) => {
+  for (const entry of choices) {
     if (entry !== selected) entry.classList.add("is-choice-fading");
-  });
+  }
   let done = false;
   const finish = (event) => {
     if (event && event.propertyName !== "transform") return;
@@ -5375,7 +6748,7 @@ function toggleHabitDetail(habitId) {
 }
 
 function openHabitEditor(habitId) {
-  if (!state.habits.some((habit) => habit.id === habitId)) return;
+  if (!collectionIdMap("habits").has(habitId)) return;
   ui.expandedHabitId = habitId;
   ui.editingHabitId = ui.editingHabitId === habitId ? "" : habitId;
   ui.commandOpen = false;
@@ -5386,7 +6759,7 @@ function openHabitEditor(habitId) {
 }
 
 function openHabitDeleteConfirm(habitId) {
-  if (!state.habits.some((habit) => habit.id === habitId)) return;
+  if (!collectionIdMap("habits").has(habitId)) return;
   ui.habitDeleteConfirmId = habitId;
   renderOverlays();
 }
@@ -5412,7 +6785,7 @@ function confirmHabitDelete(habitId) {
 }
 
 function convertCapture(captureId, targetType) {
-  const capture = state.captures.find((entry) => entry.id === captureId);
+  const capture = itemById("captures", captureId);
   if (!capture) return;
   const createOptions = { navigate: false };
   let created;
@@ -5501,7 +6874,7 @@ function cancelTaskFlow(captureId) {
 }
 
 function saveTaskFlow(captureId) {
-  const capture = state.captures.find((entry) => entry.id === captureId);
+  const capture = itemById("captures", captureId);
   const draft = getCaptureDraft(captureId);
   if (!capture || !draft) return;
   const targetType = draft.type || "tasks";
@@ -5586,10 +6959,10 @@ function clearTaskFlowDependents(draft, stepKey) {
 
 function syncTaskFlowRelations(draft, changedField) {
   const values = draft.values || {};
-  const goal = state.goals.find((entry) => entry.id === values.goalId);
-  const project = state.projects.find((entry) => entry.id === values.projectId);
-  const resource = state.resources.find((entry) => entry.id === values.resourceId);
-  const projectGoal = state.goals.find((entry) => entry.id === project?.goalId);
+  const goal = itemById("goals", values.goalId);
+  const project = itemById("projects", values.projectId);
+  const resource = itemById("resources", values.resourceId);
+  const projectGoal = itemById("goals", project?.goalId);
 
   if (changedField === "goalId" && goal?.boxId) {
     values.boxId = goal.boxId;
@@ -5607,7 +6980,7 @@ function isTaskFlowAnimating(captureId) {
 }
 
 function refreshCaptureCard(captureId, options = {}) {
-  const capture = state.captures.find((entry) => entry.id === captureId);
+  const capture = itemById("captures", captureId);
   const current = document.querySelector(`[data-select-type="captures"][data-select-id="${captureId}"]`);
   if (!capture || !current) {
     renderView({ soft: true });
@@ -5677,8 +7050,11 @@ function animateTaskFlowChoiceCommit(captureId, stepKey, value, onComplete) {
   const flow = document.querySelector(`[data-task-flow="${captureId}"]`);
   const row = flow?.querySelector(`.capture-flow-row.is-active[data-flow-index]`);
   if (!flow || !row || flow.classList.contains("is-flow-animating")) return false;
-  const options = Array.from(row.querySelectorAll(".capture-flow-option"));
-  const selected = options.find((option) => option.dataset.flowStep === stepKey && option.dataset.flowValue === value);
+  const options = row.querySelectorAll(".capture-flow-option");
+  let selected = null;
+  options.forEach((option) => {
+    if (option.dataset.flowStep === stepKey && option.dataset.flowValue === value) selected = option;
+  });
   const optionGroup = row.querySelector(".capture-flow-options");
   if (!selected || !optionGroup) return false;
   const selectedRect = selected.getBoundingClientRect();
@@ -5714,20 +7090,22 @@ function animateTaskFlowOptionReveal(card, options = {}) {
   const flow = card.querySelector(".capture-flow");
   const row = flow?.querySelector(`.capture-flow-row.is-active`);
   if (!flow || !row || !revealStepKey) return;
-  const selected = Array.from(row.querySelectorAll(".capture-flow-option")).find((option) => {
-    return option.dataset.flowStep === revealStepKey && option.classList.contains("is-selected");
+  const flowOptions = row.querySelectorAll(".capture-flow-option");
+  let selected = null;
+  flowOptions.forEach((option) => {
+    if (option.dataset.flowStep === revealStepKey && option.classList.contains("is-selected")) selected = option;
   });
-  const hiddenOptions = Array.from(row.querySelectorAll(".capture-flow-option")).filter((option) => option !== selected);
   flow.classList.add("is-flow-animating");
   row.classList.add("is-revealing-options", "is-reveal-prep");
   const revealOriginRect = selected?.getBoundingClientRect() || selectionOriginRect;
   const selectedCenter = revealOriginRect ? revealOriginRect.left + revealOriginRect.width / 2 : 0;
-  const orderedOptions = hiddenOptions
-    .map((option) => {
-      const rect = option.getBoundingClientRect();
-      return { option, rect, distance: Math.abs(rect.left + rect.width / 2 - selectedCenter) };
-    })
-    .sort((a, b) => a.distance - b.distance);
+  const orderedOptions = [];
+  flowOptions.forEach((option) => {
+    if (option === selected) return;
+    const rect = option.getBoundingClientRect();
+    orderedOptions.push({ option, rect, distance: Math.abs(rect.left + rect.width / 2 - selectedCenter) });
+  });
+  orderedOptions.sort((a, b) => a.distance - b.distance);
   orderedOptions.forEach(({ option, rect: optionRect }, index) => {
     const originLeft = revealOriginRect ? revealOriginRect.left : optionRect.left - 10;
     const originTop = revealOriginRect ? revealOriginRect.top : optionRect.top - 6;
@@ -5753,11 +7131,11 @@ function animateTaskFlowOptionReveal(card, options = {}) {
       }
     });
   });
-  const revealDuration = 1120 + hiddenOptions.length * 74;
+  const revealDuration = 1120 + orderedOptions.length * 74;
   window.setTimeout(() => {
     flow.classList.remove("is-flow-animating");
     row.classList.remove("is-revealing-options", "is-reveal-prep", "is-revealed");
-    hiddenOptions.forEach((option) => {
+    orderedOptions.forEach(({ option }) => {
       option.classList.remove("is-choice-reappearing");
       option.style.removeProperty("--choice-reveal-index");
       option.style.removeProperty("--choice-reveal-x");
@@ -5773,14 +7151,17 @@ function animateTaskFlowOptionReveal(card, options = {}) {
 function collapseTaskFlowToStep(captureId, targetIndex, onComplete) {
   const flow = document.querySelector(`[data-task-flow="${captureId}"]`);
   if (!flow) return false;
-  const rows = Array.from(flow.querySelectorAll(":scope > .capture-flow-row, :scope > .capture-flow-save"));
-  const collapsing = rows.filter((row) => {
-    return Number(row.dataset.flowIndex || 0) > targetIndex;
+  const collapsing = [];
+  let targetRow = null;
+  flow.querySelectorAll(":scope > .capture-flow-row, :scope > .capture-flow-save").forEach((row) => {
+    if (Number(row.dataset.flowIndex || 0) > targetIndex) {
+      collapsing.push(row);
+    } else {
+      targetRow = row;
+    }
   });
   if (!collapsing.length) return false;
   const flowRect = flow.getBoundingClientRect();
-  const keepRows = rows.filter((row) => Number(row.dataset.flowIndex || 0) <= targetIndex);
-  const targetRow = keepRows.at(-1);
   const targetHeight = targetRow ? Math.max(0, targetRow.getBoundingClientRect().bottom - flowRect.top) : 0;
   flow.style.overflow = "hidden";
   flow.style.height = `${flowRect.height}px`;
@@ -5847,9 +7228,9 @@ function replaceDatePart(dateTime, date, fallbackTime) {
 }
 
 function normalizeTaskRelations(task, changedField) {
-  const goal = state.goals.find((entry) => entry.id === task.goalId);
-  const project = state.projects.find((entry) => entry.id === task.projectId);
-  const resource = state.resources.find((entry) => entry.id === task.resourceId);
+  const goal = itemById("goals", task.goalId);
+  const project = itemById("projects", task.projectId);
+  const resource = itemById("resources", task.resourceId);
 
   if (changedField === "boxId") {
     if (goal?.boxId && goal.boxId !== task.boxId) task.goalId = "";
@@ -5877,7 +7258,7 @@ function normalizeTaskRelations(task, changedField) {
 }
 
 function toggleTaskDone(taskId, button) {
-  const task = state.tasks.find((entry) => entry.id === taskId);
+  const task = itemById("tasks", taskId);
   if (!task) return;
   const nextDone = task.status !== "done";
   if (nextDone) {
@@ -5902,7 +7283,7 @@ function toggleTaskDone(taskId, button) {
 }
 
 function toggleHabitDone(habitId, date, button) {
-  let instance = state.habitInstances.find((entry) => entry.habitId === habitId && entry.date === date);
+  let instance = habitInstanceForDate(habitId, date);
   if (!instance) {
     instance = { id: id(), habitId, date, completed: false, completedAt: "" };
     state.habitInstances.push(instance);
@@ -5920,9 +7301,12 @@ function toggleHabitDone(habitId, date, button) {
     });
     const progress = card.querySelector("[data-habit-progress]");
     if (progress) {
-      const rangeDays = Array.from(card.querySelectorAll(".habit-day"));
+      const rangeDays = card.querySelectorAll(".habit-day");
       const total = Number(progress.dataset.habitProgressTotal) || rangeDays.length || 7;
-      const doneCount = rangeDays.filter((entry) => entry.classList.contains("is-done")).length;
+      let doneCount = 0;
+      rangeDays.forEach((entry) => {
+        if (entry.classList.contains("is-done")) doneCount += 1;
+      });
       progress.textContent = `${doneCount}/${total}`;
       progress.classList.toggle("teal", doneCount >= Math.ceil(total * 0.7));
       progress.classList.toggle("amber", doneCount < Math.ceil(total * 0.7));
@@ -5994,7 +7378,7 @@ function closeTaskScheduler() {
 }
 
 function scheduleTaskFromScheduler(date, options = {}) {
-  const task = state.tasks.find((entry) => entry.id === ui.scheduler?.taskId);
+  const task = itemById("tasks", ui.scheduler?.taskId);
   if (!task) return;
   if (options.animateDrop) {
     animateSchedulerDrop(() => commitScheduledTask(task, date));
@@ -6004,7 +7388,7 @@ function scheduleTaskFromScheduler(date, options = {}) {
 }
 
 function scheduleTaskActionFromScheduler(action, options = {}) {
-  const task = state.tasks.find((entry) => entry.id === ui.scheduler?.taskId);
+  const task = itemById("tasks", ui.scheduler?.taskId);
   if (!task) return;
   if (options.animateDrop) {
     animateSchedulerDrop(() => commitTaskScheduleAction(task, action));
@@ -6102,40 +7486,58 @@ function cleanupDeletedEntityReferences(type, itemId) {
     delete ui.todayTaskActiveProperty[itemId];
   }
   if (type === "boxes") {
-    [...state.goals, ...state.projects, ...state.tasks, ...state.resources, ...state.habits].forEach((entry) => {
-      if (entry.boxId === itemId) entry.boxId = "";
-    });
+    clearFieldValue(state.goals, "boxId", itemId);
+    clearFieldValue(state.projects, "boxId", itemId);
+    clearFieldValue(state.tasks, "boxId", itemId);
+    clearFieldValue(state.resources, "boxId", itemId);
+    clearFieldValue(state.habits, "boxId", itemId);
   }
   if (type === "projects") {
-    [...state.tasks, ...state.resources, ...state.habits].forEach((entry) => {
-      if (entry.projectId === itemId) entry.projectId = "";
-    });
+    clearFieldValue(state.tasks, "projectId", itemId);
+    clearFieldValue(state.resources, "projectId", itemId);
+    clearFieldValue(state.habits, "projectId", itemId);
     if (ui.expandedProjectId === itemId) ui.expandedProjectId = "";
     if (ui.editingProjectId === itemId) ui.editingProjectId = "";
     if (ui.projectDeleteConfirmId === itemId) ui.projectDeleteConfirmId = "";
   }
   if (type === "resources") {
-    state.tasks.forEach((task) => {
-      if (task.resourceId === itemId) task.resourceId = "";
-    });
-    ui.resourceNotes = ui.resourceNotes.filter((note) => note.id !== itemId);
+    clearFieldValue(state.tasks, "resourceId", itemId);
+    removeByFieldInPlace(ui.resourceNotes, "id", itemId);
   }
   if (type === "habits") {
-    state.habitInstances = state.habitInstances.filter((instance) => instance.habitId !== itemId);
+    removeByFieldInPlace(state.habitInstances, "habitId", itemId);
     if (ui.expandedHabitId === itemId) ui.expandedHabitId = "";
     if (ui.editingHabitId === itemId) ui.editingHabitId = "";
     if (ui.habitDeleteConfirmId === itemId) ui.habitDeleteConfirmId = "";
   }
-  state.captures.forEach((capture) => {
+  for (const capture of state.captures) {
     if (capture.convertedTo === type && capture.convertedId === itemId) {
       capture.convertedTo = "";
       capture.convertedId = "";
     }
-  });
+  }
+}
+
+function clearFieldValue(collection, field, value) {
+  for (const entry of collection) {
+    if (entry[field] === value) entry[field] = "";
+  }
+}
+
+function removeByFieldInPlace(collection, field, value) {
+  let writeIndex = 0;
+  for (let readIndex = 0; readIndex < collection.length; readIndex += 1) {
+    const item = collection[readIndex];
+    if (item?.[field] === value) continue;
+    if (writeIndex !== readIndex) collection[writeIndex] = item;
+    writeIndex += 1;
+  }
+  collection.length = writeIndex;
+  return collection;
 }
 
 function deleteDragItemTitle(type, itemId) {
-  const item = getCollection(type).find((entry) => entry.id === itemId);
+  const item = itemById(type, itemId);
   if (!item) return "";
   return item.title || item.name || "(제목 없음)";
 }
@@ -6162,9 +7564,32 @@ function getCollection(type) {
   return [];
 }
 
+function clearStateIndexes() {
+  collectionIndexCache.clear();
+  habitInstanceIndexCache = null;
+  relationIndexCache = null;
+}
+
+function collectionIdMap(type) {
+  const collection = getCollection(type);
+  const cached = collectionIndexCache.get(type);
+  if (cached?.collection === collection && cached.size === collection.length) return cached.map;
+  const map = new Map();
+  for (const entry of collection) {
+    if (entry?.id) map.set(entry.id, entry);
+  }
+  collectionIndexCache.set(type, { collection, size: collection.length, map });
+  return map;
+}
+
+function itemById(type, itemId) {
+  if (!itemId) return null;
+  return collectionIdMap(type).get(itemId) || null;
+}
+
 function updateBlockText(blockContent) {
   const editor = blockContent.closest(".block-editor");
-  const item = getCollection(editor.dataset.ownerType).find((entry) => entry.id === editor.dataset.ownerId);
+  const item = itemById(editor.dataset.ownerType, editor.dataset.ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockContent.dataset.blockContent);
   if (!block) return;
   const rawText = blockContent.textContent || "";
@@ -6195,14 +7620,17 @@ function updateBlockText(blockContent) {
 }
 
 function splitBlockFromNativeLineBreak(ownerType, ownerId, blockId, rawText) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return;
   const index = item.blocks.findIndex((entry) => entry.id === blockId);
   if (index < 0) return;
   const parts = rawText.split(/\r\n|\n|\r/);
-  item.blocks[index].text = parts.shift() || "";
+  item.blocks[index].text = parts[0] || "";
   item.blocks[index].checked = false;
-  const inserted = parts.map((text) => ({ id: id(), type: "paragraph", text, checked: false }));
+  const inserted = [];
+  for (let partIndex = 1; partIndex < parts.length; partIndex += 1) {
+    inserted.push({ id: id(), type: "paragraph", text: parts[partIndex], checked: false });
+  }
   item.blocks.splice(index + 1, 0, ...inserted);
   saveState();
   renderDetail({ soft: true });
@@ -6214,7 +7642,7 @@ function splitBlockFromNativeLineBreak(ownerType, ownerId, blockId, rawText) {
 }
 
 function toggleBlockChecked(ownerType, ownerId, blockId, button) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return;
   block.checked = !block.checked;
@@ -6227,30 +7655,20 @@ function toggleBlockChecked(ownerType, ownerId, blockId, button) {
 }
 
 function applyMarkdownShortcut(blockContent, block, rawText) {
-  const shortcuts = [
-    [/^#\s$/, "heading1", ""],
-    [/^##\s$/, "heading2", ""],
-    [/^###\s$/, "heading3", ""],
-    [/^[-*]\s$/, "bullet", ""],
-    [/^1[.)]\s$/, "numbered", ""],
-    [/^\[\s?\]\s$/, "todo", ""],
-    [/^>\s$/, "toggle", ""],
-    [/^!\s$/, "callout", ""],
-    [/^```$/, "code", ""],
-    [/^---$/, "divider", ""],
-  ];
-  const match = shortcuts.find(([pattern]) => pattern.test(rawText));
-  if (!match) return false;
-  block.type = match[1];
-  block.text = match[2];
-  block.checked = false;
-  const blockElement = blockContent.closest(".block");
-  blockElement.dataset.type = block.type;
-  blockElement.dataset.checked = "false";
-  blockContent.textContent = block.text;
-  placeCaretAtEnd(blockContent);
-  if (block.type === "divider") blockContent.blur();
-  return true;
+  for (const [pattern, type, text] of MARKDOWN_SHORTCUTS) {
+    if (!pattern.test(rawText)) continue;
+    block.type = type;
+    block.text = text;
+    block.checked = false;
+    const blockElement = blockContent.closest(".block");
+    blockElement.dataset.type = block.type;
+    blockElement.dataset.checked = "false";
+    blockContent.textContent = block.text;
+    placeCaretAtEnd(blockContent);
+    if (block.type === "divider") blockContent.blur();
+    return true;
+  }
+  return false;
 }
 
 function placeCaretAtEnd(element) {
@@ -6296,7 +7714,7 @@ function splitTextAtSelection(element) {
 }
 
 function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   if (!item) return;
   if (!item.blocks) item.blocks = [];
   const index = item.blocks.findIndex((block) => block.id === blockId);
@@ -6305,10 +7723,9 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const split = splitTextAtSelection(blockContent);
   current.text = split.before;
   current.checked = false;
-  const continuedTypes = ["bullet", "numbered", "todo"];
   const newBlock = {
     id: id(),
-    type: continuedTypes.includes(current.type) && split.before ? current.type : "paragraph",
+    type: CONTINUED_BLOCK_TYPES.has(current.type) && split.before ? current.type : "paragraph",
     text: split.after,
     checked: false,
   };
@@ -6323,7 +7740,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
 }
 
 function insertBlock(ownerType, ownerId, afterBlockId) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   if (!item) return;
   if (!item.blocks) item.blocks = [];
   const index = item.blocks.findIndex((block) => block.id === afterBlockId);
@@ -6338,7 +7755,7 @@ function insertBlock(ownerType, ownerId, afterBlockId) {
 }
 
 function removeBlock(ownerType, ownerId, blockId) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   if (!item || item.blocks.length <= 1) return;
   const index = item.blocks.findIndex((block) => block.id === blockId);
   item.blocks.splice(index, 1);
@@ -6352,7 +7769,7 @@ function removeBlock(ownerType, ownerId, blockId) {
 }
 
 function changeBlockType(ownerType, ownerId, blockId, type) {
-  const item = getCollection(ownerType).find((entry) => entry.id === ownerId);
+  const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return;
   block.type = type;
@@ -6414,7 +7831,7 @@ function isCaretOnVerticalEdge(element, direction) {
 function caretRectFor(element) {
   const range = selectionRangeInside(element);
   if (!range) return null;
-  const rect = Array.from(range.getClientRects()).find((entry) => entry.width || entry.height) || range.getBoundingClientRect();
+  const rect = firstVisibleClientRect(range.getClientRects()) || range.getBoundingClientRect();
   if (rect && (rect.width || rect.height)) return rect;
   const elementRect = element.getBoundingClientRect();
   return {
@@ -6431,7 +7848,22 @@ function textLineRectsFor(element) {
   if (!(element.textContent || "")) return [];
   const range = document.createRange();
   range.selectNodeContents(element);
-  return Array.from(range.getClientRects()).filter((entry) => entry.width || entry.height);
+  return visibleClientRects(range.getClientRects());
+}
+
+function firstVisibleClientRect(rects) {
+  for (const rect of rects) {
+    if (rect.width || rect.height) return rect;
+  }
+  return null;
+}
+
+function visibleClientRects(rects) {
+  const visible = [];
+  for (const rect of rects) {
+    if (rect.width || rect.height) visible.push(rect);
+  }
+  return visible;
 }
 
 function focusBlockAtPoint(target, direction, x) {
@@ -6494,18 +7926,16 @@ function closeSlashMenu() {
 
 function moveSlashSelection(offset) {
   if (!ui.slash) return;
-  const count = Object.keys(BLOCK_TYPES).length;
-  ui.slash.selectedIndex = ((ui.slash.selectedIndex || 0) + offset + count) % count;
+  ui.slash.selectedIndex = ((ui.slash.selectedIndex || 0) + offset + BLOCK_TYPE_COUNT) % BLOCK_TYPE_COUNT;
   renderOverlays();
   requestAnimationFrame(() => document.querySelector(".slash-menu .menu-item.is-active")?.scrollIntoView({ block: "nearest" }));
 }
 
 function applySlashSelection() {
   if (!ui.slash) return;
-  const types = Object.keys(BLOCK_TYPES);
-  const selectedIndex = Math.max(0, Math.min(ui.slash.selectedIndex || 0, types.length - 1));
+  const selectedIndex = Math.max(0, Math.min(ui.slash.selectedIndex || 0, BLOCK_TYPE_COUNT - 1));
   const slash = ui.slash;
-  changeBlockType(slash.ownerType, slash.ownerId, slash.blockId, types[selectedIndex]);
+  changeBlockType(slash.ownerType, slash.ownerId, slash.blockId, BLOCK_TYPE_KEYS[selectedIndex]);
 }
 
 async function apiJson(path, options = {}) {
@@ -6523,6 +7953,187 @@ async function apiJson(path, options = {}) {
   return payload;
 }
 
+async function initializeDatabaseState() {
+  try {
+    const status = await apiJson("/api/state/status");
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      configured: Boolean(status.configured),
+      connected: Boolean(status.connected),
+      loading: false,
+      error: status.error || "",
+      lastSyncedAt: status.updatedAt || "",
+    };
+    if (!databaseBackendStatus.connected) {
+      renderDatabaseStatusIfVisible();
+      return;
+    }
+
+    const payload = await apiJson("/api/state");
+    if (payload.state) {
+      const shouldCleanRemoteState = hasDeprecatedSettings(payload.state);
+      const remoteState = normalizeState(payload.state);
+      const shouldUploadLocal =
+        localStateChangedBeforeDatabaseReady ||
+        (localStateHadStoredState &&
+          stateTimestamp(state.updatedAt) > stateTimestamp(remoteState.updatedAt) + 1000);
+      if (shouldUploadLocal) {
+        await saveStateRemoteNow();
+      } else {
+        state = remoteState;
+        clearLegacyLocalState();
+        databaseBackendStatus.lastSyncedAt = payload.updatedAt || remoteState.updatedAt || "";
+        rerenderAfterStateReplace();
+        if (shouldCleanRemoteState) await saveStateRemoteNow();
+      }
+    } else {
+      const shouldSeedInitialRemoteState = !localStateHadStoredState && !localStateChangedBeforeDatabaseReady;
+      if (shouldSeedInitialRemoteState) {
+        state = createSeedState();
+        rerenderAfterStateReplace();
+      }
+      await saveStateRemoteNow();
+    }
+    localStateChangedBeforeDatabaseReady = false;
+  } catch (error) {
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      configured: true,
+      connected: false,
+      loading: false,
+      saving: false,
+      error: error.message || "PostgreSQL 상태를 불러오지 못했습니다.",
+    };
+    renderDatabaseStatusIfVisible();
+  }
+}
+
+function rerenderAfterStateReplace() {
+  clearStateIndexes();
+  updateNav();
+  renderView({ soft: true });
+  renderDetail();
+  renderOverlays();
+  updateTopbarStickiness();
+}
+
+function renderDatabaseStatusIfVisible() {
+  if (ui.view === "database") {
+    renderView({ soft: true });
+  }
+}
+
+function stateTimestamp(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function stateRequestBody() {
+  return JSON.stringify({ state });
+}
+
+function hasDeprecatedSettings(nextState) {
+  const settings = nextState?.settings || {};
+  return Object.prototype.hasOwnProperty.call(settings, "appMode") || Object.prototype.hasOwnProperty.call(settings, "notionSyncMode");
+}
+
+function queueRemoteStateSave(options = {}) {
+  if (!databaseBackendStatus.connected) return;
+  remoteStateSavePending = true;
+  window.clearTimeout(remoteStateSaveTimer);
+  if (options.immediate) {
+    flushRemoteStateSave(options);
+    return;
+  }
+  remoteStateSaveTimer = window.setTimeout(flushRemoteStateSave, REMOTE_STATE_SAVE_DELAY_MS);
+}
+
+async function flushRemoteStateSave(options = {}) {
+  if (!databaseBackendStatus.connected || remoteStateSaveInFlight || !remoteStateSavePending) return;
+  remoteStateSavePending = false;
+  remoteStateSaveInFlight = true;
+  let retryLater = false;
+  try {
+    const saved = await saveStateRemoteNow(options);
+    if (!saved && databaseBackendStatus.connected) {
+      remoteStateSavePending = true;
+      retryLater = !options.keepalive;
+    }
+  } finally {
+    remoteStateSaveInFlight = false;
+    if (retryLater) {
+      window.clearTimeout(remoteStateSaveTimer);
+      remoteStateSaveTimer = window.setTimeout(flushRemoteStateSave, REMOTE_STATE_RETRY_DELAY_MS);
+    } else if (remoteStateSavePending) {
+      queueRemoteStateSave({ immediate: true });
+    }
+  }
+}
+
+function handleVisibilityStateSave() {
+  if (document.visibilityState === "hidden") flushRemoteStateSave({ keepalive: true });
+}
+
+function handlePageHideStateSave() {
+  if (!databaseBackendStatus.connected || !remoteStateSavePending) return;
+  if (sendRemoteStateBeacon()) {
+    remoteStateSavePending = false;
+    window.clearTimeout(remoteStateSaveTimer);
+    return;
+  }
+  flushRemoteStateSave({ keepalive: true });
+}
+
+function sendRemoteStateBeacon() {
+  if (!navigator.sendBeacon) return false;
+  try {
+    const body = stateRequestBody();
+    const blob = new Blob([body], { type: "application/json" });
+    return navigator.sendBeacon("/api/state", blob);
+  } catch {
+    return false;
+  }
+}
+
+async function saveStateRemoteNow(options = {}) {
+  if (!databaseBackendStatus.connected) return null;
+  const renderStatus = !options.keepalive;
+  if (renderStatus) {
+    databaseBackendStatus.saving = true;
+    renderDatabaseStatusIfVisible();
+  }
+  try {
+    const payload = await apiJson("/api/state", {
+      method: options.keepalive ? "POST" : "PUT",
+      keepalive: Boolean(options.keepalive),
+      body: stateRequestBody(),
+    });
+    if (payload.state) {
+      state = normalizeState(payload.state);
+      clearStateIndexes();
+    }
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      configured: true,
+      connected: true,
+      saving: false,
+      error: "",
+      lastSyncedAt: payload.updatedAt || new Date().toISOString(),
+    };
+    clearLegacyLocalState();
+    if (renderStatus) renderDatabaseStatusIfVisible();
+    return payload;
+  } catch (error) {
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      saving: false,
+      error: error.message || "PostgreSQL 저장에 실패했습니다.",
+    };
+    if (renderStatus) renderDatabaseStatusIfVisible();
+    return null;
+  }
+}
+
 async function refreshGoogleBackendStatus(options = {}) {
   try {
     const payload = await apiJson("/api/google/status");
@@ -6532,8 +8143,11 @@ async function refreshGoogleBackendStatus(options = {}) {
       loading: false,
     };
     if (payload.connected) {
-      state.settings.googleConnectedAt = payload.connectedAt || state.settings.googleConnectedAt || new Date().toISOString();
-      saveState();
+      const connectedAt = payload.connectedAt || state.settings.googleConnectedAt || new Date().toISOString();
+      if (state.settings.googleConnectedAt !== connectedAt) {
+        state.settings.googleConnectedAt = connectedAt;
+        saveState();
+      }
       if (options.fetchEvents) await fetchGoogleCalendarEvents({ silent: true });
     } else if (state.settings.googleConnectedAt) {
       state.settings.googleConnectedAt = "";
@@ -6558,8 +8172,9 @@ async function connectGoogle() {
       renderView({ soft: true });
       return;
     }
-    window.sessionStorage.setItem("sygma-google-return-view", ui.view || "calendar");
-    window.location.href = `/api/google/auth/start?returnTo=${encodeURIComponent("/?google=connected")}`;
+    const returnView = defaultNavOrder().includes(ui.view) ? ui.view : "calendar";
+    const returnTo = `/?google=connected&view=${encodeURIComponent(returnView)}`;
+    window.location.href = `/api/google/auth/start?returnTo=${encodeURIComponent(returnTo)}`;
   } catch {
     showToast("Google 로그인 준비 상태를 확인하지 못했습니다.");
   }
@@ -6583,12 +8198,10 @@ async function fetchGoogleCalendarEvents(options = {}) {
 
   try {
     const payload = await apiJson(`/api/google/calendar-data?${params}`);
-    const calendars = (payload.calendars || []).map(normalizeGoogleCalendarEntry).filter(Boolean);
+    const calendars = normalizeGoogleCalendarEntries(payload.calendars);
     state.googleCalendars = calendars;
     ensureGoogleCalendarVisibility(calendars);
-    state.googleEvents = (payload.events || [])
-      .map((entry) => normalizeGoogleApiEvent(entry.event, entry.calendar))
-      .filter(Boolean);
+    state.googleEvents = normalizeGoogleApiEvents(payload.events);
     state.settings.lastGoogleFetchAt = new Date().toISOString();
     saveState();
     if (!options.silent) showToast(`${state.googleEvents.length}개 Google 일정을 불러왔습니다.`);
@@ -6608,13 +8221,14 @@ async function syncGoogleCalendar() {
   }
   const calendarId = state.settings.googleCalendarId || "primary";
   const calendar = getGoogleCalendarOptions().find((entry) => entry.id === calendarId) || fallbackGoogleCalendar(calendarId);
-  const tasks = state.tasks.filter((task) => task.scheduledStart && task.status !== "done" && !task.googleEventId);
+  const tasks = googleSyncTaskCandidates();
   if (!tasks.length) {
     showToast("동기화할 예정 작업이 없습니다.");
     return;
   }
 
   let synced = 0;
+  const syncedEvents = [];
   for (const task of tasks) {
     const start = new Date(task.scheduledStart);
     const end = task.scheduledEnd ? new Date(task.scheduledEnd) : new Date(start.getTime() + (task.estimatedMinutes || 30) * 60000);
@@ -6633,16 +8247,41 @@ async function syncGoogleCalendar() {
       });
       task.googleEventId = payload.event.id;
       const normalized = normalizeGoogleApiEvent(payload.event, calendar);
-      if (normalized) {
-        state.googleEvents = [...(state.googleEvents || []).filter((entry) => entry.id !== normalized.id), normalized];
-      }
+      if (normalized) syncedEvents.push(normalized);
       synced += 1;
     } catch {}
   }
+  upsertGoogleEvents(syncedEvents);
   state.settings.lastGoogleSyncAt = new Date().toISOString();
   saveState();
   showToast(`${synced}개 작업을 Google Calendar로 보냈습니다.`);
   renderView({ soft: true });
+}
+
+function googleSyncTaskCandidates() {
+  const tasks = [];
+  for (const task of state.tasks) {
+    if (task.scheduledStart && task.status !== "done" && !task.googleEventId) tasks.push(task);
+  }
+  return tasks;
+}
+
+function upsertGoogleEvents(events = []) {
+  const incomingById = new Map();
+  for (const event of events) {
+    if (!event?.id) continue;
+    if (incomingById.has(event.id)) incomingById.delete(event.id);
+    incomingById.set(event.id, event);
+  }
+  if (!incomingById.size) return;
+  const nextEvents = [];
+  for (const event of state.googleEvents || []) {
+    if (!incomingById.has(event.id)) nextEvents.push(event);
+  }
+  for (const event of incomingById.values()) {
+    nextEvents.push(event);
+  }
+  state.googleEvents = nextEvents;
 }
 
 function exportJson() {
@@ -6650,7 +8289,7 @@ function exportJson() {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `sygma-local-${dateKey(new Date())}.json`;
+  anchor.download = `sygma-postgresql-${dateKey(new Date())}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
   showToast("JSON을 내보냈습니다.");
@@ -6681,59 +8320,195 @@ function resetDemoData() {
 
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
     if (raw) {
       const normalized = normalizeState(JSON.parse(raw));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+      localStateHadStoredState = true;
       return normalized;
     }
   } catch {
-    localStorage.removeItem(STORAGE_KEY);
+    clearLegacyLocalState();
   }
-  const seeded = createSeedState();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-  return seeded;
+  return createMinimalSeedState();
 }
 
 function normalizeState(next) {
-  const seeded = createSeedState();
-  const tasks = (next.tasks || seeded.tasks).map(({ kind, ...task }) => task);
-  const journals = (next.journals || seeded.journals).map(({ kind, ...journal }) => journal);
-  const shouldSeedStatsDemo = !next.settings?.statsDemoDataSeeded;
-  const settings = { ...seeded.settings, ...(next.settings || {}) };
+  if (!next || typeof next !== "object" || Array.isArray(next)) next = {};
+  let seeded = null;
+  const fallbackState = () => (seeded ||= createMinimalSeedState());
+  const nextSettings = isPlainObject(next.settings) ? next.settings : {};
+  const tasks = objectArrayWithoutLegacyKind(next.tasks, []);
+  const journals = objectArrayWithoutLegacyKind(next.journals, []);
+  const shouldSeedStatsDemo = !nextSettings.statsDemoDataSeeded;
+  const settings = { ...createDefaultSettings(), ...nextSettings };
+  delete settings.appMode;
+  delete settings.notionSyncMode;
   settings.navOrder = normalizeNavOrder(settings.navOrder);
   settings.calendarSources = normalizeCalendarSources(settings.calendarSources);
-  settings.visibleGoogleCalendars = { ...(settings.visibleGoogleCalendars || {}) };
-  const googleCalendars = (next.googleCalendars || seeded.googleCalendars).map(normalizeGoogleCalendarEntry).filter(Boolean);
-  googleCalendars.forEach((calendar) => {
+  settings.viewControls = normalizeViewControls(settings.viewControls);
+  settings.visibleGoogleCalendars = isPlainObject(settings.visibleGoogleCalendars) ? { ...settings.visibleGoogleCalendars } : {};
+  const googleCalendars = normalizeGoogleCalendarEntries(objectArrayOrFallback(next.googleCalendars, []));
+  for (const calendar of googleCalendars) {
     if (settings.visibleGoogleCalendars[calendar.id] === undefined) {
       settings.visibleGoogleCalendars[calendar.id] = calendar.selected !== false && !calendar.hidden;
     }
-  });
+  }
   const normalized = {
     version: 3,
-    createdAt: next.createdAt || seeded.createdAt,
-    updatedAt: next.updatedAt || seeded.updatedAt,
+    createdAt: next.createdAt || fallbackState().createdAt,
+    updatedAt: next.updatedAt || fallbackState().updatedAt,
     settings,
-    captures: next.captures || seeded.captures,
-    boxes: next.boxes || seeded.boxes,
-    goals: next.goals || seeded.goals,
-    projects: next.projects || seeded.projects,
+    captures: objectArrayOrFallback(next.captures, fallbackCollection(fallbackState, "captures")),
+    boxes: objectArrayOrFallback(next.boxes, fallbackCollection(fallbackState, "boxes")),
+    goals: objectArrayOrFallback(next.goals, fallbackCollection(fallbackState, "goals")),
+    projects: objectArrayOrFallback(next.projects, fallbackCollection(fallbackState, "projects")),
     tasks,
-    resources: next.resources || seeded.resources,
-    habits: next.habits || seeded.habits,
-    habitInstances: next.habitInstances || seeded.habitInstances,
+    resources: objectArrayOrFallback(next.resources, fallbackCollection(fallbackState, "resources")),
+    habits: objectArrayOrFallback(next.habits, []),
+    habitInstances: objectArrayOrFallback(next.habitInstances, []),
     journals,
     googleCalendars,
-    googleEvents: next.googleEvents || seeded.googleEvents,
-    links: next.links || seeded.links,
+    googleEvents: objectArrayOrFallback(next.googleEvents, []),
+    links: objectArrayOrFallback(next.links, []),
   };
   return ensureStatsDemoData(normalized, { force: shouldSeedStatsDemo });
 }
 
+function createDefaultSettings() {
+  return {
+    navOrder: defaultNavOrder(),
+    googleCalendarId: "primary",
+    googleConnectedAt: "",
+    lastGoogleFetchAt: "",
+    lastGoogleSyncAt: "",
+    calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
+    visibleGoogleCalendars: {},
+    viewControls: defaultViewControls(),
+    statsDemoDataSeeded: false,
+  };
+}
+
+function defaultViewControls() {
+  const controls = {};
+  for (const key of DEFAULT_NAV_ORDER) {
+    controls[key] = defaultViewControl(key);
+  }
+  return controls;
+}
+
+function defaultViewControl(view) {
+  const defaults = VIEW_CONTROL_DEFAULTS[view] || VIEW_CONTROL_DEFAULTS.today;
+  return {
+    ...defaults,
+    toggles: { ...(defaults.toggles || {}) },
+  };
+}
+
+function normalizeViewControls(value) {
+  const controls = defaultViewControls();
+  if (!isPlainObject(value)) return controls;
+  for (const key of DEFAULT_NAV_ORDER) {
+    const saved = value[key];
+    if (!isPlainObject(saved)) continue;
+    const defaults = VIEW_CONTROL_DEFAULTS[key] || {};
+    controls[key] = {
+      ...controls[key],
+      search: typeof saved.search === "string" ? saved.search : controls[key].search,
+      filter: optionValueAllowed(VIEW_FILTER_OPTIONS[key], saved.filter) ? saved.filter : controls[key].filter,
+      sort: optionValueAllowed(VIEW_SORT_OPTIONS[key], saved.sort) ? saved.sort : controls[key].sort,
+      mode: optionValueAllowed(VIEW_MODE_OPTIONS[key], saved.mode) ? saved.mode : controls[key].mode,
+    };
+    if (key === "resources") {
+      controls[key].type = typeof saved.type === "string" ? saved.type : controls[key].type;
+      controls[key].toggles = normalizeResourceToggles(saved.toggles || defaults.toggles);
+    }
+  }
+  return controls;
+}
+
+function normalizeResourceToggles(value) {
+  const toggles = { pinned: false, readLater: false, important: false, linked: false };
+  if (!isPlainObject(value)) return toggles;
+  for (const [key] of RESOURCE_TOGGLE_FILTERS) {
+    toggles[key] = value[key] === true;
+  }
+  return toggles;
+}
+
+function optionValueAllowed(options, value) {
+  if (!options) return value === undefined || typeof value === "string";
+  for (const [key] of options) {
+    if (key === value) return true;
+  }
+  return false;
+}
+
+function fallbackCollection(fallbackState, key) {
+  return () => fallbackState()[key];
+}
+
+function arrayOrFallback(value, fallback) {
+  if (Array.isArray(value)) return value;
+  return typeof fallback === "function" ? fallback() : fallback;
+}
+
+function objectArrayOrFallback(value, fallback) {
+  const source = arrayOrFallback(value, fallback);
+  let cleaned = null;
+  for (let index = 0; index < source.length; index += 1) {
+    const item = source[index];
+    if (isPlainObject(item)) {
+      if (cleaned) cleaned.push(item);
+      continue;
+    }
+    if (!cleaned) cleaned = source.slice(0, index);
+  }
+  return cleaned || source;
+}
+
+function objectArrayWithoutLegacyKind(value, fallback) {
+  const source = arrayOrFallback(value, fallback);
+  let cleaned = null;
+  for (let index = 0; index < source.length; index += 1) {
+    const item = source[index];
+    if (!isPlainObject(item)) {
+      if (!cleaned) cleaned = source.slice(0, index);
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(item, "kind")) {
+      if (cleaned) cleaned.push(item);
+      continue;
+    }
+    const { kind, ...cleanItem } = item;
+    if (!cleaned) cleaned = source.slice(0, index);
+    cleaned.push(cleanItem);
+  }
+  return cleaned || source;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function saveState() {
+  clearStateIndexes();
   state.updatedAt = new Date().toISOString();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (databaseBackendStatus.connected) {
+    clearLegacyLocalState();
+    queueRemoteStateSave();
+    return;
+  }
+  localStateChangedBeforeDatabaseReady = true;
+  if (!databaseBackendStatus.loading) {
+    databaseBackendStatus.error ||= "PostgreSQL 연결 전이라 변경 사항은 메모리에만 대기 중입니다.";
+    renderDatabaseStatusIfVisible();
+  }
+}
+
+function clearLegacyLocalState() {
+  try {
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {}
 }
 
 function createSeedState() {
@@ -6753,8 +8528,6 @@ function createMinimalSeedState() {
     createdAt,
     updatedAt: createdAt,
     settings: {
-      appMode: "local",
-      notionSyncMode: "one-time-final",
       navOrder: defaultNavOrder(),
       googleCalendarId: "primary",
       googleConnectedAt: "",
@@ -6762,6 +8535,7 @@ function createMinimalSeedState() {
       lastGoogleSyncAt: "",
       calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
       visibleGoogleCalendars: {},
+      viewControls: defaultViewControls(),
       statsDemoDataSeeded: false,
     },
     captures: [
@@ -6859,11 +8633,13 @@ function ensureStatsDemoData(targetState, options = {}) {
     { id: "demo-project-review", goalId: "demo-goal-archive", boxId: "demo-box-work", name: "분기 리뷰 마감", status: "completed", startDate: day(-42), endDate: day(-8), blocks: blocks("완료된 리뷰 프로젝트입니다.") },
     { id: "demo-project-paused", goalId: "demo-goal-knowledge", boxId: "demo-box-growth", name: "장기 리서치 보류", status: "paused", startDate: day(-20), endDate: day(62), blocks: blocks("우선순위 조정으로 잠시 보류합니다.") },
   ];
-  const demoTasks = Array.from({ length: 36 }, (_, index) => {
+  const demoTasks = [];
+  for (let index = 0; index < 36; index += 1) {
     const project = demoProjects[index % demoProjects.length];
     const status = index % 9 === 0 ? "waiting" : index % 7 === 0 ? "done" : index % 5 === 0 ? "doing" : "todo";
     const offset = index % 7 === 0 ? -index : index % 6 === 0 ? -2 : index - 10;
-    return {
+    const dueDate = day(offset);
+    demoTasks.push({
       id: `demo-task-${String(index + 1).padStart(2, "0")}`,
       title: `${project.name} ${index % 7 === 0 ? "완료 점검" : "실행 항목"} ${index + 1}`,
       status,
@@ -6871,19 +8647,20 @@ function ensureStatsDemoData(targetState, options = {}) {
       goalId: project.goalId,
       projectId: project.id,
       resourceId: "",
-      dueDate: day(offset),
+      dueDate,
       scheduledStart: "",
       scheduledEnd: "",
       estimatedMinutes: 20 + (index % 5) * 15,
       actualMinutes: status === "done" ? 25 + (index % 3) * 20 : 0,
-      completedAt: status === "done" ? new Date(day(offset)).toISOString() : "",
+      completedAt: status === "done" ? new Date(dueDate).toISOString() : "",
       googleEventId: "",
       blocks: blocks("통계 확인용 더미 Task입니다."),
-    };
-  });
-  const demoResources = Array.from({ length: 14 }, (_, index) => {
+    });
+  }
+  const demoResources = [];
+  for (let index = 0; index < 14; index += 1) {
     const project = demoProjects[index % demoProjects.length];
-    return {
+    demoResources.push({
       id: `demo-resource-${String(index + 1).padStart(2, "0")}`,
       title: `${project.name} 참고 자료 ${index + 1}`,
       type: index % 3 === 0 ? "scrap" : index % 3 === 1 ? "note" : "thought",
@@ -6895,27 +8672,29 @@ function ensureStatsDemoData(targetState, options = {}) {
       goalId: project.goalId,
       projectId: project.id,
       blocks: blocks("통계 확인용 Resource입니다."),
-    };
-  });
+    });
+  }
   const demoHabits = [
     { id: "demo-habit-walk", title: "20분 걷기", cadence: "daily", target: "퇴근 전 짧게 움직이기", status: "active", boxId: "demo-box-health", projectId: "demo-project-run", blocks: blocks("몸 상태를 매일 확인합니다.") },
     { id: "demo-habit-review", title: "하루 리뷰", cadence: "daily", target: "오늘 실행 흐름 기록", status: "active", boxId: "demo-box-growth", projectId: "demo-project-ui", blocks: blocks("짧게 회고합니다.") },
     { id: "demo-habit-clean", title: "10분 정리", cadence: "weekdays", target: "생활 기반 유지", status: "active", boxId: "demo-box-life", projectId: "demo-project-house", blocks: blocks("작게 정리합니다.") },
     { id: "demo-habit-reading", title: "자료 1개 정리", cadence: "weekly", target: "Resource를 실행 맥락에 연결", status: "paused", boxId: "demo-box-growth", projectId: "demo-project-notes", blocks: blocks("주간 자료 정리입니다.") },
   ];
-  const demoHabitInstances = demoHabits.flatMap((habit, habitIndex) => {
-    return Array.from({ length: 18 }, (_, index) => {
+  const demoHabitInstances = [];
+  for (let habitIndex = 0; habitIndex < demoHabits.length; habitIndex += 1) {
+    const habit = demoHabits[habitIndex];
+    for (let index = 0; index < 18; index += 1) {
       const date = day(index - 17);
       const completed = (index + habitIndex) % (habitIndex + 2) !== 0;
-      return {
+      demoHabitInstances.push({
         id: `${habit.id}-${date}`,
         habitId: habit.id,
         date,
         completed,
         completedAt: completed ? new Date(date).toISOString() : "",
-      };
-    });
-  });
+      });
+    }
+  }
   addMissingById(targetState.boxes, demoBoxes);
   addMissingById(targetState.goals, demoGoals);
   addMissingById(targetState.projects, demoProjects);
@@ -6929,13 +8708,15 @@ function ensureStatsDemoData(targetState, options = {}) {
 
 function addMissingById(collection, items) {
   if (!Array.isArray(collection)) return;
-  const existingIds = new Set(collection.map((item) => item.id));
-  items.forEach((item) => {
-    if (!existingIds.has(item.id)) {
-      collection.push(item);
-      existingIds.add(item.id);
-    }
-  });
+  const existingIds = new Set();
+  for (const item of collection) {
+    if (item?.id) existingIds.add(item.id);
+  }
+  for (const item of items) {
+    if (existingIds.has(item.id)) continue;
+    collection.push(item);
+    existingIds.add(item.id);
+  }
 }
 
 function blocks(text = "") {
@@ -6946,49 +8727,99 @@ function id() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
-function projectStats(project) {
-  const tasks = state.tasks.filter((task) => task.projectId === project.id);
-  const done = tasks.filter((task) => task.status === "done").length;
+function projectStats(project, relations = projectStatsRelations(project)) {
+  const { tasks, resources } = relations;
+  const taskCounts = taskStatusCounts(tasks);
   const total = tasks.length;
   return {
     tasks,
-    done,
+    resources,
+    done: taskCounts.done,
     total,
-    progress: total ? Math.round((done / total) * 100) : 0,
+    progress: total ? Math.round((taskCounts.done / total) * 100) : 0,
   };
 }
 
-function goalStats(goal) {
-  const projects = state.projects.filter((project) => project.goalId === goal.id);
-  const tasks = state.tasks.filter((task) => task.goalId === goal.id || projects.some((project) => project.id === task.projectId));
-  const resources = state.resources.filter((resource) => resource.goalId === goal.id || projects.some((project) => project.id === resource.projectId));
+function projectStatsIndex() {
+  const index = relationIndex();
+  const statsByProjectId = new Map();
+  for (const project of state.projects) {
+    statsByProjectId.set(
+      project.id,
+      projectStats(project, {
+        tasks: index.tasksByProjectId.get(project.id) || [],
+        resources: index.resourcesByProjectId.get(project.id) || [],
+      })
+    );
+  }
+  return statsByProjectId;
+}
+
+function projectStatsRelations(project) {
+  const index = relationIndex();
+  return {
+    tasks: index.tasksByProjectId.get(project.id) || [],
+    resources: index.resourcesByProjectId.get(project.id) || [],
+  };
+}
+
+function goalStats(goal, relations = {}) {
+  const resolved = relations.projects ? relations : goalStatsRelations(goal);
+  const projects = resolved.projects;
+  const tasks = resolved.tasks;
+  const resources = resolved.resources;
   const totalTasks = tasks.length;
-  const doneTasks = tasks.filter((task) => task.status === "done").length;
-  const activeProjects = projects.filter((project) => ["active", "focus"].includes(project.status)).length;
-  const completedProjects = projects.filter((project) => project.status === "completed").length;
-  const overdueTasks = tasks.filter(isOverdue).length;
+  const taskCounts = taskStatusCounts(tasks, dateKey(new Date()));
+  const projectCounts = projectStatusCounts(projects);
+  const resourceCounts = resourceStatusCounts(resources);
   return {
     projects,
     tasks,
     resources,
     totalTasks,
-    doneTasks,
-    activeProjects,
-    completedProjects,
-    overdueTasks,
-    importantResources: resources.filter((resource) => resource.importance === "important").length,
-    progress: totalTasks ? Math.round((doneTasks / totalTasks) * 100) : projects.length ? Math.round((completedProjects / projects.length) * 100) : goal.status === "completed" ? 100 : 0,
+    doneTasks: taskCounts.done,
+    activeProjects: projectCounts.active,
+    completedProjects: projectCounts.completed,
+    overdueTasks: taskCounts.overdue,
+    importantResources: resourceCounts.important,
+    progress: totalTasks ? Math.round((taskCounts.done / totalTasks) * 100) : projects.length ? Math.round((projectCounts.completed / projects.length) * 100) : goal.status === "completed" ? 100 : 0,
   };
 }
 
-function boxStats(box) {
-  const goals = state.goals.filter((goal) => goal.boxId === box.id);
-  const projects = state.projects.filter((project) => project.boxId === box.id || goals.some((goal) => goal.id === project.goalId));
-  const tasks = state.tasks.filter((task) => task.boxId === box.id || goals.some((goal) => goal.id === task.goalId) || projects.some((project) => project.id === task.projectId));
-  const resources = state.resources.filter((resource) => resource.boxId === box.id || goals.some((goal) => goal.id === resource.goalId) || projects.some((project) => project.id === resource.projectId));
-  const habits = state.habits.filter((habit) => habit.boxId === box.id || projects.some((project) => project.id === habit.projectId));
+function goalStatsIndex() {
+  const index = relationIndex();
+  const statsByGoalId = new Map();
+  for (const goal of state.goals) {
+    const projects = index.projectsByGoalId.get(goal.id) || [];
+    const tasks = mergeUniqueIndexedItems(index.tasksByGoalId.get(goal.id) || [], [projects, index.tasksByProjectId]);
+    const resources = mergeUniqueIndexedItems(index.resourcesByGoalId.get(goal.id) || [], [projects, index.resourcesByProjectId]);
+    statsByGoalId.set(goal.id, goalStats(goal, { projects, tasks, resources }));
+  }
+  return statsByGoalId;
+}
+
+function goalStatsRelations(goal) {
+  const index = relationIndex();
+  const projects = index.projectsByGoalId.get(goal.id) || [];
+  return {
+    projects,
+    tasks: mergeUniqueIndexedItems(index.tasksByGoalId.get(goal.id) || [], [projects, index.tasksByProjectId]),
+    resources: mergeUniqueIndexedItems(index.resourcesByGoalId.get(goal.id) || [], [projects, index.resourcesByProjectId]),
+  };
+}
+
+function boxStats(box, relations = {}) {
+  const resolved = relations.goals ? relations : boxStatsRelations(box);
+  const goals = resolved.goals;
+  const projects = resolved.projects;
+  const tasks = resolved.tasks;
+  const resources = resolved.resources;
+  const habits = resolved.habits;
   const totalTasks = tasks.length;
-  const doneTasks = tasks.filter((task) => task.status === "done").length;
+  const taskCounts = taskStatusCounts(tasks, dateKey(new Date()));
+  const projectCounts = projectStatusCounts(projects);
+  const resourceCounts = resourceStatusCounts(resources);
+  const habitCounts = habitStatusCounts(habits);
   return {
     goals,
     projects,
@@ -6996,13 +8827,103 @@ function boxStats(box) {
     resources,
     habits,
     totalTasks,
-    doneTasks,
-    activeTasks: tasks.filter((task) => !["done", "canceled"].includes(task.status)).length,
-    overdueTasks: tasks.filter(isOverdue).length,
-    activeHabits: habits.filter((habit) => habit.status === "active").length,
-    pinnedResources: resources.filter((resource) => resource.pinned).length,
-    progress: totalTasks ? Math.round((doneTasks / totalTasks) * 100) : projects.length ? Math.round((projects.filter((project) => project.status === "completed").length / projects.length) * 100) : 0,
+    doneTasks: taskCounts.done,
+    activeTasks: taskCounts.active,
+    overdueTasks: taskCounts.overdue,
+    activeHabits: habitCounts.active,
+    pinnedResources: resourceCounts.pinned,
+    progress: totalTasks ? Math.round((taskCounts.done / totalTasks) * 100) : projects.length ? Math.round((projectCounts.completed / projects.length) * 100) : 0,
   };
+}
+
+function taskStatusCounts(tasks, today = "") {
+  const counts = { done: 0, active: 0, overdue: 0 };
+  for (const task of tasks) {
+    if (task.status === "done") {
+      counts.done += 1;
+      continue;
+    }
+    if (task.status !== "canceled") counts.active += 1;
+    if (today && isOverdueOnDate(task, today)) counts.overdue += 1;
+  }
+  return counts;
+}
+
+function projectStatusCounts(projects) {
+  const counts = { active: 0, completed: 0 };
+  for (const project of projects) {
+    if (project.status === "completed") {
+      counts.completed += 1;
+      continue;
+    }
+    if (project.status === "active" || project.status === "focus") counts.active += 1;
+  }
+  return counts;
+}
+
+function resourceStatusCounts(resources) {
+  const counts = { important: 0, pinned: 0 };
+  for (const resource of resources) {
+    if (resource.importance === "important") counts.important += 1;
+    if (resource.pinned) counts.pinned += 1;
+  }
+  return counts;
+}
+
+function habitStatusCounts(habits) {
+  const counts = { active: 0 };
+  for (const habit of habits) {
+    if (habit.status === "active") counts.active += 1;
+  }
+  return counts;
+}
+
+function boxStatsIndex() {
+  const index = relationIndex();
+  const statsByBoxId = new Map();
+  for (const box of state.boxes) {
+    const goals = index.goalsByBoxId.get(box.id) || [];
+    const projects = index.projectsByBoxId.get(box.id) || [];
+    const tasks = mergeUniqueIndexedItems(index.tasksByBoxId.get(box.id) || [], [goals, index.tasksByGoalId], [projects, index.tasksByProjectId]);
+    const resources = mergeUniqueIndexedItems(index.resourcesByBoxId.get(box.id) || [], [goals, index.resourcesByGoalId], [projects, index.resourcesByProjectId]);
+    const habits = mergeUniqueIndexedItems(index.habitsByBoxId.get(box.id) || [], [projects, index.habitsByProjectId]);
+    statsByBoxId.set(box.id, boxStats(box, { goals, projects, tasks, resources, habits }));
+  }
+  return statsByBoxId;
+}
+
+function boxStatsRelations(box) {
+  const index = relationIndex();
+  const goals = index.goalsByBoxId.get(box.id) || [];
+  const projects = index.projectsByBoxId.get(box.id) || [];
+  return {
+    goals,
+    projects,
+    tasks: mergeUniqueIndexedItems(index.tasksByBoxId.get(box.id) || [], [goals, index.tasksByGoalId], [projects, index.tasksByProjectId]),
+    resources: mergeUniqueIndexedItems(index.resourcesByBoxId.get(box.id) || [], [goals, index.resourcesByGoalId], [projects, index.resourcesByProjectId]),
+    habits: mergeUniqueIndexedItems(index.habitsByBoxId.get(box.id) || [], [projects, index.habitsByProjectId]),
+  };
+}
+
+function mergeUniqueIndexedItems(baseItems = [], ...indexedGroups) {
+  const seen = new Set();
+  const merged = [];
+  appendUniqueItems(merged, seen, baseItems);
+  for (const [items, index] of indexedGroups) {
+    for (const item of items) {
+      appendUniqueItems(merged, seen, index.get(item.id) || []);
+    }
+  }
+  return merged;
+}
+
+function appendUniqueItems(merged, seen, items = []) {
+  for (const item of items) {
+    const key = item?.id || item;
+    if (!item || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
 }
 
 function goalInsight(goal, stats) {
@@ -7030,26 +8951,37 @@ function projectRangeLabel(project) {
 }
 
 function compactDateLabel(value) {
-  const [year, month, day] = String(value).slice(0, 10).split("-").map(Number);
+  const text = String(value).slice(0, 10);
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
   if (!year || !month || !day) return String(value);
   const currentYear = new Date().getFullYear();
   return year === currentYear ? `${month}월 ${day}일` : `${year}.${month}.${day}`;
 }
 
 function taskDateDisplay(value) {
-  const [year, month, day] = String(value || "").slice(0, 10).split("-").map(Number);
+  const text = String(value || "").slice(0, 10);
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
   if (!year || !month || !day) return "날짜 없음";
   return `${year}년 ${month}월 ${day}일`;
 }
 
 function nameOf(type, itemId) {
-  const item = getCollection(type).find((entry) => entry.id === itemId);
+  const item = itemById(type, itemId);
   if (!item) return "";
   return item.name || item.title || "";
 }
 
 function blockText(item) {
-  return (item.blocks || []).map((block) => block.text).filter(Boolean).join(" ");
+  let text = "";
+  for (const block of item.blocks || []) {
+    if (!block.text) continue;
+    text = text ? `${text} ${block.text}` : block.text;
+  }
+  return text;
 }
 
 function empty(text) {
@@ -7065,12 +8997,87 @@ function bySchedule(a, b) {
   return (a.scheduledStart || a.dueDate || "").localeCompare(b.scheduledStart || b.dueDate || "");
 }
 
+function todayTaskBuckets(today, tomorrow, tasks = state.tasks) {
+  const buckets = {
+    activeTodayTasks: [],
+    completedTodayTasks: [],
+    tomorrowTasks: [],
+    overdue: [],
+    doneToday: [],
+  };
+  for (const task of tasks) {
+    const done = task.status === "done";
+    if (isTaskOnDate(task, today)) {
+      if (done) {
+        buckets.completedTodayTasks.push(task);
+      } else {
+        buckets.activeTodayTasks.push(task);
+      }
+    }
+    if (!done && isTaskOnDate(task, tomorrow)) buckets.tomorrowTasks.push(task);
+    if (isOverdueOnDate(task, today)) buckets.overdue.push(task);
+    if (task.completedAt?.slice(0, 10) === today) buckets.doneToday.push(task);
+  }
+  buckets.activeTodayTasks.sort(bySchedule);
+  buckets.completedTodayTasks.sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
+  buckets.tomorrowTasks.sort(bySchedule);
+  buckets.overdue.sort(bySchedule);
+  return buckets;
+}
+
+function sortTaskBoardBuckets(buckets, control, context = {}) {
+  sortTasks(buckets.unplannedOnly, control.sort, context);
+  sortTasks(buckets.todayTasks, control.sort, context);
+  sortTasks(buckets.tomorrowTasks, control.sort, context);
+  sortTasks(buckets.scheduled, control.sort, context);
+  sortTasks(buckets.overdue, control.sort, context);
+  sortTasks(buckets.completed, control.sort, context);
+}
+
+function taskBoardBuckets(tasks, today, tomorrow, searchQuery = "") {
+  const buckets = {
+    todayTasks: [],
+    tomorrowTasks: [],
+    scheduled: [],
+    overdue: [],
+    unplannedOnly: [],
+    completed: [],
+  };
+  for (const task of tasks) {
+    if (!matchesSearch(task.title, searchQuery)) continue;
+    if (task.status === "done") {
+      buckets.completed.push(task);
+      continue;
+    }
+    if (task.status === "canceled") continue;
+
+    const onToday = isTaskOnDate(task, today);
+    const onTomorrow = isTaskOnDate(task, tomorrow);
+    const overdue = isOverdueOnDate(task, today);
+    if (!task.scheduledStart && !task.dueDate) buckets.unplannedOnly.push(task);
+    if (onToday) buckets.todayTasks.push(task);
+    if (onTomorrow) buckets.tomorrowTasks.push(task);
+    if ((task.scheduledStart || task.dueDate) && !onToday && !onTomorrow && !overdue) buckets.scheduled.push(task);
+    if (overdue) buckets.overdue.push(task);
+  }
+  buckets.todayTasks.sort(bySchedule);
+  buckets.tomorrowTasks.sort(bySchedule);
+  buckets.scheduled.sort(bySchedule);
+  buckets.overdue.sort(bySchedule);
+  buckets.completed.sort((a, b) => (b.completedAt || "").localeCompare(a.completedAt || ""));
+  buckets.completed = buckets.completed.slice(0, 14);
+  return buckets;
+}
+
 function isTaskOnDate(task, date) {
   return task.scheduledStart?.slice(0, 10) === date || task.dueDate === date;
 }
 
 function isOverdue(task) {
-  const today = dateKey(new Date());
+  return isOverdueOnDate(task, dateKey(new Date()));
+}
+
+function isOverdueOnDate(task, today) {
   const compare = task.dueDate || task.scheduledStart?.slice(0, 10);
   return Boolean(compare && compare < today && task.status !== "done" && task.status !== "canceled");
 }
@@ -7080,22 +9087,62 @@ function schedulerLaneTargets(excludedTaskId = "") {
   const tomorrow = dateKey(addDays(new Date(), 1));
   const nextScheduled = dateKey(addDays(new Date(), 2));
   const late = dateKey(addDays(new Date(), -1));
-  const active = state.tasks.filter((task) => task.id !== excludedTaskId && task.status !== "done" && task.status !== "canceled");
-  const scheduled = active.filter((task) => (task.scheduledStart || task.dueDate) && !isTaskOnDate(task, today) && !isTaskOnDate(task, tomorrow) && !isOverdue(task));
-  const unplanned = active.filter((task) => !task.scheduledStart && !task.dueDate);
-  const done = state.tasks.filter((task) => task.id !== excludedTaskId && task.status === "done");
+  const schedulerCounts = schedulerLaneCounts(excludedTaskId, today, tomorrow);
   return [
-    { key: "unplanned", title: "미계획", action: "unplanned", targetKey: "action:unplanned", meta: "날짜 제거", count: unplanned.length },
-    { key: "today", title: "오늘", date: today, targetKey: `date:${today}`, meta: shortDateLabel(today), count: active.filter((task) => isTaskOnDate(task, today)).length },
-    { key: "tomorrow", title: "내일", date: tomorrow, targetKey: `date:${tomorrow}`, meta: shortDateLabel(tomorrow), count: active.filter((task) => isTaskOnDate(task, tomorrow)).length },
-    { key: "scheduled", title: "예정", date: nextScheduled, targetKey: `date:${nextScheduled}`, meta: `${shortDateLabel(nextScheduled)}로`, count: scheduled.length },
-    { key: "overdue", title: "지연", date: late, targetKey: `date:${late}`, meta: `${shortDateLabel(late)}로`, count: active.filter(isOverdue).length },
-    { key: "done", title: "완료", action: "done", targetKey: "action:done", meta: "완료 처리", count: done.length },
+    { key: "unplanned", title: "미계획", action: "unplanned", targetKey: "action:unplanned", meta: "날짜 제거", count: schedulerCounts.unplanned },
+    { key: "today", title: "오늘", date: today, targetKey: `date:${today}`, meta: shortDateLabel(today), count: schedulerCounts.today },
+    { key: "tomorrow", title: "내일", date: tomorrow, targetKey: `date:${tomorrow}`, meta: shortDateLabel(tomorrow), count: schedulerCounts.tomorrow },
+    { key: "scheduled", title: "예정", date: nextScheduled, targetKey: `date:${nextScheduled}`, meta: `${shortDateLabel(nextScheduled)}로`, count: schedulerCounts.scheduled },
+    { key: "overdue", title: "지연", date: late, targetKey: `date:${late}`, meta: `${shortDateLabel(late)}로`, count: schedulerCounts.overdue },
+    { key: "done", title: "완료", action: "done", targetKey: "action:done", meta: "완료 처리", count: schedulerCounts.done },
   ];
 }
 
+function schedulerLaneCounts(excludedTaskId, today, tomorrow) {
+  const counts = {
+    unplanned: 0,
+    today: 0,
+    tomorrow: 0,
+    scheduled: 0,
+    overdue: 0,
+    done: 0,
+  };
+  for (const task of state.tasks) {
+    if (task.id === excludedTaskId) continue;
+    if (task.status === "done") {
+      counts.done += 1;
+      continue;
+    }
+    if (task.status === "canceled") continue;
+
+    const onToday = isTaskOnDate(task, today);
+    const onTomorrow = isTaskOnDate(task, tomorrow);
+    const overdue = isOverdueOnDate(task, today);
+    if (!task.scheduledStart && !task.dueDate) counts.unplanned += 1;
+    if (onToday) counts.today += 1;
+    if (onTomorrow) counts.tomorrow += 1;
+    if ((task.scheduledStart || task.dueDate) && !onToday && !onTomorrow && !overdue) counts.scheduled += 1;
+    if (overdue) counts.overdue += 1;
+  }
+  return counts;
+}
+
+function schedulerTaskCountsByDate(excludedTaskId) {
+  const counts = new Map();
+  for (const task of state.tasks) {
+    if (task.id === excludedTaskId || task.status === "done") continue;
+    const scheduledDate = task.scheduledStart?.slice(0, 10);
+    const dueDate = task.dueDate;
+    if (scheduledDate) counts.set(scheduledDate, (counts.get(scheduledDate) || 0) + 1);
+    if (dueDate && dueDate !== scheduledDate) counts.set(dueDate, (counts.get(dueDate) || 0) + 1);
+  }
+  return counts;
+}
+
 function shortDateLabel(date) {
-  const [, month, day] = String(date).split("-").map(Number);
+  const text = String(date);
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
   return `${month}월 ${day}일`;
 }
 
@@ -7103,8 +9150,12 @@ function monthSideLabel(date) {
   return `${date.getMonth() + 1}월`;
 }
 
-function matchesSearch(text) {
-  return !ui.search || String(text).toLowerCase().includes(ui.search.toLowerCase());
+function normalizedSearchQuery() {
+  return String(ui.search || "").toLowerCase();
+}
+
+function matchesSearch(text, query = normalizedSearchQuery()) {
+  return !query || String(text).toLowerCase().includes(query);
 }
 
 function habitVisibleDayCount() {
@@ -7119,7 +9170,7 @@ function habitPreviewDays(currentDate) {
   const count = habitVisibleDayCount();
   const current = new Date(currentDate);
   const start = count < 7 ? addDays(current, -Math.floor(count / 2)) : startOfWeek(current);
-  return Array.from({ length: count }, (_, index) => dateKey(addDays(start, index)));
+  return dateKeyRange(start, count);
 }
 
 function habitRangeLabel(days) {
@@ -7130,25 +9181,90 @@ function habitRangeLabel(days) {
 function habitMonthStats(habitId, monthDate) {
   const month = monthKey(monthDate);
   const total = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
-  const completed = state.habitInstances.filter((entry) => entry.habitId === habitId && entry.completed && entry.date.startsWith(month)).length;
+  const completed = habitInstanceIndex().completedByHabitMonth.get(habitInstanceKey(habitId, month)) || 0;
   return { completed, total };
 }
 
 function habitDone(habitId, date) {
-  return Boolean(state.habitInstances.find((entry) => entry.habitId === habitId && entry.date === date && entry.completed));
+  return habitInstanceIndex().completedByHabitDate.has(habitInstanceKey(habitId, date));
+}
+
+function habitDoneCount(habitId, dates) {
+  let completed = 0;
+  for (const date of dates) {
+    if (habitDone(habitId, date)) completed += 1;
+  }
+  return completed;
+}
+
+function habitInstanceForDate(habitId, date) {
+  return habitInstanceIndex().byHabitDate.get(habitInstanceKey(habitId, date)) || null;
+}
+
+function habitInstanceIndex() {
+  const collection = state.habitInstances;
+  if (habitInstanceIndexCache?.collection === collection && habitInstanceIndexCache.size === collection.length) {
+    return habitInstanceIndexCache;
+  }
+  const byHabitDate = new Map();
+  const completedByHabitDate = new Set();
+  const completedByHabitMonth = new Map();
+  for (const instance of collection) {
+    if (!instance?.habitId || !instance.date) continue;
+    const dayKey = habitInstanceKey(instance.habitId, instance.date);
+    byHabitDate.set(dayKey, instance);
+    if (!instance.completed) continue;
+    completedByHabitDate.add(dayKey);
+    const month = String(instance.date).slice(0, 7);
+    const monthKeyValue = habitInstanceKey(instance.habitId, month);
+    completedByHabitMonth.set(monthKeyValue, (completedByHabitMonth.get(monthKeyValue) || 0) + 1);
+  }
+  habitInstanceIndexCache = {
+    collection,
+    size: collection.length,
+    byHabitDate,
+    completedByHabitDate,
+    completedByHabitMonth,
+  };
+  return habitInstanceIndexCache;
+}
+
+function habitInstanceKey(habitId, date) {
+  return `${habitId}\u0000${date}`;
 }
 
 function countOf(key) {
   if (Array.isArray(state[key])) return state[key].length;
-  if (key === "settings") return Object.keys(state.settings).length;
+  if (key === "settings") return settingsCount();
   return 0;
 }
 
+function settingsCount() {
+  let count = 0;
+  for (const key in state.settings) {
+    if (Object.prototype.hasOwnProperty.call(state.settings, key)) count += 1;
+  }
+  return count;
+}
+
 function totalBlocks() {
-  return [...state.boxes, ...state.goals, ...state.projects, ...state.tasks, ...state.resources, ...state.habits, ...state.journals].reduce(
-    (sum, item) => sum + (item.blocks?.length || 0),
-    0
-  );
+  let total = 0;
+  total += blockCountForItems(state.boxes);
+  total += blockCountForItems(state.goals);
+  total += blockCountForItems(state.projects);
+  total += blockCountForItems(state.tasks);
+  total += blockCountForItems(state.resources);
+  total += blockCountForItems(state.habits);
+  total += blockCountForItems(state.journals);
+  return total;
+}
+
+function blockCountForItems(items) {
+  let total = 0;
+  for (const item of items) {
+    total += item.blocks?.length || 0;
+  }
+  return total;
 }
 
 function dateKey(date) {
@@ -7167,7 +9283,9 @@ function monthKey(date) {
 }
 
 function parseMonthKey(key) {
-  const [year, month] = String(key || monthKey(new Date())).split("-").map(Number);
+  const text = String(key || monthKey(new Date()));
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
   return new Date(year, month - 1, 1);
 }
 
@@ -7176,17 +9294,17 @@ function addMonths(date, months) {
 }
 
 function monthLabel(date) {
-  return new Intl.DateTimeFormat("ko-KR", { year: "numeric", month: "long" }).format(date);
+  return KOREAN_MONTH_FORMATTER.format(date);
 }
 
 function monthLabelEnglish(date) {
-  return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "long" }).format(date);
+  return ENGLISH_MONTH_FORMATTER.format(date);
 }
 
 function monthGridDays(date) {
   const first = new Date(date.getFullYear(), date.getMonth(), 1);
   const start = startOfWeek(first);
-  return Array.from({ length: 42 }, (_, index) => addDays(start, index));
+  return dateRange(start, 42);
 }
 
 function calendarMonthGridDays(date) {
@@ -7195,13 +9313,39 @@ function calendarMonthGridDays(date) {
   const start = addDays(startOfSundayWeek(first), -7);
   const end = addDays(startOfSundayWeek(last), 13);
   const totalDays = Math.round((end - start) / 86400000) + 1;
-  return Array.from({ length: totalDays }, (_, index) => addDays(start, index));
+  return dateRange(start, totalDays);
 }
 
 function habitCalendarMonthDays(date) {
   const first = new Date(date.getFullYear(), date.getMonth(), 1);
   const start = startOfSundayWeek(first);
-  return Array.from({ length: 42 }, (_, index) => addDays(start, index));
+  return dateRange(start, 42);
+}
+
+function dateRange(start, count) {
+  const days = [];
+  for (let index = 0; index < count; index += 1) {
+    days.push(addDays(start, index));
+  }
+  return days;
+}
+
+function dateKeyRange(start, count) {
+  const days = [];
+  for (let index = 0; index < count; index += 1) {
+    days.push(dateKey(addDays(start, index)));
+  }
+  return days;
+}
+
+function renderWeekdayLabels(start, includeWeekendClass = false) {
+  let html = "";
+  for (let index = 0; index < 7; index += 1) {
+    const day = addDays(start, index);
+    const className = includeWeekendClass ? weekendClass(day) : "";
+    html += `<span${className ? ` class="${className}"` : ""}>${weekday(day)}</span>`;
+  }
+  return html;
 }
 
 function addDays(date, days) {
@@ -7233,46 +9377,50 @@ function weekendClass(date) {
 }
 
 function weekday(date) {
-  return new Intl.DateTimeFormat("ko-KR", { weekday: "short" }).format(date);
+  return KOREAN_WEEKDAY_FORMATTER.format(date);
 }
 
 function formatLongDate(date) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  }).format(date);
+  return KOREAN_LONG_DATE_FORMATTER.format(date);
 }
 
 function formatDateTime(value) {
   if (!value) return "";
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return KOREAN_DATE_TIME_FORMATTER.format(new Date(value));
 }
 
 function formatTime(value) {
   if (!value) return "";
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return KOREAN_TIME_FORMATTER.format(new Date(value));
 }
 
 function parseDateOnly(value) {
-  const [year, month, day] = String(value).split("-").map(Number);
+  const text = String(value);
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
   return new Date(year, month - 1, day);
 }
 
 function normalizeCalendarSources(sources = {}) {
-  return {
-    ...DEFAULT_CALENDAR_SOURCES,
-    ...(sources || {}),
-  };
+  if (calendarSourcesValid(sources)) return sources;
+  const normalized = { ...DEFAULT_CALENDAR_SOURCES };
+  if (!isPlainObject(sources)) return normalized;
+  for (const key of CALENDAR_SOURCE_KEYS) {
+    if (typeof sources[key] === "boolean") normalized[key] = sources[key];
+  }
+  return normalized;
+}
+
+function calendarSourcesValid(sources) {
+  if (!isPlainObject(sources)) return false;
+  let count = 0;
+  for (const key in sources) {
+    if (!Object.prototype.hasOwnProperty.call(sources, key)) continue;
+    if (!CALENDAR_SOURCE_KEY_SET.has(key) || typeof sources[key] !== "boolean") return false;
+    count += 1;
+  }
+  return count === CALENDAR_SOURCE_KEYS.length;
 }
 
 function fallbackGoogleCalendar(calendarId = "primary", summary = "") {
@@ -7305,13 +9453,23 @@ function normalizeGoogleCalendarEntry(entry) {
   };
 }
 
+function normalizeGoogleCalendarEntries(entries = []) {
+  const calendars = [];
+  if (!Array.isArray(entries)) return calendars;
+  for (const entry of entries) {
+    const normalized = normalizeGoogleCalendarEntry(entry);
+    if (normalized) calendars.push(normalized);
+  }
+  return calendars;
+}
+
 function ensureGoogleCalendarVisibility(calendars) {
   const visibleGoogleCalendars = { ...(state.settings.visibleGoogleCalendars || {}) };
-  calendars.forEach((calendar) => {
+  for (const calendar of calendars) {
     if (calendar?.id && visibleGoogleCalendars[calendar.id] === undefined) {
       visibleGoogleCalendars[calendar.id] = calendar.selected !== false && !calendar.hidden;
     }
-  });
+  }
   state.settings.visibleGoogleCalendars = visibleGoogleCalendars;
 }
 
@@ -7342,6 +9500,16 @@ function normalizeGoogleApiEvent(event, calendar = fallbackGoogleCalendar(state.
     status: event.status || "",
     updated: event.updated || "",
   };
+}
+
+function normalizeGoogleApiEvents(entries = []) {
+  const events = [];
+  if (!Array.isArray(entries)) return events;
+  for (const entry of entries) {
+    const normalized = normalizeGoogleApiEvent(entry?.event, entry?.calendar);
+    if (normalized) events.push(normalized);
+  }
+  return events;
 }
 
 function extractUrl(text) {

@@ -5,9 +5,13 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check app.js && node --check Notion_like/app.js && node --check server.js"
+    "check": "node --check app.js && node --check server.js && node --check server/storage.js && node --check scripts/check-postgres-state.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs",
+    "check:postgres": "node scripts/check-postgres-state.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.21.0"
   }
 }

@@ -1,16 +1,18 @@
 # Personal Web
 
-Static local-first personal operating system prototype.
+Personal operating system prototype with PostgreSQL-backed app state.
 
 ## Run Locally
 
-For Google Calendar login, copy the env template and fill the OAuth values:
+Copy the env template and fill the PostgreSQL URL. Google Calendar values are optional unless you use calendar sync:
 
 ```bash
 cp .env.example .env
 ```
 
 ```text
+DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web
+APP_STATE_ID=default
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 ```
@@ -25,7 +27,17 @@ Then open:
 http://127.0.0.1:4180/
 ```
 
-Use `npm start` for Google Calendar integration. A static Python preview can show the UI, but it cannot run the server-side OAuth callback.
+Use `npm start` for PostgreSQL persistence and Google Calendar integration. The server requires `DATABASE_URL` and does not persist app data to browser storage or token files. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
+
+The server creates the `app_state` and `app_private_data` tables automatically. The full app state is stored as a JSONB document in `app_state`, and internal private data such as Google OAuth tokens is stored in `app_private_data`. Existing `localStorage` state is only read as a legacy migration source and removed after PostgreSQL sync.
+
+Verify the PostgreSQL-backed state path with:
+
+```bash
+DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web npm run check:postgres
+```
+
+This starts a temporary app server, writes state through `/api/state`, reads it back, and checks the `app_state` and `app_private_data` tables directly.
 
 ## Railway
 
@@ -38,6 +50,13 @@ http://127.0.0.1:4180/api/google/oauth/callback
 ```
 
 If you run a different port, use that port in the redirect URI.
+
+Set these Railway variables for persistence:
+
+```text
+DATABASE_URL
+APP_STATE_ID=default
+```
 
 Set these Railway variables before using Google Calendar:
 
@@ -63,5 +82,3 @@ https://personalweb-production-81a6.up.railway.app/
 - `server.js`
 - `railway.json`
 - `icons/`
-
-`Notion_like/` is a separate earlier static editor prototype kept in the same workspace.

@@ -1,25 +1,24 @@
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, extname, join, normalize, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import http from "node:http";
+import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 
 async function loadLocalEnv() {
   try {
     const raw = await readFile(join(root, ".env"), "utf8");
-    raw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#") && line.includes("="))
-      .forEach((line) => {
-        const index = line.indexOf("=");
-        const key = line.slice(0, index).trim();
-        const value = line.slice(index + 1).trim().replace(/^['"]|['"]$/g, "");
-        if (key && process.env[key] === undefined) process.env[key] = value;
-      });
+    for (const rawLine of raw.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || !line.includes("=")) continue;
+      const index = line.indexOf("=");
+      const key = line.slice(0, index).trim();
+      const value = line.slice(index + 1).trim().replace(/^['"]|['"]$/g, "");
+      if (key && process.env[key] === undefined) process.env[key] = value;
+    }
   } catch {}
 }
 
@@ -27,6 +26,8 @@ await loadLocalEnv();
 
 const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
+const databaseUrl = process.env.DATABASE_URL || "";
+const appStateId = process.env.APP_STATE_ID || "default";
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -40,6 +41,14 @@ const googleAuthUrl = "https://accounts.google.com/o/oauth2/v2/auth";
 const googleTokenUrl = "https://oauth2.googleapis.com/token";
 const googleCalendarApi = "https://www.googleapis.com/calendar/v3";
 const oauthStateCookie = "sygma_google_oauth_state";
+let storage;
+
+try {
+  storage = createStorage({ databaseUrl, appStateId, googleTokenFile });
+} catch (error) {
+  console.error(error.message || "PostgreSQL storage initialization failed.");
+  process.exit(1);
+}
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -71,17 +80,18 @@ function isSecureRequest(request) {
 }
 
 function parseCookies(request) {
-  return Object.fromEntries(
-    String(request.headers.cookie || "")
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const index = part.indexOf("=");
-        if (index === -1) return [part, ""];
-        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
-      })
-  );
+  const cookies = Object.create(null);
+  for (const rawPart of String(request.headers.cookie || "").split(";")) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const index = part.indexOf("=");
+    if (index === -1) {
+      cookies[part] = "";
+      continue;
+    }
+    cookies[part.slice(0, index)] = decodeURIComponent(part.slice(index + 1));
+  }
+  return cookies;
 }
 
 function setCookie(response, request, name, value, maxAgeSeconds = 600) {
@@ -104,13 +114,14 @@ function sendJson(response, status, payload, headers = {}) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
     ...headers,
   });
   response.end(JSON.stringify(payload));
 }
 
 function redirect(response, location, headers = {}) {
-  response.writeHead(302, { Location: location, "Cache-Control": "no-store", ...headers });
+  response.writeHead(302, { Location: location, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers });
   response.end();
 }
 
@@ -142,39 +153,25 @@ function appendQuery(path, key, value) {
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
-async function readBody(request) {
+async function readBody(request, limit = 1_000_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 1_000_000) throw new Error("Request body too large");
+    if (size > limit) throw Object.assign(new Error("Request body too large"), { status: 413 });
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function readJsonBody(request) {
-  const raw = await readBody(request);
-  return raw ? JSON.parse(raw) : {};
-}
-
-async function readToken() {
+async function readJsonBody(request, limit) {
+  const raw = await readBody(request, limit);
+  if (!raw) return {};
   try {
-    return JSON.parse(await readFile(googleTokenFile, "utf8"));
+    return JSON.parse(raw);
   } catch {
-    return null;
+    throw Object.assign(new Error("Invalid JSON body."), { status: 400 });
   }
-}
-
-async function writeToken(token) {
-  await mkdir(dirname(googleTokenFile), { recursive: true });
-  await writeFile(googleTokenFile, JSON.stringify(token, null, 2), { mode: 0o600 });
-}
-
-async function deleteToken() {
-  try {
-    await unlink(googleTokenFile);
-  } catch {}
 }
 
 async function exchangeToken(params) {
@@ -192,7 +189,7 @@ async function exchangeToken(params) {
 
 async function getGoogleAccessToken() {
   if (!googleConfigured()) throw Object.assign(new Error("Google OAuth is not configured"), { status: 501 });
-  const token = await readToken();
+  const token = await storage.readToken();
   if (!token) throw Object.assign(new Error("Google is not connected"), { status: 401 });
   if (token.access_token && token.expires_at && token.expires_at > Date.now() + 60_000) {
     return token.access_token;
@@ -211,7 +208,7 @@ async function getGoogleAccessToken() {
     expires_at: Date.now() + Number(refreshed.expires_in || 3600) * 1000,
     updated_at: new Date().toISOString(),
   };
-  await writeToken(nextToken);
+  await storage.writeToken(nextToken);
   return nextToken.access_token;
 }
 
@@ -255,12 +252,52 @@ async function listGoogleCalendarEvents(calendarId, query) {
 }
 
 async function handleGoogleStatus(response) {
-  const token = await readToken();
+  const token = await storage.readToken();
   sendJson(response, 200, {
     configured: googleConfigured(),
     connected: Boolean(token?.refresh_token || token?.access_token),
     connectedAt: token?.created_at || "",
     updatedAt: token?.updated_at || "",
+    tokenStore: "postgresql",
+  });
+}
+
+async function handleStateStatus(response) {
+  try {
+    sendJson(response, 200, await storage.stateStatus());
+  } catch (error) {
+    sendJson(response, error.status || 500, {
+      configured: true,
+      connected: false,
+      appStateId: storage.appStateId,
+      error: error.message || "PostgreSQL connection failed.",
+    });
+  }
+}
+
+async function handleStateRead(response) {
+  const payload = await storage.readAppState();
+  sendJson(response, 200, {
+    configured: true,
+    connected: true,
+    appStateId: storage.appStateId,
+    ...payload,
+  });
+}
+
+async function handleStateWrite(request, response) {
+  const body = await readJsonBody(request, 10_000_000);
+  if (!body.state || typeof body.state !== "object" || Array.isArray(body.state)) {
+    sendJson(response, 400, { error: "state object is required." });
+    return;
+  }
+  const saved = await storage.writeAppState(body.state);
+  sendJson(response, 200, {
+    ok: true,
+    configured: true,
+    connected: true,
+    appStateId: storage.appStateId,
+    ...saved,
   });
 }
 
@@ -303,7 +340,7 @@ async function handleGoogleCallback(request, response, requestUrl) {
       grant_type: "authorization_code",
       redirect_uri: redirectUri(request),
     });
-    const previousToken = await readToken();
+    const previousToken = await storage.readToken();
     const nextToken = {
       ...previousToken,
       ...token,
@@ -312,7 +349,7 @@ async function handleGoogleCallback(request, response, requestUrl) {
       created_at: previousToken?.created_at || new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    await writeToken(nextToken);
+    await storage.writeToken(nextToken);
     redirect(response, appendQuery(safeReturnTo(state.returnTo), "google", "connected"));
   } catch {
     redirect(response, appendQuery(safeReturnTo(state.returnTo), "google", "failed"));
@@ -334,13 +371,20 @@ async function handleGoogleCalendarData(requestUrl, response) {
     maxResults: "2500",
   });
   const calendars = await listGoogleCalendars();
-  const eventGroups = await Promise.all(
-    calendars.map(async (calendar) => {
-      const events = await listGoogleCalendarEvents(calendar.id, params).catch(() => []);
-      return events.map((event) => ({ calendar, event }));
-    })
-  );
-  sendJson(response, 200, { calendars, events: eventGroups.flat() });
+  const eventRequests = [];
+  for (const calendar of calendars) {
+    eventRequests.push(listGoogleCalendarEvents(calendar.id, params).catch(() => []));
+  }
+  const eventGroups = await Promise.all(eventRequests);
+  const events = [];
+  for (let index = 0; index < eventGroups.length; index += 1) {
+    const calendar = calendars[index];
+    const calendarEvents = eventGroups[index];
+    for (const event of calendarEvents) {
+      events.push({ calendar, event });
+    }
+  }
+  sendJson(response, 200, { calendars, events });
 }
 
 async function handleGoogleEventInsert(request, response) {
@@ -359,12 +403,24 @@ async function handleGoogleEventInsert(request, response) {
 }
 
 async function handleGoogleDisconnect(response) {
-  await deleteToken();
+  await storage.deleteToken();
   sendJson(response, 200, { ok: true });
 }
 
 async function handleApiRequest(request, response, requestUrl) {
   try {
+    if (request.method === "GET" && requestUrl.pathname === "/api/state/status") {
+      await handleStateStatus(response);
+      return true;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/api/state") {
+      await handleStateRead(response);
+      return true;
+    }
+    if ((request.method === "PUT" || request.method === "POST") && requestUrl.pathname === "/api/state") {
+      await handleStateWrite(request, response);
+      return true;
+    }
     if (request.method === "GET" && requestUrl.pathname === "/api/google/status") {
       await handleGoogleStatus(response);
       return true;
@@ -408,41 +464,77 @@ function resolveRequestPath(url) {
   return absolute.startsWith(root) ? absolute : "";
 }
 
-async function sendFile(response, filePath) {
+async function sendFile(request, response, requestUrl, filePath) {
   const fileStat = await stat(filePath);
   if (!fileStat.isFile()) throw new Error("Not a file");
   response.writeHead(200, {
     "Content-Length": fileStat.size,
     "Content-Type": contentTypes[extname(filePath)] || "application/octet-stream",
+    "Cache-Control": staticCacheControl(filePath, requestUrl),
+    "X-Content-Type-Options": "nosniff",
   });
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
   createReadStream(filePath).pipe(response);
+}
+
+function staticCacheControl(filePath, requestUrl) {
+  const name = filePath.slice(root.length);
+  if (name === "index.html" || name === "service-worker.js" || name === "manifest.json") return "no-store";
+  if (requestUrl.searchParams.has("v")) return "public, max-age=31536000, immutable";
+  return "public, max-age=3600";
 }
 
 const server = http.createServer(async (request, response) => {
   const requestUrl = new URL(request.url || "/", requestOrigin(request));
 
   if (requestUrl.pathname === "/health") {
-    sendJson(response, 200, { ok: true });
+    try {
+      await storage.stateStatus();
+      sendJson(response, 200, { ok: true, database: "postgresql" });
+    } catch (error) {
+      sendJson(response, error.status || 503, { ok: false, error: error.message || "PostgreSQL connection failed." });
+    }
     return;
   }
 
   if (await handleApiRequest(request, response, requestUrl)) return;
 
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    response.writeHead(405, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      Allow: "GET, HEAD",
+    });
+    response.end("Method not allowed");
+    return;
+  }
+
   const filePath = resolveRequestPath(request.url || "/");
   if (!filePath) {
-    response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
     response.end("Forbidden");
     return;
   }
 
   try {
-    await sendFile(response, filePath);
+    await sendFile(request, response, requestUrl, filePath);
   } catch {
-    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
     response.end("Not found");
   }
 });
 
-server.listen(port, host, () => {
-  console.log(`Personal Web listening on ${host}:${port}`);
-});
+try {
+  await storage.ready();
+  server.listen(port, host, () => {
+    console.log(`Personal Web listening on ${host}:${port}`);
+  });
+} catch (error) {
+  console.error(error.message || "PostgreSQL initialization failed.");
+  await storage.end().catch(() => {});
+  process.exit(1);
+}
