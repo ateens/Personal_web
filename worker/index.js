@@ -84,7 +84,7 @@ async function proxyApiRequest(request, env) {
   });
 }
 
-function withStaticHeaders(response, pathname) {
+function withStaticHeaders(response, pathname, encodeBody = "automatic") {
   const headers = new Headers(response.headers);
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "same-origin");
@@ -98,6 +98,7 @@ function withStaticHeaders(response, pathname) {
     status: response.status,
     statusText: response.statusText,
     headers,
+    encodeBody,
   });
 }
 
@@ -117,11 +118,12 @@ async function serveStatic(request, env) {
     assetEncoding = "";
     response = await env.ASSETS.fetch(staticAssetRequest(new URL(assetSourcePath, request.url), request));
   }
-  if (assetSourcePath) response = withAssetEncoding(response, assetSourcePath, assetEncoding);
+  const servedEncoding = assetSourcePath && response.status === 200 ? assetEncoding : "";
+  if (assetSourcePath) response = withAssetEncoding(response, assetSourcePath, servedEncoding);
   if (response.status === 404 && request.method === "GET" && request.headers.get("accept")?.includes("text/html")) {
     response = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
   }
-  return withStaticHeaders(response, requestUrl.pathname);
+  return withStaticHeaders(response, requestUrl.pathname, servedEncoding ? "manual" : "automatic");
 }
 
 export default {

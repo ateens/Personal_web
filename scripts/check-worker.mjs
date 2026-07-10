@@ -2,10 +2,18 @@ import assert from "node:assert/strict";
 import worker from "../worker/index.js";
 
 const originalFetch = globalThis.fetch;
+const OriginalResponse = globalThis.Response;
 let proxiedUrl = "";
 let proxiedMethod = "";
+let responseEncodeBody = "";
 
 try {
+  globalThis.Response = class extends OriginalResponse {
+    constructor(body, init = {}) {
+      super(body, init);
+      responseEncodeBody = init.encodeBody || "";
+    }
+  };
   globalThis.fetch = async (input, init = {}) => {
     proxiedUrl = String(input);
     proxiedMethod = init.method || "GET";
@@ -42,6 +50,7 @@ try {
   assert.equal(assetResponse.headers.get("content-type"), "text/javascript; charset=utf-8");
   assert.match(assetResponse.headers.get("vary"), /Accept-Encoding/i);
   assert.equal(assetRequests.at(-1), "/assets/app.1234567890ab.js.br");
+  assert.equal(responseEncodeBody, "manual");
 
   const gzipResponse = await worker.fetch(new Request("https://sygma.example/_sygma/assets/styles.1234567890ab.css", {
     headers: { "accept-encoding": "gzip" },
@@ -59,4 +68,5 @@ try {
   console.log("Sites worker check passed.");
 } finally {
   globalThis.fetch = originalFetch;
+  globalThis.Response = OriginalResponse;
 }

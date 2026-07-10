@@ -10,6 +10,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(root, "dist");
 const clientDir = resolve(dist, "client");
 const assetDir = resolve(clientDir, "assets");
+const assetDeliveryVersion = "precompressed-manual-v1";
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
 
@@ -75,8 +76,8 @@ const [appBrotli, stylesBrotli, appGzip, stylesGzip] = await Promise.all([
   gzipAsync(appBuild.code, { level: 9 }),
   gzipAsync(stylesBuild.code, { level: 9 }),
 ]);
-const appFile = `app.${contentHash(Buffer.concat([Buffer.from(appBuild.code), appBrotli, appGzip]))}.js`;
-const stylesFile = `styles.${contentHash(Buffer.concat([Buffer.from(stylesBuild.code), stylesBrotli, stylesGzip]))}.css`;
+const appFile = `app.${contentHash(Buffer.concat([Buffer.from(assetDeliveryVersion), Buffer.from(appBuild.code), appBrotli, appGzip]))}.js`;
+const stylesFile = `styles.${contentHash(Buffer.concat([Buffer.from(assetDeliveryVersion), Buffer.from(stylesBuild.code), stylesBrotli, stylesGzip]))}.css`;
 const appPath = `/_sygma/assets/${appFile}`;
 const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
