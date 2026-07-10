@@ -24,6 +24,29 @@ self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;con
 `;
 }
 
+function staticHeaders() {
+  return `/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/
+  Cache-Control: no-store
+
+/index.html
+  Cache-Control: no-store
+
+/service-worker.js
+  Cache-Control: no-store
+
+/manifest.json
+  Cache-Control: no-store
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin
+  X-Frame-Options: SAMEORIGIN
+`;
+}
+
 await rm(dist, { recursive: true, force: true });
 await mkdir(assetDir, { recursive: true });
 
@@ -62,6 +85,7 @@ await Promise.all([
   writeFile(resolve(clientDir, "index.html"), builtIndex),
   writeFile(resolve(clientDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`),
   writeFile(resolve(clientDir, "service-worker.js"), builtServiceWorker(`sygma-${cacheId}`, precacheAssets)),
+  writeFile(resolve(clientDir, "_headers"), staticHeaders()),
   cp(resolve(root, "icons"), resolve(clientDir, "icons"), { recursive: true }),
 ]);
 

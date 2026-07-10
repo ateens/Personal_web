@@ -7,6 +7,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const client = resolve(root, "dist/client");
 const index = await readFile(resolve(client, "index.html"), "utf8");
 const serviceWorker = await readFile(resolve(client, "service-worker.js"), "utf8");
+const staticHeaders = await readFile(resolve(client, "_headers"), "utf8");
 const appPath = index.match(/src="(\/assets\/app\.[a-f0-9]{12}\.js)"/)?.[1];
 const stylesPath = index.match(/href="(\/assets\/styles\.[a-f0-9]{12}\.css)"/)?.[1];
 assert(appPath, "built index is missing a content-hashed app asset");
@@ -21,6 +22,7 @@ const [appStat, stylesStat, workerStat, sourceAppStat, sourceStylesStat] = await
 ]);
 assert(workerStat.size > 0, "Sites worker build is empty");
 assert(serviceWorker.includes(appPath) && serviceWorker.includes(stylesPath), "service worker does not precache built assets");
+assert(staticHeaders.includes("/assets/*") && staticHeaders.includes("max-age=31536000, immutable"), "built static assets are missing immutable browser cache headers");
 const builtBytes = appStat.size + stylesStat.size;
 const sourceBytes = sourceAppStat.size + sourceStylesStat.size;
 assert(builtBytes / sourceBytes <= 0.75, "built JS/CSS did not meet the size reduction target");
