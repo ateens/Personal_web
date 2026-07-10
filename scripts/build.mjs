@@ -2,12 +2,16 @@ import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { build, transform } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(root, "dist");
 const clientDir = resolve(dist, "client");
 const assetDir = resolve(clientDir, "assets");
+const brotliCompressAsync = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
 
 function contentHash(content) {
   return createHash("sha256").update(content).digest("hex").slice(0, 12);
@@ -65,13 +69,23 @@ const [appBuild, stylesBuild] = await Promise.all([
   transform(stylesSource, { loader: "css", minify: true, target: "es2022", charset: "utf8" }),
 ]);
 
-const appFile = `app.${contentHash(appBuild.code)}.js`;
-const stylesFile = `styles.${contentHash(stylesBuild.code)}.css`;
+const [appBrotli, stylesBrotli, appGzip, stylesGzip] = await Promise.all([
+  brotliCompressAsync(appBuild.code, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 } }),
+  brotliCompressAsync(stylesBuild.code, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 } }),
+  gzipAsync(appBuild.code, { level: 9 }),
+  gzipAsync(stylesBuild.code, { level: 9 }),
+]);
+const appFile = `app.${contentHash(Buffer.concat([Buffer.from(appBuild.code), appBrotli, appGzip]))}.js`;
+const stylesFile = `styles.${contentHash(Buffer.concat([Buffer.from(stylesBuild.code), stylesBrotli, stylesGzip]))}.css`;
 const appPath = `/_sygma/assets/${appFile}`;
 const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
   writeFile(resolve(assetDir, appFile), appBuild.code),
+  writeFile(resolve(assetDir, `${appFile}.br`), appBrotli),
+  writeFile(resolve(assetDir, `${appFile}.gz`), appGzip),
   writeFile(resolve(assetDir, stylesFile), stylesBuild.code),
+  writeFile(resolve(assetDir, `${stylesFile}.br`), stylesBrotli),
+  writeFile(resolve(assetDir, `${stylesFile}.gz`), stylesGzip),
 ]);
 
 const builtIndex = indexSource
@@ -81,7 +95,7 @@ const builtIndex = indexSource
 const manifest = JSON.parse(manifestSource);
 manifest.start_url = "/";
 manifest.scope = "/";
-const cacheId = contentHash(`${appBuild.code}\n${stylesBuild.code}`);
+const cacheId = contentHash(`${appPath}\n${stylesPath}`);
 const precacheAssets = ["/index.html", stylesPath, appPath, "/manifest.json", "/icons/app-icon.svg"];
 
 await Promise.all([
@@ -108,4 +122,6 @@ await cp(resolve(root, ".openai/hosting.json"), resolve(dist, ".openai/hosting.j
 
 const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(stylesSource);
 const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(stylesBuild.code);
+const brotliBytes = appBrotli.byteLength + stylesBrotli.byteLength;
 console.log(`Built SYGMA assets: ${originalBytes} -> ${builtBytes} bytes (${Math.round((builtBytes / originalBytes) * 100)}%).`);
+console.log(`Precompressed Brotli assets: ${brotliBytes} bytes (${Math.round((brotliBytes / originalBytes) * 100)}% of source).`);

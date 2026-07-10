@@ -33,10 +33,22 @@ try {
       },
     },
   };
-  const assetResponse = await worker.fetch(new Request("https://sygma.example/_sygma/assets/app.1234567890ab.js"), env);
+  const assetResponse = await worker.fetch(new Request("https://sygma.example/_sygma/assets/app.1234567890ab.js", {
+    headers: { "accept-encoding": "br, gzip" },
+  }), env);
   assert.equal(assetResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
   assert.equal(assetResponse.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(assetRequests.at(-1), "/assets/app.1234567890ab.js");
+  assert.equal(assetResponse.headers.get("content-encoding"), "br");
+  assert.equal(assetResponse.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assert.match(assetResponse.headers.get("vary"), /Accept-Encoding/i);
+  assert.equal(assetRequests.at(-1), "/assets/app.1234567890ab.js.br");
+
+  const gzipResponse = await worker.fetch(new Request("https://sygma.example/_sygma/assets/styles.1234567890ab.css", {
+    headers: { "accept-encoding": "gzip" },
+  }), env);
+  assert.equal(gzipResponse.headers.get("content-encoding"), "gzip");
+  assert.equal(gzipResponse.headers.get("content-type"), "text/css; charset=utf-8");
+  assert.equal(assetRequests.at(-1), "/assets/styles.1234567890ab.css.gz");
 
   const fallbackResponse = await worker.fetch(new Request("https://sygma.example/missing", { headers: { accept: "text/html" } }), env);
   assert.equal(fallbackResponse.status, 200);

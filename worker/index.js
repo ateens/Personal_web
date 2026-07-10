@@ -27,6 +27,43 @@ function rewriteUpstreamLocation(headers, requestUrl, upstreamOrigin) {
   headers.set("location", resolved.toString());
 }
 
+function preferredAssetEncoding(request) {
+  const accepted = String(request.headers.get("accept-encoding") || "").toLowerCase();
+  const qualities = new Map(accepted.split(",").map((entry) => {
+    const [name, ...parameters] = entry.trim().split(";");
+    const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
+    return [name, quality ? Number(quality.trim().slice(2)) : 1];
+  }));
+  const brotliQuality = qualities.get("br") || 0;
+  const gzipQuality = qualities.get("gzip") || 0;
+  if (brotliQuality <= 0 && gzipQuality <= 0) return "";
+  if (brotliQuality >= gzipQuality) return "br";
+  if (gzipQuality > 0) return "gzip";
+  return "";
+}
+
+function withAssetEncoding(response, sourcePath, encoding) {
+  const headers = new Headers(response.headers);
+  const vary = new Set(String(headers.get("vary") || "").split(",").map((value) => value.trim()).filter(Boolean));
+  vary.add("Accept-Encoding");
+  headers.set("vary", [...vary].join(", "));
+  if (sourcePath.endsWith(".css")) headers.set("content-type", "text/css; charset=utf-8");
+  if (sourcePath.endsWith(".js")) headers.set("content-type", "text/javascript; charset=utf-8");
+  if (encoding) headers.set("content-encoding", encoding);
+  else headers.delete("content-encoding");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function staticAssetRequest(url, request) {
+  const headers = new Headers(request.headers);
+  headers.delete("accept-encoding");
+  return new Request(url, { method: request.method, headers });
+}
+
 async function proxyApiRequest(request, env) {
   const requestUrl = new URL(request.url);
   const upstreamOrigin = apiOrigin(env);
@@ -67,11 +104,20 @@ function withStaticHeaders(response, pathname) {
 async function serveStatic(request, env) {
   const requestUrl = new URL(request.url);
   let assetRequest = request;
+  let assetSourcePath = "";
+  let assetEncoding = "";
   if (requestUrl.pathname.startsWith(ASSET_PROXY_PREFIX)) {
-    const assetUrl = new URL(`/assets/${requestUrl.pathname.slice(ASSET_PROXY_PREFIX.length)}`, request.url);
-    assetRequest = new Request(assetUrl, request);
+    assetSourcePath = `/assets/${requestUrl.pathname.slice(ASSET_PROXY_PREFIX.length)}`;
+    assetEncoding = preferredAssetEncoding(request);
+    const assetUrl = new URL(`${assetSourcePath}${assetEncoding ? `.${assetEncoding === "gzip" ? "gz" : assetEncoding}` : ""}`, request.url);
+    assetRequest = staticAssetRequest(assetUrl, request);
   }
   let response = await env.ASSETS.fetch(assetRequest);
+  if (assetSourcePath && assetEncoding && response.status === 404) {
+    assetEncoding = "";
+    response = await env.ASSETS.fetch(staticAssetRequest(new URL(assetSourcePath, request.url), request));
+  }
+  if (assetSourcePath) response = withAssetEncoding(response, assetSourcePath, assetEncoding);
   if (response.status === 404 && request.method === "GET" && request.headers.get("accept")?.includes("text/html")) {
     response = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
   }
