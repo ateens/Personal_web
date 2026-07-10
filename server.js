@@ -9,6 +9,15 @@ import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+const sourceStaticRoot = resolve(root);
+const assetProxyPrefix = "/_sygma/assets/";
+const sourceStaticFiles = new Set([
+  "/app.js",
+  "/index.html",
+  "/manifest.json",
+  "/service-worker.js",
+  "/styles.css",
+]);
 
 async function loadLocalEnv() {
   try {
@@ -26,12 +35,12 @@ async function loadLocalEnv() {
 
 await loadLocalEnv();
 
-const builtStaticRoot = resolve(root, "dist/client");
+const builtStaticRoot = resolve(sourceStaticRoot, "dist/client");
 const staticRoot = process.env.STATIC_ROOT
-  ? resolve(root, process.env.STATIC_ROOT)
+  ? resolve(sourceStaticRoot, process.env.STATIC_ROOT)
   : existsSync(join(builtStaticRoot, "index.html"))
     ? builtStaticRoot
-    : resolve(root);
+    : sourceStaticRoot;
 const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
 const databaseUrl = process.env.DATABASE_URL || "";
@@ -466,9 +475,20 @@ async function handleApiRequest(request, response, requestUrl) {
 
 function resolveRequestPath(url) {
   const { pathname } = new URL(url, `http://${host}:${port}`);
-  const decoded = decodeURIComponent(pathname);
-  const requested = decoded === "/" ? "/index.html" : decoded;
-  const absolute = resolve(join(staticRoot, normalize(requested)));
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return "";
+  }
+  const requested = decoded === "/"
+    ? "/index.html"
+    : decoded.startsWith(assetProxyPrefix)
+      ? `/assets/${decoded.slice(assetProxyPrefix.length)}`
+      : decoded;
+  const normalizedRequest = normalize(requested).replaceAll("\\", "/");
+  if (staticRoot === sourceStaticRoot && !sourceStaticFiles.has(normalizedRequest) && !normalizedRequest.startsWith("/icons/")) return "";
+  const absolute = resolve(join(staticRoot, normalizedRequest));
   return absolute === staticRoot || absolute.startsWith(`${staticRoot}${sep}`) ? absolute : "";
 }
 
