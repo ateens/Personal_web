@@ -11,8 +11,8 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const port = Number(process.env.PORT || 4199);
-const appStateId = process.env.APP_STATE_ID || `check-${randomBytes(6).toString("hex")}`;
+const port = Number(process.env.CHECK_PORT || 4199);
+const appStateId = process.env.CHECK_APP_STATE_ID || `check-${randomBytes(6).toString("hex")}`;
 const tokenStateId = `${appStateId}-private`;
 const legacyTokenStateId = `${appStateId}-legacy-token`;
 const legacyTokenFile = `/tmp/personal-web-legacy-token-${appStateId}.json`;
@@ -45,6 +45,7 @@ try {
       PORT: String(port),
       HOST: "127.0.0.1",
       APP_STATE_ID: appStateId,
+      STATIC_ROOT: ".",
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
     },
@@ -59,6 +60,8 @@ try {
   const status = await fetchJson("/api/state/status");
   assert(status.configured === true && status.connected === true, "state status did not report a PostgreSQL connection");
   assert(status.tokenStore === "postgresql", "Google token store did not report PostgreSQL");
+  assert(status.relationalStore === "postgresql" && status.relationalTables?.includes("tasks"), "state status did not report relational PostgreSQL tables");
+  assert(status.collectionSource === "relational", "state status did not report relational collections as the source of truth");
   const indexHead = await fetch(`${baseUrl}/`, { method: "HEAD" });
   assert(indexHead.ok, "static index HEAD request failed");
   assert(indexHead.headers.get("cache-control") === "no-store", "static index response should not be cached");
@@ -66,6 +69,12 @@ try {
   const versionedAppHead = await fetch(`${baseUrl}/app.js?v=check`, { method: "HEAD" });
   assert(versionedAppHead.ok, "versioned static asset HEAD request failed");
   assert(versionedAppHead.headers.get("cache-control")?.includes("immutable"), "versioned static asset should be immutable cached");
+  const compressedApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "Accept-Encoding": "br" } });
+  assert(compressedApp.ok && compressedApp.headers.get("content-encoding") === "br", "static JavaScript did not use Brotli compression");
+  const staticEtag = compressedApp.headers.get("etag");
+  assert(staticEtag, "static JavaScript response is missing an ETag");
+  const conditionalApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "If-None-Match": staticEtag } });
+  assert(conditionalApp.status === 304, "conditional static request did not return 304");
   const invalidJsonResponse = await fetch(`${baseUrl}/api/state`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -83,14 +92,14 @@ try {
     boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
     goals: [{ id: "check-goal", name: "PostgreSQL check goal", boxId: "check-box" }],
     projects: [{ id: "check-project", name: "PostgreSQL check project", goalId: "check-goal", boxId: "check-box" }],
-    tasks: [{ id: "check-task", title: "PostgreSQL check task" }],
-    resources: [{ id: "check-resource", title: "PostgreSQL check resource", projectId: "check-project" }],
+    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
+    resources: [{ id: "check-resource", title: "PostgreSQL check resource", boxId: "check-box", goalId: "check-goal", projectId: "check-project" }],
     habits: [{ id: "check-habit", title: "PostgreSQL check habit", projectId: "check-project" }],
     habitInstances: [{ id: "check-habit-instance", habitId: "check-habit", date: "2026-06-02", completed: true }],
     journals: [{ id: "check-journal", title: "PostgreSQL check journal" }],
     googleCalendars: [{ id: "check-google-calendar", summary: "PostgreSQL check Google calendar" }],
     googleEvents: [{ id: "check-google-event", calendarId: "check-google-calendar", title: "PostgreSQL check Google event" }],
-    links: [{ id: "check-link", fromType: "tasks", fromId: "check-task", toType: "projects", toId: "check-project" }],
+    links: [{ id: "check-link", fromType: "tasks", fromId: "check-task", toType: "resources", toId: "check-resource", relation: "related" }],
   };
 
   const writeResult = await fetchJson("/api/state", {
@@ -105,6 +114,8 @@ try {
   for (const key of COLLECTION_KEYS) {
     assert(readResult.state?.[key]?.length === 1, `state read did not return written ${key}`);
   }
+  assert(readResult.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
+  assert(readResult.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
 
   const postState = {
     ...state,
@@ -116,9 +127,10 @@ try {
       viewControls: {
         resources: {
           search: "check resource",
-          filter: "active",
+          filters: ["active", "important", "active"],
           sort: "title",
           mode: "map",
+          panels: { filter: true, sort: false },
           type: "article",
           toggles: { pinned: true, readLater: "invalid-toggle", important: true, linked: false },
         },
@@ -129,8 +141,8 @@ try {
       notionSyncMode: "obsolete",
     },
     updatedAt: 123,
-    tasks: [{ id: "check-task", title: "PostgreSQL check task", kind: "legacy-task-kind" }, null, "invalid-task"],
-    resources: [null, "invalid-resource", { id: "check-resource", title: "PostgreSQL check resource" }],
+    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", kind: "legacy-task-kind" }, null, "invalid-task"],
+    resources: [null, "invalid-resource", { id: "check-resource", title: "PostgreSQL check resource", boxId: "check-box", goalId: "check-goal", projectId: "check-project", pinned: true }],
     journals: [{ id: "check-journal", title: "PostgreSQL check journal", kind: "legacy-journal-kind" }, false],
   };
   const postWriteResult = await fetchJson("/api/state", {
@@ -144,7 +156,9 @@ try {
   assert(postWriteResult.state?.settings?.calendarSources?.tasks === false && postWriteResult.state.settings.calendarSources.projects === true, "state POST write response did not normalize calendar source values");
   assert(postWriteResult.state?.settings?.visibleGoogleCalendars?.primary === false && !("secondary" in postWriteResult.state.settings.visibleGoogleCalendars) && postWriteResult.state.settings.visibleGoogleCalendars.tertiary === true, "state POST write response did not normalize visible Google calendar values");
   assert(postWriteResult.state?.settings?.viewControls?.resources?.mode === "map", "state POST write response did not preserve resource view mode");
-  assert(postWriteResult.state?.settings?.viewControls?.resources?.toggles?.pinned === true && postWriteResult.state.settings.viewControls.resources.toggles.readLater === false, "state POST write response did not normalize resource view toggles");
+  assert(postWriteResult.state?.settings?.viewControls?.resources?.filters?.join(",") === "active,important", "state POST write response did not preserve resource multi filters");
+  assert(postWriteResult.state?.settings?.viewControls?.resources?.panels?.filter === true && postWriteResult.state.settings.viewControls.resources.panels.sort === false, "state POST write response did not preserve resource panel visibility");
+  assert(!("type" in postWriteResult.state.settings.viewControls.resources) && !("toggles" in postWriteResult.state.settings.viewControls.resources), "state POST write response did not remove legacy resource view controls");
   assert(postWriteResult.state?.tasks?.length === 1 && !("kind" in postWriteResult.state.tasks[0]), "state POST write response did not normalize invalid or legacy task entries");
   assert(postWriteResult.state?.resources?.length === 1 && postWriteResult.state.resources[0]?.id === "check-resource", "state POST write response did not normalize invalid resource entries");
   assert(postWriteResult.state?.journals?.length === 1 && !("kind" in postWriteResult.state.journals[0]), "state POST write response did not normalize invalid or legacy journal entries");
@@ -174,11 +188,74 @@ try {
   assert(row.rows[0]?.stats_seeded_type === "boolean" && row.rows[0]?.google_calendar_id_type === "string" && row.rows[0]?.updated_at_type === "string", "server did not normalize scalar settings or timestamps before storage");
   assert(row.rows[0]?.has_app_mode === false && row.rows[0]?.has_notion_sync_mode === false, "server stored deprecated settings keys");
   const viewControlRow = await pool.query(
-    "SELECT state->'settings'->'viewControls'->'resources'->>'mode' AS resource_mode, state->'settings'->'viewControls'->'resources'->>'type' AS resource_type, state->'settings'->'viewControls'->'resources'->'toggles'->>'pinned' AS pinned_toggle, state->'settings'->'viewControls'->'resources'->'toggles'->>'readLater' AS read_later_toggle FROM app_state WHERE id = $1",
+    "SELECT state->'settings'->'viewControls'->'resources'->>'mode' AS resource_mode, state->'settings'->'viewControls'->'resources'->'filters' AS resource_filters, state->'settings'->'viewControls'->'resources'->'panels'->>'filter' AS filter_panel, state->'settings'->'viewControls'->'resources'->'panels'->>'sort' AS sort_panel, state->'settings'->'viewControls'->'resources' ? 'type' AS has_legacy_type, state->'settings'->'viewControls'->'resources' ? 'toggles' AS has_legacy_toggles FROM app_state WHERE id = $1",
     [appStateId]
   );
-  assert(viewControlRow.rows[0]?.resource_mode === "map" && viewControlRow.rows[0]?.resource_type === "article", "server did not store resource view controls in PostgreSQL");
-  assert(viewControlRow.rows[0]?.pinned_toggle === "true" && viewControlRow.rows[0]?.read_later_toggle === "false", "server did not normalize resource view control toggles before storage");
+  assert(viewControlRow.rows[0]?.resource_mode === "map", "server did not store resource view controls in PostgreSQL");
+  assert(viewControlRow.rows[0]?.resource_filters?.join(",") === "active,important", "server did not store resource multi filters in PostgreSQL");
+  assert(viewControlRow.rows[0]?.filter_panel === "true" && viewControlRow.rows[0]?.sort_panel === "false", "server did not store resource panel visibility in PostgreSQL");
+  assert(viewControlRow.rows[0]?.has_legacy_type === false && viewControlRow.rows[0]?.has_legacy_toggles === false, "server stored legacy resource view controls in PostgreSQL");
+
+  const relationalCounts = await pool.query(
+    `
+      SELECT
+        (SELECT count(*)::int FROM boxes WHERE app_state_id = $1) AS boxes,
+        (SELECT count(*)::int FROM goals WHERE app_state_id = $1) AS goals,
+        (SELECT count(*)::int FROM projects WHERE app_state_id = $1) AS projects,
+        (SELECT count(*)::int FROM tasks WHERE app_state_id = $1) AS tasks,
+        (SELECT count(*)::int FROM resources WHERE app_state_id = $1) AS resources,
+        (SELECT count(*)::int FROM task_resources WHERE app_state_id = $1) AS task_resources,
+        (SELECT count(*)::int FROM habits WHERE app_state_id = $1) AS habits,
+        (SELECT count(*)::int FROM habit_instances WHERE app_state_id = $1) AS habit_instances,
+        (SELECT count(*)::int FROM captures WHERE app_state_id = $1) AS captures,
+        (SELECT count(*)::int FROM journals WHERE app_state_id = $1) AS journals,
+        (SELECT count(*)::int FROM google_calendars WHERE app_state_id = $1) AS google_calendars,
+        (SELECT count(*)::int FROM google_events WHERE app_state_id = $1) AS google_events,
+        (SELECT count(*)::int FROM collection_links WHERE app_state_id = $1) AS collection_links
+    `,
+    [appStateId]
+  );
+  const relationalCountRow = relationalCounts.rows[0] || {};
+  for (const tableName of ["boxes", "goals", "projects", "tasks", "resources", "task_resources", "habits", "habit_instances", "captures", "journals", "google_calendars", "google_events", "collection_links"]) {
+    assert(Number(relationalCountRow[tableName]) === 1, `relational table ${tableName} did not contain the written row`);
+  }
+
+  const relationalRefs = await pool.query(
+    `
+      SELECT
+        (SELECT box_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_box_id,
+        (SELECT goal_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_goal_id,
+        (SELECT project_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_project_id,
+        (SELECT box_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_box_id,
+        (SELECT goal_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_goal_id,
+        (SELECT project_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_project_id,
+        (SELECT task_id FROM task_resources WHERE app_state_id = $1 AND task_id = 'check-task' AND resource_id = 'check-resource') AS task_resource_task_id,
+        (SELECT resource_id FROM task_resources WHERE app_state_id = $1 AND task_id = 'check-task' AND resource_id = 'check-resource') AS task_resource_resource_id,
+        (SELECT project_id FROM habits WHERE app_state_id = $1 AND id = 'check-habit') AS habit_project_id,
+        (SELECT habit_id FROM habit_instances WHERE app_state_id = $1 AND id = 'check-habit-instance') AS habit_instance_habit_id,
+        (SELECT calendar_id FROM google_events WHERE app_state_id = $1 AND id = 'check-google-event') AS google_event_calendar_id
+    `,
+    [appStateId]
+  );
+  const refRow = relationalRefs.rows[0] || {};
+  assert(refRow.task_box_id === "check-box" && refRow.task_goal_id === "check-goal" && refRow.task_project_id === "check-project", "relational tasks did not preserve box/goal/project references");
+  assert(refRow.resource_box_id === "check-box" && refRow.resource_goal_id === "check-goal" && refRow.resource_project_id === "check-project", "relational resources did not preserve box/goal/project references");
+  assert(refRow.task_resource_task_id === "check-task" && refRow.task_resource_resource_id === "check-resource", "task-resource relation was not stored as a separate relationship");
+  assert(refRow.habit_project_id === "check-project" && refRow.habit_instance_habit_id === "check-habit", "habit relational references were not stored");
+  assert(refRow.google_event_calendar_id === "check-google-calendar", "Google event relational calendar reference was not stored");
+
+  await pool.query("UPDATE tasks SET title = 'Relational table task title', status = 'done' WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
+  await pool.query("UPDATE resources SET title = 'Relational table resource title', pinned = false WHERE app_state_id = $1 AND id = 'check-resource'", [appStateId]);
+  const relationalReadResult = await fetchJson("/api/state");
+  assert(relationalReadResult.state?.tasks?.[0]?.title === "Relational table task title", "state read did not use the relational tasks table as source of truth");
+  assert(relationalReadResult.state?.tasks?.[0]?.status === "done", "state read did not use relational task status");
+  assert(relationalReadResult.state?.tasks?.[0]?.resourceId === "check-resource", "state read did not reconstruct task-resource peer relation");
+  assert(relationalReadResult.state?.resources?.[0]?.title === "Relational table resource title", "state read did not use the relational resources table as source of truth");
+  assert(relationalReadResult.state?.resources?.[0]?.pinned === false, "state read did not use relational resource boolean columns");
+
+  await pool.query("UPDATE app_state SET state = jsonb_set(state, '{tasks,0,title}', to_jsonb('JSONB stale task title'::text), true) WHERE id = $1", [appStateId]);
+  const staleJsonReadResult = await fetchJson("/api/state");
+  assert(staleJsonReadResult.state?.tasks?.[0]?.title === "Relational table task title", "stale JSONB app_state overrode the relational task table");
 
   const pollutedState = {
     version: "not-a-version",
@@ -189,11 +266,12 @@ try {
       appMode: "legacy-local",
       calendarSources: { tasks: "polluted-tasks", projects: false, google: true },
       visibleGoogleCalendars: { primary: "polluted-primary", work: false },
-      viewControls: { resources: { mode: "list", toggles: { readLater: true } }, today: "polluted-control" },
+      viewControls: { resources: { mode: "list", filters: ["active", "pinned"], panels: { sort: true }, toggles: { readLater: true }, type: "article" }, today: "polluted-control" },
     },
     tasks: [null, { id: "polluted-task", kind: "legacy-task-kind" }],
     journals: [{ id: "polluted-journal", kind: "legacy-journal-kind" }, "polluted-journal"],
   };
+  await deleteRelationalRows(appStateId);
   await pool.query("UPDATE app_state SET state = $2::jsonb WHERE id = $1", [appStateId, JSON.stringify(pollutedState)]);
   const healedReadResult = await fetchJson("/api/state");
   assert(healedReadResult.state?.version === 3, "state read did not normalize an invalid stored version");
@@ -202,7 +280,7 @@ try {
   assert(healedReadResult.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
   assert(healedReadResult.state?.settings?.calendarSources?.tasks === true && healedReadResult.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
   assert(!("primary" in healedReadResult.state?.settings?.visibleGoogleCalendars) && healedReadResult.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
-  assert(healedReadResult.state?.settings?.viewControls?.resources?.mode === "list" && healedReadResult.state.settings.viewControls.resources.toggles.readLater === true, "state read did not normalize polluted view controls");
+  assert(healedReadResult.state?.settings?.viewControls?.resources?.mode === "list" && healedReadResult.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedReadResult.state.settings.viewControls.resources.panels.sort === true && !("type" in healedReadResult.state.settings.viewControls.resources) && !("toggles" in healedReadResult.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
   assert(!("appMode" in (healedReadResult.state?.settings || {})), "state read returned deprecated settings from polluted storage");
 
   const healedRow = await pool.query(
@@ -217,6 +295,10 @@ try {
   assert(healedRow.rows[0]?.task_has_kind === false && healedRow.rows[0]?.journal_has_kind === false, "state read did not remove legacy kind fields from PostgreSQL");
   assert(healedRow.rows[0]?.has_app_mode === false, "state read did not remove deprecated settings from PostgreSQL");
 
+  const healedRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
+  assert(Number(healedRelationalRows.rows[0]?.tasks) === 1, "state read did not sync healed PostgreSQL state into relational tables");
+
+  await deleteRelationalRows(appStateId);
   await pool.query("UPDATE app_state SET state = $2::jsonb WHERE id = $1", [appStateId, JSON.stringify("polluted-scalar-state")]);
   const scalarHealedReadResult = await fetchJson("/api/state");
   assert(scalarHealedReadResult.state?.version === 3, "state read did not normalize a scalar PostgreSQL state");
@@ -227,11 +309,17 @@ try {
   );
   assert(scalarHealedRow.rows[0]?.state_type === "object", "state read did not heal scalar PostgreSQL state into an object");
   assert(scalarHealedRow.rows[0]?.settings_type === "object" && scalarHealedRow.rows[0]?.tasks_type === "array", "state read did not heal scalar PostgreSQL defaults");
+  const scalarRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
+  assert(Number(scalarRelationalRows.rows[0]?.tasks) === 0, "scalar state healing did not clear stale relational task rows");
 
   const tables = await pool.query(
-    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('app_state', 'app_private_data') ORDER BY tablename"
+    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('app_state', 'app_private_data', 'boxes', 'goals', 'projects', 'tasks', 'resources', 'task_resources', 'habits', 'habit_instances', 'captures', 'journals', 'google_calendars', 'google_events', 'collection_links') ORDER BY tablename"
   );
-  assert(tables.rows.map((row) => row.tablename).join(",") === "app_private_data,app_state", "required PostgreSQL tables were not created");
+  const createdTables = tables.rows.map((row) => row.tablename).join(",");
+  assert(
+    createdTables === "app_private_data,app_state,boxes,captures,collection_links,goals,google_calendars,google_events,habit_instances,habits,journals,projects,resources,task_resources,tasks",
+    "required PostgreSQL tables were not created"
+  );
 
   tokenStorage = createStorage({ databaseUrl, appStateId: tokenStateId });
   await tokenStorage.ready();
@@ -288,6 +376,27 @@ try {
 async function cleanupCheckRows() {
   await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [[appStateId, tokenStateId, legacyTokenStateId]]);
   await pool.query("DELETE FROM app_state WHERE id = $1", [appStateId]);
+}
+
+async function deleteRelationalRows(stateId) {
+  const tables = [
+    "task_resources",
+    "collection_links",
+    "habit_instances",
+    "google_events",
+    "tasks",
+    "resources",
+    "habits",
+    "projects",
+    "goals",
+    "boxes",
+    "captures",
+    "journals",
+    "google_calendars",
+  ];
+  for (const table of tables) {
+    await pool.query(`DELETE FROM ${table} WHERE app_state_id = $1`, [stateId]);
+  }
 }
 
 async function fileExists(path) {

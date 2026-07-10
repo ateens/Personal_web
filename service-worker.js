@@ -1,7 +1,7 @@
-const CACHE_NAME = "sygma-personal-web-v292";
+const CACHE_NAME = "sygma-personal-web-v634-full-opt";
 const ASSETS = [
-  "./styles.css?v=20260603-17",
-  "./app.js?v=20260603-17",
+  "./styles.css?v=20260711-full-opt-328",
+  "./app.js?v=20260711-full-opt-328",
   "./manifest.json",
   "./icons/app-icon.svg"
 ];
@@ -24,6 +24,19 @@ function shouldCache(response) {
   return response && response.status === 200 && response.type !== "opaque";
 }
 
+function cacheFirst(request) {
+  return caches.match(request).then((cached) => {
+    if (cached) return cached;
+    return fetch(request).then((response) => {
+      if (shouldCache(response)) {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+      }
+      return response;
+    });
+  });
+}
+
 function networkFirst(request) {
   return fetch(request, { cache: "no-store" })
     .then((response) => {
@@ -43,5 +56,6 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
 
-  event.respondWith(networkFirst(event.request));
+  const immutableAsset = url.searchParams.has("v") || url.pathname.startsWith("/icons/");
+  event.respondWith(immutableAsset ? cacheFirst(event.request) : networkFirst(event.request));
 });

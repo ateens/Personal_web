@@ -4,14 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node scripts/build.mjs",
     "start": "node server.js",
-    "check": "node --check app.js && node --check server.js && node --check server/storage.js && node --check scripts/check-postgres-state.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs",
-    "check:postgres": "node scripts/check-postgres-state.mjs"
+    "preview": "STATIC_ROOT=dist/client node server.js",
+    "check": "node --check app.js && node --check server.js && node --check server/storage.js && node --check worker/index.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-worker.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-worker.mjs",
+    "check:build": "npm run build && node scripts/check-build.mjs",
+    "check:postgres": "node --env-file-if-exists=.env scripts/check-postgres-state.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "pg": "^8.21.0"
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

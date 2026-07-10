@@ -1,9 +1,11 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import http from "node:http";
+import { promisify } from "node:util";
+import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -24,6 +26,12 @@ async function loadLocalEnv() {
 
 await loadLocalEnv();
 
+const builtStaticRoot = resolve(root, "dist/client");
+const staticRoot = process.env.STATIC_ROOT
+  ? resolve(root, process.env.STATIC_ROOT)
+  : existsSync(join(builtStaticRoot, "index.html"))
+    ? builtStaticRoot
+    : resolve(root);
 const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
 const databaseUrl = process.env.DATABASE_URL || "";
@@ -460,29 +468,72 @@ function resolveRequestPath(url) {
   const { pathname } = new URL(url, `http://${host}:${port}`);
   const decoded = decodeURIComponent(pathname);
   const requested = decoded === "/" ? "/index.html" : decoded;
-  const absolute = resolve(join(root, normalize(requested)));
-  return absolute.startsWith(root) ? absolute : "";
+  const absolute = resolve(join(staticRoot, normalize(requested)));
+  return absolute === staticRoot || absolute.startsWith(`${staticRoot}${sep}`) ? absolute : "";
+}
+
+const compressibleExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".svg", ".txt"]);
+const compressedStaticCache = new Map();
+const brotliCompressAsync = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
+
+function responseEncoding(request, extension, size) {
+  if (size < 1024 || !compressibleExtensions.has(extension)) return "";
+  const accepted = String(request.headers["accept-encoding"] || "").toLowerCase();
+  if (accepted.includes("br")) return "br";
+  if (accepted.includes("gzip")) return "gzip";
+  return "";
+}
+
+async function compressedStaticFile(filePath, fileStat, encoding) {
+  const key = `${filePath}:${fileStat.size}:${Math.trunc(fileStat.mtimeMs)}:${encoding}`;
+  const cached = compressedStaticCache.get(key);
+  if (cached) return cached;
+  const source = await readFile(filePath);
+  const compressed = encoding === "br"
+    ? await brotliCompressAsync(source, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 } })
+    : await gzipAsync(source, { level: 6 });
+  if (compressedStaticCache.size >= 32) compressedStaticCache.clear();
+  compressedStaticCache.set(key, compressed);
+  return compressed;
 }
 
 async function sendFile(request, response, requestUrl, filePath) {
   const fileStat = await stat(filePath);
   if (!fileStat.isFile()) throw new Error("Not a file");
-  response.writeHead(200, {
-    "Content-Length": fileStat.size,
-    "Content-Type": contentTypes[extname(filePath)] || "application/octet-stream",
+  const extension = extname(filePath);
+  const encoding = responseEncoding(request, extension, fileStat.size);
+  const etag = `\"${fileStat.size.toString(16)}-${Math.trunc(fileStat.mtimeMs).toString(16)}\"`;
+  const headers = {
+    "Content-Type": contentTypes[extension] || "application/octet-stream",
     "Cache-Control": staticCacheControl(filePath, requestUrl),
+    ETag: etag,
+    Vary: "Accept-Encoding",
     "X-Content-Type-Options": "nosniff",
-  });
+  };
+  if (request.headers["if-none-match"] === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  if (encoding) headers["Content-Encoding"] = encoding;
+  else headers["Content-Length"] = fileStat.size;
+  response.writeHead(200, headers);
   if (request.method === "HEAD") {
     response.end();
+    return;
+  }
+  if (encoding) {
+    response.end(await compressedStaticFile(filePath, fileStat, encoding));
     return;
   }
   createReadStream(filePath).pipe(response);
 }
 
 function staticCacheControl(filePath, requestUrl) {
-  const name = filePath.slice(root.length);
+  const name = filePath.slice(staticRoot.length).replace(/^[/\\]+/, "");
   if (name === "index.html" || name === "service-worker.js" || name === "manifest.json") return "no-store";
+  if (/^assets\/[^/]+\.[a-f0-9]{10,}\./.test(name)) return "public, max-age=31536000, immutable";
   if (requestUrl.searchParams.has("v")) return "public, max-age=31536000, immutable";
   return "public, max-age=3600";
 }
