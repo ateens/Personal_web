@@ -76,8 +76,8 @@ const [appBrotli, stylesBrotli, appGzip, stylesGzip] = await Promise.all([
   gzipAsync(appBuild.code, { level: 9 }),
   gzipAsync(stylesBuild.code, { level: 9 }),
 ]);
-const appFile = `app.${contentHash(Buffer.concat([Buffer.from(assetDeliveryVersion), Buffer.from(appBuild.code), appBrotli, appGzip]))}.js`;
-const stylesFile = `styles.${contentHash(Buffer.concat([Buffer.from(assetDeliveryVersion), Buffer.from(stylesBuild.code), stylesBrotli, stylesGzip]))}.css`;
+const appFile = `app.${contentHash(`${assetDeliveryVersion}\0${appBuild.code}`)}.js`;
+const stylesFile = `styles.${contentHash(`${assetDeliveryVersion}\0${stylesBuild.code}`)}.css`;
 const appPath = `/_sygma/assets/${appFile}`;
 const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
