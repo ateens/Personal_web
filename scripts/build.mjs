@@ -20,12 +20,15 @@ self.addEventListener("activate",event=>{event.waitUntil(caches.keys().then(keys
 const canCache=response=>response&&response.status===200&&response.type!=="opaque";
 const cacheFirst=request=>caches.match(request).then(cached=>cached||fetch(request).then(response=>{if(canCache(response)){const copy=response.clone();caches.open(CACHE_NAME).then(cache=>cache.put(request,copy))}return response}));
 const networkFirst=request=>fetch(request,{cache:"no-store"}).then(response=>{if(canCache(response)){const copy=response.clone();caches.open(CACHE_NAME).then(cache=>cache.put(request,copy))}return response}).catch(()=>caches.match(request).then(cached=>cached||Response.error()));
-self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;const url=new URL(event.request.url);if(url.origin!==self.location.origin||url.pathname.startsWith("/api/"))return;const immutable=url.pathname.startsWith("/assets/")||url.pathname.startsWith("/icons/");event.respondWith(immutable?cacheFirst(event.request):networkFirst(event.request))});
+self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;const url=new URL(event.request.url);if(url.origin!==self.location.origin||url.pathname.startsWith("/api/"))return;const immutable=url.pathname.startsWith("/_sygma/assets/")||url.pathname.startsWith("/assets/")||url.pathname.startsWith("/icons/");event.respondWith(immutable?cacheFirst(event.request):networkFirst(event.request))});
 `;
 }
 
 function staticHeaders() {
-  return `/assets/*
+  return `/_sygma/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/assets/*
   Cache-Control: public, max-age=31536000, immutable
 
 /
@@ -64,8 +67,8 @@ const [appBuild, stylesBuild] = await Promise.all([
 
 const appFile = `app.${contentHash(appBuild.code)}.js`;
 const stylesFile = `styles.${contentHash(stylesBuild.code)}.css`;
-const appPath = `/assets/${appFile}`;
-const stylesPath = `/assets/${stylesFile}`;
+const appPath = `/_sygma/assets/${appFile}`;
+const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
   writeFile(resolve(assetDir, appFile), appBuild.code),
   writeFile(resolve(assetDir, stylesFile), stylesBuild.code),

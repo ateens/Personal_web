@@ -33,9 +33,10 @@ try {
       },
     },
   };
-  const assetResponse = await worker.fetch(new Request("https://sygma.example/assets/app.1234567890ab.js"), env);
+  const assetResponse = await worker.fetch(new Request("https://sygma.example/_sygma/assets/app.1234567890ab.js"), env);
   assert.equal(assetResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
   assert.equal(assetResponse.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(assetRequests.at(-1), "/assets/app.1234567890ab.js");
 
   const fallbackResponse = await worker.fetch(new Request("https://sygma.example/missing", { headers: { accept: "text/html" } }), env);
   assert.equal(fallbackResponse.status, 200);

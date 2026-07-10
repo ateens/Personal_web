@@ -1,5 +1,6 @@
 const DEFAULT_API_ORIGIN = "https://personalweb-production-81a6.up.railway.app";
-const HASHED_ASSET_PATTERN = /\/assets\/[^/]+\.[a-f0-9]{10,}\.(?:css|js)$/;
+const ASSET_PROXY_PREFIX = "/_sygma/assets/";
+const HASHED_ASSET_PATTERN = /\/(?:_sygma\/)?assets\/[^/]+\.[a-f0-9]{10,}\.(?:css|js)$/;
 
 function apiOrigin(env) {
   return String(env?.API_ORIGIN || DEFAULT_API_ORIGIN).replace(/\/$/, "");
@@ -64,11 +65,17 @@ function withStaticHeaders(response, pathname) {
 }
 
 async function serveStatic(request, env) {
-  let response = await env.ASSETS.fetch(request);
+  const requestUrl = new URL(request.url);
+  let assetRequest = request;
+  if (requestUrl.pathname.startsWith(ASSET_PROXY_PREFIX)) {
+    const assetUrl = new URL(`/assets/${requestUrl.pathname.slice(ASSET_PROXY_PREFIX.length)}`, request.url);
+    assetRequest = new Request(assetUrl, request);
+  }
+  let response = await env.ASSETS.fetch(assetRequest);
   if (response.status === 404 && request.method === "GET" && request.headers.get("accept")?.includes("text/html")) {
     response = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
   }
-  return withStaticHeaders(response, new URL(request.url).pathname);
+  return withStaticHeaders(response, requestUrl.pathname);
 }
 
 export default {
