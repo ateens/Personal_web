@@ -9,11 +9,13 @@ Scope: the single-workspace PostgreSQL API served by `server.js` and reached thr
 The production path has two independent gates:
 
 1. A private Sites access policy authenticates the human user. When `REQUIRE_AUTHENTICATED_PROXY=1`, the Worker also requires the platform-provided `oai-authenticated-user-email` header.
-2. The Worker strips browser-controlled authentication, cookie, forwarded-IP, and identity headers, then adds its server-side `API_BEARER_TOKEN`. Railway compares that bearer token with the enabled DB-backed proxy credential.
+2. The Worker strips browser-controlled authentication, cookie, forwarded-IP, and identity headers, then adds its server-side `API_BEARER_TOKEN`. Railway compares that bearer token with either the exact-production one-way verifier, a fail-closed deployment credential, or the enabled DB-backed proxy credential.
 
 The normalized Sites email is forwarded as `x-sygma-authenticated-user-email` for future attribution. The current Node server does not use it for per-user authorization. This is therefore a shared, single-workspace bearer gate, not tenant isolation or role-based access control.
 
-The proxy credential is stored under the `api_proxy_auth` key in `app_private_data`, scoped by `APP_STATE_ID`. The configuration command prints only status, timestamps, and a SHA-256 fingerprint; it never prints the token. The server caches only the policy and token digest for `API_PROXY_AUTH_CACHE_TTL_MS`.
+The staged DB credential is stored under the `api_proxy_auth` key in `app_private_data`, scoped by `APP_STATE_ID`. The configuration command prints only status, timestamps, and a SHA-256 fingerprint; it never prints the token. The server caches only the policy and token digest for `API_PROXY_AUTH_CACHE_TTL_MS`.
+
+This repository also has an exact-production policy in `server/deployment-security.js`. When Railway's injected project, environment, and service IDs all match the intended production target, the server forces API authentication and state-write preconditions and compares the supplied token with a committed SHA-256 verifier. The token itself remains only in the Sites secret store. This is safe only because the credential was generated from 32 random bytes; do not replace it with a human-chosen or short token.
 
 ## Preconditions
 
@@ -23,6 +25,7 @@ The proxy credential is stored under the `api_proxy_auth` key in `app_private_da
 - Keep `FAIL_CLOSED_API_AUTH=0` or unset during staging. An environment override would ignore the DB policy.
 - Keep `TRUST_PROXY_IP_HEADERS=0` unless direct access is restricted to a trusted ingress that sanitizes those headers.
 - Use a secure operator machine with PostgreSQL access. Do not run token commands in CI logs.
+- If the Railway project, environment, or service is recreated, update all three IDs in `server/deployment-security.js` and rerun the target-scope auth tests before moving traffic. An ID mismatch deliberately does not inherit the production verifier.
 
 Run the isolated checks before touching the production key:
 
@@ -31,6 +34,18 @@ npm run check:api-auth
 ```
 
 The check creates random test workspace IDs and cleans them up. It does not enable the production `APP_STATE_ID`.
+
+## Exact-production one-way verifier
+
+The exact-production policy is the preferred fail-closed path when the Sites secret is already installed but Railway dashboard secret propagation is unavailable:
+
+1. Recover the staged token only into a mode-`0600` temporary file.
+2. Compute its SHA-256 fingerprint locally and confirm it exactly matches `PRODUCTION_RAILWAY_SECURITY_POLICY.apiBearerTokenSha256`; never print the token.
+3. Deploy the source containing the matching verifier. Railway supplies `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID`; all three must match.
+4. The exact target forces auth and `REQUIRE_STATE_PRECONDITION` regardless of weaker or stale `API_BEARER_TOKEN`, `API_BEARER_TOKEN_SHA256`, `FAIL_CLOSED_API_AUTH`, or DB-policy values.
+5. Verify the missing/wrong/correct matrix and the signed-in Sites path, then delete the temporary token file.
+
+For another deployment, `API_BEARER_TOKEN_SHA256=sha256:<64 hex characters>` may be used with `FAIL_CLOSED_API_AUTH=1`. A malformed verifier fails closed with `503 API_AUTH_NOT_CONFIGURED`. If both a digest and plaintext deployment token are present outside the exact production target, the digest is authoritative.
 
 ## Staged activation
 
@@ -161,7 +176,7 @@ These controls are in-memory and per Node process, not distributed quotas. Multi
 
 ### Preserve authentication while bypassing the DB policy
 
-The safer fallback is the environment override. Install the same credential as a Railway secret named `API_BEARER_TOKEN`, set `FAIL_CLOSED_API_AUTH=1`, redeploy, and repeat the missing/wrong/correct checks. The environment credential is then authoritative and the DB policy is ignored. If the flag is enabled without a token, all protected `/api/*` routes fail closed with `503 API_AUTH_NOT_CONFIGURED`.
+The safer generic fallback is the environment override. Install either the same credential as a Railway secret named `API_BEARER_TOKEN`, or its SHA-256 verifier as `API_BEARER_TOKEN_SHA256`, set `FAIL_CLOSED_API_AUTH=1`, redeploy, and repeat the missing/wrong/correct checks. A configured digest is authoritative over a plaintext deployment token, and either deployment override ignores the DB policy. If the flag is enabled without a valid token or verifier, all protected `/api/*` routes fail closed with `503 API_AUTH_NOT_CONFIGURED`.
 
 Once that override is verified, the DB record may be disabled for diagnosis:
 
@@ -194,7 +209,7 @@ node --env-file-if-exists=.env scripts/configure-api-proxy-auth.mjs remove --con
 | Worker `401 AUTHENTICATED_SITE_USER_REQUIRED` | Sites did not provide authenticated identity | Check private access policy and signed-in session; do not accept a browser-supplied replacement header |
 | Worker `503 AUTHENTICATED_PROXY_NOT_CONFIGURED` | Worker gate is on but its secret is absent | Install `API_BEARER_TOKEN` as a Sites secret and redeploy |
 | Railway `401 AUTH_REQUIRED` | Missing or wrong bearer under an enforced policy | Check Worker secret against the staged fingerprint; never log the token |
-| Railway `503 API_AUTH_NOT_CONFIGURED` | Missing environment token, malformed DB policy, or DB auth-policy read failure | Restore a valid secret/policy; use the verified environment override for a fail-closed fallback |
+| Railway `503 API_AUTH_NOT_CONFIGURED` | Missing/malformed deployment verifier or token, malformed DB policy, or DB auth-policy read failure | Restore a valid verifier/secret/policy; repeat the exact target and request-matrix checks |
 | `429 API_RATE_LIMITED` | Fixed-window route quota exceeded | Honor `Retry-After`; inspect ingress/client keying before raising limits |
 | `429 STATE_WRITE_BUSY` | Write queue full or timed out | Honor `Retry-After`; reduce write bursts or scale with a shared concurrency design |
 
@@ -202,7 +217,9 @@ Known boundaries:
 
 - A single bearer credential protects the whole `APP_STATE_ID`; there is no row-level tenant isolation, per-user authorization, or role model.
 - The identity email is forwarded for future attribution but is not an authorization decision in the current server.
-- The DB credential must be recoverable by the server, so database and Sites-secret access remain security-critical. Only a digest is retained in the in-process policy cache.
+- In DB-backed mode, the credential is recoverable by the server, so database and Sites-secret access remain security-critical. The exact-production path instead stores only the one-way verifier in source and the token in the Sites secret store.
+- On the exact production target, a staged DB `api_proxy_auth` row is ignored. Audit and remove an obsolete plaintext row when production DB operator access is available, but do not weaken the active one-way gate to do so.
+- Recreating the Railway project, environment, or service changes the IDs and requires a policy update before cutover. Token rotation requires coordinated Sites-secret and verifier changes; use a temporary dual-verifier rollout if zero downtime is required.
 - The direct Railway `/health` route remains anonymous, and `/api/google/oauth/callback` is exempt from the Node bearer check so that OAuth state-cookie validation can complete. Application state routes are not exempt.
 - The limiter and state-write queue are process-local. They are guardrails, not DDoS protection.
 - `stage` recovers an existing credential and does not rotate it. There is no atomic zero-downtime rotation command in this version; plan a controlled fail-closed environment-override transition for rotation.

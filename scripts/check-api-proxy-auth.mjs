@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer as createNetServer } from "node:net";
+import { PRODUCTION_RAILWAY_SECURITY_POLICY, deploymentSecurityPolicy } from "../server/deployment-security.js";
 import { createStorage } from "../server/storage.js";
 
 const databaseUrl = String(process.env.DATABASE_URL || "").trim();
@@ -16,6 +17,7 @@ const CACHE_TTL_MS = 150;
 const appStateId = `check-api-proxy-auth-${randomBytes(12).toString("hex")}`;
 const databaseToken = randomBytes(32).toString("base64url");
 const environmentToken = randomBytes(32).toString("base64url");
+const environmentTokenSha256 = createHash("sha256").update(environmentToken).digest("hex");
 const wrongToken = randomBytes(32).toString("base64url");
 const injectedEmail = "proxy-auth-check@example.invalid";
 const observedBodies = [];
@@ -24,6 +26,31 @@ let storage;
 let runningServer;
 
 try {
+  const productionDeployment = deploymentSecurityPolicy({
+    RAILWAY_PROJECT_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.projectId,
+    RAILWAY_ENVIRONMENT_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.environmentId,
+    RAILWAY_SERVICE_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.serviceId,
+  });
+  assert(productionDeployment.forceApiAuth, "production Railway target did not force API authentication");
+  assert(productionDeployment.forceStatePrecondition, "production Railway target did not force state preconditions");
+  assert(
+    productionDeployment.apiBearerTokenSha256 === PRODUCTION_RAILWAY_SECURITY_POLICY.apiBearerTokenSha256,
+    "production Railway target did not select its one-way bearer verifier",
+  );
+  for (const [label, ids] of [
+    ["project", { RAILWAY_PROJECT_ID: "copied-project" }],
+    ["environment", { RAILWAY_ENVIRONMENT_ID: "preview-environment" }],
+    ["service", { RAILWAY_SERVICE_ID: "replacement-service" }],
+  ]) {
+    const otherDeployment = deploymentSecurityPolicy({
+      RAILWAY_PROJECT_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.projectId,
+      RAILWAY_ENVIRONMENT_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.environmentId,
+      RAILWAY_SERVICE_ID: PRODUCTION_RAILWAY_SECURITY_POLICY.serviceId,
+      ...ids,
+    });
+    assert(!otherDeployment.forceApiAuth, `mismatched Railway ${label} inherited the production verifier`);
+  }
+
   storage = createStorage({ databaseUrl, appStateId });
   await storage.deletePrivateData(PRIVATE_DATA_KEY);
   await writePolicy(false, databaseToken);
@@ -102,7 +129,39 @@ try {
 
   runningServer = await startServer({
     FAIL_CLOSED_API_AUTH: "1",
+    API_BEARER_TOKEN: wrongToken,
+    API_BEARER_TOKEN_SHA256: `sha256:${environmentTokenSha256}`,
+  });
+  assertUnauthorized(await requestJson(runningServer, "/api/state/status"), "digest override anonymous request");
+  assertUnauthorized(
+    await requestJson(runningServer, "/api/state/status", { headers: { Authorization: `Bearer ${wrongToken}` } }),
+    "wrong token while digest override is active",
+  );
+  const digestAuthorized = await requestJson(runningServer, "/api/state/status", {
+    headers: { Authorization: `Bearer ${environmentToken}` },
+  });
+  assert(digestAuthorized.response.status === 200, "correct bearer token was rejected by its SHA-256 verifier");
+  await stopServer(runningServer);
+  runningServer = null;
+
+  runningServer = await startServer({
+    FAIL_CLOSED_API_AUTH: "1",
     API_BEARER_TOKEN: "",
+    API_BEARER_TOKEN_SHA256: "sha256:not-a-valid-digest",
+  });
+  assertServiceUnavailable(
+    await requestJson(runningServer, "/api/state/status", {
+      headers: { Authorization: `Bearer ${environmentToken}` },
+    }),
+    "malformed environment token digest",
+  );
+  await stopServer(runningServer);
+  runningServer = null;
+
+  runningServer = await startServer({
+    FAIL_CLOSED_API_AUTH: "1",
+    API_BEARER_TOKEN: "",
+    API_BEARER_TOKEN_SHA256: "",
   });
   const missingEnvironmentToken = await requestJson(runningServer, "/api/state/status", {
     headers: { Authorization: `Bearer ${databaseToken}` },
@@ -158,6 +217,12 @@ async function startServer(overrides) {
       GOOGLE_CLIENT_ID: "proxy-auth-check-client",
       GOOGLE_CLIENT_SECRET: "proxy-auth-check-secret",
       TRUST_PROXY_IP_HEADERS: "0",
+      FAIL_CLOSED_API_AUTH: "0",
+      API_BEARER_TOKEN: "",
+      API_BEARER_TOKEN_SHA256: "",
+      RAILWAY_PROJECT_ID: "",
+      RAILWAY_ENVIRONMENT_ID: "",
+      RAILWAY_SERVICE_ID: "",
       ...overrides,
     },
     stdio: ["ignore", "pipe", "pipe"],
