@@ -5,7 +5,10 @@ const originalFetch = globalThis.fetch;
 const OriginalResponse = globalThis.Response;
 let proxiedUrl = "";
 let proxiedMethod = "";
+let proxiedHeaders = new Headers();
 let responseEncodeBody = "";
+let upstreamResponseHeaders = { "content-type": "application/json", location: "/api/state/status" };
+let upstreamCalls = 0;
 
 try {
   globalThis.Response = class extends OriginalResponse {
@@ -15,20 +18,82 @@ try {
     }
   };
   globalThis.fetch = async (input, init = {}) => {
+    upstreamCalls += 1;
     proxiedUrl = String(input);
     proxiedMethod = init.method || "GET";
+    proxiedHeaders = new Headers(init.headers);
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
-      headers: { "content-type": "application/json", location: "/api/state/status" },
+      headers: upstreamResponseHeaders,
     });
   };
 
-  const apiResponse = await worker.fetch(new Request("https://sygma.example/api/state"), {});
+  const apiResponse = await worker.fetch(new Request("https://sygma.example/api/state", {
+    headers: {
+      authorization: "Bearer browser-controlled-token",
+      cookie: "sites-session=browser-controlled-cookie",
+      "oai-authenticated-user-email": "spoofed@example.com",
+      "x-authenticated-user-email": "spoofed@example.com",
+      "x-forwarded-user": "spoofed@example.com",
+      "x-sygma-authenticated-user-email": "spoofed@example.com",
+    },
+  }), {});
   assert.equal(apiResponse.status, 200);
   assert.equal(proxiedUrl, "https://personalweb-production-81a6.up.railway.app/api/state");
   assert.equal(proxiedMethod, "GET");
+  assert.equal(proxiedHeaders.get("authorization"), null);
+  assert.equal(proxiedHeaders.get("cookie"), null);
+  assert.equal(proxiedHeaders.get("oai-authenticated-user-email"), null);
+  assert.equal(proxiedHeaders.get("x-authenticated-user-email"), null);
+  assert.equal(proxiedHeaders.get("x-forwarded-user"), null);
+  assert.equal(proxiedHeaders.get("x-sygma-authenticated-user-email"), null);
   assert.equal(apiResponse.headers.get("x-sygma-backend"), "postgresql");
   assert.equal(apiResponse.headers.get("location"), "https://sygma.example/api/state/status");
+
+  const anonymousCallCount = upstreamCalls;
+  const anonymousResponse = await worker.fetch(new Request("https://sygma.example/api/state"), {
+    REQUIRE_AUTHENTICATED_PROXY: "true",
+    API_BEARER_TOKEN: "server-only-secret",
+  });
+  assert.equal(anonymousResponse.status, 401);
+  assert.equal((await anonymousResponse.json()).code, "AUTHENTICATED_SITE_USER_REQUIRED");
+  assert.equal(upstreamCalls, anonymousCallCount);
+
+  const missingSecretCallCount = upstreamCalls;
+  const missingSecretResponse = await worker.fetch(new Request("https://sygma.example/api/state", {
+    headers: { "oai-authenticated-user-email": "person@example.com" },
+  }), {
+    REQUIRE_AUTHENTICATED_PROXY: "1",
+  });
+  assert.equal(missingSecretResponse.status, 503);
+  assert.equal((await missingSecretResponse.json()).code, "AUTHENTICATED_PROXY_NOT_CONFIGURED");
+  assert.equal(upstreamCalls, missingSecretCallCount);
+
+  const proxySecret = "server-only-secret";
+  upstreamResponseHeaders = {
+    authorization: `Bearer ${proxySecret}`,
+    "content-type": "application/json",
+    "x-api-key": proxySecret,
+  };
+  const authenticatedResponse = await worker.fetch(new Request("https://sygma.example/api/state", {
+    headers: {
+      authorization: "Bearer browser-controlled-token",
+      "oai-authenticated-user-email": "  Person@Example.COM  ",
+      "x-sygma-authenticated-user-email": "spoofed@example.com",
+    },
+  }), {
+    REQUIRE_AUTHENTICATED_PROXY: "yes",
+    API_BEARER_TOKEN: proxySecret,
+  });
+  assert.equal(authenticatedResponse.status, 200);
+  assert.equal(proxiedHeaders.get("authorization"), `Bearer ${proxySecret}`);
+  assert.equal(proxiedHeaders.get("oai-authenticated-user-email"), null);
+  assert.equal(proxiedHeaders.get("x-sygma-authenticated-user-email"), "person@example.com");
+  assert.equal(authenticatedResponse.headers.get("authorization"), null);
+  assert.equal(authenticatedResponse.headers.get("x-api-key"), null);
+  assert.equal(await authenticatedResponse.text(), JSON.stringify({ ok: true }));
+  assert.equal(JSON.stringify([...authenticatedResponse.headers]).includes(proxySecret), false);
+  upstreamResponseHeaders = { "content-type": "application/json", location: "/api/state/status" };
 
   const assetRequests = [];
   const env = {
@@ -36,7 +101,9 @@ try {
       async fetch(request) {
         const url = new URL(request.url);
         assetRequests.push(url.pathname);
-        if (url.pathname === "/missing") return new Response("missing", { status: 404 });
+        if (["/missing", "/resources/resource-1", "/missing.js"].includes(url.pathname)) {
+          return new Response("missing", { status: 404 });
+        }
         return new Response("asset", { status: 200, headers: { "content-type": "text/html" } });
       },
     },
@@ -62,6 +129,17 @@ try {
   const fallbackResponse = await worker.fetch(new Request("https://sygma.example/missing", { headers: { accept: "text/html" } }), env);
   assert.equal(fallbackResponse.status, 200);
   assert.deepEqual(assetRequests.slice(-2), ["/missing", "/index.html"]);
+
+  const headFallbackResponse = await worker.fetch(new Request("https://sygma.example/resources/resource-1", {
+    method: "HEAD",
+    headers: { accept: "text/html" },
+  }), env);
+  assert.equal(headFallbackResponse.status, 200);
+  assert.deepEqual(assetRequests.slice(-2), ["/resources/resource-1", "/index.html"]);
+
+  const assetNotFoundResponse = await worker.fetch(new Request("https://sygma.example/missing.js", { headers: { accept: "text/html" } }), env);
+  assert.equal(assetNotFoundResponse.status, 404);
+  assert.equal(assetRequests.at(-1), "/missing.js");
 
   const rejected = await worker.fetch(new Request("https://sygma.example/file", { method: "POST" }), env);
   assert.equal(rejected.status, 405);

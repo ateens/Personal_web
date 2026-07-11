@@ -20,7 +20,7 @@ assert(stylesPath, "built index is missing a content-hashed stylesheet");
 
 const appFile = resolve(client, "assets", basename(appPath));
 const stylesFile = resolve(client, "assets", basename(stylesPath));
-const [appStat, stylesStat, appBrotliStat, stylesBrotliStat, appGzipStat, stylesGzipStat, workerStat, sourceAppStat, sourceStylesStat] = await Promise.all([
+const [appStat, stylesStat, appBrotliStat, stylesBrotliStat, appGzipStat, stylesGzipStat, workerStat, socialPreviewStat, sourceAppStat, sourceStylesStat] = await Promise.all([
   stat(appFile),
   stat(stylesFile),
   stat(resolve(client, "assets", `${basename(appPath)}.br`)),
@@ -28,10 +28,14 @@ const [appStat, stylesStat, appBrotliStat, stylesBrotliStat, appGzipStat, styles
   stat(resolve(client, "assets", `${basename(appPath)}.gz`)),
   stat(resolve(client, "assets", `${basename(stylesPath)}.gz`)),
   stat(resolve(root, "dist/server/index.js")),
+  stat(resolve(client, "assets/sygma-social-preview.png")),
   stat(resolve(root, "app.js")),
   stat(resolve(root, "styles.css")),
 ]);
 assert(workerStat.size > 0, "Sites worker build is empty");
+assert(socialPreviewStat.size > 0, "social preview asset is missing from the client build");
+assert(index.includes('property="og:image" content="/assets/sygma-social-preview.png"'), "built index is missing its Open Graph preview");
+assert(serviceWorker.includes("/assets/sygma-social-preview.png"), "service worker does not precache the social preview");
 assert(serviceWorker.includes(appPath) && serviceWorker.includes(stylesPath), "service worker does not precache built assets");
 assert(staticHeaders.includes("/_sygma/assets/*") && staticHeaders.includes("max-age=31536000, immutable"), "built static assets are missing immutable browser cache headers");
 const builtBytes = appStat.size + stylesStat.size;

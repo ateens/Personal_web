@@ -27,7 +27,7 @@ Then open:
 http://127.0.0.1:4180/
 ```
 
-Use `npm start` for PostgreSQL persistence and Google Calendar integration. The server requires `DATABASE_URL` and does not persist app data to browser storage or token files. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
+Use `npm start` for PostgreSQL persistence and Google Calendar integration. PostgreSQL remains the remote source of truth. The browser also keeps a workspace-scoped IndexedDB snapshot and pending-operation queue so Resource drafts survive reloads and reconnect safely; it never stores Google OAuth tokens or the API proxy credential. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
 
 The server creates the `app_state` and `app_private_data` tables automatically. The full app state is still stored as a JSONB document in `app_state` for backup, settings, migration, and client compatibility. Internal private data such as Google OAuth tokens is stored in `app_private_data`. Existing `localStorage` state is only read as a legacy migration source and removed after PostgreSQL sync.
 
@@ -61,6 +61,14 @@ DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web npm ru
 
 This starts a temporary app server, writes state through `/api/state`, reads it back, and checks the JSONB tables plus the relational collection tables directly.
 
+Verify the DB-backed API proxy authentication path with:
+
+```bash
+npm run check:api-auth
+```
+
+The check uses isolated random `APP_STATE_ID` values, exercises staged, enabled, disabled, malformed, and environment-override policies, and removes its test records. It requires the same PostgreSQL access as `check:postgres` and does not enable authentication for the production `APP_STATE_ID`.
+
 ## Production Build
 
 Create and verify the optimized production bundle with:
@@ -69,6 +77,7 @@ Create and verify the optimized production bundle with:
 npm run check
 npm run check:build
 npm run check:postgres
+npm run check:api-auth
 ```
 
 The build writes content-hashed, minified JS/CSS and the Sites Worker entry point to `dist/`. To preview that exact bundle locally:
@@ -82,6 +91,10 @@ The Node server serves Brotli or gzip when supported, validates conditional requ
 ## OpenAI Sites
 
 `.openai/hosting.json` identifies the Sites project. `worker/index.js` serves the optimized static bundle through the Sites asset binding and forwards `/api/*` plus `/health` to the existing PostgreSQL-backed Railway service. This keeps the current data and Google Calendar integration available from the Sites deployment without duplicating browser state.
+
+Production should use a private Sites access policy plus the authenticated proxy. With `REQUIRE_AUTHENTICATED_PROXY=1`, the Worker requires the Sites-provided `oai-authenticated-user-email` header, strips browser-supplied credentials and identity headers, and injects a server-side `API_BEARER_TOKEN` secret for Railway. The Railway API must enforce the matching staged DB credential before the rollout is considered complete. Do not place that token in source, `.env.example`, shell history, logs, or a non-secret Sites variable.
+
+The exact staged activation, verification, rollback, and failure-mode procedure is in [the API proxy authentication runbook](docs/resource-api-auth-runbook-2026-07-11.md).
 
 ## Railway
 
@@ -101,6 +114,25 @@ Set these Railway variables for persistence:
 DATABASE_URL
 APP_STATE_ID=default
 ```
+
+Recommended production settings are documented in `.env.example`; the limits below use the code defaults, while the state-write precondition is deliberately enabled for production:
+
+```text
+REQUIRE_STATE_PRECONDITION=1
+FAIL_CLOSED_API_AUTH=0
+API_PROXY_AUTH_CACHE_TTL_MS=1000
+API_RATE_LIMIT_WINDOW_MS=60000
+API_RATE_LIMIT_STATE_READ_MAX=240
+API_RATE_LIMIT_STATE_WRITE_MAX=120
+API_RATE_LIMIT_GOOGLE_MUTATION_MAX=20
+API_RATE_LIMIT_MAX_KEYS=10000
+STATE_WRITE_MAX_CONCURRENCY=2
+STATE_WRITE_MAX_QUEUE=16
+STATE_WRITE_QUEUE_TIMEOUT_MS=10000
+TRUST_PROXY_IP_HEADERS=0
+```
+
+`FAIL_CLOSED_API_AUTH=0` is intentional for the staged DB-backed flow; protection begins only after the DB policy is explicitly enabled. Setting it to `1` switches to the deployment-environment override, where `API_BEARER_TOKEN` is mandatory and takes precedence over the DB policy. Never enable `TRUST_PROXY_IP_HEADERS` unless the only reachable ingress strips and recreates forwarded IP headers.
 
 Set these Railway variables before using Google Calendar:
 
@@ -126,5 +158,7 @@ https://personalweb-production-81a6.up.railway.app/
 - `server.js`
 - `worker/index.js`
 - `scripts/build.mjs`
+- `scripts/configure-api-proxy-auth.mjs`
+- `scripts/check-api-proxy-auth.mjs`
 - `railway.json`
 - `icons/`

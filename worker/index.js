@@ -1,6 +1,22 @@
 const DEFAULT_API_ORIGIN = "https://personalweb-production-81a6.up.railway.app";
 const ASSET_PROXY_PREFIX = "/_sygma/assets/";
 const HASHED_ASSET_PATTERN = /\/(?:_sygma\/)?assets\/[^/]+\.[a-f0-9]{10,}\.(?:css|js)$/;
+const PLATFORM_IDENTITY_HEADER = "oai-authenticated-user-email";
+const UPSTREAM_IDENTITY_HEADER = "x-sygma-authenticated-user-email";
+const PROXY_SECRET_BINDING = "API_BEARER_TOKEN";
+const STRIPPED_PROXY_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "forwarded",
+  "oai-authenticated-user-email",
+  "proxy-authorization",
+  "x-api-key",
+  "x-authenticated-user-email",
+  "x-auth-user",
+  "x-original-authorization",
+  "x-sygma-authenticated-user-email",
+  "x-user-email",
+]);
 
 function apiOrigin(env) {
   return String(env?.API_ORIGIN || DEFAULT_API_ORIGIN).replace(/\/$/, "");
@@ -10,11 +26,63 @@ function isApiRequest(pathname) {
   return pathname === "/health" || pathname.startsWith("/api/");
 }
 
-function proxyHeaders(request) {
+function envFlag(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || ""));
+}
+
+function normalizedPlatformEmail(request) {
+  const value = String(request.headers.get(PLATFORM_IDENTITY_HEADER) || "").trim().toLowerCase();
+  if (!value || value.length > 320 || /[\u0000-\u001f\u007f]/.test(value)) return "";
+  return value;
+}
+
+function isSpoofableProxyHeader(name) {
+  const normalized = name.toLowerCase();
+  return STRIPPED_PROXY_HEADERS.has(normalized)
+    || normalized.startsWith("cf-access-")
+    || normalized.startsWith("oai-authenticated-")
+    || normalized.startsWith("x-auth-")
+    || normalized.startsWith("x-authenticated-")
+    || normalized.startsWith("x-forwarded-")
+    || normalized.startsWith("x-sygma-authenticated-")
+    || normalized.startsWith("x-user-");
+}
+
+function proxyHeaders(request, { bearerToken = "", identityEmail = "" } = {}) {
   const headers = new Headers(request.headers);
+  for (const name of [...headers.keys()]) {
+    if (isSpoofableProxyHeader(name)) headers.delete(name);
+  }
   headers.delete("host");
   headers.delete("content-length");
+  if (bearerToken) headers.set("authorization", `Bearer ${bearerToken}`);
+  if (identityEmail) headers.set(UPSTREAM_IDENTITY_HEADER, identityEmail);
   return headers;
+}
+
+function proxyAuthError(status, code, message) {
+  return new Response(JSON.stringify({ error: message, code }), {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
+}
+
+function proxyAuthContext(request, env) {
+  if (!envFlag(env?.REQUIRE_AUTHENTICATED_PROXY)) {
+    return { bearerToken: "", identityEmail: "" };
+  }
+  const identityEmail = normalizedPlatformEmail(request);
+  if (!identityEmail) {
+    return { error: proxyAuthError(401, "AUTHENTICATED_SITE_USER_REQUIRED", "Authenticated Sites access is required.") };
+  }
+  const bearerToken = String(env?.[PROXY_SECRET_BINDING] || "").trim();
+  if (!bearerToken) {
+    return { error: proxyAuthError(503, "AUTHENTICATED_PROXY_NOT_CONFIGURED", "Authenticated API proxy is not configured.") };
+  }
+  return { bearerToken, identityEmail };
 }
 
 function rewriteUpstreamLocation(headers, requestUrl, upstreamOrigin) {
@@ -64,17 +132,22 @@ function staticAssetRequest(url, request) {
   return new Request(url, { method: request.method, headers });
 }
 
-async function proxyApiRequest(request, env) {
+async function proxyApiRequest(request, env, authContext) {
   const requestUrl = new URL(request.url);
   const upstreamOrigin = apiOrigin(env);
   const target = new URL(`${requestUrl.pathname}${requestUrl.search}`, upstreamOrigin);
   const upstream = await fetch(target, {
     method: request.method,
-    headers: proxyHeaders(request),
+    headers: proxyHeaders(request, authContext),
     body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
     redirect: "manual",
   });
   const headers = new Headers(upstream.headers);
+  for (const [name, value] of [...headers]) {
+    if (isSpoofableProxyHeader(name) || (authContext.bearerToken && value.includes(authContext.bearerToken))) {
+      headers.delete(name);
+    }
+  }
   rewriteUpstreamLocation(headers, requestUrl, upstreamOrigin);
   headers.set("x-sygma-backend", "postgresql");
   return new Response(upstream.body, {
@@ -89,6 +162,8 @@ function withStaticHeaders(response, pathname, encodeBody = "automatic") {
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "same-origin");
   headers.set("x-frame-options", "SAMEORIGIN");
+  headers.set("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'");
+  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (HASHED_ASSET_PATTERN.test(pathname)) {
     headers.set("cache-control", "public, max-age=31536000, immutable");
   } else if (pathname === "/" || pathname === "/index.html" || pathname === "/service-worker.js" || pathname === "/manifest.json") {
@@ -120,7 +195,10 @@ async function serveStatic(request, env) {
   }
   const servedEncoding = assetSourcePath && response.status === 200 ? assetEncoding : "";
   if (assetSourcePath) response = withAssetEncoding(response, assetSourcePath, servedEncoding);
-  if (response.status === 404 && request.method === "GET" && request.headers.get("accept")?.includes("text/html")) {
+  const acceptsHtml = request.headers.get("accept")?.includes("text/html");
+  const pathName = requestUrl.pathname.split("/").pop() || "";
+  const extensionlessNavigation = !pathName.includes(".");
+  if (response.status === 404 && (request.method === "GET" || request.method === "HEAD") && acceptsHtml && extensionlessNavigation) {
     response = await env.ASSETS.fetch(new Request(new URL("/index.html", request.url), request));
   }
   return withStaticHeaders(response, requestUrl.pathname, servedEncoding ? "manual" : "automatic");
@@ -129,7 +207,12 @@ async function serveStatic(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (isApiRequest(url.pathname)) return proxyApiRequest(request, env);
+    if (isApiRequest(url.pathname)) {
+      const authContext = proxyAuthContext(request, env);
+      if (authContext.error) return withStaticHeaders(authContext.error, url.pathname);
+      const response = await proxyApiRequest(request, env, authContext);
+      return withStaticHeaders(response, url.pathname);
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method not allowed", {
         status: 405,

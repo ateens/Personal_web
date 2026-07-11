@@ -1,8 +1,9 @@
 import { readFile, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 
 const { Pool } = pg;
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 const COLLECTION_KEYS = [
   "captures",
   "boxes",
@@ -35,11 +36,18 @@ const DEFAULT_VIEW_CONTROLS = {
   projects: { filters: ["all"], sort: "status", mode: "board", panels: { filter: false, sort: false } },
   goals: { filters: ["all"], sort: "target", mode: "cards", panels: { filter: false, sort: false } },
   boxes: { filters: ["all"], sort: "activity", mode: "columns", panels: { filter: false, sort: false } },
-  resources: { search: "", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
+  resources: { search: "", searchScope: "fullText", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
   habits: { filters: ["all"], sort: "progress", mode: "list", panels: { filter: false, sort: false } },
   journal: { filters: ["all"], sort: "date", mode: "cards", panels: { filter: false, sort: false } },
   calendar: { filters: ["all"], sort: "time", mode: "calendar", panels: { filter: false, sort: false } },
   database: { filters: ["all"], sort: "rows", mode: "grid", panels: { filter: false, sort: false } },
+};
+const RESOURCE_SEARCH_SCOPES = new Set(["database", "fullText"]);
+const RESOURCE_OPEN_PAGE_MODES = new Set(["center", "side", "full"]);
+const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
+  library: "center",
+  list: "side",
+  map: "center",
 };
 const RELATIONAL_DELETE_ORDER = [
   "task_resources",
@@ -82,6 +90,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     ssl: databaseSslConfig(),
   });
   let appStateTableReady = null;
+  let appStateBackupTablesReady = null;
   let appPrivateDataTableReady = null;
   let relationalTablesReady = null;
 
@@ -90,11 +99,46 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       CREATE TABLE IF NOT EXISTS app_state (
         id text PRIMARY KEY,
         state jsonb NOT NULL,
+        revision bigint NOT NULL DEFAULT 0,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
-      )
+      );
+      ALTER TABLE app_state ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 0
     `);
     await appStateTableReady;
+  }
+
+  async function ensureAppStateBackupTables() {
+    await ensureAppStateTable();
+    appStateBackupTablesReady ||= dbPool.query(`
+      CREATE TABLE IF NOT EXISTS app_state_migration_backups (
+        id text PRIMARY KEY,
+        app_state_id text NOT NULL,
+        source_revision bigint NOT NULL,
+        source_version integer,
+        reason text NOT NULL,
+        state jsonb NOT NULL,
+        state_sha256 text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS app_state_migration_backups_workspace_created_idx
+        ON app_state_migration_backups(app_state_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS app_state_restore_history (
+        id text PRIMARY KEY,
+        app_state_id text NOT NULL,
+        backup_id text NOT NULL REFERENCES app_state_migration_backups(id) ON DELETE RESTRICT,
+        safety_backup_id text NOT NULL REFERENCES app_state_migration_backups(id) ON DELETE RESTRICT,
+        previous_revision bigint NOT NULL,
+        restored_revision bigint NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS app_state_restore_history_workspace_created_idx
+        ON app_state_restore_history(app_state_id, created_at DESC)
+    `);
+    await appStateBackupTablesReady;
   }
 
   async function ensureAppPrivateDataTable() {
@@ -355,32 +399,56 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
 
   async function ready() {
     await ensureAppStateTable();
+    await ensureAppStateBackupTables();
     await ensureAppPrivateDataTable();
     await ensureRelationalTables();
   }
 
-  async function readAppState() {
-    await ensureAppStateTable();
+  async function authoritativeStateSnapshot(client, storedState) {
+    const hasRelationalRows = await relationalStateHasRows(client);
+    if (!hasRelationalRows) {
+      return { state: cloneJsonValue(storedState), hasRelationalRows: false };
+    }
+    const baseState = isPlainObject(storedState) ? cloneJsonValue(storedState) : {};
+    return {
+      state: await readRelationalAppState(client, baseState, { normalize: false }),
+      hasRelationalRows: true,
+    };
+  }
+
+  async function insertMigrationBackup(client, state, sourceRevision, reason) {
+    const backupState = cloneJsonValue(state);
+    const id = randomUUID();
+    const safeReason = migrationBackupReason(reason);
+    const sourceVersion = stateVersion(backupState);
+    const stateSha256 = jsonSha256(backupState);
+    const result = await client.query(
+      `
+        INSERT INTO app_state_migration_backups (
+          id, app_state_id, source_revision, source_version, reason, state, state_sha256
+        ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        RETURNING id, app_state_id, source_revision, source_version, reason, state_sha256, created_at
+      `,
+      [id, appStateId, nonNegativeRevision(sourceRevision, 0), sourceVersion, safeReason, JSON.stringify(backupState), stateSha256]
+    );
+    return migrationBackupMetadata(result.rows[0]);
+  }
+
+  async function createMigrationBackup({ reason = "manual" } = {}) {
+    await ensureAppStateBackupTables();
     await ensureRelationalTables();
     const client = await dbPool.connect();
     try {
       await client.query("BEGIN");
-      const result = await client.query("SELECT state, updated_at FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const result = await client.query("SELECT state, revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
       const row = result.rows[0];
       if (!row) {
-        await client.query("COMMIT");
-        return { state: null, updatedAt: "" };
+        throw storageError(404, "STATE_NOT_INITIALIZED", "Application state is not initialized.");
       }
-      const normalized = normalizeAppStateForStorage(row.state);
-      if (normalized.changed) {
-        await client.query("UPDATE app_state SET state = $2::jsonb, updated_at = now() WHERE id = $1", [appStateId, JSON.stringify(normalized.state)]);
-      }
-      if (!(await relationalStateHasRows(client))) {
-        await syncRelationalState(client, normalized.state);
-      }
-      const relationalState = await readRelationalAppState(client, normalized.state);
+      const authoritative = await authoritativeStateSnapshot(client, row.state);
+      const backup = await insertMigrationBackup(client, authoritative.state, row.revision, `manual:${manualBackupLabel(reason)}`);
       await client.query("COMMIT");
-      return { state: relationalState, updatedAt: row.updated_at?.toISOString?.() || "" };
+      return backup;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
       throw error;
@@ -389,29 +457,313 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     }
   }
 
-  async function writeAppState(state) {
-    await ensureAppStateTable();
+  async function listMigrationBackups({ limit = 20 } = {}) {
+    await ensureAppStateBackupTables();
+    const safeLimit = boundedInteger(limit, 1, 100, 20);
+    const result = await dbPool.query(
+      `
+        SELECT
+          backup.id,
+          backup.app_state_id,
+          backup.source_revision,
+          backup.source_version,
+          backup.reason,
+          backup.state_sha256,
+          backup.created_at,
+          count(history.id)::int AS restored_count,
+          max(history.created_at) AS last_restored_at
+        FROM app_state_migration_backups AS backup
+        LEFT JOIN app_state_restore_history AS history
+          ON history.backup_id = backup.id AND history.app_state_id = backup.app_state_id
+        WHERE backup.app_state_id = $1
+        GROUP BY backup.id
+        ORDER BY backup.created_at DESC, backup.id DESC
+        LIMIT $2
+      `,
+      [appStateId, safeLimit]
+    );
+    return result.rows.map(migrationBackupMetadata);
+  }
+
+  async function restoreMigrationBackup(backupId, { expectedRevision } = {}) {
+    await ensureAppStateBackupTables();
     await ensureRelationalTables();
-    const normalized = normalizeAppStateForStorage(state);
+    const requestedRevision = optionalRevision(expectedRevision);
+    if (requestedRevision === null) {
+      throw storageError(428, "STATE_PRECONDITION_REQUIRED", "An expected revision is required to restore a backup.");
+    }
+    if (typeof backupId !== "string" || !backupId.trim()) {
+      throw storageError(400, "INVALID_BACKUP_ID", "A backup ID is required.");
+    }
+
     const client = await dbPool.connect();
     try {
       await client.query("BEGIN");
+      const currentResult = await client.query("SELECT state, revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const currentRow = currentResult.rows[0];
+      if (!currentRow) {
+        throw storageError(404, "STATE_NOT_INITIALIZED", "Application state is not initialized.");
+      }
+      const currentRevision = nonNegativeRevision(currentRow.revision, 0);
+      if (requestedRevision !== currentRevision) {
+        throw storageError(409, "STATE_REVISION_CONFLICT", "State revision conflict.", { revision: currentRevision });
+      }
+
+      const backupResult = await client.query(
+        `
+          SELECT id, app_state_id, source_revision, source_version, reason, state, state_sha256, created_at
+          FROM app_state_migration_backups
+          WHERE id = $1 AND app_state_id = $2
+        `,
+        [backupId.trim(), appStateId]
+      );
+      const backupRow = backupResult.rows[0];
+      if (!backupRow) {
+        throw storageError(404, "BACKUP_NOT_FOUND", "The backup was not found for this workspace.");
+      }
+      if (!isPlainObject(backupRow.state)) {
+        throw storageError(422, "BACKUP_NOT_RESTORABLE", "Only object application-state backups can be restored.");
+      }
+      if (jsonSha256(backupRow.state) !== backupRow.state_sha256) {
+        throw storageError(422, "BACKUP_INTEGRITY_FAILED", "The backup failed its integrity check.");
+      }
+
+      const currentAuthoritative = await authoritativeStateSnapshot(client, currentRow.state);
+      const safetyBackup = await insertMigrationBackup(client, currentAuthoritative.state, currentRevision, `pre_restore:${backupRow.id}`);
+      const restoredRevision = currentRevision + 1;
+      const restoredState = cloneJsonValue(backupRow.state);
+      restoredState.revision = restoredRevision;
+      restoredState.updatedAt = new Date().toISOString();
+
+      await syncRelationalState(client, restoredState);
+      await client.query(
+        "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1",
+        [appStateId, JSON.stringify(restoredState), restoredRevision]
+      );
+      const historyId = randomUUID();
+      const history = await client.query(
+        `
+          INSERT INTO app_state_restore_history (
+            id, app_state_id, backup_id, safety_backup_id, previous_revision, restored_revision
+          ) VALUES ($1, $2, $3, $4, $5, $6)
+          RETURNING id, created_at
+        `,
+        [historyId, appStateId, backupRow.id, safetyBackup.id, currentRevision, restoredRevision]
+      );
+      await client.query("COMMIT");
+      return {
+        backup: migrationBackupMetadata(backupRow),
+        safetyBackup,
+        restoreId: history.rows[0]?.id || historyId,
+        previousRevision: currentRevision,
+        restoredRevision,
+        restoredAt: history.rows[0]?.created_at?.toISOString?.() || "",
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function readAppState() {
+    await ensureAppStateTable();
+    await ensureAppStateBackupTables();
+    await ensureRelationalTables();
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query("SELECT state, revision, updated_at FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const row = result.rows[0];
+      if (!row) {
+        await client.query("COMMIT");
+        return { state: null, revision: 0, updatedAt: "" };
+      }
+      const authoritative = await authoritativeStateSnapshot(client, row.state);
+      const normalized = normalizeAppStateForStorage(cloneJsonValue(authoritative.state));
+      const revision = positiveRevision(row.revision, 1);
+      if (normalized.state.revision !== revision) {
+        normalized.state.revision = revision;
+        normalized.changed = true;
+      }
+      if (Number(row.revision) !== revision) normalized.changed = true;
+      let updatedAt = row.updated_at?.toISOString?.() || "";
+      const needsHealing = normalized.changed;
+      if (normalized.changed) {
+        const sourceVersion = stateVersion(authoritative.state);
+        const reason = sourceVersion === STATE_VERSION
+          ? "automatic_read_heal"
+          : `automatic_version_migration_v${sourceVersion ?? "unknown"}_to_v${STATE_VERSION}`;
+        await insertMigrationBackup(client, authoritative.state, row.revision, reason);
+        if (authoritative.hasRelationalRows) {
+          await syncRelationalState(client, normalized.state);
+        }
+      }
+      if (!authoritative.hasRelationalRows) {
+        await syncRelationalState(client, normalized.state);
+      }
+      const relationalState = await readRelationalAppState(client, normalized.state);
+      if (needsHealing) {
+        relationalState.revision = revision;
+        const healed = await client.query(
+          "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
+          [appStateId, JSON.stringify(relationalState), revision]
+        );
+        updatedAt = healed.rows[0]?.updated_at?.toISOString?.() || updatedAt;
+      }
+      await client.query("COMMIT");
+      return { state: relationalState, revision, updatedAt };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function writeAppState(state, options = {}) {
+    await ensureAppStateTable();
+    await ensureRelationalTables();
+    const normalized = normalizeAppStateForStorage(state);
+    const requestedBaseRevision = optionalRevision(options.baseRevision);
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const bootstrap = await client.query(
+        `
+          INSERT INTO app_state (id, state, revision, updated_at)
+          VALUES ($1, '{}'::jsonb, 0, now())
+          ON CONFLICT (id) DO NOTHING
+          RETURNING id
+        `,
+        [appStateId]
+      );
+      const isBootstrap = bootstrap.rowCount === 1;
+      const current = await client.query("SELECT revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const currentRevision = nonNegativeRevision(current.rows[0]?.revision, 0);
+      if (requestedBaseRevision !== null && requestedBaseRevision !== currentRevision) {
+        throw storageError(409, "STATE_REVISION_CONFLICT", "State revision conflict.", { revision: currentRevision });
+      }
+      if (!isBootstrap && options.requirePrecondition === true && requestedBaseRevision === null) {
+        throw storageError(428, "STATE_PRECONDITION_REQUIRED", "A state revision precondition is required.", { revision: currentRevision });
+      }
+      const revision = currentRevision + 1;
+      normalized.state.revision = revision;
+      normalized.state.updatedAt = new Date().toISOString();
       const result = await client.query(
         `
-          INSERT INTO app_state (id, state, updated_at)
-          VALUES ($1, $2::jsonb, now())
+          INSERT INTO app_state (id, state, revision, updated_at)
+          VALUES ($1, $2::jsonb, $3, now())
           ON CONFLICT (id)
-          DO UPDATE SET state = EXCLUDED.state, updated_at = now()
-          RETURNING updated_at
+          DO UPDATE SET state = EXCLUDED.state, revision = EXCLUDED.revision, updated_at = now()
+          RETURNING revision, updated_at
         `,
-        [appStateId, JSON.stringify(normalized.state)]
+        [appStateId, JSON.stringify(normalized.state), revision]
       );
       await syncRelationalState(client, normalized.state);
       const relationalState = await readRelationalAppState(client, normalized.state);
-      await client.query("UPDATE app_state SET state = $2::jsonb WHERE id = $1", [appStateId, JSON.stringify(relationalState)]);
+      relationalState.revision = revision;
+      await client.query("UPDATE app_state SET state = $2::jsonb, revision = $3 WHERE id = $1", [appStateId, JSON.stringify(relationalState), revision]);
       await client.query("COMMIT");
       return {
         state: relationalState,
+        revision,
+        bootstrap: isBootstrap,
+        updatedAt: result.rows[0]?.updated_at?.toISOString?.() || "",
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function writeResource(resource, options = {}) {
+    await ensureAppStateTable();
+    await ensureAppStateBackupTables();
+    await ensureRelationalTables();
+    const requestedBaseRevision = optionalRevision(options.baseRevision);
+    if (typeof options.validateState !== "function") {
+      throw new Error("Resource state validation is unavailable.");
+    }
+
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const current = await client.query(
+        "SELECT state, revision FROM app_state WHERE id = $1 FOR UPDATE",
+        [appStateId]
+      );
+      const row = current.rows[0];
+      if (!row) {
+        throw storageError(404, "STATE_NOT_INITIALIZED", "Application state must be initialized before writing a Resource.");
+      }
+
+      const currentRevision = nonNegativeRevision(row.revision, 0);
+      if (requestedBaseRevision !== null && requestedBaseRevision !== currentRevision) {
+        throw storageError(409, "STATE_REVISION_CONFLICT", "State revision conflict.", { revision: currentRevision });
+      }
+      if (options.requirePrecondition === true && requestedBaseRevision === null) {
+        throw storageError(428, "STATE_PRECONDITION_REQUIRED", "A state revision precondition is required.", { revision: currentRevision });
+      }
+
+      const authoritative = await authoritativeStateSnapshot(client, row.state);
+      const normalized = normalizeAppStateForStorage(cloneJsonValue(authoritative.state));
+      if (normalized.state.revision !== currentRevision) {
+        normalized.state.revision = currentRevision;
+        normalized.changed = true;
+      }
+      if (normalized.changed) {
+        const sourceVersion = stateVersion(authoritative.state);
+        const reason = sourceVersion === STATE_VERSION
+          ? "automatic_read_heal_before_resource_write"
+          : `automatic_version_migration_v${sourceVersion ?? "unknown"}_to_v${STATE_VERSION}_before_resource_write`;
+        await insertMigrationBackup(client, authoritative.state, row.revision, reason);
+        if (authoritative.hasRelationalRows) {
+          await syncRelationalState(client, normalized.state);
+        }
+      }
+      if (!authoritative.hasRelationalRows) {
+        await syncRelationalState(client, normalized.state);
+      }
+      const currentState = await readRelationalAppState(client, normalized.state);
+      currentState.revision = currentRevision;
+
+      const resources = Array.isArray(currentState.resources) ? currentState.resources.slice() : [];
+      const existingIndex = resources.findIndex((item) => item?.id === resource.id);
+      const resourceIndex = existingIndex === -1 ? resources.length : existingIndex;
+      const created = existingIndex === -1;
+      if (created) resources.push(resource);
+      else resources[existingIndex] = resource;
+
+      const revision = currentRevision + 1;
+      const nextState = {
+        ...currentState,
+        resources,
+        revision,
+        updatedAt: new Date().toISOString(),
+      };
+
+      // The validator runs after reconstructing the authoritative relational
+      // workspace and before any Resource mutation reaches PostgreSQL. This
+      // catches cross-collection IDs, relations, hierarchy cycles, URLs, and
+      // block/comment constraints that cannot be checked on an isolated item.
+      await options.validateState(nextState);
+
+      await upsertResource(client, resource, resourceIndex, relationalIdSets(nextState));
+      nextState.resources = await readResources(client);
+      const savedResource = nextState.resources.find((item) => item.id === resource.id);
+      const result = await client.query(
+        "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
+        [appStateId, JSON.stringify(nextState), revision]
+      );
+      await client.query("COMMIT");
+      return {
+        resource: savedResource,
+        revision,
+        created,
         updatedAt: result.rows[0]?.updated_at?.toISOString?.() || "",
       };
     } catch (error) {
@@ -424,12 +776,13 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
 
   async function stateStatus() {
     await ready();
-    const result = await dbPool.query("SELECT updated_at FROM app_state WHERE id = $1", [appStateId]);
+    const result = await dbPool.query("SELECT revision, updated_at FROM app_state WHERE id = $1", [appStateId]);
     return {
       configured: true,
       connected: true,
       appStateId,
       hasState: Boolean(result.rows[0]),
+      revision: nonNegativeRevision(result.rows[0]?.revision, 0),
       tokenStore: "postgresql",
       relationalStore: "postgresql",
       collectionSource: "relational",
@@ -509,13 +862,20 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
 
   return {
     appStateId,
+    createMigrationBackup,
+    deletePrivateData,
     deleteToken,
     end,
+    listMigrationBackups,
     readAppState,
+    readPrivateData,
     readToken,
     ready,
+    restoreMigrationBackup,
     stateStatus,
     writeAppState,
+    writeResource,
+    writePrivateData,
     writeToken,
   };
 
@@ -542,11 +902,12 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     return result.rows[0]?.has_rows === true;
   }
 
-  async function readRelationalAppState(client, baseState) {
+  async function readRelationalAppState(client, baseState, { normalize = true } = {}) {
+    const safeBaseState = isPlainObject(baseState) ? baseState : {};
     const taskResources = await readTaskResourceMap(client);
     const relationalState = {
-      ...baseState,
-      settings: isPlainObject(baseState.settings) ? baseState.settings : {},
+      ...safeBaseState,
+      settings: isPlainObject(safeBaseState.settings) ? safeBaseState.settings : {},
       captures: await readCaptures(client),
       boxes: await readBoxes(client),
       goals: await readGoals(client),
@@ -560,7 +921,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       googleEvents: await readGoogleEvents(client),
       links: await readCollectionLinks(client),
     };
-    return normalizeAppStateForStorage(relationalState).state;
+    return normalize ? normalizeAppStateForStorage(relationalState).state : relationalState;
   }
 
   async function readRows(client, table, columns = "*") {
@@ -904,6 +1265,43 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     }
   }
 
+  async function upsertResource(client, resource, position, ids) {
+    await client.query(
+      `INSERT INTO resources (
+        app_state_id, id, box_id, goal_id, project_id, title, type, importance, pinned,
+        read_later, url, position, data
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+      ON CONFLICT (app_state_id, id) DO UPDATE SET
+        box_id = EXCLUDED.box_id,
+        goal_id = EXCLUDED.goal_id,
+        project_id = EXCLUDED.project_id,
+        title = EXCLUDED.title,
+        type = EXCLUDED.type,
+        importance = EXCLUDED.importance,
+        pinned = EXCLUDED.pinned,
+        read_later = EXCLUDED.read_later,
+        url = EXCLUDED.url,
+        position = EXCLUDED.position,
+        data = EXCLUDED.data,
+        updated_at = now()`,
+      [
+        appStateId,
+        resource.id,
+        validRef(resource.boxId, ids.boxes),
+        validRef(resource.goalId, ids.goals),
+        validRef(resource.projectId, ids.projects),
+        textValue(resource.title),
+        textValue(resource.type),
+        textValue(resource.importance),
+        resource.pinned === true,
+        resource.readLater === true,
+        textValue(resource.url),
+        position,
+        jsonValue(resource),
+      ]
+    );
+  }
+
   async function insertTaskResources(client, relations) {
     for (const relation of relations) {
       await client.query(
@@ -1148,14 +1546,105 @@ function numberOrDefault(value, fallback = null) {
   return Number.isFinite(Number(fallback)) ? Number(fallback) : 0;
 }
 
+function nonNegativeRevision(value, fallback = 0) {
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : fallback;
+}
+
+function positiveRevision(value, fallback = 1) {
+  const revision = nonNegativeRevision(value, fallback);
+  return revision > 0 ? revision : fallback;
+}
+
+function optionalRevision(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const validNumber = typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const validString = typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value);
+  const revision = validNumber || validString ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw storageError(400, "INVALID_BASE_REVISION", "baseRevision must be a non-negative integer.");
+  }
+  return revision;
+}
+
+function manualBackupLabel(value) {
+  const label = typeof value === "string" ? value.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,152}$/.test(label)) {
+    throw storageError(400, "INVALID_BACKUP_REASON", "Manual backup labels must use 1-153 letters, numbers, dots, underscores, colons, or hyphens.");
+  }
+  return label;
+}
+
+function boundedInteger(value, minimum, maximum, fallback) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) return fallback;
+  return Math.min(maximum, Math.max(minimum, number));
+}
+
+function migrationBackupReason(value) {
+  const reason = typeof value === "string" ? value.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(reason)) {
+    throw storageError(400, "INVALID_BACKUP_REASON", "Backup reasons must use 1-160 letters, numbers, dots, underscores, colons, or hyphens.");
+  }
+  return reason;
+}
+
+function migrationBackupMetadata(row) {
+  const sourceVersion = Number(row?.source_version);
+  return {
+    id: typeof row?.id === "string" ? row.id : "",
+    appStateId: typeof row?.app_state_id === "string" ? row.app_state_id : "",
+    sourceRevision: nonNegativeRevision(row?.source_revision, 0),
+    sourceVersion: Number.isSafeInteger(sourceVersion) && sourceVersion >= 0 ? sourceVersion : null,
+    reason: typeof row?.reason === "string" ? row.reason : "",
+    stateSha256: typeof row?.state_sha256 === "string" ? row.state_sha256 : "",
+    createdAt: row?.created_at?.toISOString?.() || "",
+    restoredCount: boundedInteger(row?.restored_count, 0, Number.MAX_SAFE_INTEGER, 0),
+    lastRestoredAt: row?.last_restored_at?.toISOString?.() || "",
+  };
+}
+
+function stateVersion(state) {
+  if (!isPlainObject(state)) return null;
+  const version = Number(state.version);
+  return Number.isSafeInteger(version) && version >= 0 ? version : null;
+}
+
+function cloneJsonValue(value) {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? null : JSON.parse(serialized);
+}
+
+function jsonSha256(value) {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const entries = Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`);
+  return `{${entries.join(",")}}`;
+}
+
+function storageError(status, code, message, details = undefined) {
+  return Object.assign(new Error(message), { status, code, expose: true, details });
+}
+
 function normalizeAppStateForStorage(state) {
   const validRoot = isPlainObject(state);
   const nextState = validRoot ? state : {};
   let changed = !validRoot;
   const now = new Date().toISOString();
   const version = Number(nextState.version);
-  if (!Number.isFinite(version) || nextState.version !== version) {
-    nextState.version = Number.isFinite(version) ? version : STATE_VERSION;
+  if (version !== STATE_VERSION || nextState.version !== version) {
+    nextState.version = STATE_VERSION;
+    changed = true;
+  }
+  const revision = nonNegativeRevision(nextState.revision, 0);
+  if (nextState.revision !== revision) {
+    nextState.revision = revision;
     changed = true;
   }
   if (!isValidDateString(nextState.createdAt)) {
@@ -1194,10 +1683,27 @@ function normalizeAppStateForStorage(state) {
     changed = true;
   }
   const normalizedViewControls = normalizeViewControls(nextState.settings.viewControls);
-  if (JSON.stringify(nextState.settings.viewControls) !== JSON.stringify(normalizedViewControls)) {
-    nextState.settings.viewControls = normalizedViewControls;
+  if (!jsonValuesEqual(nextState.settings.viewControls, normalizedViewControls)) {
     changed = true;
   }
+  nextState.settings.viewControls = normalizedViewControls;
+  const normalizedNotionParityMode = typeof nextState.settings.notionParityMode === "boolean"
+    ? nextState.settings.notionParityMode
+    : true;
+  if (nextState.settings.notionParityMode !== normalizedNotionParityMode) {
+    nextState.settings.notionParityMode = normalizedNotionParityMode;
+    changed = true;
+  }
+  const normalizedAdvancedWindowMode = nextState.settings.advancedWindowMode === true;
+  if (nextState.settings.advancedWindowMode !== normalizedAdvancedWindowMode) {
+    nextState.settings.advancedWindowMode = normalizedAdvancedWindowMode;
+    changed = true;
+  }
+  const normalizedOpenPagesIn = normalizeResourceOpenPagesIn(nextState.settings.openPagesIn);
+  if (!jsonValuesEqual(nextState.settings.openPagesIn, normalizedOpenPagesIn)) {
+    changed = true;
+  }
+  nextState.settings.openPagesIn = normalizedOpenPagesIn;
   for (const key of STRING_SETTING_KEYS) {
     if (typeof nextState.settings[key] !== "string") {
       nextState.settings[key] = "";
@@ -1309,9 +1815,23 @@ function normalizeViewControls(value) {
     };
     if (key === "resources") {
       controls[key].search = typeof saved.search === "string" ? saved.search : defaults.search;
+      controls[key].searchScope = normalizeResourceSearchScope(saved.searchScope);
     }
   }
   return controls;
+}
+
+function normalizeResourceSearchScope(value) {
+  return RESOURCE_SEARCH_SCOPES.has(value) ? value : "fullText";
+}
+
+function normalizeResourceOpenPagesIn(value) {
+  const source = isPlainObject(value) ? value : {};
+  const normalized = {};
+  for (const [view, fallback] of Object.entries(DEFAULT_RESOURCE_OPEN_PAGES_IN)) {
+    normalized[view] = RESOURCE_OPEN_PAGE_MODES.has(source[view]) ? source[view] : fallback;
+  }
+  return normalized;
 }
 
 function normalizeViewControlFilters(saved, fallback = ["all"]) {
@@ -1351,6 +1871,29 @@ function arraysEqual(left, right) {
     if (left[index] !== right[index]) return false;
   }
   return true;
+}
+
+function jsonValuesEqual(left, right) {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!jsonValuesEqual(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+  let leftCount = 0;
+  for (const key in left) {
+    if (!Object.prototype.hasOwnProperty.call(left, key)) continue;
+    leftCount += 1;
+    if (!Object.prototype.hasOwnProperty.call(right, key) || !jsonValuesEqual(left[key], right[key])) return false;
+  }
+  let rightCount = 0;
+  for (const key in right) {
+    if (Object.prototype.hasOwnProperty.call(right, key)) rightCount += 1;
+  }
+  return leftCount === rightCount;
 }
 
 function shallowObjectsEqual(left, right) {

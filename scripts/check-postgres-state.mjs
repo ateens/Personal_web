@@ -12,11 +12,14 @@ if (!databaseUrl) {
 }
 
 const port = Number(process.env.CHECK_PORT || 4199);
+const resourcePort = Number(process.env.CHECK_RESOURCE_PORT || port + 1);
 const appStateId = process.env.CHECK_APP_STATE_ID || `check-${randomBytes(6).toString("hex")}`;
+const resourceAppStateId = `${appStateId}-resource-api`;
 const tokenStateId = `${appStateId}-private`;
 const legacyTokenStateId = `${appStateId}-legacy-token`;
 const legacyTokenFile = `/tmp/personal-web-legacy-token-${appStateId}.json`;
 const baseUrl = `http://127.0.0.1:${port}`;
+const resourceBaseUrl = `http://127.0.0.1:${resourcePort}`;
 const pool = new Pool({ connectionString: databaseUrl, ssl: databaseSslConfig() });
 const COLLECTION_KEYS = [
   "captures",
@@ -33,9 +36,11 @@ const COLLECTION_KEYS = [
   "links",
 ];
 let serverProcess;
+let resourceServerProcess;
 let tokenStorage;
 let legacyTokenStorage;
 let serverStderr = "";
+let resourceServerStderr = "";
 
 try {
   serverProcess = spawn("node", ["server.js"], {
@@ -46,6 +51,7 @@ try {
       HOST: "127.0.0.1",
       APP_STATE_ID: appStateId,
       STATIC_ROOT: ".",
+      REQUIRE_STATE_PRECONDITION: "1",
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
     },
@@ -57,15 +63,22 @@ try {
   });
   await waitForHealth();
 
-  const status = await fetchJson("/api/state/status");
+  const statusResult = await requestJson("/api/state/status");
+  assert(statusResult.response.ok, "state status request failed");
+  const status = statusResult.payload;
   assert(status.configured === true && status.connected === true, "state status did not report a PostgreSQL connection");
   assert(status.tokenStore === "postgresql", "Google token store did not report PostgreSQL");
   assert(status.relationalStore === "postgresql" && status.relationalTables?.includes("tasks"), "state status did not report relational PostgreSQL tables");
   assert(status.collectionSource === "relational", "state status did not report relational collections as the source of truth");
+  assert(status.hasState === false && status.revision === 0, "isolated state ID was not empty at bootstrap");
+  assert(statusResult.response.headers.get("etag") === '"state-0"', "empty state status did not expose the bootstrap ETag");
+  assert(statusResult.response.headers.get("x-state-concurrency") === "required", "state status did not advertise required preconditions");
+
   const indexHead = await fetch(`${baseUrl}/`, { method: "HEAD" });
   assert(indexHead.ok, "static index HEAD request failed");
   assert(indexHead.headers.get("cache-control") === "no-store", "static index response should not be cached");
   assert(indexHead.headers.get("x-content-type-options") === "nosniff", "static index response is missing nosniff");
+  assert(indexHead.headers.get("content-security-policy")?.includes("frame-ancestors 'none'"), "static index response is missing the application CSP");
   const versionedAppHead = await fetch(`${baseUrl}/app.js?v=check`, { method: "HEAD" });
   assert(versionedAppHead.ok, "versioned static asset HEAD request failed");
   assert(versionedAppHead.headers.get("cache-control")?.includes("immutable"), "versioned static asset should be immutable cached");
@@ -75,126 +88,297 @@ try {
   assert(staticEtag, "static JavaScript response is missing an ETag");
   const conditionalApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "If-None-Match": staticEtag } });
   assert(conditionalApp.status === 304, "conditional static request did not return 304");
-  const invalidJsonResponse = await fetch(`${baseUrl}/api/state`, {
+
+  const invalidJsonResult = await requestJson("/api/state", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: "{bad json",
   });
-  const invalidJsonPayload = await invalidJsonResponse.json().catch(() => ({}));
-  assert(invalidJsonResponse.status === 400 && invalidJsonPayload.error === "Invalid JSON body.", "invalid JSON state write should return 400");
+  assert(invalidJsonResult.response.status === 400 && invalidJsonResult.payload.code === "INVALID_JSON", "invalid JSON state write should return INVALID_JSON/400");
 
-  const state = {
-    version: 1000,
-    createdAt: new Date().toISOString(),
-    updatedAt: "2026-06-02T00:00:00.000Z",
-    settings: { navOrder: ["database", "today"], appMode: "legacy-local", notionSyncMode: "obsolete" },
-    captures: [{ id: "check-capture", title: "PostgreSQL check capture" }],
-    boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
-    goals: [{ id: "check-goal", name: "PostgreSQL check goal", boxId: "check-box" }],
-    projects: [{ id: "check-project", name: "PostgreSQL check project", goalId: "check-goal", boxId: "check-box" }],
-    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
-    resources: [{ id: "check-resource", title: "PostgreSQL check resource", boxId: "check-box", goalId: "check-goal", projectId: "check-project" }],
-    habits: [{ id: "check-habit", title: "PostgreSQL check habit", projectId: "check-project" }],
-    habitInstances: [{ id: "check-habit-instance", habitId: "check-habit", date: "2026-06-02", completed: true }],
-    journals: [{ id: "check-journal", title: "PostgreSQL check journal" }],
-    googleCalendars: [{ id: "check-google-calendar", summary: "PostgreSQL check Google calendar" }],
-    googleEvents: [{ id: "check-google-event", calendarId: "check-google-calendar", title: "PostgreSQL check Google event" }],
-    links: [{ id: "check-link", fromType: "tasks", fromId: "check-task", toType: "resources", toId: "check-resource", relation: "related" }],
-  };
-
-  const writeResult = await fetchJson("/api/state", {
+  const initialState = makeValidState();
+  const bootstrapResult = await requestJson("/api/state", {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state }),
-  });
-  assert(writeResult.ok === true, "state write did not return ok=true");
-
-  const readResult = await fetchJson("/api/state");
-  assert(readResult.state?.version === 1000, "state read did not return the written version");
-  for (const key of COLLECTION_KEYS) {
-    assert(readResult.state?.[key]?.length === 1, `state read did not return written ${key}`);
-  }
-  assert(readResult.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
-  assert(readResult.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
-
-  const postState = {
-    ...state,
-    version: 1001,
-    settings: {
-      navOrder: ["database", "unknown-view", "today", "database", 17],
-      calendarSources: { tasks: false, projects: "invalid-projects-source", google: true, extra: false },
-      visibleGoogleCalendars: { primary: false, secondary: "invalid-visible", tertiary: true },
-      viewControls: {
-        resources: {
-          search: "check resource",
-          filters: ["active", "important", "active"],
-          sort: "title",
-          mode: "map",
-          panels: { filter: true, sort: false },
-          type: "article",
-          toggles: { pinned: true, readLater: "invalid-toggle", important: true, linked: false },
-        },
-      },
-      googleCalendarId: 123,
-      statsDemoDataSeeded: "yes",
-      appMode: "legacy-local",
-      notionSyncMode: "obsolete",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"state-0"',
     },
-    updatedAt: 123,
-    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", kind: "legacy-task-kind" }, null, "invalid-task"],
-    resources: [null, "invalid-resource", { id: "check-resource", title: "PostgreSQL check resource", boxId: "check-box", goalId: "check-goal", projectId: "check-project", pinned: true }],
-    journals: [{ id: "check-journal", title: "PostgreSQL check journal", kind: "legacy-journal-kind" }, false],
-  };
-  const postWriteResult = await fetchJson("/api/state", {
+    body: JSON.stringify({ state: initialState, baseRevision: 0 }),
+  });
+  assert(bootstrapResult.response.ok && bootstrapResult.payload.ok === true, "conditional state bootstrap failed");
+  assert(bootstrapResult.payload.bootstrap === true && bootstrapResult.payload.concurrency === "conditional", "state bootstrap did not report conditional bootstrap semantics");
+  assert(bootstrapResult.payload.revision === 1 && bootstrapResult.payload.state?.revision === 1, "state bootstrap did not create revision 1");
+  assert(bootstrapResult.response.headers.get("etag") === '"state-1"', "state bootstrap did not return the revision 1 ETag");
+  assert(bootstrapResult.response.headers.get("x-state-revision") === "1", "state bootstrap did not return X-State-Revision 1");
+
+  const firstRead = await readState();
+  assert(firstRead.payload.revision === 1 && firstRead.payload.state?.revision === 1, "state read did not return bootstrap revision 1");
+  assert(firstRead.response.headers.get("etag") === '"state-1"', "state read did not return the current ETag");
+  assert(firstRead.payload.state?.version === 4, "state read did not preserve state version 4");
+  for (const key of COLLECTION_KEYS) {
+    assert(firstRead.payload.state?.[key]?.length === 1, `state read did not return written ${key}`);
+  }
+  assert(firstRead.payload.state?.resources?.[0]?.blocks?.[0]?.id === "check-resource-block", "Resource block ID changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.createdAt === "2026-06-02T00:00:00.000Z", "Resource createdAt changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.updatedAt === "2026-06-02T00:00:00.000Z", "Resource updatedAt changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.revision === 1, "Resource revision changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.timestampSource === "native", "Resource timestamp source changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.pageSettings?.font === "serif", "Resource page settings changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.icon === "📚", "Resource icon changed during PostgreSQL round trip");
+  assert(
+    JSON.stringify(firstRead.payload.state?.resources?.[0]?.cover) === JSON.stringify({ url: "https://example.com/resource-cover.jpg", position: 37 }),
+    "Resource cover changed during PostgreSQL round trip",
+  );
+  assert(firstRead.payload.state?.resources?.[0]?.readOnly === false, "Resource readOnly changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[0]?.replies?.[0]?.body === "PostgreSQL check reply", "Resource comment thread changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[1]?.anchor?.blockId === "check-resource-block", "Resource inline comment anchor changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.settings?.viewControls?.resources?.searchScope === "database", "Resource searchScope changed during PostgreSQL round trip");
+  assert(
+    JSON.stringify(firstRead.payload.state?.settings?.openPagesIn) === JSON.stringify({ library: "full", list: "center", map: "side" }),
+    "Resource openPagesIn changed during PostgreSQL round trip",
+  );
+  assert(firstRead.payload.state?.settings?.notionParityMode === false, "Resource notionParityMode changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.settings?.advancedWindowMode === true, "Resource advancedWindowMode changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
+
+  const missingPreconditionState = structuredClone(firstRead.payload.state);
+  missingPreconditionState.updatedAt = "2026-06-02T00:01:00.000Z";
+  missingPreconditionState.resources[0].title = "Missing precondition must not persist";
+  const missingPreconditionResult = await requestJson("/api/state", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state: postState }),
+    body: JSON.stringify({ state: missingPreconditionState }),
   });
-  assert(postWriteResult.ok === true, "state POST write did not return ok=true");
-  assert(postWriteResult.state?.version === 1001, "state POST write did not return the normalized state");
-  assert(postWriteResult.state?.settings?.navOrder?.join(",") === "database,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,calendar", "state POST write response did not normalize navOrder entries");
-  assert(postWriteResult.state?.settings?.calendarSources?.tasks === false && postWriteResult.state.settings.calendarSources.projects === true, "state POST write response did not normalize calendar source values");
-  assert(postWriteResult.state?.settings?.visibleGoogleCalendars?.primary === false && !("secondary" in postWriteResult.state.settings.visibleGoogleCalendars) && postWriteResult.state.settings.visibleGoogleCalendars.tertiary === true, "state POST write response did not normalize visible Google calendar values");
-  assert(postWriteResult.state?.settings?.viewControls?.resources?.mode === "map", "state POST write response did not preserve resource view mode");
-  assert(postWriteResult.state?.settings?.viewControls?.resources?.filters?.join(",") === "active,important", "state POST write response did not preserve resource multi filters");
-  assert(postWriteResult.state?.settings?.viewControls?.resources?.panels?.filter === true && postWriteResult.state.settings.viewControls.resources.panels.sort === false, "state POST write response did not preserve resource panel visibility");
-  assert(!("type" in postWriteResult.state.settings.viewControls.resources) && !("toggles" in postWriteResult.state.settings.viewControls.resources), "state POST write response did not remove legacy resource view controls");
-  assert(postWriteResult.state?.tasks?.length === 1 && !("kind" in postWriteResult.state.tasks[0]), "state POST write response did not normalize invalid or legacy task entries");
-  assert(postWriteResult.state?.resources?.length === 1 && postWriteResult.state.resources[0]?.id === "check-resource", "state POST write response did not normalize invalid resource entries");
-  assert(postWriteResult.state?.journals?.length === 1 && !("kind" in postWriteResult.state.journals[0]), "state POST write response did not normalize invalid or legacy journal entries");
-  assert(!("appMode" in (postWriteResult.state?.settings || {})) && !("notionSyncMode" in (postWriteResult.state?.settings || {})), "state POST write response included deprecated settings");
+  assert(missingPreconditionResult.response.status === 428, "state update without a revision precondition did not return 428");
+  assert(missingPreconditionResult.payload.code === "STATE_PRECONDITION_REQUIRED" && missingPreconditionResult.payload.revision === 1, "missing-precondition response did not expose the current revision");
+  await assertStoredRevisionAndTitle(1, "PostgreSQL check resource", "missing-precondition rejection mutated state");
+
+  const staleState = structuredClone(firstRead.payload.state);
+  staleState.updatedAt = "2026-06-02T00:02:00.000Z";
+  staleState.resources[0].title = "Stale write must not persist";
+  const staleResult = await requestJson("/api/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"state-0"',
+    },
+    body: JSON.stringify({ state: staleState, baseRevision: 0 }),
+  });
+  assert(staleResult.response.status === 409, "stale state update did not return 409");
+  assert(staleResult.payload.code === "STATE_REVISION_CONFLICT" && staleResult.payload.revision === 1, "stale-write response did not expose the current revision");
+  assert(staleResult.response.headers.get("etag") === '"state-1"', "stale-write response did not return the current ETag");
+  await assertStoredRevisionAndTitle(1, "PostgreSQL check resource", "stale write mutated state");
+
+  const secondState = structuredClone(firstRead.payload.state);
+  secondState.updatedAt = "2026-06-02T00:03:00.000Z";
+  secondState.resources[0].title = "PostgreSQL updated resource";
+  secondState.resources[0].updatedAt = "2026-06-02T00:03:00.000Z";
+  secondState.resources[0].revision = 2;
+  secondState.resources[0].timestampSource = "server";
+  const secondWrite = await requestJson("/api/state", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"state-1"',
+    },
+    body: JSON.stringify({ state: secondState, baseRevision: 1 }),
+  });
+  assert(secondWrite.response.ok && secondWrite.payload.ok === true, "conditional state update failed");
+  assert(secondWrite.payload.revision === 2 && secondWrite.payload.state?.revision === 2, "conditional update did not advance the workspace revision monotonically");
+  assert(secondWrite.payload.state?.resources?.[0]?.revision === 2, "conditional update did not preserve the Resource revision");
+  assert(secondWrite.response.headers.get("etag") === '"state-2"', "conditional update did not return the revision 2 ETag");
+  assert(secondWrite.response.headers.get("x-state-concurrency") === "conditional", "conditional update did not report its concurrency mode");
+
+  const committedRead = await readState();
+  assert(committedRead.payload.revision === 2 && committedRead.payload.state?.revision === 2, "committed state did not remain at revision 2");
+  assert(committedRead.payload.state?.resources?.[0]?.title === "PostgreSQL updated resource", "committed Resource title was not readable");
+  assert(committedRead.payload.state?.resources?.[0]?.timestampSource === "server", "committed Resource timestamp source was not readable");
+  await assertInvalidWriteDoesNotMutate(
+    "duplicate ID",
+    (draft) => {
+      draft.captures[0].id = draft.resources[0].id;
+    },
+    "duplicate_id"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "broken relation",
+    (draft) => {
+      draft.tasks[0].projectId = "missing-project";
+    },
+    "broken_relation"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "unsafe URL",
+    (draft) => {
+      draft.resources[0].url = "javascript:alert(1)";
+    },
+    "unsafe_url_protocol"
+  );
+  for (const unsafeInlineUrl of [
+    "javascript:alert(1)",
+    "JaVaScRiPt:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+  ]) {
+    await assertInvalidWriteDoesNotMutate(
+      `unsafe inline URL ${unsafeInlineUrl.split(":", 1)[0]}`,
+      (draft) => {
+        draft.resources[0].blocks[0].text = "unsafe";
+        draft.resources[0].blocks[0].marks = [{ type: "link", start: 0, end: 6, href: unsafeInlineUrl }];
+      },
+      "unsafe_url_protocol"
+    );
+  }
+  await assertInvalidWriteDoesNotMutate(
+    "invalid Resource block",
+    (draft) => {
+      draft.resources[0].blocks[0].type = "unsupported-embed";
+    },
+    "unsupported_block_type"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "duplicate comment reply ID",
+    (draft) => {
+      draft.resources[0].commentThreads[0].replies[0].id = draft.resources[0].commentThreads[0].id;
+    },
+    "duplicate_id"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "broken inline comment anchor",
+    (draft) => {
+      draft.resources[0].commentThreads[1].anchor.blockId = "missing-resource-block";
+    },
+    "broken_comment_anchor"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "overlong comment body",
+    (draft) => {
+      draft.resources[0].commentThreads[0].body = "x".repeat(20_001);
+    },
+    "comment_body_too_long"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "too many comment replies",
+    (draft) => {
+      const createdAt = "2026-06-02T00:00:00.000Z";
+      draft.resources[0].commentThreads[0].replies = Array.from({ length: 501 }, (_, index) => ({
+        id: `check-overflow-reply-${index}`,
+        body: `Overflow reply ${index}`,
+        createdAt,
+      }));
+    },
+    "too_many_comment_replies"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "invalid Resource page font",
+    (draft) => {
+      draft.resources[0].pageSettings.font = "script";
+    },
+    "invalid_page_font"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-string Resource icon",
+    (draft) => {
+      draft.resources[0].icon = { emoji: "📚" };
+    },
+    "invalid_resource_icon"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "overlong Resource icon",
+    (draft) => {
+      draft.resources[0].icon = "x".repeat(17);
+    },
+    "invalid_resource_icon"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "Resource icon with angle brackets",
+    (draft) => {
+      draft.resources[0].icon = "<svg>";
+    },
+    "invalid_resource_icon"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-object Resource cover",
+    (draft) => {
+      draft.resources[0].cover = "https://example.com/resource-cover.jpg";
+    },
+    "invalid_resource_cover"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "Resource cover missing URL",
+    (draft) => {
+      draft.resources[0].cover = { position: 50 };
+    },
+    "missing_resource_cover_url"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "Resource cover missing position",
+    (draft) => {
+      draft.resources[0].cover = { url: "" };
+    },
+    "missing_resource_cover_position"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-HTTPS Resource cover",
+    (draft) => {
+      draft.resources[0].cover.url = "http://example.com/resource-cover.jpg";
+    },
+    "invalid_resource_cover_url"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "fractional Resource cover position",
+    (draft) => {
+      draft.resources[0].cover.position = 50.5;
+    },
+    "invalid_resource_cover_position"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "out-of-range Resource cover position",
+    (draft) => {
+      draft.resources[0].cover.position = 101;
+    },
+    "invalid_resource_cover_position"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-boolean Resource readOnly",
+    (draft) => {
+      draft.resources[0].readOnly = "false";
+    },
+    "invalid_resource_read_only"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "Resource self parent",
+    (draft) => {
+      draft.resources[0].parentId = draft.resources[0].id;
+    },
+    "resource_self_parent"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "Resource parent cycle",
+    (draft) => {
+      const child = structuredClone(draft.resources[0]);
+      child.id = "check-resource-child";
+      child.parentId = draft.resources[0].id;
+      child.childOrder = [draft.resources[0].id];
+      child.blocks = [{ id: "check-resource-child-block", type: "paragraph", text: "Child block", indent: 0, marks: [] }];
+      child.commentThreads = [];
+      draft.resources[0].parentId = child.id;
+      draft.resources[0].childOrder = [child.id];
+      draft.resources.push(child);
+    },
+    "resource_parent_cycle"
+  );
 
   const row = await pool.query(
-    "SELECT state->>'version' AS version, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, jsonb_typeof(state->'settings'->'calendarSources') AS calendar_sources_type, state->'settings'->'calendarSources' AS calendar_sources, jsonb_typeof(state->'settings'->'visibleGoogleCalendars') AS visible_google_calendars_type, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, jsonb_typeof(state->'settings'->'statsDemoDataSeeded') AS stats_seeded_type, jsonb_typeof(state->'settings'->'googleCalendarId') AS google_calendar_id_type, jsonb_typeof(state->'updatedAt') AS updated_at_type, jsonb_array_length(state->'captures') AS capture_count, jsonb_array_length(state->'boxes') AS box_count, jsonb_array_length(state->'goals') AS goal_count, jsonb_array_length(state->'projects') AS project_count, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'resources') AS resource_count, jsonb_array_length(state->'habits') AS habit_count, jsonb_array_length(state->'habitInstances') AS habit_instance_count, jsonb_array_length(state->'journals') AS journal_count, jsonb_array_length(state->'googleCalendars') AS google_calendar_count, jsonb_array_length(state->'googleEvents') AS google_event_count, jsonb_array_length(state->'links') AS link_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, state->'settings' ? 'appMode' AS has_app_mode, state->'settings' ? 'notionSyncMode' AS has_notion_sync_mode FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_array_length(state->'captures') AS capture_count, jsonb_array_length(state->'boxes') AS box_count, jsonb_array_length(state->'goals') AS goal_count, jsonb_array_length(state->'projects') AS project_count, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'resources') AS resource_count, jsonb_array_length(state->'habits') AS habit_count, jsonb_array_length(state->'habitInstances') AS habit_instance_count, jsonb_array_length(state->'journals') AS journal_count, jsonb_array_length(state->'googleCalendars') AS google_calendar_count, jsonb_array_length(state->'googleEvents') AS google_event_count, jsonb_array_length(state->'links') AS link_count FROM app_state WHERE id = $1",
     [appStateId]
   );
-  assert(row.rows[0]?.version === "1001", "app_state row did not contain the POST-written version");
-  assert(Number(row.rows[0]?.capture_count) === 1, "app_state row did not contain the written capture");
-  assert(Number(row.rows[0]?.box_count) === 1, "app_state row did not contain the written box");
-  assert(Number(row.rows[0]?.goal_count) === 1, "app_state row did not contain the written goal");
-  assert(Number(row.rows[0]?.project_count) === 1, "app_state row did not contain the written project");
-  assert(Number(row.rows[0]?.task_count) === 1, "app_state row did not contain the written task");
-  assert(Number(row.rows[0]?.habit_count) === 1, "app_state row did not contain the written habit");
-  assert(Number(row.rows[0]?.habit_instance_count) === 1, "app_state row did not contain the written habit instance");
-  assert(Number(row.rows[0]?.google_calendar_count) === 1, "app_state row did not contain the written Google calendar");
-  assert(Number(row.rows[0]?.google_event_count) === 1, "app_state row did not contain the written Google event");
-  assert(Number(row.rows[0]?.link_count) === 1, "app_state row did not contain the written link");
-  assert(Number(row.rows[0]?.resource_count) === 1 && Number(row.rows[0]?.journal_count) === 1, "server did not normalize invalid collection item values before storage");
-  assert(row.rows[0]?.task_has_kind === false && row.rows[0]?.journal_has_kind === false, "server stored legacy kind fields on task or journal entries");
-  assert(row.rows[0]?.nav_order === "database,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,calendar", "server did not normalize invalid navOrder entries before storage");
-  assert(row.rows[0]?.calendar_sources_type === "object" && row.rows[0]?.visible_google_calendars_type === "object", "server did not normalize settings object maps before storage");
-  assert(row.rows[0]?.calendar_sources?.tasks === false && row.rows[0]?.calendar_sources?.projects === true && row.rows[0]?.calendar_sources?.google === true && !("extra" in row.rows[0].calendar_sources), "server did not normalize calendar source values before storage");
-  assert(row.rows[0]?.visible_google_calendars?.primary === false && !("secondary" in row.rows[0].visible_google_calendars) && row.rows[0]?.visible_google_calendars?.tertiary === true, "server did not normalize visible Google calendar values before storage");
-  assert(row.rows[0]?.stats_seeded_type === "boolean" && row.rows[0]?.google_calendar_id_type === "string" && row.rows[0]?.updated_at_type === "string", "server did not normalize scalar settings or timestamps before storage");
-  assert(row.rows[0]?.has_app_mode === false && row.rows[0]?.has_notion_sync_mode === false, "server stored deprecated settings keys");
-  const viewControlRow = await pool.query(
-    "SELECT state->'settings'->'viewControls'->'resources'->>'mode' AS resource_mode, state->'settings'->'viewControls'->'resources'->'filters' AS resource_filters, state->'settings'->'viewControls'->'resources'->'panels'->>'filter' AS filter_panel, state->'settings'->'viewControls'->'resources'->'panels'->>'sort' AS sort_panel, state->'settings'->'viewControls'->'resources' ? 'type' AS has_legacy_type, state->'settings'->'viewControls'->'resources' ? 'toggles' AS has_legacy_toggles FROM app_state WHERE id = $1",
-    [appStateId]
-  );
-  assert(viewControlRow.rows[0]?.resource_mode === "map", "server did not store resource view controls in PostgreSQL");
-  assert(viewControlRow.rows[0]?.resource_filters?.join(",") === "active,important", "server did not store resource multi filters in PostgreSQL");
-  assert(viewControlRow.rows[0]?.filter_panel === "true" && viewControlRow.rows[0]?.sort_panel === "false", "server did not store resource panel visibility in PostgreSQL");
-  assert(viewControlRow.rows[0]?.has_legacy_type === false && viewControlRow.rows[0]?.has_legacy_toggles === false, "server stored legacy resource view controls in PostgreSQL");
+  assert(Number(row.rows[0]?.revision) === 2 && row.rows[0]?.state_revision === "2", "app_state row did not store workspace revision 2 consistently");
+  assert(row.rows[0]?.version === "4", "app_state row did not contain state version 4");
+  for (const field of ["capture_count", "box_count", "goal_count", "project_count", "task_count", "resource_count", "habit_count", "habit_instance_count", "journal_count", "google_calendar_count", "google_event_count", "link_count"]) {
+    assert(Number(row.rows[0]?.[field]) === 1, `app_state row did not preserve ${field}`);
+  }
 
   const relationalCounts = await pool.query(
     `
@@ -246,19 +430,21 @@ try {
 
   await pool.query("UPDATE tasks SET title = 'Relational table task title', status = 'done' WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
   await pool.query("UPDATE resources SET title = 'Relational table resource title', pinned = false WHERE app_state_id = $1 AND id = 'check-resource'", [appStateId]);
-  const relationalReadResult = await fetchJson("/api/state");
-  assert(relationalReadResult.state?.tasks?.[0]?.title === "Relational table task title", "state read did not use the relational tasks table as source of truth");
-  assert(relationalReadResult.state?.tasks?.[0]?.status === "done", "state read did not use relational task status");
-  assert(relationalReadResult.state?.tasks?.[0]?.resourceId === "check-resource", "state read did not reconstruct task-resource peer relation");
-  assert(relationalReadResult.state?.resources?.[0]?.title === "Relational table resource title", "state read did not use the relational resources table as source of truth");
-  assert(relationalReadResult.state?.resources?.[0]?.pinned === false, "state read did not use relational resource boolean columns");
+  const relationalRead = await readState();
+  assert(relationalRead.payload.state?.tasks?.[0]?.title === "Relational table task title", "state read did not use the relational tasks table as source of truth");
+  assert(relationalRead.payload.state?.tasks?.[0]?.status === "done", "state read did not use relational task status");
+  assert(relationalRead.payload.state?.tasks?.[0]?.resourceId === "check-resource", "state read did not reconstruct task-resource peer relation");
+  assert(relationalRead.payload.state?.resources?.[0]?.title === "Relational table resource title", "state read did not use the relational resources table as source of truth");
+  assert(relationalRead.payload.state?.resources?.[0]?.pinned === false, "state read did not use relational resource boolean columns");
+  assert(relationalRead.payload.revision === 2 && relationalRead.payload.state?.revision === 2, "relational reads changed the workspace revision");
 
   await pool.query("UPDATE app_state SET state = jsonb_set(state, '{tasks,0,title}', to_jsonb('JSONB stale task title'::text), true) WHERE id = $1", [appStateId]);
-  const staleJsonReadResult = await fetchJson("/api/state");
-  assert(staleJsonReadResult.state?.tasks?.[0]?.title === "Relational table task title", "stale JSONB app_state overrode the relational task table");
+  const staleJsonRead = await readState();
+  assert(staleJsonRead.payload.state?.tasks?.[0]?.title === "Relational table task title", "stale JSONB app_state overrode the relational task table");
 
   const pollutedState = {
     version: "not-a-version",
+    revision: "not-a-revision",
     createdAt: "not-a-date",
     updatedAt: "not-a-date",
     settings: {
@@ -273,40 +459,44 @@ try {
   };
   await deleteRelationalRows(appStateId);
   await pool.query("UPDATE app_state SET state = $2::jsonb WHERE id = $1", [appStateId, JSON.stringify(pollutedState)]);
-  const healedReadResult = await fetchJson("/api/state");
-  assert(healedReadResult.state?.version === 3, "state read did not normalize an invalid stored version");
-  assert(healedReadResult.state?.tasks?.length === 1 && !("kind" in healedReadResult.state.tasks[0]), "state read did not normalize polluted stored tasks");
-  assert(healedReadResult.state?.journals?.length === 1 && !("kind" in healedReadResult.state.journals[0]), "state read did not normalize polluted stored journals");
-  assert(healedReadResult.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
-  assert(healedReadResult.state?.settings?.calendarSources?.tasks === true && healedReadResult.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
-  assert(!("primary" in healedReadResult.state?.settings?.visibleGoogleCalendars) && healedReadResult.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
-  assert(healedReadResult.state?.settings?.viewControls?.resources?.mode === "list" && healedReadResult.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedReadResult.state.settings.viewControls.resources.panels.sort === true && !("type" in healedReadResult.state.settings.viewControls.resources) && !("toggles" in healedReadResult.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
-  assert(!("appMode" in (healedReadResult.state?.settings || {})), "state read returned deprecated settings from polluted storage");
+  const healedRead = await readState();
+  assert(healedRead.payload.state?.version === 4, "state read did not heal an invalid stored version to v4");
+  assert(healedRead.payload.revision === 2 && healedRead.payload.state?.revision === 2, "state read did not reconcile the healed state to the stored revision");
+  assert(healedRead.response.headers.get("etag") === '"state-2"', "healed state read did not retain the current ETag");
+  assert(healedRead.payload.state?.tasks?.length === 1 && !("kind" in healedRead.payload.state.tasks[0]), "state read did not normalize polluted stored tasks");
+  assert(healedRead.payload.state?.journals?.length === 1 && !("kind" in healedRead.payload.state.journals[0]), "state read did not normalize polluted stored journals");
+  assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
+  assert(healedRead.payload.state?.settings?.calendarSources?.tasks === true && healedRead.payload.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
+  assert(!("primary" in healedRead.payload.state?.settings?.visibleGoogleCalendars) && healedRead.payload.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
+  assert(healedRead.payload.state?.settings?.viewControls?.resources?.mode === "list" && healedRead.payload.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedRead.payload.state.settings.viewControls.resources.panels.sort === true && !("type" in healedRead.payload.state.settings.viewControls.resources) && !("toggles" in healedRead.payload.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
+  assert(!("appMode" in (healedRead.payload.state?.settings || {})), "state read returned deprecated settings from polluted storage");
 
   const healedRow = await pool.query(
-    "SELECT state->>'version' AS version, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
     [appStateId]
   );
-  assert(healedRow.rows[0]?.version === "3", "state read did not heal invalid stored version in PostgreSQL");
+  assert(Number(healedRow.rows[0]?.revision) === 2 && healedRow.rows[0]?.state_revision === "2", "state read did not preserve the revision while healing PostgreSQL");
+  assert(healedRow.rows[0]?.version === "4", "state read did not heal invalid stored version to v4 in PostgreSQL");
   assert(healedRow.rows[0]?.tasks_type === "array" && healedRow.rows[0]?.nav_order === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not heal polluted PostgreSQL collections/settings");
   assert(healedRow.rows[0]?.calendar_sources?.tasks === true && healedRow.rows[0]?.calendar_sources?.projects === false, "state read did not heal polluted calendar sources in PostgreSQL");
   assert(!("primary" in healedRow.rows[0]?.visible_google_calendars) && healedRow.rows[0]?.visible_google_calendars?.work === false, "state read did not heal polluted visible Google calendars in PostgreSQL");
   assert(Number(healedRow.rows[0]?.task_count) === 1 && Number(healedRow.rows[0]?.journal_count) === 1, "state read did not remove polluted collection items from PostgreSQL");
   assert(healedRow.rows[0]?.task_has_kind === false && healedRow.rows[0]?.journal_has_kind === false, "state read did not remove legacy kind fields from PostgreSQL");
   assert(healedRow.rows[0]?.has_app_mode === false, "state read did not remove deprecated settings from PostgreSQL");
-
   const healedRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
   assert(Number(healedRelationalRows.rows[0]?.tasks) === 1, "state read did not sync healed PostgreSQL state into relational tables");
 
   await deleteRelationalRows(appStateId);
   await pool.query("UPDATE app_state SET state = $2::jsonb WHERE id = $1", [appStateId, JSON.stringify("polluted-scalar-state")]);
-  const scalarHealedReadResult = await fetchJson("/api/state");
-  assert(scalarHealedReadResult.state?.version === 3, "state read did not normalize a scalar PostgreSQL state");
-  assert(Array.isArray(scalarHealedReadResult.state?.tasks), "state read did not create collections for scalar PostgreSQL state");
+  const scalarHealedRead = await readState();
+  assert(scalarHealedRead.payload.state?.version === 4, "state read did not normalize a scalar PostgreSQL state to v4");
+  assert(scalarHealedRead.payload.revision === 2 && scalarHealedRead.payload.state?.revision === 2, "scalar state healing did not reconcile the stored revision");
+  assert(Array.isArray(scalarHealedRead.payload.state?.tasks), "state read did not create collections for scalar PostgreSQL state");
   const scalarHealedRow = await pool.query(
-    "SELECT jsonb_typeof(state) AS state_type, jsonb_typeof(state->'settings') AS settings_type, jsonb_typeof(state->'tasks') AS tasks_type FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'revision' AS state_revision, jsonb_typeof(state) AS state_type, jsonb_typeof(state->'settings') AS settings_type, jsonb_typeof(state->'tasks') AS tasks_type FROM app_state WHERE id = $1",
     [appStateId]
   );
+  assert(Number(scalarHealedRow.rows[0]?.revision) === 2 && scalarHealedRow.rows[0]?.state_revision === "2", "scalar state healing changed or lost the stored revision");
   assert(scalarHealedRow.rows[0]?.state_type === "object", "state read did not heal scalar PostgreSQL state into an object");
   assert(scalarHealedRow.rows[0]?.settings_type === "object" && scalarHealedRow.rows[0]?.tasks_type === "array", "state read did not heal scalar PostgreSQL defaults");
   const scalarRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
@@ -315,7 +505,7 @@ try {
   const tables = await pool.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('app_state', 'app_private_data', 'boxes', 'goals', 'projects', 'tasks', 'resources', 'task_resources', 'habits', 'habit_instances', 'captures', 'journals', 'google_calendars', 'google_events', 'collection_links') ORDER BY tablename"
   );
-  const createdTables = tables.rows.map((row) => row.tablename).join(",");
+  const createdTables = tables.rows.map((tableRow) => tableRow.tablename).join(",");
   assert(
     createdTables === "app_private_data,app_state,boxes,captures,collection_links,goals,google_calendars,google_events,habit_instances,habits,journals,projects,resources,task_resources,tasks",
     "required PostgreSQL tables were not created"
@@ -357,25 +547,338 @@ try {
   assert(legacyTokenRow.rows[0]?.refresh_token === legacyToken.refresh_token, "migrated legacy Google token was not stored in app_private_data");
   assert((await fileExists(legacyTokenFile)) === false, "legacy Google token file was not removed after migration");
 
-  console.log(`PostgreSQL state check passed for APP_STATE_ID=${appStateId}.`);
+  await checkIncrementalResourceApi();
+
+  console.log(`PostgreSQL state check passed for isolated APP_STATE_ID=${appStateId}.`);
 } catch (error) {
   console.error(error.message || error);
   process.exitCode = 1;
 } finally {
-  await cleanupCheckRows().catch(() => {});
+  try {
+    await cleanupCheckRows();
+    await assertCleanupComplete();
+  } catch (error) {
+    console.error(error.message || "PostgreSQL check cleanup failed.");
+    process.exitCode = 1;
+  }
   await pool.end().catch(() => {});
   await tokenStorage?.end().catch(() => {});
   await legacyTokenStorage?.end().catch(() => {});
   await rm(legacyTokenFile, { force: true }).catch(() => {});
+  if (resourceServerProcess && !resourceServerProcess.killed) {
+    resourceServerProcess.kill("SIGTERM");
+    await once(resourceServerProcess, "exit").catch(() => {});
+  }
   if (serverProcess && !serverProcess.killed) {
     serverProcess.kill("SIGTERM");
     await once(serverProcess, "exit").catch(() => {});
   }
 }
 
+function makeValidState() {
+  const createdAt = "2026-06-02T00:00:00.000Z";
+  return {
+    version: 4,
+    revision: 0,
+    createdAt,
+    updatedAt: createdAt,
+    settings: {
+      navOrder: ["database", "today"],
+      notionParityMode: false,
+      advancedWindowMode: true,
+      openPagesIn: { library: "full", list: "center", map: "side" },
+      viewControls: {
+        resources: { search: "", searchScope: "database", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
+      },
+    },
+    captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", convertedTo: "resources", convertedId: "check-resource", createdAt }],
+    boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
+    goals: [{ id: "check-goal", name: "PostgreSQL check goal", boxId: "check-box" }],
+    projects: [{ id: "check-project", name: "PostgreSQL check project", goalId: "check-goal", boxId: "check-box" }],
+    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
+    resources: [{
+      id: "check-resource",
+      title: "PostgreSQL check resource",
+      boxId: "check-box",
+      goalId: "check-goal",
+      projectId: "check-project",
+      url: "https://example.com/resource",
+      pinned: true,
+      createdAt,
+      updatedAt: createdAt,
+      revision: 1,
+      timestampSource: "native",
+      parentId: "",
+      childOrder: [],
+      pageSettings: { font: "serif", smallText: true, fullWidth: false },
+      icon: "📚",
+      cover: { url: "https://example.com/resource-cover.jpg", position: 37 },
+      readOnly: false,
+      trashedAt: "",
+      commentThreads: [
+        {
+          id: "check-resource-page-thread",
+          scope: "page",
+          anchor: null,
+          body: "PostgreSQL check page discussion",
+          createdAt,
+          updatedAt: createdAt,
+          resolvedAt: "",
+          deletedAt: "",
+          replies: [{
+            id: "check-resource-page-reply",
+            body: "PostgreSQL check reply",
+            createdAt,
+            updatedAt: createdAt,
+            deletedAt: "",
+          }],
+        },
+        {
+          id: "check-resource-inline-thread",
+          scope: "inline",
+          anchor: { blockId: "check-resource-block", start: 0, end: 10 },
+          body: "PostgreSQL inline discussion",
+          createdAt,
+          updatedAt: createdAt,
+          resolvedAt: "",
+          deletedAt: "",
+          replies: [],
+        },
+      ],
+      blocks: [{ id: "check-resource-block", type: "paragraph", text: "PostgreSQL Resource block", indent: 0, marks: [{ type: "bold", start: 0, end: 10 }] }],
+    }],
+    habits: [{ id: "check-habit", title: "PostgreSQL check habit", projectId: "check-project" }],
+    habitInstances: [{ id: "check-habit-instance", habitId: "check-habit", date: "2026-06-02", completed: true }],
+    journals: [{ id: "check-journal", title: "PostgreSQL check journal" }],
+    googleCalendars: [{ id: "check-google-calendar", summary: "PostgreSQL check Google calendar" }],
+    googleEvents: [{ id: "check-google-event", calendarId: "check-google-calendar", title: "PostgreSQL check Google event", htmlLink: "https://calendar.google.com/calendar/event?eid=check" }],
+    links: [{ id: "check-link", fromType: "tasks", fromId: "check-task", toType: "resources", toId: "check-resource", relation: "related" }],
+  };
+}
+
+function makeIncrementalResource(id, title) {
+  const createdAt = "2026-06-02T00:00:00.000Z";
+  return {
+    id,
+    title,
+    boxId: "check-box",
+    goalId: "check-goal",
+    projectId: "check-project",
+    url: `https://example.com/resources/${encodeURIComponent(id)}`,
+    pinned: false,
+    readLater: false,
+    createdAt,
+    updatedAt: createdAt,
+    revision: 1,
+    timestampSource: "native",
+    parentId: "",
+    childOrder: [],
+    pageSettings: { font: "default", smallText: false, fullWidth: false },
+    icon: "",
+    cover: { url: "", position: 50 },
+    readOnly: false,
+    trashedAt: "",
+    commentThreads: [],
+    blocks: [{ id: `${id}-block`, type: "paragraph", text: `${title} block`, indent: 0, marks: [] }],
+  };
+}
+
+async function checkIncrementalResourceApi() {
+  resourceServerProcess = spawn("node", ["server.js"], {
+    cwd: new URL("..", import.meta.url),
+    env: {
+      ...process.env,
+      PORT: String(resourcePort),
+      HOST: "127.0.0.1",
+      APP_STATE_ID: resourceAppStateId,
+      STATIC_ROOT: ".",
+      REQUIRE_STATE_PRECONDITION: "1",
+      GOOGLE_CLIENT_ID: "",
+      GOOGLE_CLIENT_SECRET: "",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  resourceServerProcess.stderr.on("data", (chunk) => {
+    resourceServerStderr += chunk;
+  });
+  await waitForServerHealth(resourceServerProcess, resourceBaseUrl, () => resourceServerStderr);
+
+  const initialState = makeValidState();
+  const peerResource = makeIncrementalResource("check-resource-peer", "Unrelated Resource baseline");
+  initialState.resources.push(peerResource);
+  const bootstrap = await requestJsonAt(resourceBaseUrl, "/api/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-0"' },
+    body: JSON.stringify({ state: initialState, baseRevision: 0 }),
+  });
+  assert(bootstrap.response.ok && bootstrap.payload.revision === 1, "incremental Resource check bootstrap failed");
+
+  const missingPrecondition = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resource: structuredClone(initialState.resources[0]) }),
+  });
+  assert(
+    missingPrecondition.response.status === 428
+      && missingPrecondition.payload.code === "STATE_PRECONDITION_REQUIRED"
+      && missingPrecondition.payload.revision === 1,
+    "incremental Resource write without a precondition did not return 428 with the current revision"
+  );
+
+  const peerUpdate = structuredClone(peerResource);
+  peerUpdate.title = "Unrelated Resource committed first";
+  peerUpdate.updatedAt = "2026-06-02T00:01:00.000Z";
+  peerUpdate.revision = 2;
+  const peerWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-peer", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resource: peerUpdate, baseRevision: 1 }),
+  });
+  assert(peerWrite.response.ok && peerWrite.payload.revision === 2, "baseRevision-only incremental Resource update failed");
+  assert(peerWrite.payload.created === false && peerWrite.payload.resource?.title === peerUpdate.title, "incremental Resource update returned the wrong Resource");
+  assert(peerWrite.payload.state === undefined && peerWrite.response.headers.get("etag") === '"state-2"', "incremental Resource response did not return compact conditional metadata");
+
+  const primaryUpdate = structuredClone(initialState.resources[0]);
+  primaryUpdate.title = "Primary Resource updated incrementally";
+  primaryUpdate.updatedAt = "2026-06-02T00:02:00.000Z";
+  primaryUpdate.revision = 2;
+  const primaryWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-2"' },
+    body: JSON.stringify({ resource: primaryUpdate }),
+  });
+  assert(primaryWrite.response.ok && primaryWrite.payload.revision === 3, "If-Match-only incremental Resource update failed");
+
+  const afterPrimary = await requestJsonAt(resourceBaseUrl, "/api/state");
+  const afterPrimaryResources = new Map(afterPrimary.payload.state?.resources?.map((resource) => [resource.id, resource]));
+  assert(afterPrimary.payload.revision === 3, "incremental Resource updates did not advance the workspace revision monotonically");
+  assert(afterPrimaryResources.get("check-resource")?.title === primaryUpdate.title, "incremental Resource update did not persist the target Resource");
+  assert(afterPrimaryResources.get("check-resource-peer")?.title === peerUpdate.title, "incremental Resource update clobbered an unrelated committed Resource");
+  assert(afterPrimary.payload.state?.tasks?.[0]?.title === "PostgreSQL check task", "incremental Resource update clobbered an unrelated collection");
+
+  const staleUpdate = structuredClone(primaryUpdate);
+  staleUpdate.title = "Stale Resource update must not persist";
+  const staleWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-2"' },
+    body: JSON.stringify({ resource: staleUpdate, baseRevision: 2 }),
+  });
+  assert(
+    staleWrite.response.status === 409
+      && staleWrite.payload.code === "STATE_REVISION_CONFLICT"
+      && staleWrite.payload.revision === 3
+      && staleWrite.response.headers.get("etag") === '"state-3"',
+    "stale incremental Resource update did not return 409 with the current revision"
+  );
+
+  const invalidUpdate = structuredClone(primaryUpdate);
+  invalidUpdate.blocks[0].id = peerResource.blocks[0].id;
+  const invalidWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-3"' },
+    body: JSON.stringify({ resource: invalidUpdate, baseRevision: 3 }),
+  });
+  assert(invalidWrite.response.status === 422 && invalidWrite.payload.code === "INVALID_STATE", "invalid incremental Resource did not return INVALID_STATE/422");
+  assert(
+    invalidWrite.payload.details?.issues?.some((issue) => issue.code === "duplicate_id"),
+    "incremental Resource validation did not detect a cross-Resource duplicate block ID"
+  );
+
+  const afterRejections = await requestJsonAt(resourceBaseUrl, "/api/state");
+  const rejectedResources = new Map(afterRejections.payload.state?.resources?.map((resource) => [resource.id, resource]));
+  assert(afterRejections.payload.revision === 3, "rejected incremental Resource write changed the workspace revision");
+  assert(rejectedResources.get("check-resource")?.title === primaryUpdate.title, "rejected incremental Resource write mutated the target Resource");
+  assert(rejectedResources.get("check-resource-peer")?.title === peerUpdate.title, "rejected incremental Resource write mutated an unrelated Resource");
+
+  const createdResource = makeIncrementalResource("check-resource-created", "Created incrementally");
+  delete createdResource.icon;
+  delete createdResource.cover;
+  delete createdResource.readOnly;
+  const createWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-3"' },
+    body: JSON.stringify({ resource: createdResource, baseRevision: 3 }),
+  });
+  assert(
+    createWrite.response.ok
+      && createWrite.payload.created === true
+      && createWrite.payload.revision === 4
+      && createWrite.payload.resource?.id === createdResource.id,
+    "backward-compatible incremental Resource create without media/readOnly fields did not return the created Resource at revision 4"
+  );
+
+  const idMismatch = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-4"' },
+    body: JSON.stringify({ resource: { ...createdResource, id: "check-resource-mismatched" }, baseRevision: 4 }),
+  });
+  assert(idMismatch.response.status === 400 && idMismatch.payload.code === "RESOURCE_ID_MISMATCH", "Resource path/body ID mismatch was not rejected");
+
+  const finalRead = await requestJsonAt(resourceBaseUrl, "/api/state");
+  const finalResources = new Map(finalRead.payload.state?.resources?.map((resource) => [resource.id, resource]));
+  assert(finalRead.payload.revision === 4 && finalResources.size === 3, "incremental Resource create did not persist exactly one Resource");
+  assert(finalResources.get("check-resource")?.title === primaryUpdate.title, "Resource create clobbered the existing target Resource");
+  assert(finalResources.get("check-resource-peer")?.title === peerUpdate.title, "Resource create clobbered the unrelated Resource");
+
+  const relationalResources = await pool.query(
+    "SELECT id, title FROM resources WHERE app_state_id = $1 ORDER BY id",
+    [resourceAppStateId]
+  );
+  assert(relationalResources.rowCount === 3, "incremental Resource API did not synchronize the relational Resource table");
+  assert(
+    relationalResources.rows.find((row) => row.id === "check-resource-peer")?.title === peerUpdate.title,
+    "incremental Resource API did not preserve the unrelated relational Resource row"
+  );
+}
+
+async function assertInvalidWriteDoesNotMutate(label, mutate, expectedIssueCode) {
+  const before = await pool.query("SELECT revision, state::text AS state_text FROM app_state WHERE id = $1", [appStateId]);
+  const draft = structuredClone(await currentState());
+  mutate(draft);
+  const result = await requestJson("/api/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"state-2"',
+    },
+    body: JSON.stringify({ state: draft, baseRevision: 2 }),
+  });
+  assert(result.response.status === 422 && result.payload.code === "INVALID_STATE", `${label} payload did not return INVALID_STATE/422`);
+  assert(result.payload.details?.issues?.some((issue) => issue.code === expectedIssueCode), `${label} payload did not report ${expectedIssueCode}`);
+  const after = await pool.query("SELECT revision, state::text AS state_text FROM app_state WHERE id = $1", [appStateId]);
+  assert(Number(after.rows[0]?.revision) === Number(before.rows[0]?.revision), `${label} rejection changed the stored revision`);
+  assert(after.rows[0]?.state_text === before.rows[0]?.state_text, `${label} rejection mutated the stored state`);
+  await assertStoredRevisionAndTitle(2, "PostgreSQL updated resource", `${label} rejection mutated readable state`);
+}
+
+async function currentState() {
+  const result = await readState();
+  return result.payload.state;
+}
+
+async function assertStoredRevisionAndTitle(expectedRevision, expectedTitle, message) {
+  const read = await readState();
+  assert(read.payload.revision === expectedRevision && read.payload.state?.revision === expectedRevision, `${message}: revision changed`);
+  assert(read.payload.state?.resources?.[0]?.title === expectedTitle, `${message}: Resource title changed`);
+}
+
+async function readState() {
+  const result = await requestJson("/api/state");
+  assert(result.response.ok, "state read failed");
+  return result;
+}
+
 async function cleanupCheckRows() {
-  await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [[appStateId, tokenStateId, legacyTokenStateId]]);
-  await pool.query("DELETE FROM app_state WHERE id = $1", [appStateId]);
+  const stateIds = [appStateId, resourceAppStateId, tokenStateId, legacyTokenStateId];
+  await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [stateIds]);
+  await pool.query("DELETE FROM app_state WHERE id = ANY($1)", [stateIds]);
+}
+
+async function assertCleanupComplete() {
+  const stateIds = [appStateId, resourceAppStateId, tokenStateId, legacyTokenStateId];
+  const remainingState = await pool.query("SELECT count(*)::int AS count FROM app_state WHERE id = ANY($1)", [stateIds]);
+  const remainingPrivate = await pool.query("SELECT count(*)::int AS count FROM app_private_data WHERE id = ANY($1)", [stateIds]);
+  assert(Number(remainingState.rows[0]?.count) === 0 && Number(remainingPrivate.rows[0]?.count) === 0, "PostgreSQL check rows were not cleaned up");
 }
 
 async function deleteRelationalRows(stateId) {
@@ -416,14 +919,18 @@ function databaseSslConfig() {
 }
 
 async function waitForHealth() {
+  await waitForServerHealth(serverProcess, baseUrl, () => serverStderr);
+}
+
+async function waitForServerHealth(process, url, stderr) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    if (serverProcess.exitCode !== null) {
-      const stderr = serverStderr.trim();
-      throw new Error(`server exited before health check passed, exitCode=${serverProcess.exitCode}${stderr ? `, stderr=${stderr}` : ""}`);
+    if (process.exitCode !== null) {
+      const errorOutput = stderr().trim();
+      throw new Error(`server exited before health check passed, exitCode=${process.exitCode}${errorOutput ? `, stderr=${errorOutput}` : ""}`);
     }
     try {
-      const response = await fetch(`${baseUrl}/health`);
+      const response = await fetch(`${url}/health`);
       if (response.ok) return;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -431,11 +938,14 @@ async function waitForHealth() {
   throw new Error("server health check timed out");
 }
 
-async function fetchJson(path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, options);
+async function requestJson(path, options = {}) {
+  return requestJsonAt(baseUrl, path, options);
+}
+
+async function requestJsonAt(url, path, options = {}) {
+  const response = await fetch(`${url}${path}`, options);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `${path} failed with ${response.status}`);
-  return payload;
+  return { response, payload };
 }
 
 function assert(condition, message) {

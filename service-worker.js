@@ -1,14 +1,19 @@
-const CACHE_NAME = "sygma-personal-web-v634-full-opt";
-const ASSETS = [
-  "./styles.css?v=20260711-full-opt-328",
-  "./app.js?v=20260711-full-opt-328",
-  "./manifest.json",
-  "./icons/app-icon.svg"
+const CACHE_NAME = "sygma-personal-web-v636-social-preview";
+const APP_SHELL_URL = "/index.html";
+const REQUIRED_ASSETS = [
+  APP_SHELL_URL,
+  "/styles.css?v=20260711-full-opt-328",
+  "/app.js?v=20260711-full-opt-328",
 ];
+const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
-  self.skipWaiting();
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(async (cache) => {
+      await cache.addAll(REQUIRED_ASSETS);
+      await Promise.allSettled(OPTIONAL_ASSETS.map((asset) => cache.add(asset)));
+    })
+  );
 });
 
 self.addEventListener("activate", (event) => {
@@ -20,33 +25,52 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 function shouldCache(response) {
   return response && response.status === 200 && response.type !== "opaque";
 }
 
-function cacheFirst(request) {
-  return caches.match(request).then((cached) => {
-    if (cached) return cached;
-    return fetch(request).then((response) => {
-      if (shouldCache(response)) {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-      }
-      return response;
-    });
-  });
+async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  const response = await fetch(request);
+  if (shouldCache(response)) {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  }
+  return response;
 }
 
-function networkFirst(request) {
-  return fetch(request, { cache: "no-store" })
-    .then((response) => {
-      if (shouldCache(response)) {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+async function networkFirst(request) {
+  try {
+    const response = await fetch(request, { cache: "no-store" });
+    if (shouldCache(response)) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    return (await caches.match(request)) || Response.error();
+  }
+}
+
+async function navigationFirst(request) {
+  try {
+    const response = await fetch(request, { cache: "no-store" });
+    if (shouldCache(response)) {
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(new URL(APP_SHELL_URL, self.registration.scope), response.clone());
       }
-      return response;
-    })
-    .catch(() => caches.match(request).then((cached) => cached || Response.error()));
+    }
+    return response;
+  } catch {
+    return (await caches.match(new URL(APP_SHELL_URL, self.registration.scope))) || Response.error();
+  }
 }
 
 self.addEventListener("fetch", (event) => {
@@ -55,6 +79,11 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/")) return;
+
+  if (event.request.mode === "navigate") {
+    event.respondWith(navigationFirst(event.request));
+    return;
+  }
 
   const immutableAsset = url.searchParams.has("v") || url.pathname.startsWith("/icons/");
   event.respondWith(immutableAsset ? cacheFirst(event.request) : networkFirst(event.request));

@@ -2,14 +2,15 @@
   "name": "SYGMA Personal Web",
   "short_name": "SYGMA",
   "description": "개인 로컬 프로젝트, 일정, 자료 관리 PWA",
-  "start_url": "./index.html",
-  "scope": "./",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f7f8fb",
   "theme_color": "#f7f8fb",
   "icons": [
     {
-      "src": "./icons/app-icon.svg",
+      "src": "/icons/app-icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

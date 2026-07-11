@@ -19,13 +19,15 @@ function contentHash(content) {
 }
 
 function builtServiceWorker(cacheName, assets) {
-  return `const CACHE_NAME=${JSON.stringify(cacheName)};const ASSETS=${JSON.stringify(assets)};
-self.addEventListener("install",event=>{event.waitUntil(caches.open(CACHE_NAME).then(cache=>cache.addAll(ASSETS)));self.skipWaiting()});
+  return `const CACHE_NAME=${JSON.stringify(cacheName)};const ASSETS=${JSON.stringify(assets)};const APP_SHELL_URL="/index.html";
+self.addEventListener("install",event=>{event.waitUntil(caches.open(CACHE_NAME).then(async cache=>{await cache.addAll(ASSETS.slice(0,3));await Promise.allSettled(ASSETS.slice(3).map(asset=>cache.add(asset)))}))});
 self.addEventListener("activate",event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE_NAME).map(key=>caches.delete(key)))).then(()=>self.clients.claim()))});
+self.addEventListener("message",event=>{if(event.data?.type==="SKIP_WAITING")self.skipWaiting()});
 const canCache=response=>response&&response.status===200&&response.type!=="opaque";
-const cacheFirst=request=>caches.match(request).then(cached=>cached||fetch(request).then(response=>{if(canCache(response)){const copy=response.clone();caches.open(CACHE_NAME).then(cache=>cache.put(request,copy))}return response}));
-const networkFirst=request=>fetch(request,{cache:"no-store"}).then(response=>{if(canCache(response)){const copy=response.clone();caches.open(CACHE_NAME).then(cache=>cache.put(request,copy))}return response}).catch(()=>caches.match(request).then(cached=>cached||Response.error()));
-self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;const url=new URL(event.request.url);if(url.origin!==self.location.origin||url.pathname.startsWith("/api/"))return;const immutable=url.pathname.startsWith("/_sygma/assets/")||url.pathname.startsWith("/assets/")||url.pathname.startsWith("/icons/");event.respondWith(immutable?cacheFirst(event.request):networkFirst(event.request))});
+const cacheFirst=async request=>{const cached=await caches.match(request);if(cached)return cached;const response=await fetch(request);if(canCache(response)){const cache=await caches.open(CACHE_NAME);await cache.put(request,response.clone())}return response};
+const networkFirst=async request=>{try{const response=await fetch(request,{cache:"no-store"});if(canCache(response)){const cache=await caches.open(CACHE_NAME);await cache.put(request,response.clone())}return response}catch{return await caches.match(request)||Response.error()}};
+const navigationFirst=async request=>{try{const response=await fetch(request,{cache:"no-store"});if(canCache(response)&&(response.headers.get("content-type")||"").includes("text/html")){const cache=await caches.open(CACHE_NAME);await cache.put(APP_SHELL_URL,response.clone())}return response}catch{return await caches.match(APP_SHELL_URL)||Response.error()}};
+self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;const url=new URL(event.request.url);if(url.origin!==self.location.origin||url.pathname.startsWith("/api/"))return;if(event.request.mode==="navigate"){event.respondWith(navigationFirst(event.request));return}const immutable=url.pathname.startsWith("/_sygma/assets/")||url.pathname.startsWith("/assets/")||url.pathname.startsWith("/icons/");event.respondWith(immutable?cacheFirst(event.request):networkFirst(event.request))});
 `;
 }
 
@@ -52,6 +54,8 @@ function staticHeaders() {
   X-Content-Type-Options: nosniff
   Referrer-Policy: same-origin
   X-Frame-Options: SAMEORIGIN
+  Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
 `;
 }
 
@@ -90,14 +94,21 @@ await Promise.all([
 ]);
 
 const builtIndex = indexSource
-  .replace(/\.\/styles\.css\?v=[^"']+/, stylesPath)
-  .replace(/\.\/app\.js\?v=[^"']+/, appPath)
+  .replace(/(?:\.\/|\/)styles\.css\?v=[^"']+/, stylesPath)
+  .replace(/(?:\.\/|\/)app\.js\?v=[^"']+/, appPath)
   .replace("</head>", `    <link rel="preload" href="${appPath}" as="script">\n  </head>`);
 const manifest = JSON.parse(manifestSource);
 manifest.start_url = "/";
 manifest.scope = "/";
 const cacheId = contentHash(`${appPath}\n${stylesPath}`);
-const precacheAssets = ["/index.html", stylesPath, appPath, "/manifest.json", "/icons/app-icon.svg"];
+const precacheAssets = [
+  "/index.html",
+  stylesPath,
+  appPath,
+  "/manifest.json",
+  "/icons/app-icon.svg",
+  "/assets/sygma-social-preview.png",
+];
 
 await Promise.all([
   writeFile(resolve(clientDir, "index.html"), builtIndex),
@@ -105,6 +116,7 @@ await Promise.all([
   writeFile(resolve(clientDir, "service-worker.js"), builtServiceWorker(`sygma-${cacheId}`, precacheAssets)),
   writeFile(resolve(clientDir, "_headers"), staticHeaders()),
   cp(resolve(root, "icons"), resolve(clientDir, "icons"), { recursive: true }),
+  cp(resolve(root, "assets/sygma-social-preview.png"), resolve(clientDir, "assets/sygma-social-preview.png")),
 ]);
 
 await build({
