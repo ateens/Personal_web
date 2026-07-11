@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 const files = {
   app: read("app.js"),
   server: read("server.js"),
+  deploymentSecurity: read("server/deployment-security.js"),
   storage: read("server/storage.js"),
   styles: read("styles.css"),
   index: read("index.html"),
@@ -15,8 +16,10 @@ const files = {
   envExample: read(".env.example"),
   readme: read("README.md"),
   checkPostgres: read("scripts/check-postgres-state.mjs"),
+  checkApiAuth: read("scripts/check-api-proxy-auth.mjs"),
   backupCli: read("scripts/manage-state-backups.mjs"),
   checkBackups: read("scripts/check-state-migration-backups.mjs"),
+  railway: JSON.parse(read("railway.json")),
 };
 
 const checks = [
@@ -37,6 +40,8 @@ const checks = [
   ["backup CLI requires exact workspace confirmation and never prints state", () => files.backupCli.includes('confirmation !== appStateId') && files.backupCli.includes('"CONFIRMATION_REQUIRED"') && files.backupCli.includes('parsed.options.has("expected-revision")') && files.backupCli.includes("backup state is never printed") && !/\bstate\s*:/.test(files.backupCli)],
   ["isolated migration backup check covers v3 backup and restore", () => files.checkBackups.includes("legacyV3State") && files.checkBackups.includes("automatic_version_migration_v3_to_v4") && files.checkBackups.includes("CLI restore accepted a stale revision") && files.checkBackups.includes("backup/restore touched an unrelated sentinel workspace") && files.checkBackups.includes("DELETE FROM app_state_migration_backups WHERE app_state_id = ANY($1)")],
   ["state status exposes relational collection source", () => files.storage.includes('collectionSource: "relational"') && files.checkPostgres.includes('status.collectionSource === "relational"')],
+  ["production API auth uses a target-scoped one-way verifier and fails closed", () => files.server.includes("deploymentSecurityPolicy(process.env)") && files.server.includes("deploymentSecurity.forceApiAuth || envFlag") && files.server.includes("deploymentSecurity.forceStatePrecondition || envFlag") && files.server.includes("function parseSha256Digest(value)") && files.server.includes("configuredApiBearerTokenSha256") && /apiBearerTokenSha256: "sha256:[a-f0-9]{64}"/.test(files.deploymentSecurity) && files.deploymentSecurity.includes('projectId: "623a83b1-085a-446a-8789-be57923a7058"') && files.deploymentSecurity.includes('environmentId: "0bd3f580-8f52-47e7-b69f-89f413176d3e"') && files.deploymentSecurity.includes('serviceId: "3a97e1c9-5424-4ec5-8da7-423b21f76785"') && files.railway.deploy?.startCommand === "npm start"],
+  ["API auth self-test covers digest-only and malformed verifier modes", () => files.checkApiAuth.includes("environmentTokenSha256") && files.checkApiAuth.includes("digest override anonymous request") && files.checkApiAuth.includes("correct bearer token was rejected by its SHA-256 verifier") && files.checkApiAuth.includes("malformed environment token digest")],
   ["storage normalizes app state before JSONB writes", () => files.storage.includes("normalizeAppStateForStorage(state)") && files.storage.includes("delete nextState.settings.appMode") && files.storage.includes("for (const key of COLLECTION_KEYS)")],
   ["storage enforces app state schema defaults", () => files.storage.includes("STATE_VERSION") && files.storage.includes("DEFAULT_NAV_ORDER") && files.storage.includes("DEFAULT_CALENDAR_SOURCES") && files.storage.includes("STRING_SETTING_KEYS") && files.storage.includes("statsDemoDataSeeded")],
   ["state writes strictly validate v4 payloads before storage mutation", () => files.server.includes("const STATE_VERSION = 4;") && files.server.includes("function validateIncomingState(state)") && /async function handleStateWrite\(request, response\) \{[\s\S]*?validateIncomingState\(body\.state\);[\s\S]*?storage\.writeAppState\(body\.state/.test(files.server) && files.server.includes('throw apiError(422, "INVALID_STATE"') && files.checkPostgres.includes("assertInvalidWriteDoesNotMutate(")],

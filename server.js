@@ -7,6 +7,7 @@ import http from "node:http";
 import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
+import { deploymentSecurityPolicy } from "./server/deployment-security.js";
 import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -118,10 +119,17 @@ const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
 const databaseUrl = process.env.DATABASE_URL || "";
 const appStateId = process.env.APP_STATE_ID || "default";
-const requireStatePrecondition = envFlag("REQUIRE_STATE_PRECONDITION");
-const failClosedApiAuth = envFlag("FAIL_CLOSED_API_AUTH");
+const deploymentSecurity = deploymentSecurityPolicy(process.env);
+const requireStatePrecondition = deploymentSecurity.forceStatePrecondition || envFlag("REQUIRE_STATE_PRECONDITION");
+const failClosedApiAuth = deploymentSecurity.forceApiAuth || envFlag("FAIL_CLOSED_API_AUTH");
 const apiBearerToken = process.env.API_BEARER_TOKEN || "";
-const apiBearerTokenDigest = apiBearerToken ? tokenDigest(apiBearerToken) : null;
+const configuredApiBearerTokenSha256 = deploymentSecurity.apiBearerTokenSha256
+  || String(process.env.API_BEARER_TOKEN_SHA256 || "").trim();
+const apiBearerTokenDigest = configuredApiBearerTokenSha256
+  ? parseSha256Digest(configuredApiBearerTokenSha256)
+  : apiBearerToken
+    ? tokenDigest(apiBearerToken)
+    : null;
 const apiProxyAuthCacheTtlMs = envInteger("API_PROXY_AUTH_CACHE_TTL_MS", 1_000, 100, 5_000);
 const trustProxyIpHeaders = envFlag("TRUST_PROXY_IP_HEADERS");
 const apiRateLimitWindowMs = envInteger("API_RATE_LIMIT_WINDOW_MS", 60_000, 100, 3_600_000);
@@ -421,6 +429,12 @@ function tokenDigest(value) {
   return createHash("sha256").update(String(value || ""), "utf8").digest();
 }
 
+function parseSha256Digest(value) {
+  const normalized = String(value || "").trim().replace(/^sha256:/i, "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalized)) return null;
+  return Buffer.from(normalized, "hex");
+}
+
 function suppliedBearerToken(request) {
   const authorization = String(request.headers.authorization || "");
   if (!authorization.startsWith("Bearer ")) return "";
@@ -507,7 +521,7 @@ async function enforceApiAuthentication(request, response, requestUrl) {
   // The deployment-time environment switch is the authoritative override and
   // deliberately bypasses the database policy, preserving its fail-closed behavior.
   if (failClosedApiAuth) {
-    if (!apiBearerToken) {
+    if (!apiBearerTokenDigest) {
       return denyApiAuthentication(request, response, 503, "API_AUTH_NOT_CONFIGURED", "server_misconfigured");
     }
     if (bearerTokenMatchesDigest(request, apiBearerTokenDigest)) return false;

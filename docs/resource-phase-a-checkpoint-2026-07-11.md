@@ -2,21 +2,21 @@
 
 Date: 2026-07-11 (Asia/Seoul)
 
-Branch: `codex/resource-notion-parity-phase-a`
+Branch: `codex/resource-notion-parity-phase-a` at `0bb41c3`; merged to `main` at `665b237`
 
-Checkpoint type: local implementation, migration, and test checkpoint; production rollout pending
+Checkpoint type: final tested source with partial production rollout; DB-auth enforcement pending
 
-This checkpoint records the current branch's implemented and tested behavior. It does not claim a completed production deployment or pixel parity with authenticated current Notion.
+This checkpoint records the current branch's implemented/tested behavior and the verified portion of the production rollout. It does not claim completed production authentication or pixel parity with authenticated current Notion.
 
 ## Phase status
 
 | Phase | Status | Evidence | Open gate |
 |---|---|---|---|
 | Phase A — page/editor parity | Broad local implementation complete; scoped gaps remain | 83-test isolated browser suite, 27 viewport captures, four state captures, source/build checks | authenticated Notion reference diff, real mobile keyboard/screen-reader QA, named P1/P2 features |
-| Phase B — persistence/offline | Local core implemented and tested | IndexedDB snapshot/queue/replay/conflict, incremental Resource writes, SW update gate, migration backup/restore checks | production pre-deploy backup, rollout smoke test, disaster-recovery coverage outside the application DB |
-| Phase C — deployment/access control | Code and runbook implemented; production activation not started/completed | Worker and DB-policy self-tests pass | private Sites deployment, matching secret, Railway policy enablement, direct/public path verification |
+| Phase B — persistence/offline | Local core implemented/tested and production migration checkpoint created | IndexedDB snapshot/queue/replay/conflict, incremental Resource writes, SW update gate, v3→v4 production revision 1, manual predeploy backup | authenticated post-enforcement smoke test and disaster-recovery coverage outside the application DB |
+| Phase C — deployment/access control | Partial production rollout | Railway and owner-only/custom Sites deployed; Sites anonymous gate verified; DB credential configured but not enforced | owner signed-in Sites `200`, DB policy enablement, direct Railway missing/wrong `401`, authenticated end-to-end smoke test |
 
-The one remaining P0 release blocker is production API access. The 2026-07-11 production audit still observed anonymous `200` state reads and a DB auth policy of `configured:false`, `enforced:false`. Do not describe production as protected until the ordered auth rollout and post-deploy checks pass.
+The remaining P0 release blocker is the final production API-auth gate. Sites now rejects anonymous `/`, `/api/state/status`, and `/health` with `401`, but the actual owner path is `[Unverified]`: Chrome is stopped at “Continue with ChatGPT”, and performing that login action requires user confirmation. Railway's DB policy is `configured:true`, `enforced:false`, so direct anonymous `/api/state/status` still returns `200`. Do not enable enforcement or describe production as fully protected until the signed-in owner Sites path returns `200` and the remaining runbook checks pass.
 
 ## Implemented in this checkpoint
 
@@ -71,8 +71,17 @@ The one remaining P0 release blocker is production API access. The 2026-07-11 pr
 - Strict server validation rejects invalid roots, duplicate IDs, bad block/mark/range/indent values, broken relations, unsafe URL protocols, excessive size/depth, and ID mismatches before database mutation.
 - Client link rendering revalidates safe protocols and adds `noopener noreferrer`; pasted HTML is sanitized.
 - Central headers, redacted errors and audit records, request-size limits, route rate limits, and bounded state-write concurrency are implemented.
-- `app_state_migration_backups` and `app_state_restore_history` support automatic pre-migration/read-heal snapshots and manual workspace-scoped create/list/restore with SHA-256 verification, revision precondition, safety backup, and monotonic restored revision.
-- The branch includes a staged DB-backed bearer policy and private Sites Worker proxy design. The Worker strips browser-controlled auth/identity/forwarding headers before injecting its own credential. This is a single-workspace gate, not per-user authorization.
+- `app_state_migration_backups` and `app_state_restore_history` support automatic pre-migration/read-heal snapshots and manual workspace-scoped create/list/restore with SHA-256 verification, revision precondition, safety backup, and monotonic restored revision. A manual production predeploy backup exists, and Railway migrated production v3→v4 at revision 1.
+- The deployed DB-backed bearer policy and private Sites Worker strip browser-controlled auth/identity/forwarding headers before the Worker injects its own credential. This is a single-workspace gate, not per-user authorization. The DB policy is currently `configured:true`, `enforced:false` pending owner-path verification.
+
+## Production rollout evidence
+
+- Source commit `0bb41c3` passed the final checks. PR #1 merged it to `main` at `665b237`, and Railway auto-deployed the new server.
+- Railway production state migrated v3→v4 at revision 1, with a manual predeploy backup retained.
+- Sites version 8 was saved from `0bb41c3` and deployed owner-only/custom at <https://sygma-personal-web.ateens.chatgpt.site> with environment revision 1, `API_BEARER_TOKEN` installed, and `REQUIRE_AUTHENTICATED_PROXY=1`.
+- Anonymous Sites requests to `/`, `/api/state/status`, and `/health` return `401`.
+- Direct anonymous Railway `/api/state/status` still returns `200` because DB enforcement is intentionally off.
+- The signed-in owner path is `[Unverified]`. Chrome is at “Continue with ChatGPT”; completing that login requires user confirmation. No owner access success is claimed.
 
 ## Automated evidence
 
@@ -155,13 +164,19 @@ The pre-change audit remains historical and must not be edited to make its origi
 
 ## Deployment and rollback gate
 
-1. Run all checks against the exact commit to deploy.
-2. Create the production manual migration checkpoint and confirm separate PostgreSQL PITR/dump coverage.
-3. Deploy the fail-closed-capable server and Worker code while DB auth enforcement remains disabled.
-4. Stage the bearer credential with a private `0600` token file; never print it or place it in ordinary command arguments/logs.
-5. Make Sites private, set `REQUIRE_AUTHENTICATED_PROXY=1`, install the matching Sites secret, deploy, and verify the signed-in Sites path.
-6. Enable the DB-backed policy only after step 5 works. After cache refresh, verify direct Railway missing/wrong credentials return `401` and private Sites still returns `200`.
-7. Record commit, deployment IDs, backup ID, auth fingerprint, revision, and smoke-test results without recording state or secrets.
+Completed:
+
+1. Final checks, PR #1 merge, Railway deployment, production v4 migration, and manual predeploy backup.
+2. DB credential staging with enforcement off.
+3. Owner-only/custom Sites version 8 deployment with the API secret and authenticated-proxy requirement.
+4. Anonymous Sites `/`, `/api/state/status`, and `/health` rejection with `401`.
+
+Blocked and remaining:
+
+1. Obtain user confirmation to continue the ChatGPT login shown in Chrome.
+2. Verify signed-in owner Sites `/api/state/status` and a conditional state read/write return success while DB enforcement is off.
+3. Enable the DB-backed policy only after step 2 succeeds. After cache refresh, verify direct Railway missing/wrong credentials return `401` and the signed-in Sites path still returns `200`.
+4. Record the final deployment/auth evidence without recording state or secrets, and confirm separate PostgreSQL PITR/dump coverage.
 
 Restore requires stopped/drained writes, exact workspace confirmation, and the current revision. It creates a safety backup and advances revision rather than rewinding it. Authentication rollback should prefer the verified fail-closed environment override; do not delete the DB credential first. Follow the dedicated migration and auth runbooks for exact commands and limitations.
 
@@ -169,7 +184,7 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 
 ### P0 release blocker
 
-- Production backup, backend/Worker deployment, private Sites access policy and secret, DB enforcement, and missing/wrong/correct credential verification.
+- User-confirmed ChatGPT owner sign-in, signed-in Sites `200`/conditional state operation, DB enforcement, direct Railway missing/wrong `401`, and post-enforcement owner-path `200`.
 
 ### P1
 
@@ -190,4 +205,4 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 
 ## Checkpoint conclusion
 
-The branch passed its final same-revision local test gate and is suitable for deployment review. It is not yet a completed production release, and the absence of authenticated reference captures prevents any exact Notion visual parity claim. The detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
+The branch passed its final same-revision local test gate and has been partially deployed through Railway and owner-only/custom Sites. Production authentication remains incomplete until the user-confirmed owner path and DB-enforcement checks pass. The absence of authenticated Notion reference captures still prevents any exact visual parity claim. The detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
