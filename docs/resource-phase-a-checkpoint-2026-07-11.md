@@ -80,7 +80,7 @@ There is no remaining P0 production-access blocker. Sites rejects anonymous `/`,
 - Railway production state migrated v3→v4 at revision 1, with a manual predeploy backup retained.
 - Sites version 8 was saved from `0bb41c3` and deployed owner-only/custom at <https://sygma-personal-web.ateens.chatgpt.site> with environment revision 1, `API_BEARER_TOKEN` installed, and `REQUIRE_AUTHENTICATED_PROXY=1`.
 - Anonymous Sites requests to `/`, `/api/state/status`, and `/health` return `401`.
-- Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` is `ACTIVE` and `Deployment successful` for the PR #2 merge.
+- Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` reported `ACTIVE` and `Deployment successful` for the PR #2 merge during live auth verification.
 - Direct Railway `/api/state/status` returns `401 AUTH_REQUIRED` for missing and wrong bearer credentials and `200` for the matching Sites credential. Authenticated `/api/state` also returns `200`; both authenticated responses reported revision 2, `ETag: "state-2"`, and `X-State-Concurrency: required`. `/health` remains `200`.
 - The signed-in owner Sites `/api/state/status` returned `200` at revision 2. The production root loaded, the Resources view rendered 16 active Resources, and a real Resource opened in Center peek.
 - The verifier fingerprint was matched locally against the existing Sites credential without printing the token; its mode-`0600` temporary file was deleted immediately after live verification.
