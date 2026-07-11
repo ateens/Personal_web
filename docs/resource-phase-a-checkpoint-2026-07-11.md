@@ -1,22 +1,22 @@
 # Resource parity implementation checkpoint
 
-Date: 2026-07-11 (Asia/Seoul)
+Date: 2026-07-12 (Asia/Seoul)
 
-Branch: `codex/resource-notion-parity-phase-a` at `0bb41c3`; merged to `main` at `665b237`
+Implementation: PR #1 merged the parity rebuild at `665b237`; PR #2 merged production auth hardening at `617f44e`
 
-Checkpoint type: final tested source with partial production rollout; DB-auth enforcement pending
+Checkpoint type: final tested source with verified production access-control rollout
 
-This checkpoint records the current branch's implemented/tested behavior and the verified portion of the production rollout. It does not claim completed production authentication or pixel parity with authenticated current Notion.
+This checkpoint records the implemented/tested behavior and completed production access-control rollout. It does not claim pixel parity with authenticated current Notion.
 
 ## Phase status
 
 | Phase | Status | Evidence | Open gate |
 |---|---|---|---|
 | Phase A — page/editor parity | Broad local implementation complete; scoped gaps remain | 83-test isolated browser suite, 27 viewport captures, four state captures, source/build checks | authenticated Notion reference diff, real mobile keyboard/screen-reader QA, named P1/P2 features |
-| Phase B — persistence/offline | Local core implemented/tested and production migration checkpoint created | IndexedDB snapshot/queue/replay/conflict, incremental Resource writes, SW update gate, v3→v4 production revision 1, manual predeploy backup | authenticated post-enforcement smoke test and disaster-recovery coverage outside the application DB |
-| Phase C — deployment/access control | Partial production rollout | Railway and owner-only/custom Sites deployed; Sites anonymous gate verified; DB credential configured but not enforced | owner signed-in Sites `200`, DB policy enablement, direct Railway missing/wrong `401`, authenticated end-to-end smoke test |
+| Phase B — persistence/offline | Core implemented/tested and production migration checkpoint created | IndexedDB snapshot/queue/replay/conflict, incremental Resource writes, SW update gate, v3→v4 production revision 1, current revision 2, manual predeploy backup | disaster-recovery coverage outside the application DB |
+| Phase C — deployment/access control | Production gate complete for the current single-workspace scope | Railway active deployment, exact-target one-way verifier, direct `401/401/200`, required state preconditions, anonymous Sites `401`, signed-in Sites status/Resources/Center peek `200` | per-user/RBAC/tenant scope remains P2; ID drift, token rotation, and external PITR are operational follow-ups |
 
-The remaining P0 release blocker is the final production API-auth gate. Sites now rejects anonymous `/`, `/api/state/status`, and `/health` with `401`, but the actual owner path is `[Unverified]`: Chrome is stopped at “Continue with ChatGPT”, and performing that login action requires user confirmation. Railway's DB policy is `configured:true`, `enforced:false`, so direct anonymous `/api/state/status` still returns `200`. Do not enable enforcement or describe production as fully protected until the signed-in owner Sites path returns `200` and the remaining runbook checks pass.
+There is no remaining P0 production-access blocker. Sites rejects anonymous `/`, `/api/state/status`, and `/health` with `401`; the signed-in owner path returns `200`; direct Railway rejects missing and wrong bearer credentials with `401 AUTH_REQUIRED` and accepts only the matching Sites credential. Authenticated state reads reported revision 2, `ETag: "state-2"`, and `X-State-Concurrency: required`, while `/health` remained public `200` for Railway health checks.
 
 ## Implemented in this checkpoint
 
@@ -72,16 +72,18 @@ The remaining P0 release blocker is the final production API-auth gate. Sites no
 - Client link rendering revalidates safe protocols and adds `noopener noreferrer`; pasted HTML is sanitized.
 - Central headers, redacted errors and audit records, request-size limits, route rate limits, and bounded state-write concurrency are implemented.
 - `app_state_migration_backups` and `app_state_restore_history` support automatic pre-migration/read-heal snapshots and manual workspace-scoped create/list/restore with SHA-256 verification, revision precondition, safety backup, and monotonic restored revision. A manual production predeploy backup exists, and Railway migrated production v3→v4 at revision 1.
-- The deployed DB-backed bearer policy and private Sites Worker strip browser-controlled auth/identity/forwarding headers before the Worker injects its own credential. This is a single-workspace gate, not per-user authorization. The DB policy is currently `configured:true`, `enforced:false` pending owner-path verification.
+- The private Sites Worker strips browser-controlled auth/identity/forwarding headers before injecting its own credential. On the exact production Railway target, `server/deployment-security.js` forces a one-way verifier and state preconditions regardless of weaker environment or DB-policy values. This is a single-workspace gate, not per-user authorization.
 
 ## Production rollout evidence
 
-- Source commit `0bb41c3` passed the final checks. PR #1 merged it to `main` at `665b237`, and Railway auto-deployed the new server.
+- PR #1 merged the tested Resource rebuild to `main` at `665b237`; PR #2 merged target-scoped production auth hardening at `617f44e`.
 - Railway production state migrated v3→v4 at revision 1, with a manual predeploy backup retained.
 - Sites version 8 was saved from `0bb41c3` and deployed owner-only/custom at <https://sygma-personal-web.ateens.chatgpt.site> with environment revision 1, `API_BEARER_TOKEN` installed, and `REQUIRE_AUTHENTICATED_PROXY=1`.
 - Anonymous Sites requests to `/`, `/api/state/status`, and `/health` return `401`.
-- Direct anonymous Railway `/api/state/status` still returns `200` because DB enforcement is intentionally off.
-- The signed-in owner path is `[Unverified]`. Chrome is at “Continue with ChatGPT”; completing that login requires user confirmation. No owner access success is claimed.
+- Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` reported `ACTIVE` and `Deployment successful` for the PR #2 merge during live auth verification.
+- Direct Railway `/api/state/status` returns `401 AUTH_REQUIRED` for missing and wrong bearer credentials and `200` for the matching Sites credential. Authenticated `/api/state` also returns `200`; both authenticated responses reported revision 2, `ETag: "state-2"`, and `X-State-Concurrency: required`. `/health` remains `200`.
+- The signed-in owner Sites `/api/state/status` returned `200` at revision 2. The production root loaded, the Resources view rendered 16 active Resources, and a real Resource opened in Center peek.
+- The verifier fingerprint was matched locally against the existing Sites credential without printing the token; its mode-`0600` temporary file was deleted immediately after live verification.
 
 ## Automated evidence
 
@@ -90,10 +92,10 @@ The remaining P0 release blocker is the final production API-auth gate. Sites no
 Last complete command:
 
 ```sh
-PLAYWRIGHT_CHANNEL=chromium E2E_PORT=43260 npm run test:e2e -- --reporter=line
+PLAYWRIGHT_CHANNEL=chromium E2E_PORT=43280 npm run test:e2e -- --reporter=line
 ```
 
-Result: **83 passed (2.8 minutes)**.
+Result: **83 passed (2.6 minutes)**.
 
 | Spec | Tests | Main evidence |
 |---|---:|---|
@@ -115,9 +117,9 @@ The complete run was executed against the final documented source revision, incl
 - `npm run check`: passed syntax, source audit, and Sites Worker checks.
 - `npm run check:build`: passed; authoritative final bundle result `1,112,382 → 779,823` bytes, Brotli `136,347`, gzip `173,007`.
 - `assets/sygma-social-preview.png` is copied into the client build and referenced by `index.html` Open Graph and Twitter image metadata.
-- `npm run check:postgres`: passed against isolated workspace `check-33b0d96e4b4d`, including v4 migration/read-heal, strict validation/no mutation, preconditions, stale conflict, incremental Resource writes, URL-scheme rejection, relational reconstruction, and cleanup.
-- `npm run check:backups`: passed against isolated workspace `migration-backup-check-83a74611bc7186b0`, including automatic v3→v4 backup, CLI create/list/restore, integrity, safety backup, restore history, unrelated sentinel protection, and cleanup.
-- `npm run check:api-auth`: passed isolated DB policy and configuration self-tests.
+- `npm run check:postgres`: passed against isolated workspace `check-43890cbf0704`, including v4 migration/read-heal, strict validation/no mutation, preconditions, stale conflict, incremental Resource writes, URL-scheme rejection, relational reconstruction, and cleanup.
+- `npm run check:backups`: passed against isolated workspace `migration-backup-check-a2962e1a6ddf852d`, including automatic v3→v4 backup, CLI create/list/restore, integrity, safety backup, restore history, unrelated sentinel protection, and cleanup.
+- `npm run check:api-auth`: passed isolated DB policy/configuration checks plus exact-target scope, digest-only auth, digest-over-stale-plaintext priority, and malformed-verifier fail-closed cases.
 
 ### Performance evidence
 
@@ -126,12 +128,12 @@ The deterministic 400-block local fixture recorded:
 ```json
 {
   "shellDomNodes": 4556,
-  "propertyPatchMs": 18.7,
-  "scrollResponseMs": 9.8,
+  "propertyPatchMs": 20.5,
+  "scrollResponseMs": 16.6,
   "maxLongTaskMs": 0,
   "totalLongTaskMs": 0,
   "longTaskCount": 0,
-  "readyMs": 294
+  "readyMs": 270
 }
 ```
 
@@ -153,7 +155,7 @@ Authenticated Notion reference capture was unavailable. Therefore:
 | Files | Purpose |
 |---|---|
 | `app.js`, `styles.css` | Resource v4 model, minimal patching, router/page shells, editor/page features, IndexedDB queue, mobile and accessibility behavior |
-| `server.js`, `server/storage.js` | SPA/API routing, validation, revisions, incremental Resource writes, security controls, bearer policy, migration backup/restore |
+| `server.js`, `server/deployment-security.js`, `server/storage.js` | SPA/API routing, validation, revisions, incremental Resource writes, exact-target one-way bearer policy, migration backup/restore |
 | `service-worker.js`, `worker/index.js` | offline navigation/update handling and authenticated private proxy boundary |
 | `index.html`, `manifest.json`, `assets/sygma-social-preview.png`, `README.md`, `.env.example` | app-shell and social-preview metadata, cache/build versioning, operator/user-facing state and configuration documentation |
 | `scripts/*.mjs`, `package.json`, `package-lock.json`, `playwright.config.js` | source/build/Worker/PostgreSQL/auth/backup checks and deterministic browser harness |
@@ -166,25 +168,27 @@ The pre-change audit remains historical and must not be edited to make its origi
 
 Completed:
 
-1. Final checks, PR #1 merge, Railway deployment, production v4 migration, and manual predeploy backup.
-2. DB credential staging with enforcement off.
-3. Owner-only/custom Sites version 8 deployment with the API secret and authenticated-proxy requirement.
-4. Anonymous Sites `/`, `/api/state/status`, and `/health` rejection with `401`.
+1. Final checks, PR #1/PR #2 merges, active Railway deployment, production v4 migration, and manual predeploy backup.
+2. Owner-only/custom Sites version 8 deployment with the API secret and authenticated-proxy requirement.
+3. Anonymous Sites `/`, `/api/state/status`, and `/health` rejection with `401`.
+4. Exact-production token fingerprint match, direct Railway `401/401/200`, authenticated state `200` with required preconditions, and health `200`.
+5. Signed-in Sites status `200` at revision 2 plus production Resources and Center peek smoke checks.
+6. Secure deletion of the temporary credential file.
 
-Blocked and remaining:
+Non-blocking operational follow-ups:
 
-1. Obtain user confirmation to continue the ChatGPT login shown in Chrome.
-2. Verify signed-in owner Sites `/api/state/status` and a conditional state read/write return success while DB enforcement is off.
-3. Enable the DB-backed policy only after step 2 succeeds. After cache refresh, verify direct Railway missing/wrong credentials return `401` and the signed-in Sites path still returns `200`.
-4. Record the final deployment/auth evidence without recording state or secrets, and confirm separate PostgreSQL PITR/dump coverage.
+1. Update project/environment/service IDs and the scope tests before any Railway resource recreation.
+2. Rotate the Sites secret and verifier together; use a temporary dual-verifier rollout if zero downtime is required.
+3. Audit/remove any obsolete production DB `api_proxy_auth` row when operator DB access is available; the exact-target path currently ignores it.
+4. Confirm separate PostgreSQL PITR/dump coverage.
 
 Restore requires stopped/drained writes, exact workspace confirmation, and the current revision. It creates a safety backup and advances revision rather than rewinding it. Authentication rollback should prefer the verified fail-closed environment override; do not delete the DB credential first. Follow the dedicated migration and auth runbooks for exact commands and limitations.
 
 ## Remaining work
 
-### P0 release blocker
+### P0
 
-- User-confirmed ChatGPT owner sign-in, signed-in Sites `200`/conditional state operation, DB enforcement, direct Railway missing/wrong `401`, and post-enforcement owner-path `200`.
+- No open functional or production-access P0 remains in the defined single-workspace scope.
 
 ### P1
 
@@ -205,4 +209,4 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 
 ## Checkpoint conclusion
 
-The branch passed its final same-revision local test gate and has been partially deployed through Railway and owner-only/custom Sites. Production authentication remains incomplete until the user-confirmed owner path and DB-enforcement checks pass. The absence of authenticated Notion reference captures still prevents any exact visual parity claim. The detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
+The implementation passed its final same-revision local test gate and the production access-control rollout is verified through Railway and owner-only/custom Sites. The absence of authenticated Notion reference captures still prevents any exact visual parity claim, and real mobile/screen-reader plus named P1/P2 capabilities remain open. The detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.

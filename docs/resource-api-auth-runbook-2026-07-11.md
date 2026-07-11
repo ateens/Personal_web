@@ -41,7 +41,7 @@ The exact-production policy is the preferred fail-closed path when the Sites sec
 
 1. Recover the staged token only into a mode-`0600` temporary file.
 2. Compute its SHA-256 fingerprint locally and confirm it exactly matches `PRODUCTION_RAILWAY_SECURITY_POLICY.apiBearerTokenSha256`; never print the token.
-3. Deploy the source containing the matching verifier. Railway supplies `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID`; all three must match.
+3. Deploy the source containing the matching verifier. Railway supplies `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, and `RAILWAY_SERVICE_ID`; all three must match. The platform-provided variables are documented at <https://docs.railway.com/variables/reference>.
 4. The exact target forces auth and `REQUIRE_STATE_PRECONDITION` regardless of weaker or stale `API_BEARER_TOKEN`, `API_BEARER_TOKEN_SHA256`, `FAIL_CLOSED_API_AUTH`, or DB-policy values.
 5. Verify the missing/wrong/correct matrix and the signed-in Sites path, then delete the temporary token file.
 
