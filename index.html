@@ -4,14 +4,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#f7f8fb">
+    <meta name="description" content="프로젝트, 일정, 자료를 한곳에서 관리하는 개인 생산성 PWA">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="SYGMA Personal Web">
+    <meta property="og:description" content="프로젝트, 일정, 자료를 한곳에서 관리하는 개인 생산성 PWA">
+    <meta property="og:image" content="/assets/sygma-social-preview.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="문서 카드와 연결된 자료를 표현한 SYGMA 추상 일러스트">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="SYGMA Personal Web">
+    <meta name="twitter:description" content="프로젝트, 일정, 자료를 한곳에서 관리하는 개인 생산성 PWA">
+    <meta name="twitter:image" content="/assets/sygma-social-preview.png">
     <title>SYGMA Personal Web</title>
-    <link rel="manifest" href="./manifest.json">
-    <link rel="icon" href="./icons/app-icon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="./styles.css?v=20260711-full-opt-328">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icons/app-icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css?v=20260711-full-opt-328">
   </head>
   <body>
+    <a class="skip-link" href="#viewRoot">본문으로 건너뛰기</a>
     <div id="app" class="app"></div>
+    <noscript>
+      <main class="no-script-fallback">
+        <h1>SYGMA Personal Web</h1>
+        <p>이 앱을 사용하려면 JavaScript를 활성화해야 합니다.</p>
+      </main>
+    </noscript>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js?v=20260711-full-opt-328"></script>
+    <script src="/app.js?v=20260711-full-opt-328"></script>
   </body>
 </html>

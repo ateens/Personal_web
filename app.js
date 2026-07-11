@@ -1,4 +1,16 @@
 const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
+const APP_STATE_VERSION = 4;
+const BASE_DOCUMENT_TITLE = "SYGMA Personal Web";
+const RESOURCE_SEARCH_SCOPES = new Set(["database", "fullText"]);
+const RESOURCE_OPEN_PAGE_MODES = new Set(["center", "side", "full"]);
+const RESOURCE_HISTORY_STATE_KEY = "sygmaResourcePage";
+const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
+  library: "center",
+  list: "side",
+  map: "center",
+};
+const RESOURCE_SEARCH_SAVE_DELAY_MS = 320;
+const RESOURCE_TITLE_SAVE_DELAY_MS = 360;
 const DEFAULT_CALENDAR_SOURCES = {
   tasks: true,
   projects: true,
@@ -36,7 +48,7 @@ const VIEW_CONTROL_DEFAULTS = {
   projects: { filters: ["all"], sort: "status", mode: "board", panels: { filter: false, sort: false } },
   goals: { filters: ["all"], sort: "target", mode: "cards", panels: { filter: false, sort: false } },
   boxes: { filters: ["all"], sort: "activity", mode: "columns", panels: { filter: false, sort: false } },
-  resources: { search: "", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
+  resources: { search: "", searchScope: "fullText", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
   habits: { filters: ["all"], sort: "progress", mode: "list", panels: { filter: false, sort: false } },
   journal: { filters: ["all"], sort: "date", mode: "cards", panels: { filter: false, sort: false } },
   calendar: { filters: ["all"], sort: "time", mode: "calendar", panels: { filter: false, sort: false } },
@@ -462,16 +474,44 @@ const RESOURCE_TYPE_CAPTURE_OPTIONS = [
   { value: "reflection", label: "회고", meta: "돌아보기" },
 ];
 let localStateHadStoredState = false;
+const LOCAL_RESOURCE_DATABASE_NAME = "sygma-resource-local-v1";
+const LOCAL_RESOURCE_DATABASE_VERSION = 1;
+const LOCAL_RESOURCE_SNAPSHOT_STORE = "snapshots";
+const LOCAL_RESOURCE_OPERATION_STORE = "operations";
+const LOCAL_RESOURCE_SCHEMA_VERSION = 1;
+const LOCAL_RESOURCE_WRITE_DELAY_MS = 60;
+const dirtyResourceIds = new Set();
+let localWorkspaceOperationRequired = false;
+let localResourceWriteTimer = 0;
+let localResourceDatabasePromise = null;
+let localResourcePersistence = {
+  available: "indexedDB" in globalThis,
+  ready: false,
+  workspaceId: "",
+  snapshot: null,
+  operations: [],
+  pending: false,
+  conflictRemoteState: null,
+  conflictResourceId: "",
+};
+let waitingServiceWorkerRegistration = null;
+let serviceWorkerUpdateAvailable = false;
+let serviceWorkerUpdateApplying = false;
 let remoteStateSaveTimer = 0;
 let remoteStateSavePending = false;
 let remoteStateSaveInFlight = false;
+let remoteStateSaveBlocked = false;
 let localStateChangedBeforeDatabaseReady = false;
+let resourceSearchSaveTimer = 0;
+let resourceSearchSavePending = false;
+const resourceTitleSaveTimers = new Map();
 const REMOTE_STATE_SAVE_DELAY_MS = 450;
 const REMOTE_STATE_RETRY_DELAY_MS = 3000;
 const GOOGLE_CALENDAR_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
 let state = loadState();
 const collectionIndexCache = new Map();
+const resourceSearchTextCache = new Map();
 let habitInstanceIndexCache = null;
 let relationIndexCache = null;
 let googleBackendStatus = {
@@ -489,6 +529,8 @@ let databaseBackendStatus = {
   saving: false,
   error: "",
   lastSyncedAt: "",
+  revision: Number.isSafeInteger(state.revision) ? state.revision : 0,
+  conflict: null,
 };
 let els = {};
 let navCloseTimer = 0;
@@ -498,6 +540,7 @@ let habitResizeTimer = 0;
 let projectCalendarResizeTimer = 0;
 let blockIconHoverFrame = 0;
 let pendingBlockIconHoverPoint = null;
+let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
 const todayTaskPropertyResizeTimers = new Map();
 let ui = {
@@ -524,6 +567,23 @@ let ui = {
   resourceNoteZ: 70,
   resourceDrag: null,
   resourceResize: null,
+  resourceSideResize: null,
+  resourceSearchComposing: false,
+  resourceTitleComposingIds: new Set(),
+  resourceTitleDrafts: {},
+  resourceRouteReady: false,
+  pendingResourceRoute: null,
+  resourceRouteNotFound: "",
+  resourceRouteContextUrl: "/",
+  resourceRouteReturnFocus: null,
+  resourceRouteReturnFocusId: "",
+  resourcePageMenuId: "",
+  resourceUrlEditorId: "",
+  resourceCommentsId: "",
+  resourceCommentFocusId: "",
+  resourceTrashUndoId: "",
+  resourceIconPickerId: "",
+  resourceCoverEditorId: "",
   activeBlockId: "",
   recentBlockFocus: null,
   shiftKeyDown: false,
@@ -588,6 +648,7 @@ init();
 
 function init() {
   const googleRedirect = handleGoogleRedirectResult();
+  prepareInitialResourceRoute();
   app.innerHTML = renderShell();
   els = {
     navTrack: app.querySelector("#navTrack"),
@@ -611,6 +672,8 @@ function init() {
   app.addEventListener("compositionend", handleCompositionEnd);
   app.addEventListener("focusin", handleFocusIn);
   app.addEventListener("focusout", handleFocusOut);
+  app.addEventListener("load", handleResourceMediaLoad, true);
+  app.addEventListener("error", handleResourceMediaError, true);
   app.addEventListener("keydown", handleKeydown);
   app.addEventListener("scroll", handleResourceNoteScroll, true);
   const pointerEventsSupported = "PointerEvent" in window;
@@ -636,6 +699,7 @@ function init() {
   document.addEventListener(pointerMoveEvent, handleEditorMarqueePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleResourcePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleResourceResizePointerMove, true);
+  document.addEventListener(pointerMoveEvent, handleResourceSideResizePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleTodayTaskPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleDeleteDragPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleSchedulePointerMove, true);
@@ -644,6 +708,7 @@ function init() {
   document.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
   document.addEventListener(pointerUpEvent, finishResourceDrag, true);
   document.addEventListener(pointerUpEvent, finishResourceResize, true);
+  document.addEventListener(pointerUpEvent, finishResourceSideResize, true);
   document.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
   document.addEventListener(pointerUpEvent, finishDeleteDrag, true);
   document.addEventListener(pointerUpEvent, finishScheduleDrag, true);
@@ -653,6 +718,7 @@ function init() {
     document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
     document.addEventListener("pointercancel", cancelResourceDrag, true);
     document.addEventListener("pointercancel", cancelResourceResize, true);
+    document.addEventListener("pointercancel", cancelResourceSideResize, true);
     document.addEventListener("pointercancel", cancelTodayTaskDrag, true);
     document.addEventListener("pointercancel", cancelDeleteDrag, true);
     document.addEventListener("pointercancel", cancelScheduleDrag, true);
@@ -666,14 +732,18 @@ function init() {
   window.addEventListener("resize", updateTopbarStickiness);
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("resize", handleResourceLayoutResize);
+  window.visualViewport?.addEventListener("resize", syncResourceVisualViewport);
+  window.visualViewport?.addEventListener("scroll", syncResourceVisualViewport);
   window.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   window.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
   window.addEventListener(pointerUpEvent, finishResourceResize, true);
+  window.addEventListener(pointerUpEvent, finishResourceSideResize, true);
   window.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
   window.addEventListener(pointerUpEvent, finishDeleteDrag, true);
   window.addEventListener("blur", cancelScheduleDrag);
   window.addEventListener("blur", cancelEditorMarqueeDrag);
   window.addEventListener("blur", cancelResourceResize);
+  window.addEventListener("blur", cancelResourceSideResize);
   window.addEventListener("blur", cancelTodayTaskDrag);
   window.addEventListener("blur", cancelDeleteDrag);
   window.addEventListener("blur", cancelNavPointerDrag);
@@ -682,19 +752,11 @@ function init() {
   document.addEventListener("visibilitychange", handleGoogleCalendarWakeRefresh);
   window.addEventListener("focus", handleGoogleCalendarWakeRefresh);
   window.addEventListener("pagehide", handlePageHideStateSave);
+  window.addEventListener("popstate", handleResourceRoutePopState);
+  window.addEventListener("online", handleResourceConnectionRestored);
+  window.addEventListener("offline", handleResourceConnectionLost);
 
-  if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    let serviceWorkerReloaded = false;
-    navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (serviceWorkerReloaded) return;
-      serviceWorkerReloaded = true;
-      window.location.reload();
-    });
-    navigator.serviceWorker
-      .register("./service-worker.js", { updateViaCache: "none" })
-      .then((registration) => registration.update())
-      .catch(() => {});
-  }
+  registerServiceWorkerUpdateFlow();
 
   updateNav();
   renderView({ transition: false });
@@ -703,7 +765,8 @@ function init() {
   updateTopbarStickiness();
   if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
-  initializeDatabaseState().finally(() => {
+  initializeLocalResourcePersistence().then(initializeDatabaseState).finally(() => {
+    finalizeInitialResourceRoute();
     refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
   });
 }
@@ -754,7 +817,8 @@ function renderShell() {
       <div class="sidebar-scrim" data-action="close-nav" data-nav-scrim></div>
       <main class="main">
         ${renderTopbar()}
-        <section class="view-root" id="viewRoot" aria-live="polite"></section>
+        <section class="view-root" id="viewRoot" tabindex="-1"></section>
+        <div class="visually-hidden" id="appAnnouncements" role="status" aria-live="polite" aria-atomic="true"></div>
       </main>
     </div>
     <button class="fab" type="button" data-action="open-command" aria-label="빠른 생성">+</button>
@@ -770,8 +834,8 @@ function renderNavButtons() {
     const [key, label, icon] = items[index];
     const shortcutKey = navShortcutKeyForIndex(index);
     buttons += `
-      <button class="nav-button" type="button" data-view="${key}" data-nav-key="${key}"${shortcutKey ? ` data-nav-shortcut="${shortcutKey}"` : ""}>
-        <span class="nav-icon">${icon}</span>
+      <button class="nav-button" type="button" data-view="${key}" data-nav-key="${key}" ${ui.view === key ? 'aria-current="page"' : ""}${shortcutKey ? ` data-nav-shortcut="${shortcutKey}"` : ""}>
+        <span class="nav-icon" aria-hidden="true">${icon}</span>
         <span class="nav-label">${esc(label)}</span>
         ${shortcutKey ? `<span class="nav-shortcut" aria-hidden="true">${esc(shortcutKey)}</span>` : ""}
       </button>
@@ -975,7 +1039,10 @@ function updateNav() {
   const activeIndex = Math.max(0, orderedNavItems().findIndex(([key]) => key === ui.view));
   els.navTrack?.style.setProperty("--active-index", String(activeIndex));
   app.querySelectorAll("[data-nav-key]").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.navKey === ui.view);
+    const active = button.dataset.navKey === ui.view;
+    button.classList.toggle("is-active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   });
   if (ui.navOpen) {
     window.clearTimeout(navCloseTimer);
@@ -1037,6 +1104,7 @@ function renderView({ transition = false, soft = false, animateCards = false } =
     calendar: renderCalendar,
     database: renderDatabase,
   };
+  if (ui.view === "resources" && soft && patchResourceView()) return;
   const cardRects = animateCards ? captureCardRects() : null;
   const previousChipMeta = captureViewControlChipMeta(ui.view);
   els.viewRoot.innerHTML = renderers[ui.view]();
@@ -1048,6 +1116,110 @@ function renderView({ transition = false, soft = false, animateCards = false } =
     view.classList.add("is-entering");
     window.setTimeout(() => view.classList.remove("is-entering"), 280);
   }
+}
+
+function patchResourceView() {
+  if (ui.view !== "resources" || !els.viewRoot) return false;
+  const currentView = els.viewRoot.querySelector(":scope > .view");
+  const currentControls = currentView?.querySelector("[data-view-controls='resources']");
+  const currentVault = currentView?.querySelector(".resource-vault");
+  if (!currentView || !currentControls || !currentVault) return false;
+
+  const template = document.createElement("template");
+  template.innerHTML = renderResources().trim();
+  const nextView = template.content.firstElementChild;
+  const nextControls = nextView?.querySelector("[data-view-controls='resources']");
+  const nextVault = nextView?.querySelector(".resource-vault");
+  if (!nextView || !nextControls || !nextVault) return false;
+
+  const scrollState = captureResourceViewScrollState(currentView);
+  const previousChipMeta = captureViewControlChipMeta("resources");
+  patchResourceViewControls(currentControls, nextControls);
+  patchResourceVault(currentVault, nextVault);
+  patchResourceSearchChrome({ syncValue: true });
+  syncViewControlChipStripState("resources", previousChipMeta);
+  restoreResourceViewScrollState(scrollState, currentView);
+  return true;
+}
+
+function patchResourceViewControls(currentControls, nextControls) {
+  currentControls.className = nextControls.className;
+  const currentTopline = currentControls.querySelector(":scope > .view-control-topline");
+  const nextTopline = nextControls.querySelector(":scope > .view-control-topline");
+  if (!currentTopline || !nextTopline) return;
+
+  patchResourceViewUnit(currentTopline, nextTopline, ":scope > .view-control-actions");
+  patchResourceViewUnit(currentTopline, nextTopline, ":scope > .view-mode-group");
+  patchResourceViewUnit(currentTopline, nextTopline, ":scope > .resource-open-pages-in-control");
+
+  const currentCount = currentTopline.querySelector(":scope > .view-control-count");
+  const nextCount = nextTopline.querySelector(":scope > .view-control-count");
+  if (currentCount && nextCount && currentCount.textContent !== nextCount.textContent) {
+    currentCount.textContent = nextCount.textContent;
+  }
+
+  patchResourceViewUnit(currentControls, nextControls, ":scope > .view-control-chip-strip");
+  patchResourceViewUnit(currentControls, nextControls, ":scope > .view-control-panel-stack");
+}
+
+function patchResourceViewUnit(currentRoot, nextRoot, selector) {
+  const current = currentRoot.querySelector(selector);
+  const next = nextRoot.querySelector(selector);
+  if (!current || !next || current.outerHTML === next.outerHTML) return false;
+  current.replaceWith(next);
+  decorateButtons(next);
+  return true;
+}
+
+function patchResourceVault(currentVault, nextVault) {
+  currentVault.dataset.resourceView = nextVault.dataset.resourceView || "library";
+  const currentSidebar = currentVault.querySelector(":scope > .resource-vault-sidebar");
+  const currentMain = currentVault.querySelector(":scope > .resource-vault-main");
+  const nextSidebar = nextVault.querySelector(":scope > .resource-vault-sidebar");
+  const nextMain = nextVault.querySelector(":scope > .resource-vault-main");
+  if (currentSidebar && nextSidebar && currentSidebar.outerHTML !== nextSidebar.outerHTML) {
+    currentSidebar.replaceWith(nextSidebar);
+  }
+  if (currentMain && nextMain && currentMain.outerHTML !== nextMain.outerHTML) {
+    nextMain.style.animation = "none";
+    currentMain.replaceWith(nextMain);
+    decorateButtons(nextMain);
+  }
+}
+
+function captureResourceViewScrollState(view) {
+  const scrollingElement = document.scrollingElement;
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    documentLeft: scrollingElement?.scrollLeft || 0,
+    documentTop: scrollingElement?.scrollTop || 0,
+    rootLeft: els.viewRoot?.scrollLeft || 0,
+    rootTop: els.viewRoot?.scrollTop || 0,
+    viewLeft: view?.scrollLeft || 0,
+    viewTop: view?.scrollTop || 0,
+  };
+}
+
+function restoreResourceViewScrollState(scrollState, view) {
+  if (!scrollState) return;
+  const restore = () => {
+    if (ui.view !== "resources" || !view?.isConnected) return;
+    if (els.viewRoot) {
+      els.viewRoot.scrollLeft = scrollState.rootLeft;
+      els.viewRoot.scrollTop = scrollState.rootTop;
+    }
+    view.scrollLeft = scrollState.viewLeft;
+    view.scrollTop = scrollState.viewTop;
+    const scrollingElement = document.scrollingElement;
+    if (scrollingElement) {
+      scrollingElement.scrollLeft = scrollState.documentLeft;
+      scrollingElement.scrollTop = scrollState.documentTop;
+    }
+    window.scrollTo(scrollState.windowX, scrollState.windowY);
+  };
+  restore();
+  window.requestAnimationFrame(restore);
 }
 
 function captureViewControlChipMeta(view) {
@@ -1417,7 +1589,7 @@ function renderResources() {
       ${renderViewHeader("Resources", "자료와 노트", `${resourceBuckets.active.length}개 활성 / ${resourceBuckets.archived.length}개 보관`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      ${renderViewControls("resources", { count: resources.length, total: state.resources.length, placeholder: "자료, 본문, 연결 검색" })}
+      ${renderViewControls("resources", { count: resources.length, total: state.resources.length, placeholder: "제목, 본문, 속성, 연결 검색" })}
       ${renderResourceVault(resources, resourceBuckets, control)}
     </section>
   `;
@@ -1637,13 +1809,18 @@ function renderDatabase() {
         ${renderDatabaseModelGrid(visibleModels)}
       </div>
       <div class="grid cols-2" style="margin-top:46px">
-        <div class="panel">
+        <div class="panel" data-database-sync-panel>
           ${panelHeader("PostgreSQL 저장소", databaseStatusLabel())}
           <div class="stack">
             ${renderMetric("Tasks", state.tasks.length, "할 일")}
             ${renderMetric("Resources", state.resources.length, "본문 blocks")}
             ${renderMetric("Blocks", totalBlocks(), "자료/회고 본문")}
-            <div class="resource-preview">${esc(databaseStatusDescription())}</div>
+            <div class="resource-preview" role="status" data-database-sync-status>${esc(databaseStatusDescription())}</div>
+            ${
+              databaseBackendStatus.conflict
+                ? '<button class="button secondary" type="button" data-action="reload-remote-state">로컬 변경을 버리고 원격 상태 다시 불러오기</button>'
+                : ""
+            }
           </div>
         </div>
         <div class="panel">
@@ -1696,6 +1873,7 @@ function renderDatabaseModelRelations(relations) {
 
 function databaseStatusLabel() {
   if (databaseBackendStatus.loading) return "확인 중";
+  if (databaseBackendStatus.conflict) return "저장 충돌";
   if (databaseBackendStatus.saving) return "저장 중";
   if (databaseBackendStatus.connected) return databaseBackendStatus.lastSyncedAt ? `마지막 ${formatDateTime(databaseBackendStatus.lastSyncedAt)}` : "연결됨";
   if (!databaseBackendStatus.configured) return "DATABASE_URL 필요";
@@ -1704,8 +1882,13 @@ function databaseStatusLabel() {
 
 function databaseStatusDescription() {
   if (databaseBackendStatus.loading) return "PostgreSQL 연결 상태를 확인하고 있습니다.";
+  if (databaseBackendStatus.conflict) {
+    const localRevision = normalizedWorkspaceRevision(databaseBackendStatus.conflict.localRevision, state.revision);
+    const remoteRevision = normalizedWorkspaceRevision(databaseBackendStatus.conflict.remoteRevision, localRevision);
+    return `원격 상태가 먼저 변경되어 로컬 저장을 중단했습니다 (로컬 r${localRevision}, 원격 r${remoteRevision}). 자동 재시도하지 않습니다.`;
+  }
   if (databaseBackendStatus.connected) return "앱 상태 전체가 PostgreSQL app_state JSONB 레코드에 저장됩니다. 기존 localStorage 데이터는 마이그레이션 후 제거됩니다.";
-  return databaseBackendStatus.error || "PostgreSQL 연결이 필요합니다. DB 연결 전 변경 사항은 영구 저장되지 않습니다.";
+  return databaseBackendStatus.error || "PostgreSQL 연결이 필요합니다. 변경 사항은 연결 전까지 IndexedDB 대기열에 보관됩니다.";
 }
 
 function renderViewHeader(eyebrow, title, copy, actions = "") {
@@ -1714,6 +1897,7 @@ function renderViewHeader(eyebrow, title, copy, actions = "") {
       <div class="view-heading">
         <div class="eyebrow">${esc(eyebrow)}</div>
         <h1 class="view-title">${esc(title)}</h1>
+        ${copy ? `<p class="view-copy">${esc(copy)}</p>` : ""}
       </div>
       <div class="toolbar">${actions}</div>
     </header>
@@ -1737,17 +1921,20 @@ function renderViewControls(view, meta = {}) {
   const filterChanged = !filterValuesEqual(filters, defaultFilters);
   const sortChanged = control.sort !== defaultControl.sort;
   const resourceChanged = showSearch && Boolean((control.search || "").trim());
-  const canReset = filterChanged || sortChanged || resourceChanged;
+  const resourceScopeChanged = showSearch && normalizeResourceSearchScope(control.searchScope) !== normalizeResourceSearchScope(defaultControl.searchScope);
+  const canReset = filterChanged || sortChanged || resourceChanged || resourceScopeChanged;
   return `
     <div class="view-controls ${showSearch ? "has-search" : "no-search"} ${filterOpen || sortOpen ? "is-panel-open" : ""}" data-view-controls="${view}">
       <div class="view-control-topline">
         ${showSearch ? renderResourceSearchControl(view, control, meta) : ""}
         <div class="view-control-actions" aria-label="필터와 정렬">
+          ${showSearch ? `<span class="view-control-filter-logic" data-resource-filter-logic>활성/보관 범위 · 추가 조건 AND</span>` : ""}
           ${renderViewControlTrigger(view, "filter", "필터", selectedFilterLabel(filterOptions, filters), filterOpen, filterChanged)}
           ${renderViewControlTrigger(view, "sort", "정렬", selectedControlLabel(sortOptions, control.sort), sortOpen, sortChanged)}
           ${canReset ? `<button class="view-control-reset" type="button" data-view-control-reset="${view}">초기화</button>` : ""}
         </div>
         ${modeOptions.length ? renderViewModeButtons(view, modeOptions, control.mode) : ""}
+        ${showSearch ? renderResourceOpenPagesInControl(control.mode) : ""}
         <span class="view-control-count">${esc(count)} / ${esc(total)}</span>
       </div>
       ${renderActiveViewControlChips(view, control, defaultControl, filterOptions, sortOptions)}
@@ -1760,12 +1947,42 @@ function renderViewControls(view, meta = {}) {
 }
 
 function renderResourceSearchControl(view, control, meta = {}) {
+  const scope = normalizeResourceSearchScope(control.searchScope);
+  const query = control.search || "";
   return `
-    <label class="view-control-search">
-      <span>검색</span>
-      <input class="input" data-view-control-search="${view}" value="${esc(control.search || "")}" placeholder="${esc(meta.placeholder || "검색")}">
-    </label>
+    <div class="resource-search-control" data-resource-search-control>
+      <label class="view-control-search">
+        <span>검색</span>
+        <input class="input" data-view-control-search="${view}" value="${esc(query)}" placeholder="${esc(resourceSearchPlaceholder(scope, meta.placeholder))}" aria-describedby="resource-search-scope-description" autocomplete="off">
+      </label>
+      <div class="view-mode-group" aria-label="Resource 검색 범위">
+        ${renderResourceSearchScopeButton("database", "Database", scope)}
+        ${renderResourceSearchScopeButton("fullText", "Full text", scope)}
+      </div>
+      <button class="view-control-reset" type="button" data-resource-search-clear ${query ? "" : "hidden"}>검색 지우기</button>
+      <small id="resource-search-scope-description" data-resource-search-scope-description>${esc(resourceSearchScopeDescription(scope))}</small>
+    </div>
   `;
+}
+
+function renderResourceSearchScopeButton(value, label, selectedScope) {
+  const active = value === selectedScope;
+  return `<button class="view-mode-button ${active ? "is-active" : ""}" type="button" data-resource-search-scope="${value}" aria-pressed="${active ? "true" : "false"}">${esc(label)}</button>`;
+}
+
+function normalizeResourceSearchScope(value = "") {
+  return RESOURCE_SEARCH_SCOPES.has(value) ? value : "fullText";
+}
+
+function resourceSearchPlaceholder(scope, fallback = "") {
+  if (normalizeResourceSearchScope(scope) === "database") return "제목, 속성, 연결 검색";
+  return fallback || "제목, 본문, 속성, 연결 검색";
+}
+
+function resourceSearchScopeDescription(scope) {
+  return normalizeResourceSearchScope(scope) === "database"
+    ? "Database search: 제목, 속성, 연결만 검색"
+    : "Full-text search: 제목, 속성, 연결과 본문 검색";
 }
 
 function selectedControlLabel(options, selectedValue) {
@@ -1829,7 +2046,11 @@ function renderViewControlChip(view, field, value, label, valueLabel, index = 0)
 
 function renderViewControlPanel(view, field, options, selectedValue, open) {
   const title = field === "filter" ? "필터 선택" : "정렬 기준";
-  const copy = field === "filter" ? "여러 기준을 동시에 선택할 수 있습니다." : "목록의 표시 순서를 선택합니다.";
+  const copy = field === "filter"
+    ? view === "resources"
+      ? "활성/보관 범위를 선택하고 추가 조건은 AND로 결합합니다."
+      : "여러 기준을 동시에 선택할 수 있습니다."
+    : "목록의 표시 순서를 선택합니다.";
   let html = "";
   for (let index = 0; index < options.length; index += 1) {
     const [value, label] = options[index];
@@ -1866,6 +2087,30 @@ function renderViewModeButtons(view, options, selectedValue) {
   return `<div class="view-mode-group" aria-label="보기 방식">${html}</div>`;
 }
 
+function renderResourceOpenPagesInControl(resourceView) {
+  const view = Object.prototype.hasOwnProperty.call(DEFAULT_RESOURCE_OPEN_PAGES_IN, resourceView) ? resourceView : "library";
+  const selected = normalizeResourcePageMode(state.settings?.openPagesIn?.[view] || DEFAULT_RESOURCE_OPEN_PAGES_IN[view]);
+  return `
+    <label class="resource-open-pages-in-control">
+      <span>Open pages in</span>
+      <select class="input" data-resource-open-pages-in="${esc(view)}" aria-label="${esc(`${selectedControlLabel(VIEW_MODE_OPTIONS.resources, view)} 페이지 열기 방식`)}">
+        <option value="center" ${selected === "center" ? "selected" : ""}>Center peek</option>
+        <option value="side" ${selected === "side" ? "selected" : ""}>Side peek</option>
+        <option value="full" ${selected === "full" ? "selected" : ""}>Full page</option>
+      </select>
+    </label>
+  `;
+}
+
+function setResourceOpenPagesIn(resourceView, value) {
+  if (!Object.prototype.hasOwnProperty.call(DEFAULT_RESOURCE_OPEN_PAGES_IN, resourceView) || !RESOURCE_OPEN_PAGE_MODES.has(value)) return false;
+  state.settings.openPagesIn = normalizeResourceOpenPagesIn(state.settings.openPagesIn);
+  if (state.settings.openPagesIn[resourceView] === value) return false;
+  state.settings.openPagesIn[resourceView] = value;
+  saveState();
+  return true;
+}
+
 function viewControl(view = ui.view) {
   if (!state.settings.viewControls) state.settings.viewControls = defaultViewControls();
   const current = state.settings.viewControls[view];
@@ -1888,6 +2133,419 @@ function updateViewControl(view, field, value, options = {}) {
   control[field] = value;
   saveState();
   renderView({ soft: true });
+}
+
+function updateResourceSearchFromInput(input, event = null, options = {}) {
+  if (!input) return false;
+  const control = viewControl("resources");
+  control.search = input.value || "";
+  const composing = !options.force && (ui.resourceSearchComposing || event?.isComposing === true);
+  if (composing) return true;
+  patchResourceSearchResults();
+  scheduleResourceSearchSave();
+  return true;
+}
+
+function setResourceSearchScope(value) {
+  const scope = normalizeResourceSearchScope(value);
+  const control = viewControl("resources");
+  if (normalizeResourceSearchScope(control.searchScope) === scope) return;
+  control.searchScope = scope;
+  patchResourceSearchResults();
+  scheduleResourceSearchSave();
+}
+
+function clearResourceSearch(options = {}) {
+  const control = viewControl("resources");
+  const input = els.viewRoot?.querySelector("[data-view-control-search='resources']");
+  if (!control.search && !input?.value) {
+    if (options.focus) input?.focus();
+    return false;
+  }
+  control.search = "";
+  if (input) input.value = "";
+  ui.resourceSearchComposing = false;
+  patchResourceSearchResults();
+  scheduleResourceSearchSave();
+  if (options.focus && input) {
+    input.focus();
+    input.setSelectionRange?.(0, 0);
+  }
+  return true;
+}
+
+function handleResourceSearchKeydown(event) {
+  const input = event.target.closest?.("[data-view-control-search='resources']");
+  if (!input || event.key !== "Escape" || event.isComposing || ui.resourceSearchComposing) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (input.value) {
+    clearResourceSearch({ focus: true });
+    commitResourceSearchSave();
+  } else {
+    input.blur();
+  }
+  return true;
+}
+
+function patchResourceSearchResults() {
+  if (ui.view !== "resources" || !els.viewRoot) return false;
+  const currentVault = els.viewRoot.querySelector(".resource-vault");
+  if (!currentVault) return false;
+  const currentView = currentVault.closest(".view");
+  const scrollState = captureResourceViewScrollState(currentView);
+  const control = viewControl("resources");
+  const resources = controlledItems("resources", state.resources, "resources");
+  const buckets = resourceDisplayBuckets(resources);
+  const template = document.createElement("template");
+  template.innerHTML = renderResourceVault(resources, buckets, control).trim();
+  const nextVault = template.content.firstElementChild;
+  if (!nextVault) return false;
+  patchResourceVault(currentVault, nextVault);
+  const count = els.viewRoot.querySelector("[data-view-controls='resources'] .view-control-count");
+  if (count) count.textContent = `${resources.length} / ${state.resources.length}`;
+  patchResourceSearchChrome();
+  restoreResourceViewScrollState(scrollState, currentView);
+  return true;
+}
+
+function patchResourceSearchChrome(options = {}) {
+  const root = els.viewRoot?.querySelector("[data-resource-search-control]");
+  if (!root) return;
+  const control = viewControl("resources");
+  const scope = normalizeResourceSearchScope(control.searchScope);
+  const input = root.querySelector("[data-view-control-search='resources']");
+  if (input) {
+    input.placeholder = resourceSearchPlaceholder(scope);
+    if (options.syncValue && !ui.resourceSearchComposing && input.value !== (control.search || "")) {
+      input.value = control.search || "";
+    }
+  }
+  root.querySelectorAll("[data-resource-search-scope]").forEach((button) => {
+    const active = button.dataset.resourceSearchScope === scope;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const clear = root.querySelector("[data-resource-search-clear]");
+  if (clear) clear.hidden = !(control.search || "");
+  const description = root.querySelector("[data-resource-search-scope-description]");
+  if (description) description.textContent = resourceSearchScopeDescription(scope);
+}
+
+function scheduleResourceSearchSave() {
+  resourceSearchSavePending = true;
+  window.clearTimeout(resourceSearchSaveTimer);
+  resourceSearchSaveTimer = window.setTimeout(commitResourceSearchSave, RESOURCE_SEARCH_SAVE_DELAY_MS);
+}
+
+function commitResourceSearchSave(options = {}) {
+  window.clearTimeout(resourceSearchSaveTimer);
+  resourceSearchSaveTimer = 0;
+  if (!resourceSearchSavePending) return false;
+  resourceSearchSavePending = false;
+  if (options.save !== false) saveState();
+  return true;
+}
+
+function ensureResourceTitleDraft(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return null;
+  if (!ui.resourceTitleDrafts[resourceId]) {
+    ui.resourceTitleDrafts[resourceId] = {
+      initial: resource.title || "",
+      value: resource.title || "",
+    };
+  }
+  return ui.resourceTitleDrafts[resourceId];
+}
+
+function updateResourceTitleFromInput(input, event = null, options = {}) {
+  const resourceId = input?.dataset?.resourceTitle || "";
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) {
+    if (input && resource && input.value !== (resource.title || "")) input.value = resource.title || "";
+    delete ui.resourceTitleDrafts[resourceId];
+    return false;
+  }
+  const draft = ensureResourceTitleDraft(resourceId);
+  if (!resource || !draft) return false;
+  const nextValue = String(input.value || "").replace(/[\r\n]+/g, " ");
+  if (input.value !== nextValue) input.value = nextValue;
+  draft.value = nextValue;
+  resource.title = draft.value;
+  patchResourceTitleDisplays(resource, input);
+  patchResourcePageSaveStatus();
+  const composing = !options.force && (event?.isComposing === true || ui.resourceTitleComposingIds.has(resourceId));
+  if (!composing) scheduleResourceTitleSave(resourceId);
+  return true;
+}
+
+function patchResourceTitleDisplays(resource, sourceInput = null) {
+  if (!resource?.id) return;
+  const resourceId = cssEscape(resource.id);
+  const title = resource.title || "Untitled";
+  document.querySelectorAll(`[data-resource-title-display="${resourceId}"]`).forEach((element) => {
+    if (element.textContent !== title) element.textContent = title;
+  });
+  document.querySelectorAll(`[data-open-resource="${resourceId}"][aria-label]`).forEach((element) => {
+    element.setAttribute("aria-label", `${title} 열기`);
+  });
+  document.querySelectorAll(`[data-resource-title="${resourceId}"]`).forEach((input) => {
+    if (input === sourceInput || document.activeElement === input || ui.resourceTitleComposingIds.has(resource.id)) return;
+    if (input.value !== resource.title) input.value = resource.title || "";
+  });
+  document.querySelectorAll(`[data-resource-accessible-title="${resourceId}"]`).forEach((heading) => {
+    heading.textContent = title;
+  });
+  document.querySelectorAll(`[data-resource-note="${resourceId}"]`).forEach((shell) => {
+    shell.setAttribute("aria-label", `${title} Resource page`);
+  });
+  if (ui.resourceNotes[0]?.id === resource.id) document.title = `${title} — ${BASE_DOCUMENT_TITLE}`;
+}
+
+function scheduleResourceTitleSave(resourceId) {
+  window.clearTimeout(resourceTitleSaveTimers.get(resourceId));
+  resourceTitleSaveTimers.set(
+    resourceId,
+    window.setTimeout(() => commitResourceTitleDraft(resourceId), RESOURCE_TITLE_SAVE_DELAY_MS),
+  );
+}
+
+function commitResourceTitleDraft(resourceId, options = {}) {
+  window.clearTimeout(resourceTitleSaveTimers.get(resourceId));
+  resourceTitleSaveTimers.delete(resourceId);
+  const draft = ui.resourceTitleDrafts[resourceId];
+  const resource = itemById("resources", resourceId);
+  if (!draft || !resourceMutationAllowed(resource)) {
+    delete ui.resourceTitleDrafts[resourceId];
+    patchResourcePageSaveStatus();
+    return false;
+  }
+  resource.title = draft.value;
+  delete ui.resourceTitleDrafts[resourceId];
+  if (draft.value === draft.initial) {
+    patchResourcePageSaveStatus();
+    return false;
+  }
+  touchResource(resource);
+  if (options.save !== false) saveState();
+  patchResourcePageSaveStatus();
+  return true;
+}
+
+function flushPendingResourceControlSaves() {
+  const searchChanged = commitResourceSearchSave({ save: false });
+  let titleChanged = false;
+  for (const resourceId of Object.keys(ui.resourceTitleDrafts)) {
+    titleChanged = commitResourceTitleDraft(resourceId, { save: false }) || titleChanged;
+  }
+  if (searchChanged || titleChanged) saveState();
+  return searchChanged || titleChanged;
+}
+
+function clearResourceTransientState() {
+  window.clearTimeout(resourceSearchSaveTimer);
+  resourceSearchSaveTimer = 0;
+  resourceSearchSavePending = false;
+  for (const timer of resourceTitleSaveTimers.values()) window.clearTimeout(timer);
+  resourceTitleSaveTimers.clear();
+  ui.resourceSearchComposing = false;
+  ui.resourceTitleComposingIds.clear();
+  ui.resourceTitleDrafts = {};
+}
+
+function resourceDeepLink(resourceId) {
+  return `/resources/${encodeURIComponent(resourceId || "")}`;
+}
+
+function resourceRouteFromLocation(pathname = window.location.pathname, historyState = window.history.state) {
+  const match = String(pathname || "").match(/^\/resources\/([^/]+)\/?$/);
+  if (!match) return null;
+  let resourceId = "";
+  try {
+    resourceId = decodeURIComponent(match[1]);
+  } catch {
+    resourceId = match[1];
+  }
+  if (!resourceId) return null;
+  const routeState = resourceHistoryState(historyState);
+  const mode = routeState?.id === resourceId ? normalizeResourcePageMode(routeState.mode) : "center";
+  return {
+    id: resourceId,
+    mode,
+    contextUrl: routeState?.contextUrl || "/",
+    fromHistoryState: Boolean(routeState?.id === resourceId),
+  };
+}
+
+function resourceHistoryState(historyState = window.history.state) {
+  if (!isPlainObject(historyState)) return null;
+  const routeState = historyState[RESOURCE_HISTORY_STATE_KEY];
+  if (!isPlainObject(routeState) || typeof routeState.id !== "string" || !routeState.id) return null;
+  return {
+    id: routeState.id,
+    mode: normalizeResourcePageMode(routeState.mode),
+    contextUrl: safeResourceContextUrl(routeState.contextUrl),
+  };
+}
+
+function safeResourceContextUrl(value) {
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || /^\/resources\//.test(value)) return "/";
+  return value;
+}
+
+function normalizeResourcePageMode(value) {
+  return RESOURCE_OPEN_PAGE_MODES.has(value) ? value : "center";
+}
+
+function currentRelativeUrl() {
+  return `${window.location.pathname}${window.location.search}${window.location.hash}` || "/";
+}
+
+function prepareInitialResourceRoute() {
+  const route = resourceRouteFromLocation();
+  if (!route) return;
+  ui.view = "resources";
+  ui.pendingResourceRoute = route;
+  ui.resourceRouteContextUrl = route.contextUrl;
+}
+
+function finalizeInitialResourceRoute() {
+  ui.resourceRouteReady = true;
+  const route = ui.pendingResourceRoute || resourceRouteFromLocation();
+  ui.pendingResourceRoute = null;
+  if (route) applyResourceRoute(route, { focus: true });
+}
+
+function handleResourceRoutePopState(event) {
+  const route = resourceRouteFromLocation(window.location.pathname, event.state);
+  if (!ui.resourceRouteReady) {
+    ui.pendingResourceRoute = route;
+    if (route) ui.view = "resources";
+    return;
+  }
+  if (route) {
+    applyResourceRoute(route, { focus: true });
+    return;
+  }
+  if (resourceAdvancedWindowModeEnabled()) return;
+  closeParityResourcePage({ render: true, restoreFocus: true });
+}
+
+function applyResourceRoute(route, options = {}) {
+  if (!route?.id) return false;
+  if (!ui.resourceRouteReady) {
+    ui.pendingResourceRoute = route;
+    return false;
+  }
+  const previousView = ui.view;
+  ui.view = "resources";
+  ui.resourceRouteContextUrl = safeResourceContextUrl(route.contextUrl);
+  ui.resourceRouteNotFound = "";
+  if (previousView !== "resources") {
+    updateNav();
+    renderView({ transition: false, soft: true });
+  }
+  const resource = itemById("resources", route.id);
+  if (!resource) {
+    if (!resourceAdvancedWindowModeEnabled()) ui.resourceNotes = [];
+    ui.resourceRouteNotFound = route.id;
+    renderDetail();
+    if (options.focus !== false) requestAnimationFrame(focusResourcePageShell);
+    return false;
+  }
+  if (resourceAdvancedWindowModeEnabled()) {
+    openAdvancedResourceNote(route.id, { mode: "center" });
+    return true;
+  }
+  const previous = resourceNoteById(route.id);
+  ui.resourceNotes = [createParityResourceNote(route.id, route.mode, previous)];
+  renderDetail();
+  if (options.focus !== false) requestAnimationFrame(focusResourcePageShell);
+  return true;
+}
+
+function writeResourceRouteHistory(resourceId, mode, options = {}) {
+  const existingRoute = resourceRouteFromLocation();
+  const existingState = resourceHistoryState();
+  const contextUrl = safeResourceContextUrl(
+    options.contextUrl || existingState?.contextUrl || (existingRoute ? ui.resourceRouteContextUrl : currentRelativeUrl()),
+  );
+  const nextState = isPlainObject(window.history.state) ? { ...window.history.state } : {};
+  nextState[RESOURCE_HISTORY_STATE_KEY] = {
+    id: resourceId,
+    mode: normalizeResourcePageMode(mode),
+    contextUrl,
+  };
+  const method = options.replace ? "replaceState" : "pushState";
+  window.history[method](nextState, "", resourceDeepLink(resourceId));
+  ui.resourceRouteContextUrl = contextUrl;
+}
+
+function clearResourceHistoryState(historyState = window.history.state) {
+  if (!isPlainObject(historyState)) return {};
+  const nextState = { ...historyState };
+  delete nextState[RESOURCE_HISTORY_STATE_KEY];
+  return nextState;
+}
+
+function closeParityResourcePage(options = {}) {
+  ui.resourceNotes = [];
+  ui.resourceRouteNotFound = "";
+  ui.resourceDrag = null;
+  ui.resourceResize = null;
+  if (options.render !== false) renderDetail();
+  if (options.restoreFocus) requestAnimationFrame(restoreResourceRouteFocus);
+}
+
+function rememberResourceRouteFocus(opener, resourceId) {
+  ui.resourceRouteReturnFocus = opener instanceof HTMLElement ? opener : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  ui.resourceRouteReturnFocusId = resourceId || "";
+}
+
+function restoreResourceRouteFocus() {
+  const remembered = ui.resourceRouteReturnFocus;
+  const fallback = ui.resourceRouteReturnFocusId
+    ? document.querySelector(`[data-open-resource="${cssEscape(ui.resourceRouteReturnFocusId)}"]`)
+    : null;
+  const target = remembered?.isConnected ? remembered : fallback;
+  target?.focus?.({ preventScroll: true });
+}
+
+function focusResourcePageShell() {
+  const shell = els.detailRoot?.querySelector(".resource-page-shell.is-parity-page");
+  if (!shell) return;
+  const preferred = shell.querySelector("[data-resource-close], [data-resource-title], button, input, select, textarea, [tabindex]:not([tabindex='-1'])");
+  preferred?.focus?.({ preventScroll: true });
+}
+
+function resourcePageFocusableElements(shell) {
+  if (!shell) return [];
+  return Array.from(shell.querySelectorAll("button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable='true'], [tabindex]:not([tabindex='-1'])"))
+    .filter((element) => !element.hidden && !element.closest("[hidden], [inert]") && element.getClientRects().length > 0);
+}
+
+function handleResourcePageFocusTrap(event) {
+  if (event.key !== "Tab" || event.defaultPrevented || resourceAdvancedWindowModeEnabled()) return false;
+  const shell = els.detailRoot?.querySelector('[data-resource-shell="center"]');
+  if (!shell) return false;
+  const focusable = resourcePageFocusableElements(shell);
+  if (!focusable.length) {
+    event.preventDefault();
+    shell.setAttribute("tabindex", "-1");
+    shell.focus({ preventScroll: true });
+    return true;
+  }
+  const active = document.activeElement;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!shell.contains(active) || (!event.shiftKey && active === last) || (event.shiftKey && active === first)) {
+    event.preventDefault();
+    event.stopPropagation();
+    (event.shiftKey ? last : first).focus({ preventScroll: true });
+    return true;
+  }
+  return false;
 }
 
 function toggleViewControlPanel(view, panel) {
@@ -1939,6 +2597,7 @@ function resetViewControlOptions(view) {
   control.panels = { ...(defaults.panels || { filter: false, sort: false }) };
   if (view === "resources") {
     control.search = "";
+    control.searchScope = defaults.searchScope;
   }
   saveState();
   renderView({ soft: true });
@@ -1956,6 +2615,12 @@ function toggleViewFilterOption(view, value) {
 
 function nextFilterValues(view, current, value) {
   if (value === "all") return ["all"];
+  if (view === "resources" && (value === "active" || value === "archived")) {
+    if (current.includes(value)) return orderedFilterValues(view, current);
+    const withoutScope = current.filter((entry) => entry !== "all" && entry !== "active" && entry !== "archived");
+    withoutScope.unshift(value);
+    return orderedFilterValues(view, withoutScope);
+  }
   const selected = [];
   let removed = false;
   for (const entry of current) {
@@ -1968,6 +2633,7 @@ function nextFilterValues(view, current, value) {
   }
   if (!removed) selected.push(value);
   if (!selected.length) return ["all"];
+  if (view === "resources" && !selected.some((entry) => entry === "active" || entry === "archived")) selected.unshift("active");
   return orderedFilterValues(view, selected);
 }
 
@@ -2117,7 +2783,7 @@ function renderResourceLibrary(buckets) {
     <div class="grid cols-4 resource-library-grid">
       ${renderResourceColumn("고정", buckets.pinned)}
       ${renderResourceColumn("나중에 보기", buckets.readLater)}
-      ${renderResourceColumn("전체", buckets.active)}
+      ${renderResourceColumn("기타", buckets.normal)}
       ${renderResourceColumn("아카이브", buckets.archived)}
     </div>
   `;
@@ -2127,11 +2793,12 @@ function renderResourceList(resources) {
   if (!resources.length) return empty("자료가 없습니다.");
   let html = "";
   for (const resource of resources) {
+    const title = resource.title || "제목 없음";
     html += `
       <button class="resource-list-row" type="button" data-open-resource="${resource.id}">
         <span class="resource-list-mark ${resource.importance === "important" ? "is-important" : ""}"></span>
-        <strong>${esc(resource.title)}</strong>
-        <small>${esc(resource.type || "resource")}</small>
+        <strong data-resource-title-display="${resource.id}">${esc(title)}</strong>
+        <small>${esc(resourceTypeLabel(resource.type))}</small>
         <em>${esc(nameOf("projects", resource.projectId) || nameOf("goals", resource.goalId) || nameOf("boxes", resource.boxId) || "연결 없음")}</em>
       </button>
     `;
@@ -2178,10 +2845,11 @@ function renderResourceMapNodes(resources) {
   if (!resources.length) return `<span class="project-muted">비어 있음</span>`;
   let html = "";
   for (const resource of resources) {
+    const title = resource.title || "제목 없음";
     html += `
       <button class="resource-map-node" type="button" data-open-resource="${resource.id}">
-        <strong>${esc(resource.title)}</strong>
-        <small>${esc(resource.type || "resource")}</small>
+        <strong data-resource-title-display="${resource.id}">${esc(title)}</strong>
+        <small>${esc(resourceTypeLabel(resource.type))}</small>
       </button>
     `;
   }
@@ -2254,9 +2922,11 @@ function renderBoxCards(boxes, statsByBoxId = null, emptyText = "박스가 없�
 function controlledItems(type, items, view, context = {}) {
   const control = viewControl(view);
   const query = type === "resources" ? (control.search || "").trim().toLowerCase() : "";
+  const searchScope = type === "resources" ? normalizeResourceSearchScope(control.searchScope) : "";
   const result = [];
   for (const item of items) {
-    if (!matchesControlledSearch(type, item, query)) continue;
+    if (type === "resources" && item.trashedAt) continue;
+    if (!matchesControlledSearch(type, item, query, searchScope)) continue;
     if (!matchesControlledFilter(type, item, control, context)) continue;
     result.push(item);
   }
@@ -2264,14 +2934,32 @@ function controlledItems(type, items, view, context = {}) {
   return result;
 }
 
-function matchesControlledSearch(type, item, query) {
+function matchesControlledSearch(type, item, query, searchScope = "fullText") {
   if (!query || type !== "resources") return true;
-  return controlledSearchText(type, item).toLowerCase().includes(query);
+  return controlledSearchText(type, item, searchScope).toLowerCase().includes(query);
 }
 
-function controlledSearchText(type, item) {
+function controlledSearchText(type, item, searchScope = "fullText") {
   if (!item || type !== "resources") return "";
-  return `${item.title || ""} ${item.type || ""} ${item.importance || ""} ${nameOf("projects", item.projectId)} ${nameOf("goals", item.goalId)} ${nameOf("boxes", item.boxId)} ${blockText(item)}`;
+  const databaseParts = [
+    item.title || "",
+    item.type || "",
+    item.importance || "",
+    item.url || "",
+    item.pinned ? "pinned 고정" : "",
+    item.readLater ? "read later 나중에 보기" : "",
+    nameOf("projects", item.projectId),
+    nameOf("goals", item.goalId),
+    nameOf("boxes", item.boxId),
+  ];
+  const cacheKey = `${item.revision || 0}\0${item.updatedAt || ""}\0${databaseParts.join("\0")}`;
+  let cached = resourceSearchTextCache.get(item.id);
+  if (!cached || cached.key !== cacheKey) {
+    const database = databaseParts.join(" ");
+    cached = { key: cacheKey, database, fullText: `${database} ${blockText(item)}` };
+    resourceSearchTextCache.set(item.id, cached);
+  }
+  return normalizeResourceSearchScope(searchScope) === "fullText" ? cached.fullText : cached.database;
 }
 
 function matchesControlledFilter(type, item, control, context = {}) {
@@ -2319,10 +3007,10 @@ function projectFilterKey(project) {
 function matchesResourceFilter(resource, control) {
   const filters = selectedViewFilterValues(control);
   if (filters.includes("all")) return true;
-  for (const filter of filters) {
-    if (matchesResourceFilterValue(resource, filter)) return true;
-  }
-  return false;
+  const scopeFilters = filters.filter((filter) => filter === "active" || filter === "archived");
+  const conditionFilters = filters.filter((filter) => filter !== "active" && filter !== "archived");
+  const scopeMatches = !scopeFilters.length || scopeFilters.some((filter) => matchesResourceFilterValue(resource, filter));
+  return scopeMatches && conditionFilters.every((filter) => matchesResourceFilterValue(resource, filter));
 }
 
 function matchesResourceFilterValue(resource, filter) {
@@ -2397,10 +3085,11 @@ function sortBoxes(boxes, sort, statsByBoxId = boxStatsIndex()) {
 }
 
 function sortResources(resources, sort) {
-  if (sort === "importance") resources.sort((a, b) => resourceImportanceRank(b) - resourceImportanceRank(a) || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
-  else if (sort === "type") resources.sort((a, b) => (a.type || "").localeCompare(b.type || "") || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
-  else if (sort === "project") resources.sort((a, b) => nameOf("projects", a.projectId).localeCompare(nameOf("projects", b.projectId)) || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
-  else resources.sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "") || itemTitle("resources", a).localeCompare(itemTitle("resources", b)));
+  const stableTitleOrder = (a, b) => itemTitle("resources", a).localeCompare(itemTitle("resources", b)) || String(a.id || "").localeCompare(String(b.id || ""));
+  if (sort === "importance") resources.sort((a, b) => resourceImportanceRank(b) - resourceImportanceRank(a) || stableTitleOrder(a, b));
+  else if (sort === "type") resources.sort((a, b) => (a.type || "").localeCompare(b.type || "") || stableTitleOrder(a, b));
+  else if (sort === "project") resources.sort((a, b) => nameOf("projects", a.projectId).localeCompare(nameOf("projects", b.projectId)) || stableTitleOrder(a, b));
+  else resources.sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "") || stableTitleOrder(a, b));
 }
 
 function resourceImportanceRank(resource) {
@@ -2408,6 +3097,10 @@ function resourceImportanceRank(resource) {
   if (resource.pinned) return 2;
   if (resource.readLater) return 1;
   return 0;
+}
+
+function resourceTypeLabel(value) {
+  return RESOURCE_TYPE_CAPTURE_OPTIONS.find((option) => option.value === value)?.label || "자료";
 }
 
 function sortHabits(habits, sort, today = dateKey(new Date())) {
@@ -2678,12 +3371,12 @@ function renderTaskInlineDetail(task) {
       <div class="task-inline-resource-panel">
         <div class="task-inline-section-head">
           <strong>관련 자료</strong>
-          <span>${resource ? esc(resource.type || "resource") : "연결 없음"}</span>
+          <span>${resource ? esc(resourceTypeLabel(resource.type)) : "연결 없음"}</span>
         </div>
         ${
           resource
             ? `<button class="task-resource-link" type="button" data-open-resource="${resource.id}">
-                <strong>${esc(resource.title)}</strong>
+                <strong data-resource-title-display="${resource.id}">${esc(resource.title || "제목 없음")}</strong>
                 <small>${esc(blockText(resource).slice(0, 80)) || "자료 열기"}</small>
               </button>`
             : `<span class="project-muted">연결된 자료 없음</span>`
@@ -2943,8 +3636,8 @@ function renderInlineEditPanel(type, item, title) {
 function renderProjectResource(resource) {
   return `
     <button class="project-resource-chip" type="button" data-open-resource="${resource.id}">
-      <strong>${esc(resource.title)}</strong>
-      <small>${esc(resource.type || "resource")}</small>
+      <strong data-resource-title-display="${resource.id}">${esc(resource.title || "제목 없음")}</strong>
+      <small>${esc(resourceTypeLabel(resource.type))}</small>
     </button>
   `;
 }
@@ -3050,18 +3743,21 @@ function renderEntityStat(label, value, meta = "") {
 }
 
 function renderResourceCard(resource) {
+  const title = resource.title || "제목 없음";
   return `
     <article class="card" data-select-type="resources" data-select-id="${resource.id}" data-delete-drag-type="resources" data-delete-drag-id="${resource.id}">
-      <h3 class="card-title">${esc(resource.title)}</h3>
-      <p class="resource-preview">${esc(blockText(resource).slice(0, 112)) || "비어 있는 자료"}</p>
-      <div class="card-meta">
-        ${resource.importance === "archived" ? badge("아카이브", "rose") : ""}
-        ${resource.importance === "important" ? badge("중요", "amber") : ""}
-        ${resource.pinned ? badge("고정", "blue") : ""}
-        ${resource.readLater ? badge("나중에 보기", "amber") : ""}
-        ${resource.projectId ? badge(nameOf("projects", resource.projectId), "violet") : ""}
-        ${badge(resource.type, "teal")}
-      </div>
+      <a class="resource-card-open" href="${esc(resourceDeepLink(resource.id))}" data-open-resource="${resource.id}" aria-label="${esc(`${title} 열기`)}" aria-haspopup="dialog" style="display:block;color:inherit;text-decoration:none">
+        <h3 class="card-title" data-resource-title-display="${resource.id}">${esc(title)}</h3>
+        <p class="resource-preview">${esc(blockText(resource).slice(0, 112)) || "비어 있는 자료"}</p>
+        <div class="card-meta">
+          ${resource.importance === "archived" ? badge("아카이브", "rose") : ""}
+          ${resource.importance === "important" ? badge("중요", "amber") : ""}
+          ${resource.pinned ? badge("고정", "blue") : ""}
+          ${resource.readLater ? badge("나중에 보기", "amber") : ""}
+          ${resource.projectId ? badge(nameOf("projects", resource.projectId), "violet") : ""}
+          ${badge(resourceTypeLabel(resource.type), "teal")}
+        </div>
+      </a>
     </article>
   `;
 }
@@ -3396,7 +4092,7 @@ function projectCaptureOptions(projects, type) {
 function resourceCaptureOptions(resources) {
   const options = [{ value: "", label: "없음", meta: "자료 없이 진행" }];
   for (const resource of resources) {
-    options.push({ value: resource.id, label: resource.title, meta: resource.type || "" });
+    options.push({ value: resource.id, label: resource.title, meta: resourceTypeLabel(resource.type) });
   }
   return options;
 }
@@ -3988,10 +4684,152 @@ function calendarColorStyle(calendar) {
 function renderDetail(options = {}) {
   captureResourceNoteViewState();
   updateTaskSchedulingMode();
+  if (options.soft && patchResourceDetail(options)) {
+    syncResourceDocumentTitle();
+    syncResourceSideWidth();
+    syncResourceVisualViewport();
+    return;
+  }
   const resourceNotes = renderResourceNotes(options);
   els.detailRoot.innerHTML = resourceNotes;
   decorateButtons(els.detailRoot);
   restoreResourceNoteViewState();
+  syncResourceDocumentTitle();
+  syncResourceSideWidth();
+  syncResourceVisualViewport();
+}
+
+function patchResourceDetail(options = {}) {
+  if (!els.detailRoot || ui.resourceRouteNotFound) return false;
+  const notes = ui.resourceNotes.filter((note) => itemById("resources", note.id));
+  const currentShells = [...els.detailRoot.querySelectorAll(":scope > [data-resource-note]")];
+  if (!notes.length || currentShells.length !== notes.length) return false;
+
+  const patches = [];
+  for (const note of notes) {
+    const resource = itemById("resources", note.id);
+    const currentShell = els.detailRoot.querySelector(`:scope > [data-resource-note="${cssEscape(note.id)}"]`);
+    if (!resource || !currentShell) return false;
+    const template = document.createElement("template");
+    template.innerHTML = renderResourceNote(resource, note, options).trim();
+    const nextShell = template.content.querySelector(`[data-resource-note="${cssEscape(note.id)}"]`);
+    if (!nextShell) return false;
+    const shellModeChanged = (currentShell.dataset.resourceShell || "") !== (nextShell.dataset.resourceShell || "");
+    const trashStateChanged = currentShell.hasAttribute("data-resource-trashed") !== nextShell.hasAttribute("data-resource-trashed");
+    if (shellModeChanged || trashStateChanged) return false;
+    const currentBackdrop = els.detailRoot.querySelector(`:scope > [data-resource-backdrop="${cssEscape(note.id)}"]`);
+    const nextBackdrop = template.content.querySelector(`[data-resource-backdrop="${cssEscape(note.id)}"]`);
+    if (Boolean(currentBackdrop) !== Boolean(nextBackdrop)) return false;
+    patches.push({ currentShell, nextShell, currentBackdrop, nextBackdrop });
+  }
+
+  for (const patch of patches) {
+    if (patch.currentBackdrop && patch.nextBackdrop) syncElementAttributes(patch.currentBackdrop, patch.nextBackdrop);
+    patchResourceDetailShell(patch.currentShell, patch.nextShell);
+  }
+  return true;
+}
+
+function patchResourceDetailShell(currentShell, nextShell) {
+  syncElementAttributes(currentShell, nextShell);
+
+  patchElementBySelector(currentShell, nextShell, ":scope > .resource-page-toolbar");
+  patchElementBySelector(currentShell, nextShell, ":scope > .resource-note-chrome");
+  patchElementBySelector(currentShell, nextShell, ":scope > .resource-side-resize");
+  patchElementBySelector(currentShell, nextShell, ":scope > .resource-mobile-toolbar");
+  patchElementBySelector(currentShell, nextShell, ":scope > .resource-note-resize");
+
+  const currentScroll = currentShell.querySelector(".resource-note-scroll");
+  const nextScroll = nextShell.querySelector(".resource-note-scroll");
+  const currentPage = currentScroll?.querySelector(":scope > .resource-note-page");
+  const nextPage = nextScroll?.querySelector(":scope > .resource-note-page");
+  if (!currentScroll || !nextScroll || !currentPage || !nextPage) return;
+  syncElementAttributes(currentScroll, nextScroll);
+  syncElementAttributes(currentPage, nextPage);
+
+  patchElementBySelector(currentPage, nextPage, ":scope > [data-resource-sync-conflict]", ":scope > [data-resource-accessible-title]");
+  patchResourceTitleElements(currentPage, nextPage);
+  patchElementBySelector(currentPage, nextPage, ":scope > .resource-note-subline");
+  patchResourcePropertyDisclosure(currentPage, nextPage);
+  patchElementBySelector(currentPage, nextPage, ":scope > .resource-page-relations", ":scope > .block-editor");
+
+  const currentContent = currentShell.querySelector(":scope > .resource-page-content");
+  const nextContent = nextShell.querySelector(":scope > .resource-page-content");
+  if (currentContent && nextContent) {
+    syncElementAttributes(currentContent, nextContent);
+    patchElementBySelector(currentContent, nextContent, ":scope > .resource-comments-pane");
+  }
+}
+
+function patchResourceTitleElements(currentPage, nextPage) {
+  const currentHeading = currentPage.querySelector(":scope > [data-resource-accessible-title]");
+  const nextHeading = nextPage.querySelector(":scope > [data-resource-accessible-title]");
+  if (currentHeading && nextHeading) {
+    syncElementAttributes(currentHeading, nextHeading);
+    if (currentHeading.textContent !== nextHeading.textContent) currentHeading.textContent = nextHeading.textContent;
+  }
+  const currentTitle = currentPage.querySelector(":scope > [data-resource-title]");
+  const nextTitle = nextPage.querySelector(":scope > [data-resource-title]");
+  if (!currentTitle || !nextTitle) return;
+  syncElementAttributes(currentTitle, nextTitle);
+  const resourceId = currentTitle.dataset.resourceTitle || "";
+  if (document.activeElement !== currentTitle && !ui.resourceTitleComposingIds.has(resourceId) && currentTitle.value !== nextTitle.value) {
+    currentTitle.value = nextTitle.value;
+  }
+}
+
+function patchResourcePropertyDisclosure(currentPage, nextPage) {
+  const currentToggle = currentPage.querySelector(":scope > .resource-props-toggle");
+  const nextToggle = nextPage.querySelector(":scope > .resource-props-toggle");
+  if (currentToggle && nextToggle) {
+    syncElementAttributes(currentToggle, nextToggle);
+    const currentStrong = currentToggle.querySelector("strong");
+    const nextStrong = nextToggle.querySelector("strong");
+    if (currentStrong && nextStrong && currentStrong.textContent !== nextStrong.textContent) currentStrong.textContent = nextStrong.textContent;
+  }
+  const currentProps = currentPage.querySelector(":scope > .resource-props");
+  const nextProps = nextPage.querySelector(":scope > .resource-props");
+  if (!currentProps || !nextProps) return;
+  syncElementAttributes(currentProps, nextProps);
+  patchElementBySelector(currentProps, nextProps, ".resource-url-field");
+  currentProps.querySelectorAll("[data-field]").forEach((control) => {
+    const field = cssEscape(control.dataset.field || "");
+    const nextControl = nextProps.querySelector(`[data-field="${field}"]`);
+    if (!nextControl) return;
+    syncElementAttributes(control, nextControl);
+    if (document.activeElement === control) return;
+    if (control instanceof HTMLInputElement && control.type === "checkbox") control.checked = nextControl.checked;
+    else if ("value" in control && control.value !== nextControl.value) control.value = nextControl.value;
+  });
+}
+
+function patchElementBySelector(currentRoot, nextRoot, selector, beforeSelector = "") {
+  const current = currentRoot.querySelector(selector);
+  const next = nextRoot.querySelector(selector);
+  if (!next) {
+    current?.remove();
+    return;
+  }
+  if (current) {
+    if (!current.isEqualNode(next)) current.replaceWith(next.cloneNode(true));
+    return;
+  }
+  const before = beforeSelector ? currentRoot.querySelector(beforeSelector) : null;
+  currentRoot.insertBefore(next.cloneNode(true), before);
+}
+
+function syncElementAttributes(current, next) {
+  for (const attribute of [...current.attributes]) {
+    if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of [...next.attributes]) {
+    if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+  }
+}
+
+function syncResourceDocumentTitle() {
+  const resource = ui.resourceNotes.length ? itemById("resources", ui.resourceNotes[0].id) : null;
+  document.title = resource ? `${resource.title || "Untitled"} — ${BASE_DOCUMENT_TITLE}` : BASE_DOCUMENT_TITLE;
 }
 
 function captureResourceNoteViewState() {
@@ -4039,6 +4877,9 @@ function handleResourceNoteScroll(event) {
 }
 
 function renderResourceNotes(options = {}) {
+  if (!resourceAdvancedWindowModeEnabled() && ui.resourceRouteNotFound) {
+    return renderResourceRouteNotFound(ui.resourceRouteNotFound);
+  }
   let html = "";
   for (const note of ui.resourceNotes) {
     const resource = itemById("resources", note.id);
@@ -4048,6 +4889,11 @@ function renderResourceNotes(options = {}) {
 }
 
 function renderResourceNote(resource, note, options = {}) {
+  if (!resourceAdvancedWindowModeEnabled()) return renderParityResourceNote(resource, note, options);
+  return renderAdvancedResourceNote(resource, note, options);
+}
+
+function renderAdvancedResourceNote(resource, note, options = {}) {
   const blockCount = resource.blocks?.length || 0;
   const noteStyle = resourceNoteStyle(note);
   const noteClasses = resourceNoteModeClasses(note);
@@ -4067,24 +4913,419 @@ function renderResourceNote(resource, note, options = {}) {
       </header>
       <div class="resource-note-scroll">
         <div class="resource-note-page">
-          <input class="resource-note-title" data-resource-title="${resource.id}" value="${esc(resource.title || "")}" aria-label="자료 제목">
+          ${renderResourceTitleEditor(resource)}
           <div class="resource-note-subline">
             <span>Resource page</span>
             <span>${blockCount} blocks</span>
           </div>
-          <button class="resource-props-toggle ${note.showProps ? "is-open" : ""}" type="button" data-resource-props="${resource.id}" aria-expanded="${note.showProps ? "true" : "false"}">
-            <span>속성</span>
-            <strong>${note.showProps ? "숨기기" : "보기"}</strong>
-          </button>
-          <div class="resource-props ${note.showProps ? "is-open" : ""}">
-            ${renderDetailFields("resources", resource)}
-          </div>
+          ${renderResourcePropertyDisclosure(resource, note)}
           ${renderBlockEditor("resources", resource.id, resource.blocks || [])}
         </div>
       </div>
       <div class="resource-note-resize" data-resource-resize="${resource.id}" aria-hidden="true"></div>
     </section>
   `;
+}
+
+function renderParityResourceNote(resource, note, options = {}) {
+  if (resource.trashedAt) return renderTrashedResourceNote(resource, note, options);
+  const blockCount = resource.blocks?.length || 0;
+  const mode = normalizeResourcePageMode(note.pageMode);
+  const navigation = resourcePageNavigation(resource.id);
+  const pageSettings = normalizeResourcePageSettings(resource.pageSettings);
+  const dialogAttributes = mode === "center"
+    ? 'role="dialog" aria-modal="true"'
+    : mode === "side"
+      ? `role="dialog" aria-modal="${window.innerWidth <= 840 ? "true" : "false"}"`
+      : 'role="region"';
+  return `
+    ${mode === "center" ? `<button class="resource-page-backdrop" type="button" data-resource-backdrop="${resource.id}" aria-label="Resource 페이지 닫기"></button>` : ""}
+    <section class="resource-note resource-page-shell is-parity-page is-${mode} ${options.soft ? "is-soft-render" : ""}"
+      data-resource-note="${resource.id}"
+      data-resource-shell="${mode}"
+      data-resource-page-mode="${mode}"
+      data-resource-font="${pageSettings.font}"
+      data-resource-small-text="${pageSettings.smallText ? "true" : "false"}"
+      data-resource-full-width="${pageSettings.fullWidth ? "true" : "false"}"
+      data-resource-read-only="${resource.readOnly ? "true" : "false"}"
+      ${dialogAttributes}
+      aria-label="${esc(`${resource.title || "제목 없음"} Resource page`)}">
+      ${renderResourcePageToolbar(resource, mode, navigation)}
+      ${mode === "side" ? renderResourceSideResizeHandle(resource) : ""}
+      <div class="resource-page-content">
+        <div class="resource-note-scroll">
+          <div class="resource-note-page">
+            ${renderResourceMedia(resource)}
+            ${renderResourceSyncConflict(resource)}
+            ${renderResourceTitleEditor(resource)}
+            <div class="resource-note-subline">
+              <span>Resource page</span>
+              <span>${blockCount} blocks</span>
+            </div>
+            ${renderResourcePropertyDisclosure(resource, note)}
+            ${renderResourceHierarchy(resource)}
+            ${renderBlockEditor("resources", resource.id, resource.blocks || [])}
+          </div>
+        </div>
+        ${renderResourceCommentsPane(resource)}
+      </div>
+      ${renderResourceMobileToolbar(resource, note)}
+    </section>
+  `;
+}
+
+function renderResourcePageToolbar(resource, mode, navigation) {
+  const commentsOpen = ui.resourceCommentsId === resource.id;
+  const readOnly = resource.readOnly === true;
+  return `
+    <header class="resource-page-toolbar">
+      <div class="resource-page-toolbar-main">
+        <button class="resource-note-icon" type="button" data-resource-close="${resource.id}" aria-label="닫기" title="닫기">×</button>
+        <div class="resource-page-breadcrumb" aria-label="현재 Resource">
+          <span>Resources</span>
+          <span aria-hidden="true">/</span>
+          <strong data-resource-title-display="${resource.id}">${esc(resource.title || "제목 없음")}</strong>
+        </div>
+      </div>
+      <div class="resource-page-toolbar-actions">
+        <span class="resource-page-status" data-resource-save-status data-sync-state="${resourcePageSyncState()}" role="status">${esc(resourcePageSaveStatusLabel())}</span>
+        <nav class="resource-page-nav" aria-label="Resource 페이지 이동">
+          <button type="button" data-resource-navigate="previous" aria-label="이전 Resource" ${navigation.previous ? "" : "disabled"}>‹</button>
+          <button type="button" data-resource-navigate="next" aria-label="다음 Resource" ${navigation.next ? "" : "disabled"}>›</button>
+        </nav>
+        <button type="button" data-resource-copy-link="${resource.id}" aria-label="Resource 링크 복사" title="링크 복사">⌁</button>
+        <button type="button" data-resource-comments-toggle="${resource.id}" aria-label="댓글 패널 ${commentsOpen ? "닫기" : "열기"}" aria-expanded="${commentsOpen ? "true" : "false"}" title="댓글">☵</button>
+        <button type="button" data-resource-create-child="${resource.id}" aria-label="하위 Resource 만들기" title="하위 Resource 만들기" ${readOnly ? 'disabled aria-disabled="true"' : ""}>＋</button>
+        <span class="resource-page-menu-wrap">
+          <button type="button" data-resource-page-menu="${resource.id}" aria-label="페이지 메뉴" aria-haspopup="menu" aria-expanded="${ui.resourcePageMenuId === resource.id ? "true" : "false"}" title="페이지 메뉴" ${readOnly ? 'disabled aria-disabled="true"' : ""}>•••</button>
+          ${renderResourcePageMenu(resource)}
+        </span>
+        ${mode === "full" ? "" : `<button type="button" data-resource-expand="${resource.id}" aria-label="전체 페이지로 열기" title="전체 페이지로 열기">↗</button>`}
+      </div>
+    </header>
+  `;
+}
+
+function renderResourceTitleEditor(resource) {
+  const headingId = `resource-page-title-${resource.id}`;
+  const title = resource.title || "Untitled";
+  return `
+    <h1 class="visually-hidden" id="${esc(headingId)}" data-resource-accessible-title="${resource.id}">${esc(title)}</h1>
+    <textarea class="resource-note-title" data-resource-title="${resource.id}" rows="1" placeholder="Untitled" aria-label="자료 제목" ${resource.readOnly ? 'readonly aria-readonly="true"' : ""}>${esc(resource.title || "")}</textarea>
+  `;
+}
+
+function renderResourceMedia(resource) {
+  const cover = normalizeResourceCover(resource.cover);
+  const editable = !resource.readOnly;
+  return `
+    <section class="resource-page-media ${cover.url ? "has-cover" : ""} ${resource.icon ? "has-icon" : ""}" data-resource-media="${resource.id}">
+      <div class="resource-cover-area" data-resource-cover-area="${resource.id}">
+        ${cover.url ? `<img data-resource-cover="${resource.id}" data-resource-cover-state="loading" src="${esc(cover.url)}" alt="" style="object-position:center ${cover.position}%" draggable="false">` : ""}
+        ${editable ? `<div class="resource-media-actions">
+          <button type="button" data-resource-cover-edit="${resource.id}">${cover.url ? "Change cover" : "Add cover"}</button>
+          ${cover.url ? `<button type="button" data-resource-cover-remove="${resource.id}">Remove cover</button>` : ""}
+        </div>` : ""}
+        ${editable && ui.resourceCoverEditorId === resource.id ? renderResourceCoverEditor(resource) : ""}
+      </div>
+      <div class="resource-icon-area">
+        ${resource.icon ? `<span class="resource-page-icon" data-resource-icon="${resource.id}" role="img" aria-label="페이지 아이콘">${esc(resource.icon)}</span>` : ""}
+        ${editable ? `<button class="resource-add-icon" type="button" data-resource-icon-edit="${resource.id}">${resource.icon ? "Change icon" : "Add icon"}</button>` : ""}
+        ${editable && ui.resourceIconPickerId === resource.id ? renderResourceIconPicker(resource) : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderResourceIconPicker(resource) {
+  const choices = ["📄", "📝", "💡", "🔖", "📚", "🧭", "✅", "✨"];
+  return `
+    <div class="resource-icon-picker" data-resource-icon-picker="${resource.id}" role="menu" aria-label="페이지 아이콘 선택">
+      ${choices.map((icon) => `<button type="button" role="menuitem" data-resource-icon-choice="${esc(icon)}" data-resource-icon-owner="${resource.id}" aria-label="${esc(icon)} 아이콘">${esc(icon)}</button>`).join("")}
+      ${resource.icon ? `<button type="button" role="menuitem" data-resource-icon-remove="${resource.id}">Remove</button>` : ""}
+    </div>
+  `;
+}
+
+function renderResourceCoverEditor(resource) {
+  const cover = normalizeResourceCover(resource.cover);
+  return `
+    <div class="resource-cover-editor" data-resource-cover-editor-panel="${resource.id}">
+      <label><span>HTTPS image URL</span><input class="input" type="url" data-resource-cover-url="${resource.id}" value="${esc(cover.url)}" placeholder="https://example.com/cover.jpg"></label>
+      <label><span>Position</span><input type="range" min="0" max="100" value="${cover.position}" data-resource-cover-position="${resource.id}" aria-label="커버 세로 위치"></label>
+      <div><button type="button" data-resource-cover-apply="${resource.id}">Apply</button><button type="button" data-resource-cover-cancel="${resource.id}">Cancel</button></div>
+      <small>현재 범위는 HTTPS 외부 이미지입니다. 업로드는 지원하지 않습니다.</small>
+    </div>
+  `;
+}
+
+function renderResourceSideResizeHandle(resource) {
+  const width = normalizedResourceSideWidth(state.settings?.resourceSideWidth, window.innerWidth);
+  return `<button class="resource-side-resize" type="button" data-resource-side-resize="${resource.id}" role="separator" aria-orientation="vertical" aria-label="Side peek 너비 조절" aria-valuemin="360" aria-valuemax="${resourceSideWidthMaximum(window.innerWidth)}" aria-valuenow="${width}"></button>`;
+}
+
+function renderResourceMobileToolbar(resource, note) {
+  const readOnly = resource.readOnly === true;
+  return `
+    <nav class="resource-mobile-toolbar" data-resource-mobile-toolbar="${resource.id}" aria-label="모바일 Resource 편집 도구">
+      <button type="button" data-resource-mobile-action="undo" aria-label="실행 취소" ${readOnly ? 'disabled aria-disabled="true"' : ""}>↶</button>
+      <button type="button" data-resource-mobile-action="redo" aria-label="다시 실행" ${readOnly ? 'disabled aria-disabled="true"' : ""}>↷</button>
+      <button type="button" data-resource-mobile-action="add" data-resource-mobile-owner="${resource.id}" aria-label="본문 끝에 블록 추가" ${readOnly ? 'disabled aria-disabled="true"' : ""}>＋</button>
+      <button type="button" data-resource-mobile-action="properties" data-resource-mobile-owner="${resource.id}" aria-label="속성 ${note.showProps ? "닫기" : "열기"}">◇</button>
+      <button type="button" data-resource-mobile-action="comments" data-resource-mobile-owner="${resource.id}" aria-label="댓글 열기">☵</button>
+    </nav>
+  `;
+}
+
+function renderResourcePropertyDisclosure(resource, note) {
+  const panelId = `resource-properties-${resource.id}`;
+  const expanded = note.showProps === true;
+  return `
+    <button class="resource-props-toggle ${expanded ? "is-open" : ""}" type="button" data-resource-props="${resource.id}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${esc(panelId)}">
+      <span>속성</span>
+      <strong>${expanded ? "숨기기" : "보기"}</strong>
+    </button>
+    <div class="resource-props ${expanded ? "is-open" : ""}" id="${esc(panelId)}" data-resource-properties="${resource.id}" ${expanded ? "" : "hidden inert aria-hidden=\"true\""}>
+      ${renderDetailFields("resources", resource)}
+    </div>
+  `;
+}
+
+function renderResourcePageMenu(resource) {
+  if (ui.resourcePageMenuId !== resource.id || resource.readOnly) return "";
+  const settings = normalizeResourcePageSettings(resource.pageSettings);
+  return `
+    <div class="resource-page-menu" role="menu" data-resource-page-menu-panel="${resource.id}" aria-label="페이지 설정">
+      <button type="button" role="menuitemradio" aria-checked="${settings.font === "default" ? "true" : "false"}" data-resource-page-font="default" data-resource-page-owner="${resource.id}">Default font</button>
+      <button type="button" role="menuitemradio" aria-checked="${settings.font === "serif" ? "true" : "false"}" data-resource-page-font="serif" data-resource-page-owner="${resource.id}">Serif font</button>
+      <button type="button" role="menuitemradio" aria-checked="${settings.font === "mono" ? "true" : "false"}" data-resource-page-font="mono" data-resource-page-owner="${resource.id}">Mono font</button>
+      <button type="button" role="menuitemcheckbox" aria-checked="${settings.smallText ? "true" : "false"}" data-resource-page-option="smallText" data-resource-page-owner="${resource.id}">Small text</button>
+      <button type="button" role="menuitemcheckbox" aria-checked="${settings.fullWidth ? "true" : "false"}" data-resource-page-option="fullWidth" data-resource-page-owner="${resource.id}">Full width</button>
+      <button type="button" role="menuitem" data-resource-move-to-trash="${resource.id}">Move to trash</button>
+    </div>
+  `;
+}
+
+function renderTrashedResourceNote(resource, note, options = {}) {
+  const mode = normalizeResourcePageMode(note.pageMode);
+  const dialogAttributes = mode === "center"
+    ? 'role="dialog" aria-modal="true"'
+    : mode === "side"
+      ? 'role="dialog" aria-modal="false"'
+      : 'role="region"';
+  return `
+    ${mode === "center" ? `<button class="resource-page-backdrop" type="button" data-resource-backdrop="${resource.id}" aria-label="Resource 페이지 닫기"></button>` : ""}
+    <section class="resource-note resource-page-shell is-parity-page is-${mode} ${options.soft ? "is-soft-render" : ""}"
+      data-resource-note="${resource.id}" data-resource-shell="${mode}" data-resource-page-mode="${mode}"
+      data-resource-trashed="${resource.id}" ${dialogAttributes} aria-label="휴지통의 ${esc(resource.title || "제목 없음")}">
+      ${renderResourcePageToolbar(resource, mode, { previous: null, next: null })}
+      <div class="resource-page-content">
+        <div class="resource-note-scroll">
+          <div class="resource-note-page resource-trash-recovery">
+            <span class="resource-trash-kicker">Trash</span>
+            <h1>${esc(resource.title || "제목 없음")}</h1>
+            <p>이 Resource는 휴지통에 있습니다. 본문과 속성은 그대로 보존됩니다.</p>
+            <div class="resource-trash-actions">
+              <button class="button" type="button" data-resource-restore="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Restore page</button>
+              ${ui.resourceTrashUndoId === resource.id ? `<button class="button secondary" type="button" data-resource-trash-undo="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Undo</button>` : ""}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderResourceHierarchy(resource) {
+  const children = resourceChildren(resource.id);
+  const backlinks = resourceBacklinks(resource.id);
+  const excluded = resourceDescendantIds(resource.id);
+  excluded.add(resource.id);
+  const parentOptions = state.resources
+    .filter((candidate) => !candidate.trashedAt && !excluded.has(candidate.id))
+    .map((candidate) => `<option value="${candidate.id}" ${resource.parentId === candidate.id ? "selected" : ""}>${esc(candidate.title || "제목 없음")}</option>`)
+    .join("");
+  return `
+    <section class="resource-page-relations" aria-label="페이지 관계">
+      <label class="resource-parent-field"><span>Parent page</span><select class="select" data-resource-parent="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}><option value="">없음</option>${parentOptions}</select></label>
+      <div class="resource-relation-group" data-resource-children="${resource.id}">
+        <span>Sub-pages</span>
+        <div>${children.length ? children.map((child) => `<button type="button" data-open-resource="${child.id}">${esc(child.title || "제목 없음")}</button>`).join("") : `<small>없음</small>`}</div>
+      </div>
+      <div class="resource-relation-group" data-resource-backlinks="${resource.id}">
+        <span>Backlinks</span>
+        <div>${backlinks.length ? backlinks.map((source) => `<button type="button" data-open-resource="${source.id}">${esc(source.title || "제목 없음")}</button>`).join("") : `<small>없음</small>`}</div>
+      </div>
+    </section>
+  `;
+}
+
+function resourceChildren(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resource) return [];
+  const order = new Map((resource.childOrder || []).map((childId, index) => [childId, index]));
+  return state.resources
+    .filter((candidate) => !candidate.trashedAt && candidate.parentId === resourceId)
+    .sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER) || (a.title || "").localeCompare(b.title || ""));
+}
+
+function resourceDescendantIds(resourceId) {
+  const descendants = new Set();
+  const queue = [resourceId];
+  while (queue.length) {
+    const parentId = queue.shift();
+    for (const candidate of state.resources) {
+      if (candidate.parentId !== parentId || descendants.has(candidate.id) || candidate.id === resourceId) continue;
+      descendants.add(candidate.id);
+      queue.push(candidate.id);
+    }
+  }
+  return descendants;
+}
+
+function resourceBacklinks(resourceId) {
+  return state.resources.filter((source) => {
+    if (source.id === resourceId || source.trashedAt) return false;
+    return (source.blocks || []).some((block) => normalizeInlineMarks(block.text || "", block.marks).some((mark) => (
+      mark.type === "mention" && mark.targetType === "resources" && mark.targetId === resourceId
+    )));
+  });
+}
+
+function renderResourceCommentsPane(resource) {
+  if (ui.resourceCommentsId !== resource.id) return "";
+  const threads = normalizeResourceCommentThreads(resource.commentThreads).filter((thread) => !thread.deletedAt);
+  const pageThreads = threads.filter((thread) => thread.scope === "page");
+  const inlineThreads = threads.filter((thread) => thread.scope === "inline");
+  return `
+    <aside class="resource-comments-pane" data-resource-comments-pane="${resource.id}" aria-label="페이지 댓글">
+      <header>
+        <div><strong>Comments</strong><span>${threads.length}</span></div>
+        <button type="button" data-resource-comments-toggle="${resource.id}" aria-label="댓글 패널 닫기">×</button>
+      </header>
+      <section class="resource-comments-composer" aria-label="새 페이지 토론">
+        <textarea rows="3" data-page-discussion-composer="${resource.id}" aria-label="새 페이지 댓글" placeholder="페이지에 댓글 추가" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}></textarea>
+        <button type="button" data-page-discussion-submit="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Add comment</button>
+      </section>
+      <div class="resource-comment-list">
+        ${pageThreads.length ? `<h2>Page discussions</h2>${pageThreads.map((thread) => renderResourceCommentThread(thread, resource.readOnly)).join("")}` : ""}
+        ${inlineThreads.length ? `<h2>Inline threads</h2>${inlineThreads.map((thread) => renderResourceCommentThread(thread, resource.readOnly)).join("")}` : ""}
+        ${threads.length ? "" : `<p class="resource-comments-empty">아직 댓글이 없습니다.</p>`}
+      </div>
+    </aside>
+  `;
+}
+
+function renderResourceCommentThread(thread, readOnly = false) {
+  const resolved = Boolean(thread.resolvedAt);
+  const anchorLabel = thread.scope === "inline" ? `Block ${thread.anchor?.blockId || ""}` : "Page";
+  return `
+    <article class="resource-comment-thread ${resolved ? "is-resolved" : ""}" data-comment-thread="${thread.id}" data-comment-scope="${thread.scope}" data-comment-status="${resolved ? "resolved" : "open"}" ${ui.resourceCommentFocusId === thread.id ? 'data-comment-focused="true"' : ""}>
+      <div class="resource-comment-meta"><span>${esc(anchorLabel)}</span><time datetime="${esc(thread.createdAt)}">${esc(formatDateTime(thread.createdAt))}</time></div>
+      <p>${esc(thread.body)}</p>
+      ${(thread.replies || []).filter((reply) => !reply.deletedAt).map((reply) => `<div class="resource-comment-reply"><p>${esc(reply.body)}</p><time datetime="${esc(reply.createdAt)}">${esc(formatDateTime(reply.createdAt))}</time></div>`).join("")}
+      <div class="resource-comment-reply-box">
+        <textarea rows="2" data-comment-reply-input="${thread.id}" aria-label="댓글 답글" placeholder="Reply" ${readOnly ? 'disabled aria-disabled="true"' : ""}></textarea>
+        <button type="button" data-comment-reply-submit="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Reply</button>
+      </div>
+      ${resolved
+        ? `<button type="button" data-comment-reopen="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Reopen</button>`
+        : `<button type="button" data-comment-resolve="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Resolve</button>`}
+    </article>
+  `;
+}
+
+function renderResourceSyncConflict(resource) {
+  if (!databaseBackendStatus.conflict || localResourcePersistence.conflictResourceId !== resource.id) return "";
+  const operation = localResourceOperation(resource.id);
+  const remoteResource = localResourcePersistence.conflictRemoteState?.resources?.find((entry) => entry.id === resource.id) || null;
+  const localTitle = operation?.payload?.resource?.title ?? resource.title ?? "";
+  const remoteTitle = remoteResource?.title ?? "원격 Resource를 불러오는 중";
+  return `
+    <section class="resource-sync-conflict" data-resource-sync-conflict="${resource.id}" role="alert">
+      <strong>저장 충돌을 해결해야 합니다.</strong>
+      <p>로컬과 원격 Resource가 같은 revision에서 갈라졌습니다. 자동으로 덮어쓰지 않았습니다.</p>
+      <dl>
+        <div><dt>Local</dt><dd data-conflict-local-title>${esc(localTitle)}</dd></div>
+        <div><dt>Remote</dt><dd data-conflict-remote-title>${esc(remoteTitle)}</dd></div>
+      </dl>
+      <div>
+        <button type="button" data-conflict-resolution="keep-local" data-conflict-resource="${resource.id}" ${remoteResource ? "" : "disabled"}>Keep local</button>
+        <button type="button" data-conflict-resolution="use-remote" data-conflict-resource="${resource.id}" ${remoteResource ? "" : "disabled"}>Use remote</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderResourceRouteNotFound(resourceId) {
+  const mode = "center";
+  return `
+    <button class="resource-page-backdrop" type="button" data-resource-backdrop="${esc(resourceId)}" aria-label="Resource 페이지 닫기"></button>
+    <section class="resource-note resource-page-shell is-parity-page is-center"
+      data-resource-shell="${mode}"
+      data-resource-page-mode="${mode}"
+      data-resource-not-found="${esc(resourceId)}"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Resource를 찾을 수 없음">
+      <header class="resource-page-toolbar">
+        <div class="resource-page-toolbar-main">
+          <button class="resource-note-icon" type="button" data-resource-close="${esc(resourceId)}" aria-label="닫기">×</button>
+          <div class="resource-page-breadcrumb"><span>Resources</span><span aria-hidden="true">/</span><strong>Not found</strong></div>
+        </div>
+      </header>
+      <div class="resource-page-content">
+        <div class="resource-note-scroll">
+          <div class="resource-note-page" tabindex="-1">
+            <h1>Resource를 찾을 수 없습니다.</h1>
+            <p>요청한 Resource가 삭제되었거나 현재 데이터베이스에 존재하지 않습니다.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function resourcePageNavigation(resourceId) {
+  const resources = state.resources.filter((resource) => !resource.trashedAt && resource.importance !== "archived");
+  const index = resources.findIndex((resource) => resource.id === resourceId);
+  return {
+    previous: index > 0 ? resources[index - 1] : null,
+    next: index >= 0 && index < resources.length - 1 ? resources[index + 1] : null,
+  };
+}
+
+function resourcePageSaveStatusLabel() {
+  if (databaseBackendStatus.loading) return "저장 상태 확인 중";
+  if (databaseBackendStatus.conflict) return "Conflict · 저장 충돌 · 자동 저장 중지";
+  if (navigator.onLine === false && (localResourcePersistence.pending || remoteStateSavePending)) return "Offline · 로컬 draft 저장됨";
+  if (Object.keys(ui.resourceTitleDrafts).length) return "편집 중 · 저장 대기";
+  if (localResourcePersistence.operations.some((operation) => operation.status === "retrying")) return "Retrying · 원격 저장 재시도 중";
+  if (databaseBackendStatus.saving || remoteStateSaveInFlight) return "Saving… · 저장 중";
+  if (remoteStateSavePending || localResourcePersistence.pending) return databaseBackendStatus.connected ? "Saving… · 저장 대기" : "Offline · 변경 대기";
+  if (databaseBackendStatus.connected) return databaseBackendStatus.lastSyncedAt ? `Saved · ${formatDateTime(databaseBackendStatus.lastSyncedAt)}` : "Saved · 저장됨";
+  return databaseBackendStatus.configured ? "Offline · 연결 끊김" : "Offline · DATABASE_URL 필요";
+}
+
+function resourcePageSyncState() {
+  if (databaseBackendStatus.conflict) return "conflict";
+  if (navigator.onLine === false || (!databaseBackendStatus.connected && !databaseBackendStatus.loading)) return "offline";
+  if (localResourcePersistence.operations.some((operation) => operation.status === "retrying")) return "retrying";
+  if (databaseBackendStatus.saving || remoteStateSaveInFlight || remoteStateSavePending || localResourcePersistence.pending || Object.keys(ui.resourceTitleDrafts).length) return "saving";
+  if (databaseBackendStatus.connected) return "saved";
+  return databaseBackendStatus.loading ? "loading" : "offline";
+}
+
+function patchResourcePageSaveStatus() {
+  const label = resourcePageSaveStatusLabel();
+  els.detailRoot?.querySelectorAll("[data-resource-save-status]").forEach((element) => {
+    element.textContent = label;
+    element.dataset.syncState = resourcePageSyncState();
+  });
+}
+
+function resourceAdvancedWindowModeEnabled() {
+  return state.settings?.advancedWindowMode === true;
 }
 
 function normalizedResourceNoteMode(mode) {
@@ -4161,16 +5402,17 @@ function renderDetailFields(type, item) {
     `;
   }
   if (type === "resources") {
+    const fieldOptions = { disabled: item.readOnly === true };
     return `
       <div class="field-grid">
-        ${selectField("분류", "type", item.type, { quick_note: "간단 메모", note: "노트", scrap: "스크랩", thought: "생각", reflection: "회고" })}
-        ${selectField("중요도", "importance", item.importance, { normal: "일반", important: "중요", archived: "아카이브" })}
-        ${relationField("박스", "boxId", item.boxId, state.boxes, "name")}
-        ${relationField("목표", "goalId", item.goalId, state.goals, "name")}
-        ${relationField("프로젝트", "projectId", item.projectId, state.projects, "name")}
-        ${textField("URL", "url", item.url || "")}
-        ${checkboxField("고정", "pinned", item.pinned)}
-        ${checkboxField("나중에 보기", "readLater", item.readLater)}
+        ${selectField("분류", "type", item.type, { quick_note: "간단 메모", note: "노트", scrap: "스크랩", thought: "생각", reflection: "회고" }, fieldOptions)}
+        ${selectField("중요도", "importance", item.importance, { normal: "일반", important: "중요", archived: "아카이브" }, fieldOptions)}
+        ${relationField("박스", "boxId", item.boxId, state.boxes, "name", fieldOptions)}
+        ${relationField("목표", "goalId", item.goalId, state.goals, "name", fieldOptions)}
+        ${relationField("프로젝트", "projectId", item.projectId, state.projects, "name", fieldOptions)}
+        ${renderResourceUrlField(item)}
+        ${checkboxField("고정", "pinned", item.pinned, fieldOptions)}
+        ${checkboxField("나중에 보기", "readLater", item.readLater, fieldOptions)}
       </div>
     `;
   }
@@ -4247,10 +5489,20 @@ function renderInlineBlockEditor(type, ownerId, blocksList) {
 
 function renderBlocks(blocksList, ownerType, ownerId) {
   let html = "";
+  let openListType = "";
   const toggleStack = [];
   const numberedCounters = [];
   for (let index = 0; index < blocksList.length; index += 1) {
     const block = blocksList[index];
+    const listType = block.type === "bullet" || block.type === "numbered" ? block.type : "";
+    if (listType !== openListType) {
+      if (openListType) html += "</div>";
+      if (listType) {
+        const label = listType === "numbered" ? "번호 목록" : "글머리 기호 목록";
+        html += `<div class="block-list" role="list" data-list-type="${listType}" aria-label="${label}">`;
+      }
+      openListType = listType;
+    }
     const indent = blockIndent(block);
     while (toggleStack.length && indent <= toggleStack[toggleStack.length - 1].indent) {
       toggleStack.pop();
@@ -4261,12 +5513,14 @@ function renderBlocks(blocksList, ownerType, ownerId) {
       parentToggleId: toggleStack.length ? toggleStack[toggleStack.length - 1].id : "",
       indent,
       listMarker,
+      listItem: Boolean(listType),
       hasToggleChildren: blockHasToggleChildren(blocksList, index),
     });
     if (block.type === "toggle") {
       toggleStack.push({ id: block.id, indent, collapsed: block.collapsed === true });
     }
   }
+  if (openListType) html += "</div>";
   return html;
 }
 
@@ -4297,6 +5551,7 @@ function numberedListMarkerForBlock(block, indent, counters) {
 }
 
 function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
+  const readOnly = ownerType === "resources" && itemById("resources", ownerId)?.readOnly === true;
   const isSelected =
     ui.blockSelection.ownerType === ownerType &&
     ui.blockSelection.ownerId === ownerId &&
@@ -4309,26 +5564,56 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const listMarkerAttr = meta.listMarker ? ` data-list-marker="${esc(meta.listMarker)}"` : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
   const backgroundColorAttr = blockBackgroundColor ? ` data-block-background="${blockBackgroundColor}"` : "";
+  const listSemanticAttr = meta.listItem ? ` role="listitem" aria-level="${indent + 1}"` : "";
   const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor);
   if (block.type === "divider") {
     return `
       <div class="block ${isSelected ? "is-selected" : ""}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
-        ${renderBlockDragHandle(block.id)}
-        <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
+        ${readOnly ? "" : renderBlockDragHandle(block.id)}
+        ${readOnly ? "" : `<button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>`}
         <div class="block-divider" role="separator"></div>
       </div>
     `;
   }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true;
   return `
-    <div class="block ${isSelected ? "is-selected" : ""}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${parentToggleAttr}${hiddenAttr}${blockStyle}>
-      ${renderBlockDragHandle(block.id)}
-      <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
-      ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}"></button>` : ""}
+    <div class="block ${isSelected ? "is-selected" : ""}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${parentToggleAttr}${hiddenAttr}${blockStyle}>
+      ${readOnly ? "" : renderBlockDragHandle(block.id)}
+      ${readOnly ? "" : `<button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>`}
+      ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}" ${readOnly ? "disabled" : ""}></button>` : ""}
       ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}">▸</button>` : ""}
-      <div class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="true" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</div>
+      ${renderEditableBlockContent(block, listMarkerAttr, ownerType, ownerId)}
     </div>
   `;
+}
+
+function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", ownerId = "") {
+  const readOnly = ownerType === "resources" && itemById("resources", ownerId)?.readOnly === true;
+  const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${readOnly ? "false" : "true"}" spellcheck="${readOnly ? "false" : "true"}" role="textbox" aria-multiline="true" ${readOnly ? 'aria-readonly="true"' : ""} aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
+  if (block.type === "heading1") return `<h1 class="block-semantic-wrap">${editable}</h1>`;
+  if (block.type === "heading2") return `<h2 class="block-semantic-wrap">${editable}</h2>`;
+  if (block.type === "heading3") return `<h3 class="block-semantic-wrap">${editable}</h3>`;
+  if (block.type === "quote") return `<blockquote class="block-semantic-wrap">${editable}</blockquote>`;
+  if (block.type === "code") {
+    return `<pre class="block-semantic-wrap" aria-label="Plain text code block"><code class="block-content ${block.text ? "" : "is-empty"}" data-language="plain-text" contenteditable="${readOnly ? "false" : "true"}" spellcheck="false" role="textbox" aria-multiline="true" ${readOnly ? 'aria-readonly="true"' : ""} aria-label="코드 블록 편집 (plain text)" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</code></pre>`;
+  }
+  return editable;
+}
+
+function blockEditorAriaLabel(block) {
+  const labels = {
+    paragraph: "텍스트 블록 편집",
+    heading1: "제목 1 블록 편집",
+    heading2: "제목 2 블록 편집",
+    heading3: "제목 3 블록 편집",
+    bullet: "글머리 기호 블록 편집",
+    numbered: "번호 목록 블록 편집",
+    todo: "할 일 블록 편집",
+    toggle: "토글 블록 편집",
+    quote: "인용 블록 편집",
+    callout: "콜아웃 블록 편집",
+  };
+  return labels[block.type] || "블록 편집";
 }
 
 function blockStyleForBlock(indent, color = "", backgroundColor = "") {
@@ -4464,7 +5749,9 @@ function renderInlineSegment(text, activeMarks) {
     const mark = sortedMarks[index];
     const type = mark.type;
     if (type === "link") {
-      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.link}" data-inline-mark="link" href="${esc(mark.href || "#")}" target="_blank" rel="noreferrer">${html}</a>`;
+      const href = normalizeInlineHref(mark.href || "");
+      if (!href) continue;
+      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.link}" data-inline-mark="link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${html}</a>`;
     } else if (type === "comment") {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.comment}" data-inline-mark="comment" data-inline-comment-id="${esc(mark.commentId || "")}" data-comment-body="${esc(mark.body || "")}" title="${esc(mark.body || "")}">${html}</span>`;
     } else if (type === "mention") {
@@ -4519,21 +5806,23 @@ function normalizeInlineMarks(text = "", marks = []) {
       normalized.push({ type: mark.type, start, end });
     }
   }
-  normalized.sort((a, b) => INLINE_MARK_TYPES.indexOf(a.type) - INLINE_MARK_TYPES.indexOf(b.type) || a.start - b.start || a.end - b.end);
+  normalized.sort((a, b) => a.start - b.start || a.end - b.end || INLINE_MARK_TYPES.indexOf(a.type) - INLINE_MARK_TYPES.indexOf(b.type));
   return mergeInlineMarks(normalized);
 }
 
 function mergeInlineMarks(marks) {
   const merged = [];
   for (const mark of marks) {
-    const previous = merged[merged.length - 1];
-    if (previous && previous.type === mark.type && inlineMarkPayloadEqual(previous, mark) && mark.start <= previous.end) {
+    const previous = [...merged].reverse().find((candidate) => (
+      candidate.type === mark.type && inlineMarkPayloadEqual(candidate, mark) && mark.start <= candidate.end
+    ));
+    if (previous) {
       previous.end = Math.max(previous.end, mark.end);
     } else {
       merged.push({ ...mark });
     }
   }
-  return merged;
+  return merged.sort((a, b) => a.start - b.start || a.end - b.end || INLINE_MARK_TYPES.indexOf(a.type) - INLINE_MARK_TYPES.indexOf(b.type));
 }
 
 function inlineMarksEqual(left = [], right = []) {
@@ -4690,7 +5979,8 @@ function normalizeInlineHref(value = "") {
   if (/^(https?:|mailto:|tel:)/i.test(raw)) return raw;
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return `mailto:${raw}`;
   if (/^[\w.-]+\.[a-z]{2,}(?:[/?#].*)?$/i.test(raw)) return `https://${raw}`;
-  return raw;
+  if (/^(?:\/(?!\/)|#|\?|\.\.?\/)/.test(raw)) return raw;
+  return "";
 }
 
 function blockPlaceholder(block) {
@@ -4724,8 +6014,150 @@ function renderOverlays() {
     ${ui.view === "today" ? renderTodayFloatingDrop() : ""}
     ${ui.blockDrag ? renderBlockDragGhost() : ""}
     ${ui.todayTaskDrag ? renderTodayTaskDragGhost() : ""}
+    ${renderServiceWorkerUpdateNotice()}
   `;
   decorateButtons(els.overlayRoot);
+  syncEditorCommandMenuAria();
+}
+
+function editorCommandMenuId(kind, blockId) {
+  return `${kind}-menu-${encodeURIComponent(String(blockId || "current"))}`;
+}
+
+function editorCommandMenuItemId(kind, blockId, index) {
+  return `${editorCommandMenuId(kind, blockId)}-item-${index}`;
+}
+
+function syncEditorCommandMenuAria() {
+  document.querySelectorAll("[data-editor-command-open]").forEach((element) => {
+    element.removeAttribute("data-editor-command-open");
+    element.removeAttribute("aria-controls");
+    element.removeAttribute("aria-activedescendant");
+    element.removeAttribute("aria-haspopup");
+    element.removeAttribute("aria-expanded");
+  });
+  const commands = [
+    ["slash", ui.slash],
+    ["mention", ui.mention],
+    ["page-command", ui.pageCommand],
+    ["emoji", ui.emojiCommand],
+  ];
+  for (const [kind, command] of commands) {
+    if (!command?.blockId) continue;
+    const content = document.querySelector(`[data-block-content="${cssEscape(command.blockId)}"]`);
+    const menuId = editorCommandMenuId(kind, command.blockId);
+    const activeId = editorCommandMenuItemId(kind, command.blockId, Math.max(0, command.selectedIndex || 0));
+    if (!content || !document.getElementById(menuId)) continue;
+    content.dataset.editorCommandOpen = kind;
+    content.setAttribute("aria-controls", menuId);
+    content.setAttribute("aria-haspopup", "menu");
+    content.setAttribute("aria-expanded", "true");
+    if (document.getElementById(activeId)) content.setAttribute("aria-activedescendant", activeId);
+    const query = document.querySelector("[data-slash-query]");
+    if (kind === "slash" && query) {
+      query.setAttribute("aria-controls", menuId);
+      if (document.getElementById(activeId)) query.setAttribute("aria-activedescendant", activeId);
+    }
+  }
+}
+
+function registerServiceWorkerUpdateFlow() {
+  if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!serviceWorkerUpdateApplying) return;
+    window.location.reload();
+  });
+  navigator.serviceWorker
+    .register("/service-worker.js", { updateViaCache: "none" })
+    .then((registration) => {
+      observeServiceWorkerRegistration(registration);
+      return registration.update();
+    })
+    .catch(() => {});
+}
+
+function observeServiceWorkerRegistration(registration) {
+  if (registration.waiting) setWaitingServiceWorkerRegistration(registration);
+  registration.addEventListener("updatefound", () => {
+    const worker = registration.installing;
+    if (!worker) return;
+    worker.addEventListener("statechange", () => {
+      if (worker.state === "installed" && navigator.serviceWorker.controller && registration.waiting) {
+        setWaitingServiceWorkerRegistration(registration);
+      }
+    });
+  });
+}
+
+function setWaitingServiceWorkerRegistration(registration) {
+  waitingServiceWorkerRegistration = registration;
+  serviceWorkerUpdateAvailable = true;
+  renderServiceWorkerUpdateNoticeIfNeeded();
+}
+
+function hasUnsavedResourceWork() {
+  return Boolean(
+    localResourcePersistence.pending ||
+    localResourcePersistence.operations.length ||
+    remoteStateSavePending ||
+    remoteStateSaveInFlight ||
+    databaseBackendStatus.saving ||
+    databaseBackendStatus.conflict ||
+    Object.keys(ui.resourceTitleDrafts).length
+  );
+}
+
+function renderServiceWorkerUpdateNotice() {
+  if (!serviceWorkerUpdateAvailable) return "";
+  const blocked = hasUnsavedResourceWork();
+  return `
+    <section class="service-worker-update" data-service-worker-update data-update-state="${blocked ? "blocked" : "ready"}" role="status">
+      <div><strong>새 앱 버전 준비됨</strong><span>${blocked ? "pending 저장을 마친 뒤 적용할 수 있습니다." : "저장된 상태입니다. 준비가 되면 업데이트하세요."}</span></div>
+      <button class="button" type="button" data-action="apply-app-update" ${blocked ? "disabled" : ""}>업데이트 적용</button>
+    </section>
+  `;
+}
+
+function renderServiceWorkerUpdateNoticeIfNeeded() {
+  if (!serviceWorkerUpdateAvailable || !els.overlayRoot) return;
+  renderOverlays();
+}
+
+async function applyWaitingServiceWorkerUpdate() {
+  if (!serviceWorkerUpdateAvailable || hasUnsavedResourceWork()) return false;
+  serviceWorkerUpdateApplying = true;
+  const registration = waitingServiceWorkerRegistration || await navigator.serviceWorker.getRegistration();
+  if (registration?.waiting) {
+    registration.waiting.postMessage({ type: "SKIP_WAITING" });
+    window.setTimeout(() => {
+      if (serviceWorkerUpdateApplying) window.location.reload();
+    }, 750);
+  } else {
+    window.location.reload();
+  }
+  return true;
+}
+
+function handleResourceConnectionLost() {
+  patchResourcePageSaveStatus();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+}
+
+async function handleResourceConnectionRestored() {
+  if (databaseBackendStatus.conflict) {
+    patchResourcePageSaveStatus();
+    return;
+  }
+  if (localResourcePersistence.operations.length) {
+    await markLocalResourceOperations("retrying", { incrementAttempts: false });
+    remoteStateSavePending = true;
+  }
+  if (databaseBackendStatus.connected) {
+    queueRemoteStateSave({ immediate: true });
+  } else {
+    initializeDatabaseState();
+  }
+  patchResourcePageSaveStatus();
 }
 
 function updateTaskSchedulingMode() {
@@ -4993,7 +6425,7 @@ function renderSlashMenu() {
   const safeSelectedIndex = entries.length ? Math.max(0, Math.min(selectedIndex, entries.length - 1)) : 0;
   const isSearchable = slashMenuAcceptsSearchInput();
   return `
-    <div class="slash-menu ${mode === "selection" ? "is-selection-menu" : ""} ${mode === "insert" ? "is-insert-menu" : ""}" style="left:${x}px;top:${y}px" role="menu" aria-label="블록 서식">
+    <div class="slash-menu ${mode === "selection" ? "is-selection-menu" : ""} ${mode === "insert" ? "is-insert-menu" : ""}" id="${esc(editorCommandMenuId("slash", blockId))}" style="left:${x}px;top:${y}px" role="menu" aria-label="블록 서식">
       ${isSearchable ? renderSlashMenuSearch(query, mode === "selection" ? selectedBlocksMenuSelection()?.ids.length || 0 : null) : ""}
       ${mode === "selection" && !query.trim() ? renderSelectedBlocksMenuActions() : ""}
       ${mode === "selection" ? `<div class="slash-menu-section-title">전환</div>` : ""}
@@ -5093,7 +6525,7 @@ function renderSlashMenuItems(ownerType, ownerId, blockId, selectedIndex, entrie
       ? `data-slash-action="${type}"`
       : `data-block-type="${type}" data-owner-type="${ownerType}" data-owner-id="${ownerId}" data-block-id="${blockId}"`;
     items += `
-      <button class="menu-item${actionClass} ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-slash-index="${index}" ${dataset} ${index === selectedIndex ? `aria-current="true"` : ""}>
+      <button class="menu-item${actionClass} ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("slash", blockId, index))}" type="button" role="menuitem" data-slash-index="${index}" ${dataset} ${index === selectedIndex ? `aria-current="true"` : ""}>
         <span class="menu-icon">${icon}</span>
         <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(slashMenuEntryHint(type))}</span></span>
       </button>
@@ -5103,20 +6535,20 @@ function renderSlashMenuItems(ownerType, ownerId, blockId, selectedIndex, entrie
 }
 
 function renderMentionMenu() {
-  const { x, y, query = "", selectedIndex = 0 } = ui.mention || {};
+  const { x, y, query = "", selectedIndex = 0, blockId = "" } = ui.mention || {};
   const entries = mentionMenuEntries(query);
   const safeSelectedIndex = entries.length ? Math.max(0, Math.min(selectedIndex, entries.length - 1)) : 0;
   return `
-    <div class="mention-menu" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="@ 멘션">
-      ${renderMentionMenuItems(entries, safeSelectedIndex)}
+    <div class="mention-menu" id="${esc(editorCommandMenuId("mention", blockId))}" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="@ 멘션">
+      ${renderMentionMenuItems(entries, safeSelectedIndex, blockId)}
     </div>
   `;
 }
 
-function renderMentionMenuItems(entries, selectedIndex = 0) {
+function renderMentionMenuItems(entries, selectedIndex = 0, blockId = "") {
   if (!entries.length) return `<div class="slash-menu-empty" role="status">일치하는 멘션이 없습니다</div>`;
   return entries.map((entry, index) => `
-    <button class="menu-item mention-menu-item ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-mention-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
+    <button class="menu-item mention-menu-item ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("mention", blockId, index))}" type="button" role="menuitem" data-mention-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
       <span class="menu-icon">${esc(entry.icon || "@")}</span>
       <span class="menu-text"><strong>${esc(entry.label)}</strong><span>${esc(entry.hint || "")}</span></span>
     </button>
@@ -5124,20 +6556,20 @@ function renderMentionMenuItems(entries, selectedIndex = 0) {
 }
 
 function renderPageCommandMenu() {
-  const { x, y, query = "", selectedIndex = 0, trigger = "brackets" } = ui.pageCommand || {};
+  const { x, y, query = "", selectedIndex = 0, trigger = "brackets", blockId = "" } = ui.pageCommand || {};
   const entries = pageCommandMenuEntries(query, trigger);
   const safeSelectedIndex = entries.length ? Math.max(0, Math.min(selectedIndex, entries.length - 1)) : 0;
   return `
-    <div class="mention-menu page-command-menu" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="${esc(pageCommandTriggerLabel(trigger))} 페이지 명령">
-      ${renderPageCommandMenuItems(entries, safeSelectedIndex)}
+    <div class="mention-menu page-command-menu" id="${esc(editorCommandMenuId("page-command", blockId))}" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="${esc(pageCommandTriggerLabel(trigger))} 페이지 명령">
+      ${renderPageCommandMenuItems(entries, safeSelectedIndex, blockId)}
     </div>
   `;
 }
 
-function renderPageCommandMenuItems(entries, selectedIndex = 0) {
+function renderPageCommandMenuItems(entries, selectedIndex = 0, blockId = "") {
   if (!entries.length) return `<div class="slash-menu-empty" role="status">일치하는 페이지가 없습니다</div>`;
   return entries.map((entry, index) => `
-    <button class="menu-item mention-menu-item page-command-item ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-page-command-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
+    <button class="menu-item mention-menu-item page-command-item ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("page-command", blockId, index))}" type="button" role="menuitem" data-page-command-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
       <span class="menu-icon">${esc(entry.icon || "@")}</span>
       <span class="menu-text"><strong>${esc(entry.label)}</strong><span>${esc(entry.hint || "")}</span></span>
     </button>
@@ -5145,20 +6577,20 @@ function renderPageCommandMenuItems(entries, selectedIndex = 0) {
 }
 
 function renderEmojiMenu() {
-  const { x, y, query = "", selectedIndex = 0 } = ui.emojiCommand || {};
+  const { x, y, query = "", selectedIndex = 0, blockId = "" } = ui.emojiCommand || {};
   const entries = emojiMenuEntries(query);
   const safeSelectedIndex = entries.length ? Math.max(0, Math.min(selectedIndex, entries.length - 1)) : 0;
   return `
-    <div class="mention-menu emoji-menu" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="Emoji">
-      ${renderEmojiMenuItems(entries, safeSelectedIndex)}
+    <div class="mention-menu emoji-menu" id="${esc(editorCommandMenuId("emoji", blockId))}" style="left:${Math.round(x || 12)}px;top:${Math.round(y || 12)}px" role="menu" aria-label="Emoji">
+      ${renderEmojiMenuItems(entries, safeSelectedIndex, blockId)}
     </div>
   `;
 }
 
-function renderEmojiMenuItems(entries, selectedIndex = 0) {
+function renderEmojiMenuItems(entries, selectedIndex = 0, blockId = "") {
   if (!entries.length) return `<div class="slash-menu-empty" role="status">일치하는 이모지가 없습니다</div>`;
   return entries.map((entry, index) => `
-    <button class="menu-item mention-menu-item emoji-menu-item ${index === selectedIndex ? "is-active" : ""}" type="button" role="menuitem" data-emoji-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
+    <button class="menu-item mention-menu-item emoji-menu-item ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("emoji", blockId, index))}" type="button" role="menuitem" data-emoji-index="${index}" ${index === selectedIndex ? `aria-current="true"` : ""}>
       <span class="menu-icon">${esc(entry.emoji)}</span>
       <span class="menu-text"><strong>${esc(entry.label)}</strong><span>${esc(entry.aliases?.[0] || "emoji")}</span></span>
     </button>
@@ -5504,34 +6936,65 @@ function dateField(label, field, value) {
   return `<label class="field"><span>${esc(label)}</span><input class="input" type="date" data-field="${field}" value="${esc(value || "")}"></label>`;
 }
 
-function checkboxField(label, field, value) {
+function checkboxField(label, field, value, options = {}) {
+  const disabled = options.disabled === true ? 'disabled aria-disabled="true"' : "";
   return `
-    <label class="field">
+    <label class="field field-checkbox">
       <span>${esc(label)}</span>
-      <select class="select" data-field="${field}">
-        <option value="true" ${value ? "selected" : ""}>예</option>
-        <option value="false" ${!value ? "selected" : ""}>아니오</option>
-      </select>
+      <input class="resource-checkbox" type="checkbox" role="switch" data-field="${field}" ${value ? "checked" : ""} aria-label="${esc(label)}" ${disabled}>
     </label>
   `;
 }
 
-function selectField(label, field, value, options) {
+function normalizeResourceExternalUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function renderResourceUrlField(resource) {
+  const safeUrl = normalizeResourceExternalUrl(resource.url);
+  const readOnly = resource.readOnly === true;
+  const editing = !readOnly && ui.resourceUrlEditorId === resource.id;
+  return `
+    <div class="field resource-url-field">
+      <span>URL</span>
+      ${editing
+        ? `<input class="input" data-resource-url-editor="${resource.id}" value="${esc(resource.url || "")}" aria-label="Resource URL 편집">`
+        : `<div class="resource-url-value">${safeUrl ? `<span title="${esc(safeUrl)}">${esc(safeUrl)}</span>` : `<span class="is-empty">${resource.url ? "지원하지 않는 URL" : "비어 있음"}</span>`}</div>`}
+      <div class="resource-url-actions" data-resource-url-actions>
+        ${safeUrl ? `<a data-resource-url-action="open" href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer">Open</a>` : ""}
+        <button type="button" data-resource-url-action="copy" data-resource-url-owner="${resource.id}" ${safeUrl ? "" : "disabled"}>Copy</button>
+        <button type="button" data-resource-url-action="edit" data-resource-url-owner="${resource.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Edit</button>
+        <button type="button" data-resource-url-action="clear" data-resource-url-owner="${resource.id}" ${readOnly || !resource.url ? 'disabled aria-disabled="true"' : ""}>Clear</button>
+      </div>
+    </div>
+  `;
+}
+
+function selectField(label, field, value, options, fieldOptions = {}) {
+  const disabled = fieldOptions.disabled === true ? 'disabled aria-disabled="true"' : "";
   return `
     <label class="field">
       <span>${esc(label)}</span>
-      <select class="select" data-field="${field}">
+      <select class="select" data-field="${field}" ${disabled}>
         ${renderSelectOptions(options, value)}
       </select>
     </label>
   `;
 }
 
-function relationField(label, field, value, items, nameField) {
+function relationField(label, field, value, items, nameField, options = {}) {
+  const disabled = options.disabled === true ? 'disabled aria-disabled="true"' : "";
   return `
     <label class="field">
       <span>${esc(label)}</span>
-      <select class="select" data-field="${field}">
+      <select class="select" data-field="${field}" ${disabled}>
         ${renderRelationOptions(items, value, nameField)}
       </select>
     </label>
@@ -5589,6 +7052,18 @@ function handleClick(event) {
     event.stopPropagation();
     activateBlockContent(clickedCommentBlock);
     const editor = clickedCommentBlock.closest(".block-editor");
+    const resource = editor?.dataset.ownerType === "resources" ? itemById("resources", editor.dataset.ownerId) : null;
+    const threadedComment = resource?.commentThreads?.find((thread) => thread.id === clickedInlineComment.dataset.inlineCommentId);
+    if (threadedComment) {
+      ui.resourceCommentsId = resource.id;
+      ui.resourceCommentFocusId = threadedComment.id;
+      ui.commentPopover = null;
+      renderDetail({ soft: true });
+      requestAnimationFrame(() => {
+        document.querySelector(`[data-comment-thread="${cssEscape(threadedComment.id)}"]`)?.scrollIntoView({ block: "nearest" });
+      });
+      return;
+    }
     const range = textRangeForInlineElement(clickedCommentBlock, clickedInlineComment);
     openCommentPopover(
       editor.dataset.ownerType,
@@ -5763,6 +7238,20 @@ function handleClick(event) {
     return;
   }
 
+  const resourceSearchScope = event.target.closest("[data-resource-search-scope]");
+  if (resourceSearchScope) {
+    event.preventDefault();
+    setResourceSearchScope(resourceSearchScope.dataset.resourceSearchScope);
+    return;
+  }
+
+  const resourceSearchClear = event.target.closest("[data-resource-search-clear]");
+  if (resourceSearchClear) {
+    event.preventDefault();
+    clearResourceSearch({ focus: true });
+    return;
+  }
+
   const viewMode = event.target.closest("[data-view-control-mode]");
   if (viewMode) {
     event.preventDefault();
@@ -5822,6 +7311,38 @@ function handleClick(event) {
     bringResourceNote(resourceNote.dataset.resourceNote);
   }
 
+  const resourceBackdrop = event.target.closest("[data-resource-backdrop]");
+  if (resourceBackdrop) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeResourceNote(resourceBackdrop.dataset.resourceBackdrop || "");
+    return;
+  }
+
+  const resourceNavigate = event.target.closest("[data-resource-navigate]");
+  if (resourceNavigate) {
+    event.preventDefault();
+    event.stopPropagation();
+    navigateResourcePage(resourceNavigate.dataset.resourceNavigate);
+    return;
+  }
+
+  const resourceExpand = event.target.closest("[data-resource-expand]");
+  if (resourceExpand) {
+    event.preventDefault();
+    event.stopPropagation();
+    expandResourcePage(resourceExpand.dataset.resourceExpand);
+    return;
+  }
+
+  const resourceCopyLink = event.target.closest("[data-resource-copy-link]");
+  if (resourceCopyLink) {
+    event.preventDefault();
+    event.stopPropagation();
+    copyResourcePageLink(resourceCopyLink.dataset.resourceCopyLink);
+    return;
+  }
+
   const resourceClose = event.target.closest("[data-resource-close]");
   if (resourceClose) {
     event.preventDefault();
@@ -5856,11 +7377,166 @@ function handleClick(event) {
     return;
   }
 
+  const resourceMobileAction = event.target.closest("[data-resource-mobile-action]");
+  if (resourceMobileAction) {
+    event.preventDefault();
+    const action = resourceMobileAction.dataset.resourceMobileAction;
+    const resourceId = resourceMobileAction.dataset.resourceMobileOwner || resourceMobileAction.closest("[data-resource-mobile-toolbar]")?.dataset.resourceMobileToolbar || "";
+    if (["undo", "redo", "add"].includes(action) && !resourceMutationAllowed(resourceId)) return;
+    if (action === "undo") undoEditorHistory();
+    else if (action === "redo") redoEditorHistory();
+    else if (action === "add") focusEditorBottom("resources", resourceId);
+    else if (action === "properties") toggleResourceProps(resourceId);
+    else if (action === "comments") toggleResourceComments(resourceId);
+    return;
+  }
+
+  const resourcePageMenu = event.target.closest("[data-resource-page-menu]");
+  if (resourcePageMenu) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleResourcePageMenu(resourcePageMenu.dataset.resourcePageMenu);
+    return;
+  }
+
+  const resourceIconEdit = event.target.closest("[data-resource-icon-edit]");
+  if (resourceIconEdit) {
+    event.preventDefault();
+    toggleResourceIconPicker(resourceIconEdit.dataset.resourceIconEdit);
+    return;
+  }
+
+  const resourceIconChoice = event.target.closest("[data-resource-icon-choice]");
+  if (resourceIconChoice) {
+    event.preventDefault();
+    setResourceIcon(resourceIconChoice.dataset.resourceIconOwner, resourceIconChoice.dataset.resourceIconChoice);
+    return;
+  }
+
+  const resourceIconRemove = event.target.closest("[data-resource-icon-remove]");
+  if (resourceIconRemove) {
+    event.preventDefault();
+    setResourceIcon(resourceIconRemove.dataset.resourceIconRemove, "");
+    return;
+  }
+
+  const resourceCoverEdit = event.target.closest("[data-resource-cover-edit]");
+  if (resourceCoverEdit) {
+    event.preventDefault();
+    toggleResourceCoverEditor(resourceCoverEdit.dataset.resourceCoverEdit);
+    return;
+  }
+
+  const resourceCoverApply = event.target.closest("[data-resource-cover-apply]");
+  if (resourceCoverApply) {
+    event.preventDefault();
+    applyResourceCover(resourceCoverApply.dataset.resourceCoverApply);
+    return;
+  }
+
+  const resourceCoverRemove = event.target.closest("[data-resource-cover-remove]");
+  if (resourceCoverRemove) {
+    event.preventDefault();
+    removeResourceCover(resourceCoverRemove.dataset.resourceCoverRemove);
+    return;
+  }
+
+  const resourceCoverCancel = event.target.closest("[data-resource-cover-cancel]");
+  if (resourceCoverCancel) {
+    event.preventDefault();
+    ui.resourceCoverEditorId = "";
+    patchResourceMedia(itemById("resources", resourceCoverCancel.dataset.resourceCoverCancel));
+    return;
+  }
+
+  const resourcePageFont = event.target.closest("[data-resource-page-font]");
+  if (resourcePageFont) {
+    event.preventDefault();
+    setResourcePageSetting(resourcePageFont.dataset.resourcePageOwner, "font", resourcePageFont.dataset.resourcePageFont);
+    return;
+  }
+
+  const resourcePageOption = event.target.closest("[data-resource-page-option]");
+  if (resourcePageOption) {
+    event.preventDefault();
+    toggleResourcePageSetting(resourcePageOption.dataset.resourcePageOwner, resourcePageOption.dataset.resourcePageOption);
+    return;
+  }
+
+  const moveResourceToTrash = event.target.closest("[data-resource-move-to-trash]");
+  if (moveResourceToTrash) {
+    event.preventDefault();
+    moveResourcePageToTrash(moveResourceToTrash.dataset.resourceMoveToTrash);
+    return;
+  }
+
+  const restoreResource = event.target.closest("[data-resource-restore], [data-resource-trash-undo]");
+  if (restoreResource) {
+    event.preventDefault();
+    restoreResourcePage(restoreResource.dataset.resourceRestore || restoreResource.dataset.resourceTrashUndo);
+    return;
+  }
+
+  const createResourceChild = event.target.closest("[data-resource-create-child]");
+  if (createResourceChild) {
+    event.preventDefault();
+    createResourceSubPage(createResourceChild.dataset.resourceCreateChild);
+    return;
+  }
+
+  const resourceCommentsToggle = event.target.closest("[data-resource-comments-toggle]");
+  if (resourceCommentsToggle) {
+    event.preventDefault();
+    toggleResourceComments(resourceCommentsToggle.dataset.resourceCommentsToggle);
+    return;
+  }
+
+  const pageDiscussionSubmit = event.target.closest("[data-page-discussion-submit]");
+  if (pageDiscussionSubmit) {
+    event.preventDefault();
+    submitPageDiscussion(pageDiscussionSubmit.dataset.pageDiscussionSubmit);
+    return;
+  }
+
+  const commentReplySubmit = event.target.closest("[data-comment-reply-submit]");
+  if (commentReplySubmit) {
+    event.preventDefault();
+    submitResourceCommentReply(commentReplySubmit.dataset.commentReplySubmit);
+    return;
+  }
+
+  const commentStatus = event.target.closest("[data-comment-resolve], [data-comment-reopen]");
+  if (commentStatus) {
+    event.preventDefault();
+    setResourceCommentResolved(
+      commentStatus.dataset.commentResolve || commentStatus.dataset.commentReopen,
+      Boolean(commentStatus.dataset.commentResolve),
+    );
+    return;
+  }
+
+  const resourceUrlAction = event.target.closest("[data-resource-url-action]");
+  if (resourceUrlAction && resourceUrlAction.tagName !== "A") {
+    event.preventDefault();
+    handleResourceUrlAction(resourceUrlAction.dataset.resourceUrlOwner, resourceUrlAction.dataset.resourceUrlAction);
+    return;
+  }
+
+  const conflictResolution = event.target.closest("[data-conflict-resolution]");
+  if (conflictResolution) {
+    event.preventDefault();
+    resolveResourceSyncConflict(
+      conflictResolution.dataset.conflictResource,
+      conflictResolution.dataset.conflictResolution,
+    );
+    return;
+  }
+
   const openResource = event.target.closest("[data-open-resource]");
   if (openResource) {
     event.preventDefault();
     event.stopPropagation();
-    openResourceNote(openResource.dataset.openResource);
+    openResourceNote(openResource.dataset.openResource, { opener: openResource });
     return;
   }
 
@@ -6218,6 +7894,8 @@ function handleAction(action) {
   if (action === "fetch-google") return fetchGoogleCalendarEvents();
   if (action === "sync-google") return syncGoogleCalendar();
   if (action === "export-json") return exportJson();
+  if (action === "reload-remote-state") return reloadRemoteStateAfterConflict();
+  if (action === "apply-app-update") return applyWaitingServiceWorkerUpdate();
   if (action === "reset-demo-data") return resetDemoData();
 }
 
@@ -6316,17 +7994,13 @@ function handleInput(event) {
   const viewSearch = event.target.closest("[data-view-control-search]");
   if (viewSearch) {
     if (viewSearch.dataset.viewControlSearch !== "resources") return;
-    updateViewControl(viewSearch.dataset.viewControlSearch, "search", viewSearch.value, { save: true });
+    updateResourceSearchFromInput(viewSearch, event);
     return;
   }
 
   const resourceTitle = event.target.closest("[data-resource-title]");
   if (resourceTitle) {
-    const resource = itemById("resources", resourceTitle.dataset.resourceTitle);
-    if (!resource) return;
-    resource.title = resourceTitle.value;
-    saveState();
-    renderView({ soft: true });
+    updateResourceTitleFromInput(resourceTitle, event);
     return;
   }
 
@@ -6343,6 +8017,13 @@ function handleInput(event) {
 
   const blockContent = event.target.closest("[data-block-content]");
   if (blockContent) {
+    const editor = blockContent.closest(".block-editor");
+    if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) {
+      const resource = itemById("resources", editor.dataset.ownerId);
+      const block = resource?.blocks?.find((entry) => entry.id === blockContent.dataset.blockContent);
+      if (block) syncBlockContentMarkupFromState(blockContent, block);
+      return;
+    }
     if (isSelectedBlocksMenuOpen()) {
       event.preventDefault?.();
       renderDetail({ soft: true });
@@ -6367,6 +8048,34 @@ function handleInput(event) {
 }
 
 function handleChange(event) {
+  const resourceCoverPosition = event.target.closest("[data-resource-cover-position]");
+  if (resourceCoverPosition) {
+    setResourceCoverPosition(resourceCoverPosition.dataset.resourceCoverPosition, resourceCoverPosition.value);
+    return;
+  }
+  const resourceUrlEditor = event.target.closest("[data-resource-url-editor]");
+  if (resourceUrlEditor) {
+    updateResourceUrl(resourceUrlEditor.dataset.resourceUrlEditor, resourceUrlEditor.value);
+    return;
+  }
+
+  const resourceParent = event.target.closest("[data-resource-parent]");
+  if (resourceParent) {
+    const resource = itemById("resources", resourceParent.dataset.resourceParent);
+    if (!resourceMutationAllowed(resource)) {
+      resourceParent.value = resource?.parentId || "";
+      return;
+    }
+    setResourceParent(resourceParent.dataset.resourceParent, resourceParent.value);
+    return;
+  }
+
+  const resourceOpenPagesIn = event.target.closest("[data-resource-open-pages-in]");
+  if (resourceOpenPagesIn) {
+    setResourceOpenPagesIn(resourceOpenPagesIn.dataset.resourceOpenPagesIn, resourceOpenPagesIn.value);
+    return;
+  }
+
   const viewControlField = event.target.closest("[data-view-control-field]");
   if (viewControlField) {
     updateViewControl(viewControlField.dataset.viewControlField, viewControlField.dataset.controlField || "", viewControlField.value);
@@ -6396,18 +8105,26 @@ function handleChange(event) {
       ? itemById(inlineType, inlineOwner.dataset.inlineOwnerId)
       : null;
   if (!item) return;
-  let value = field.value;
+  let value = field.type === "checkbox" ? field.checked : field.value;
   if (value === "true") value = true;
   if (value === "false") value = false;
   if (field.type === "number") value = Number(value);
   const ownerType = resourceNote ? "resources" : inlineType || "";
+  if (!editorOwnerMutationAllowed(ownerType, item.id)) {
+    if (field.type === "checkbox") field.checked = Boolean(item[field.dataset.field]);
+    else field.value = String(item[field.dataset.field] ?? "");
+    return;
+  }
+  const previousValue = item[field.dataset.field];
   applyFieldValue(ownerType, item, field.dataset.field, value);
+  if (ownerType === "resources" && !Object.is(previousValue, item[field.dataset.field])) touchResource(item);
   saveState();
   renderView({ soft: true });
   renderDetail({ soft: Boolean(resourceNote) });
 }
 
 function applyFieldValue(ownerType, item, fieldName, value) {
+  if (ownerType === "resources" && !resourceMutationAllowed(item)) return;
   if (ownerType === "tasks") {
     applyTaskFieldValue(item, fieldName, value);
     return;
@@ -6437,6 +8154,12 @@ function handleBeforeInput(event) {
 
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
+  const ownerEditor = blockContent.closest(".block-editor");
+  if (ownerEditor && !editorOwnerMutationAllowed(ownerEditor.dataset.ownerType, ownerEditor.dataset.ownerId)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (isComposingInput(event, blockContent)) return;
   if (handlePendingSoftLineBreakBeforeInput(event, blockContent)) return;
   if (handlePendingMarkdownTextBeforeInput(event, blockContent)) return;
@@ -6498,8 +8221,23 @@ function nextSlashQueryValue(input, inserted = "", options = {}) {
 }
 
 function handleCompositionStart(event) {
+  const resourceSearch = event.target.closest("[data-view-control-search='resources']");
+  if (resourceSearch) {
+    ui.resourceSearchComposing = true;
+    return;
+  }
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (resourceTitle) {
+    const resourceId = resourceTitle.dataset.resourceTitle;
+    if (!resourceMutationAllowed(resourceId)) return;
+    ui.resourceTitleComposingIds.add(resourceId);
+    ensureResourceTitleDraft(resourceId);
+    return;
+  }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
+  const editor = blockContent.closest(".block-editor");
+  if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const offsets = selectionOffsetsInside(blockContent);
   ui.composingBlockId = blockContent.dataset.blockContent;
   ui.compositionState = {
@@ -6511,14 +8249,33 @@ function handleCompositionStart(event) {
 }
 
 function handleCompositionUpdate(event) {
+  if (event.target.closest("[data-view-control-search='resources'], [data-resource-title]")) return;
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
+  const editor = blockContent.closest(".block-editor");
+  if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   syncComposingBlockEmptyState(blockContent, event);
 }
 
 function handleCompositionEnd(event) {
+  const resourceSearch = event.target.closest("[data-view-control-search='resources']");
+  if (resourceSearch) {
+    ui.resourceSearchComposing = false;
+    updateResourceSearchFromInput(resourceSearch, event, { force: true });
+    return;
+  }
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (resourceTitle) {
+    const resourceId = resourceTitle.dataset.resourceTitle;
+    ui.resourceTitleComposingIds.delete(resourceId);
+    if (!resourceMutationAllowed(resourceId)) return;
+    updateResourceTitleFromInput(resourceTitle, event, { force: true });
+    return;
+  }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
+  const editor = blockContent.closest(".block-editor");
+  if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const blockId = blockContent.dataset.blockContent;
   const compositionState = ui.compositionState?.blockId === blockId ? ui.compositionState : null;
   const currentText = blockContent.textContent || "";
@@ -6625,6 +8382,17 @@ function handleFocusIn(event) {
 }
 
 function handleFocusOut(event) {
+  const resourceSearch = event.target.closest("[data-view-control-search='resources']");
+  if (resourceSearch && !ui.resourceSearchComposing) {
+    commitResourceSearchSave();
+    return;
+  }
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (resourceTitle) {
+    const resourceId = resourceTitle.dataset.resourceTitle;
+    if (!ui.resourceTitleComposingIds.has(resourceId)) commitResourceTitleDraft(resourceId);
+    return;
+  }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
   rememberEditableControlFocusRangeFromFocusOut(blockContent, event.relatedTarget);
@@ -6731,6 +8499,7 @@ function editorWhitespaceBlockClickTarget(event) {
 }
 
 function focusEditorBottom(ownerType, ownerId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   const item = itemById(ownerType, ownerId);
   if (!item) return;
   const editableBlocks = ensureEditableBlocks(item);
@@ -6752,6 +8521,102 @@ function focusEditorBottom(ownerType, ownerId) {
 }
 
 function openResourceNote(resourceId, options = {}) {
+  const resource = itemById("resources", resourceId);
+  if (!resource) return;
+  if (resourceAdvancedWindowModeEnabled()) {
+    openAdvancedResourceNote(resourceId, options);
+    return;
+  }
+  const existingRoute = resourceRouteFromLocation();
+  const currentNote = ui.resourceNotes[0] || null;
+  const requestedMode = RESOURCE_OPEN_PAGE_MODES.has(options.pageMode)
+    ? options.pageMode
+    : RESOURCE_OPEN_PAGE_MODES.has(options.mode)
+      ? options.mode
+      : "";
+  const pageMode = normalizeResourcePageMode(
+    requestedMode || (existingRoute && currentNote ? currentNote.pageMode : resourceOpenModeForCurrentView()),
+  );
+  if (options.rememberFocus !== false) rememberResourceRouteFocus(options.opener, resourceId);
+  ui.resourceRouteNotFound = "";
+  ui.resourceNotes = [createParityResourceNote(resourceId, pageMode, currentNote?.id === resourceId ? currentNote : null)];
+  ui.commandOpen = false;
+  ui.slash = null;
+  ui.mention = null;
+  ui.pageCommand = null;
+  ui.emojiCommand = null;
+  ui.equationPopover = null;
+  if (options.route !== false) {
+    writeResourceRouteHistory(resourceId, pageMode, { replace: options.replace === true || Boolean(existingRoute) });
+  }
+  renderDetail();
+  if (pageMode === "center" || pageMode === "full") requestAnimationFrame(focusResourcePageShell);
+}
+
+function createParityResourceNote(resourceId, pageMode, previous = null) {
+  return {
+    id: resourceId,
+    mode: "center",
+    pageMode: normalizeResourcePageMode(pageMode),
+    x: Math.round(window.innerWidth / 2 - 390),
+    y: Math.max(48, Math.round(window.innerHeight / 2 - 330)),
+    z: ++ui.resourceNoteZ,
+    showProps: Boolean(previous?.showProps),
+    scrollTop: Number.isFinite(previous?.scrollTop) ? previous.scrollTop : 0,
+    scrollLeft: Number.isFinite(previous?.scrollLeft) ? previous.scrollLeft : 0,
+  };
+}
+
+function resourceOpenModeForCurrentView() {
+  if (ui.view !== "resources") return "center";
+  const resourceView = viewControl("resources").mode || "library";
+  return normalizeResourcePageMode(state.settings?.openPagesIn?.[resourceView] || DEFAULT_RESOURCE_OPEN_PAGES_IN[resourceView]);
+}
+
+function navigateResourcePage(direction) {
+  if (resourceAdvancedWindowModeEnabled()) return;
+  const note = ui.resourceNotes[0];
+  if (!note) return;
+  const navigation = resourcePageNavigation(note.id);
+  const target = direction === "previous" ? navigation.previous : direction === "next" ? navigation.next : null;
+  if (!target) return;
+  openResourceNote(target.id, {
+    pageMode: note.pageMode,
+    replace: true,
+    rememberFocus: false,
+  });
+}
+
+function expandResourcePage(resourceId) {
+  if (resourceAdvancedWindowModeEnabled()) return;
+  const note = resourceNoteById(resourceId);
+  if (!note || normalizeResourcePageMode(note.pageMode) === "full") return;
+  note.pageMode = "full";
+  writeResourceRouteHistory(resourceId, "full", { replace: false });
+  renderDetail();
+  requestAnimationFrame(focusResourcePageShell);
+}
+
+async function copyResourcePageLink(resourceId) {
+  const url = new URL(resourceDeepLink(resourceId), window.location.origin).href;
+  try {
+    await navigator.clipboard.writeText(url);
+    showToast("Resource 링크를 복사했습니다.");
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = url;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    showToast(copied ? "Resource 링크를 복사했습니다." : "Resource 링크를 복사하지 못했습니다.");
+  }
+}
+
+function openAdvancedResourceNote(resourceId, options = {}) {
   const resource = itemById("resources", resourceId);
   if (!resource) return;
   const splitLayoutActive = resourceSplitNotes().length > 0;
@@ -6934,6 +8799,19 @@ function activateResourceTripleSplit(resourceId) {
 }
 
 function closeResourceNote(resourceId) {
+  if (!resourceAdvancedWindowModeEnabled()) {
+    commitResourceTitleDraft(resourceId);
+    const route = resourceRouteFromLocation();
+    const routeState = resourceHistoryState();
+    if (route && routeState?.id === route.id) {
+      window.history.back();
+      return;
+    }
+    const contextUrl = safeResourceContextUrl(routeState?.contextUrl || ui.resourceRouteContextUrl);
+    window.history.replaceState(clearResourceHistoryState(), "", contextUrl);
+    closeParityResourcePage({ render: true, restoreFocus: true });
+    return;
+  }
   removeByFieldInPlace(ui.resourceNotes, "id", resourceId);
   if (ui.resourceDrag?.id === resourceId) ui.resourceDrag = null;
   if (ui.resourceResize?.id === resourceId) ui.resourceResize = null;
@@ -6943,6 +8821,7 @@ function closeResourceNote(resourceId) {
 
 function bringResourceNote(resourceId, note = resourceNoteById(resourceId)) {
   if (!note) return null;
+  if (!resourceAdvancedWindowModeEnabled()) return note;
   note.z = ++ui.resourceNoteZ;
   const element = document.querySelector(`[data-resource-note="${resourceId}"]`);
   if (element) element.style.zIndex = note.z;
@@ -6978,6 +8857,366 @@ function toggleResourceProps(resourceId) {
   toggle.setAttribute("aria-expanded", note.showProps ? "true" : "false");
   toggle.querySelector("strong").textContent = note.showProps ? "숨기기" : "보기";
   props.classList.toggle("is-open", note.showProps);
+  props.hidden = !note.showProps;
+  props.toggleAttribute("inert", !note.showProps);
+  if (note.showProps) props.removeAttribute("aria-hidden");
+  else props.setAttribute("aria-hidden", "true");
+}
+
+function toggleResourcePageMenu(resourceId) {
+  if (!resourceMutationAllowed(resourceId)) return;
+  if (ui.resourcePageMenuId === resourceId) {
+    closeResourcePageMenu({ focus: true });
+    return;
+  }
+  closeResourcePageMenu({ focus: false });
+  ui.resourcePageMenuId = resourceId;
+  const trigger = document.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`);
+  const wrap = trigger?.closest(".resource-page-menu-wrap");
+  if (!trigger || !wrap) {
+    ui.resourcePageMenuId = "";
+    return;
+  }
+  trigger.setAttribute("aria-expanded", "true");
+  wrap.insertAdjacentHTML("beforeend", renderResourcePageMenu(itemById("resources", resourceId)));
+  requestAnimationFrame(() => wrap.querySelector("[role^='menuitem']")?.focus());
+}
+
+function closeResourcePageMenu(options = {}) {
+  const resourceId = ui.resourcePageMenuId;
+  if (!resourceId) return false;
+  ui.resourcePageMenuId = "";
+  document.querySelector(`[data-resource-page-menu-panel="${cssEscape(resourceId)}"]`)?.remove();
+  const trigger = document.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`);
+  trigger?.setAttribute("aria-expanded", "false");
+  if (options.focus !== false) {
+    requestAnimationFrame(() => trigger?.focus());
+  }
+  return true;
+}
+
+function setResourcePageSetting(resourceId, key, value) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  const settings = normalizeResourcePageSettings(resource.pageSettings);
+  if (key !== "font" || !["default", "serif", "mono"].includes(value) || settings.font === value) return;
+  settings.font = value;
+  resource.pageSettings = settings;
+  touchResource(resource);
+  saveState();
+  patchResourcePageSettings(resource);
+  closeResourcePageMenu({ focus: true });
+}
+
+function toggleResourcePageSetting(resourceId, key) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource) || !["smallText", "fullWidth"].includes(key)) return;
+  const settings = normalizeResourcePageSettings(resource.pageSettings);
+  settings[key] = !settings[key];
+  resource.pageSettings = settings;
+  touchResource(resource);
+  saveState();
+  patchResourcePageSettings(resource);
+  closeResourcePageMenu({ focus: true });
+}
+
+function patchResourcePageSettings(resource) {
+  const shell = document.querySelector(`[data-resource-note="${cssEscape(resource.id)}"]`);
+  if (!shell) return;
+  const settings = normalizeResourcePageSettings(resource.pageSettings);
+  shell.dataset.resourceFont = settings.font;
+  shell.dataset.resourceSmallText = settings.smallText ? "true" : "false";
+  shell.dataset.resourceFullWidth = settings.fullWidth ? "true" : "false";
+}
+
+function patchResourceMedia(resource) {
+  if (!resource) return;
+  const current = document.querySelector(`[data-resource-media="${cssEscape(resource.id)}"]`);
+  if (!current) return;
+  const template = document.createElement("template");
+  template.innerHTML = renderResourceMedia(resource).trim();
+  current.replaceWith(template.content.firstElementChild);
+}
+
+function toggleResourceIconPicker(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  ui.resourceIconPickerId = ui.resourceIconPickerId === resourceId ? "" : resourceId;
+  ui.resourceCoverEditorId = "";
+  patchResourceMedia(resource);
+  if (ui.resourceIconPickerId) requestAnimationFrame(() => document.querySelector(`[data-resource-icon-picker="${cssEscape(resourceId)}"] [role='menuitem']`)?.focus());
+}
+
+function setResourceIcon(resourceId, value) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  const icon = normalizeResourceIcon(value);
+  ui.resourceIconPickerId = "";
+  if (resource.icon !== icon) {
+    resource.icon = icon;
+    touchResource(resource);
+    saveState();
+  }
+  patchResourceMedia(resource);
+}
+
+function toggleResourceCoverEditor(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  ui.resourceCoverEditorId = ui.resourceCoverEditorId === resourceId ? "" : resourceId;
+  ui.resourceIconPickerId = "";
+  patchResourceMedia(resource);
+  if (ui.resourceCoverEditorId) requestAnimationFrame(() => document.querySelector(`[data-resource-cover-url="${cssEscape(resourceId)}"]`)?.focus());
+}
+
+function applyResourceCover(resourceId) {
+  const resource = itemById("resources", resourceId);
+  const input = document.querySelector(`[data-resource-cover-url="${cssEscape(resourceId)}"]`);
+  if (!resourceMutationAllowed(resource) || !input) return;
+  const rawUrl = String(input.value || "").trim();
+  let url = "";
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === "https:") url = parsed.href;
+  } catch {}
+  if (!url) {
+    input.setAttribute("aria-invalid", "true");
+    showToast("커버는 유효한 HTTPS 이미지 URL만 지원합니다.");
+    return;
+  }
+  const position = Number(document.querySelector(`[data-resource-cover-position="${cssEscape(resourceId)}"]`)?.value ?? resource.cover?.position ?? 50);
+  resource.cover = normalizeResourceCover({ url, position });
+  ui.resourceCoverEditorId = "";
+  touchResource(resource);
+  saveState();
+  patchResourceMedia(resource);
+}
+
+function removeResourceCover(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  resource.cover = { url: "", position: 50 };
+  ui.resourceCoverEditorId = "";
+  touchResource(resource);
+  saveState();
+  patchResourceMedia(resource);
+}
+
+function setResourceCoverPosition(resourceId, value) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource) || !resource.cover?.url) return;
+  const position = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  if (resource.cover.position === position) return;
+  resource.cover.position = position;
+  const image = document.querySelector(`[data-resource-cover="${cssEscape(resourceId)}"]`);
+  if (image) image.style.objectPosition = `center ${position}%`;
+  touchResource(resource);
+  saveState();
+}
+
+function handleResourceMediaLoad(event) {
+  const image = event.target.closest?.("[data-resource-cover]");
+  if (!image) return;
+  image.dataset.resourceCoverState = "ready";
+  image.closest("[data-resource-cover-area]")?.classList.remove("is-cover-error");
+}
+
+function handleResourceMediaError(event) {
+  const image = event.target.closest?.("[data-resource-cover]");
+  if (!image) return;
+  image.dataset.resourceCoverState = "error";
+  image.closest("[data-resource-cover-area]")?.classList.add("is-cover-error");
+}
+
+function moveResourcePageToTrash(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  resource.trashedAt = new Date().toISOString();
+  touchResource(resource);
+  ui.resourcePageMenuId = "";
+  ui.resourceCommentsId = "";
+  ui.resourceTrashUndoId = resourceId;
+  saveState();
+  renderView({ soft: true });
+  renderDetail({ soft: true });
+}
+
+function restoreResourcePage(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource, { allowTrashed: true }) || !resource.trashedAt) return;
+  resource.trashedAt = "";
+  touchResource(resource);
+  if (ui.resourceTrashUndoId === resourceId) ui.resourceTrashUndoId = "";
+  saveState();
+  renderView({ soft: true });
+  renderDetail({ soft: true });
+}
+
+function createResourceSubPage(parentId) {
+  const parent = itemById("resources", parentId);
+  if (!resourceMutationAllowed(parent)) return;
+  const child = createResource("Untitled", {
+    deferCreate: true,
+    initial: {
+      parentId,
+      boxId: parent.boxId || "",
+      goalId: parent.goalId || "",
+      projectId: parent.projectId || "",
+    },
+  });
+  parent.childOrder = Array.isArray(parent.childOrder) ? parent.childOrder : [];
+  if (!parent.childOrder.includes(child.id)) parent.childOrder.push(child.id);
+  touchResource(parent);
+  touchResource(child);
+  saveState();
+  renderView({ soft: true });
+  renderDetail({ soft: true });
+  showToast("하위 Resource를 만들었습니다.");
+}
+
+function setResourceParent(resourceId, requestedParentId) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  const parentId = String(requestedParentId || "");
+  const nextParent = parentId ? itemById("resources", parentId) : null;
+  if (parentId && (!nextParent || nextParent.trashedAt || parentId === resourceId || resourceDescendantIds(resourceId).has(parentId))) {
+    renderDetail({ soft: true });
+    return;
+  }
+  if (resource.parentId === parentId) return;
+  const previousParent = resource.parentId ? itemById("resources", resource.parentId) : null;
+  if ((previousParent && !resourceMutationAllowed(previousParent)) || (nextParent && !resourceMutationAllowed(nextParent))) return;
+  if (previousParent) {
+    previousParent.childOrder = (previousParent.childOrder || []).filter((childId) => childId !== resourceId);
+    touchResource(previousParent);
+  }
+  resource.parentId = parentId;
+  if (nextParent) {
+    nextParent.childOrder = Array.isArray(nextParent.childOrder) ? nextParent.childOrder : [];
+    if (!nextParent.childOrder.includes(resourceId)) nextParent.childOrder.push(resourceId);
+    touchResource(nextParent);
+  }
+  touchResource(resource);
+  saveState();
+  renderView({ soft: true });
+  renderDetail({ soft: true });
+}
+
+function toggleResourceComments(resourceId) {
+  if (!itemById("resources", resourceId)) return;
+  ui.resourceCommentsId = ui.resourceCommentsId === resourceId ? "" : resourceId;
+  if (!ui.resourceCommentsId) ui.resourceCommentFocusId = "";
+  ui.resourcePageMenuId = "";
+  renderDetail({ soft: true });
+}
+
+function newResourceCommentThread(scope, body, anchor = null) {
+  const now = new Date().toISOString();
+  return {
+    id: id(),
+    scope,
+    anchor,
+    body: String(body || "").trim(),
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: "",
+    deletedAt: "",
+    replies: [],
+  };
+}
+
+function submitPageDiscussion(resourceId) {
+  const resource = itemById("resources", resourceId);
+  const composer = document.querySelector(`[data-page-discussion-composer="${cssEscape(resourceId)}"]`);
+  const body = String(composer?.value || "").trim();
+  if (!resourceMutationAllowed(resource) || !body) return;
+  resource.commentThreads = normalizeResourceCommentThreads(resource.commentThreads);
+  const thread = newResourceCommentThread("page", body, null);
+  resource.commentThreads.push(thread);
+  touchResource(resource);
+  ui.resourceCommentFocusId = thread.id;
+  saveState();
+  renderDetail({ soft: true });
+}
+
+function resourceAndCommentThread(threadId) {
+  for (const resource of state.resources) {
+    const thread = resource.commentThreads?.find((entry) => entry.id === threadId);
+    if (thread) return { resource, thread };
+  }
+  return null;
+}
+
+function submitResourceCommentReply(threadId) {
+  const pair = resourceAndCommentThread(threadId);
+  const input = document.querySelector(`[data-comment-reply-input="${cssEscape(threadId)}"]`);
+  const body = String(input?.value || "").trim();
+  if (!pair || !resourceMutationAllowed(pair.resource) || !body) return;
+  const now = new Date().toISOString();
+  pair.thread.replies = Array.isArray(pair.thread.replies) ? pair.thread.replies : [];
+  pair.thread.replies.push({ id: id(), body, createdAt: now, updatedAt: now, deletedAt: "" });
+  pair.thread.updatedAt = now;
+  touchResource(pair.resource);
+  ui.resourceCommentsId = pair.resource.id;
+  ui.resourceCommentFocusId = threadId;
+  saveState();
+  renderDetail({ soft: true });
+}
+
+function setResourceCommentResolved(threadId, resolved) {
+  const pair = resourceAndCommentThread(threadId);
+  if (!pair || !resourceMutationAllowed(pair.resource)) return;
+  const now = new Date().toISOString();
+  pair.thread.resolvedAt = resolved ? now : "";
+  pair.thread.updatedAt = now;
+  touchResource(pair.resource);
+  ui.resourceCommentsId = pair.resource.id;
+  ui.resourceCommentFocusId = threadId;
+  saveState();
+  renderDetail({ soft: true });
+}
+
+function updateResourceUrl(resourceId, value) {
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return;
+  const nextValue = String(value || "").trim();
+  ui.resourceUrlEditorId = "";
+  if (resource.url !== nextValue) {
+    resource.url = nextValue;
+    touchResource(resource);
+    saveState();
+    renderView({ soft: true });
+  }
+  renderDetail({ soft: true });
+}
+
+async function handleResourceUrlAction(resourceId, action) {
+  const resource = itemById("resources", resourceId);
+  if (!resource || resource.trashedAt) return;
+  if (["edit", "clear"].includes(action) && !resourceMutationAllowed(resource)) return;
+  if (action === "edit") {
+    ui.resourceUrlEditorId = resourceId;
+    renderDetail({ soft: true });
+    requestAnimationFrame(() => {
+      const input = document.querySelector(`[data-resource-url-editor="${cssEscape(resourceId)}"]`);
+      input?.focus();
+      input?.select();
+    });
+    return;
+  }
+  if (action === "clear") {
+    updateResourceUrl(resourceId, "");
+    return;
+  }
+  if (action !== "copy") return;
+  const url = normalizeResourceExternalUrl(resource.url);
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+    showToast("URL을 복사했습니다.");
+  } catch {
+    showToast("URL을 복사하지 못했습니다.");
+  }
 }
 
 function beginResourceDrag(resourceId, event) {
@@ -7146,6 +9385,7 @@ function handleResourceLayoutResize() {
     }
   }
   syncResourceNoteElements();
+  syncResourceSideWidth();
 }
 
 function beginResourceResize(resourceId, event) {
@@ -7220,9 +9460,109 @@ function cancelResourceResize() {
   updateTaskSchedulingMode();
 }
 
+function resourceSideWidthMaximum(viewportWidth = window.innerWidth) {
+  return Math.max(360, Math.min(720, Math.round(viewportWidth - 320)));
+}
+
+function defaultResourceSideWidth(viewportWidth = window.innerWidth) {
+  if (viewportWidth <= 900) return Math.min(500, Math.max(440, Math.round(viewportWidth * 0.54)));
+  if (viewportWidth <= 1024) return Math.min(520, Math.max(440, Math.round(viewportWidth * 0.5)));
+  if (viewportWidth <= 1280) return Math.min(580, Math.max(440, Math.round(viewportWidth * 0.44)));
+  return Math.min(640, Math.max(440, Math.round(viewportWidth * 0.43)));
+}
+
+function normalizedResourceSideWidth(value, viewportWidth = window.innerWidth) {
+  const parsed = Number(value);
+  const preferred = Number.isFinite(parsed) && parsed > 0 ? parsed : defaultResourceSideWidth(viewportWidth);
+  return Math.round(Math.max(360, Math.min(resourceSideWidthMaximum(viewportWidth), preferred)));
+}
+
+function syncResourceSideWidth() {
+  const width = normalizedResourceSideWidth(state.settings?.resourceSideWidth, window.innerWidth);
+  app.style.setProperty("--resource-parity-side-width", `${width}px`);
+  const handle = document.querySelector("[data-resource-side-resize]");
+  if (handle) {
+    handle.setAttribute("aria-valuemax", String(resourceSideWidthMaximum(window.innerWidth)));
+    handle.setAttribute("aria-valuenow", String(width));
+  }
+}
+
+function syncResourceVisualViewport() {
+  const viewport = window.visualViewport;
+  const height = Math.round(viewport?.height || window.innerHeight);
+  const offsetTop = Math.round(viewport?.offsetTop || 0);
+  const keyboardInset = Math.max(0, Math.round(window.innerHeight - height - offsetTop));
+  app.style.setProperty("--resource-visual-viewport-height", `${height}px`);
+  app.style.setProperty("--resource-visual-viewport-offset-top", `${offsetTop}px`);
+  app.style.setProperty("--resource-keyboard-inset", `${keyboardInset}px`);
+  app.querySelectorAll("[data-resource-note]").forEach((shell) => {
+    shell.dataset.resourceKeyboard = keyboardInset > 80 ? "open" : "closed";
+  });
+}
+
+function beginResourceSideResize(handle, event) {
+  if (window.innerWidth <= 840) return;
+  const shell = handle.closest('[data-resource-page-mode="side"]');
+  if (!shell) return;
+  ui.resourceSideResize = {
+    pointerId: event.pointerId ?? "mouse",
+    startX: event.clientX,
+    startWidth: shell.getBoundingClientRect().width,
+    handle,
+  };
+  try {
+    handle.setPointerCapture?.(event.pointerId);
+  } catch (_) {}
+  app.classList.add("is-resource-side-resizing");
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleResourceSideResizePointerMove(event) {
+  const resize = ui.resourceSideResize;
+  if (!resize || (event.pointerId !== undefined && resize.pointerId !== event.pointerId)) return;
+  const width = normalizedResourceSideWidth(resize.startWidth + (resize.startX - event.clientX), window.innerWidth);
+  state.settings.resourceSideWidth = width;
+  syncResourceSideWidth();
+  event.preventDefault();
+}
+
+function finishResourceSideResize(event) {
+  const resize = ui.resourceSideResize;
+  if (!resize || (event.pointerId !== undefined && resize.pointerId !== event.pointerId)) return;
+  ui.resourceSideResize = null;
+  app.classList.remove("is-resource-side-resizing");
+  saveState();
+}
+
+function cancelResourceSideResize() {
+  if (!ui.resourceSideResize) return;
+  ui.resourceSideResize = null;
+  app.classList.remove("is-resource-side-resizing");
+  syncResourceSideWidth();
+}
+
+function resizeResourceSideByKeyboard(event, handle) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return false;
+  const current = normalizedResourceSideWidth(state.settings?.resourceSideWidth, window.innerWidth);
+  const next = event.key === "Home"
+    ? 360
+    : event.key === "End"
+      ? resourceSideWidthMaximum(window.innerWidth)
+      : current + (event.key === "ArrowLeft" ? 24 : -24);
+  state.settings.resourceSideWidth = normalizedResourceSideWidth(next, window.innerWidth);
+  syncResourceSideWidth();
+  saveState();
+  handle.setAttribute("aria-valuenow", String(state.settings.resourceSideWidth));
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
 function syncResourceNoteElement(note) {
   const element = document.querySelector(`[data-resource-note="${note.id}"]`);
   if (!element) return;
+  if (!resourceAdvancedWindowModeEnabled() || element.classList.contains("is-parity-page")) return;
   const mode = normalizedResourceNoteMode(note.mode);
   note.mode = mode;
   element.classList.toggle("is-center", mode === "center");
@@ -7272,6 +9612,7 @@ function beginBlockDrag(blockId, event, options = {}) {
   if (!block || !editor) return;
   const ownerType = editor.dataset.ownerType;
   const ownerId = editor.dataset.ownerId;
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   const contentRect = block.querySelector(".block-content")?.getBoundingClientRect();
   const startedFromHandle = Boolean(captureElement?.matches?.("[data-block-drag]") || event.target.closest("[data-block-drag]"));
   const existingSelection =
@@ -7598,6 +9939,7 @@ function cleanupBlockDragClasses() {
 }
 
 function copyBlocksToDropTarget(ownerType, ownerId, blockIds, targetId, position, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!blockIds.length || blockIds.includes(targetId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
@@ -7633,6 +9975,7 @@ function copyBlocksToDropTarget(ownerType, ownerId, blockIds, targetId, position
 }
 
 function moveBlocks(ownerType, ownerId, blockIds, targetId, position, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!blockIds.length || blockIds.includes(targetId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
@@ -7696,7 +10039,7 @@ function refreshBlockEditorsAfterMutation(ownerType, ownerId) {
   }
 
   const blocksHtml = renderBlocks(item.blocks, ownerType, ownerId);
-  for (const editor of editors) editor.innerHTML = blocksHtml;
+  for (const editor of editors) patchBlockEditorStructure(editor, blocksHtml);
 
   const restoreScroll = () => {
     for (const [scroll, snapshot] of scrollStates) {
@@ -7715,6 +10058,47 @@ function refreshBlockEditorsAfterMutation(ownerType, ownerId) {
 
   if (ownerType === "resources") syncResourceBlockOrderSummaries(item);
   return true;
+}
+
+function patchBlockEditorStructure(editor, blocksHtml) {
+  const template = document.createElement("template");
+  template.innerHTML = blocksHtml;
+  const existingBlocks = new Map(
+    [...editor.querySelectorAll(".block[data-block-id]")].map((block) => [block.dataset.blockId, block]),
+  );
+  const reusableBlock = (nextBlock) => {
+    const currentBlock = existingBlocks.get(nextBlock.dataset.blockId || "");
+    if (!currentBlock || currentBlock.dataset.type !== nextBlock.dataset.type) return nextBlock.cloneNode(true);
+    const currentContent = currentBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content]");
+    const nextContent = nextBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content]");
+    if (!currentContent || !nextContent || !currentContent.isEqualNode(nextContent)) return nextBlock.cloneNode(true);
+    syncElementAttributes(currentBlock, nextBlock);
+    for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
+      const currentControl = currentBlock.querySelector(selector);
+      const nextControl = nextBlock.querySelector(selector);
+      if (currentControl && nextControl) {
+        syncElementAttributes(currentControl, nextControl);
+        if (currentControl.textContent !== nextControl.textContent) currentControl.textContent = nextControl.textContent;
+      }
+    }
+    return currentBlock;
+  };
+
+  const anchor = document.createComment("block-patch-anchor");
+  editor.insertBefore(anchor, editor.firstChild);
+  for (const nextTopLevel of [...template.content.children]) {
+    if (nextTopLevel.matches(".block-list")) {
+      const list = nextTopLevel.cloneNode(false);
+      editor.insertBefore(list, anchor);
+      for (const nextBlock of [...nextTopLevel.children]) {
+        if (nextBlock.matches(".block[data-block-id]")) list.appendChild(reusableBlock(nextBlock));
+      }
+      continue;
+    }
+    if (nextTopLevel.matches(".block[data-block-id]")) editor.insertBefore(reusableBlock(nextTopLevel), anchor);
+  }
+  while (anchor.nextSibling) anchor.nextSibling.remove();
+  anchor.remove();
 }
 
 function syncResourceBlockOrderSummaries(resource) {
@@ -8414,6 +10798,7 @@ function blockRangeSelectionAnchorId(ownerType, ownerId, visibleIds, fallbackId)
 }
 
 function beginEditorHistory(ownerType, ownerId, focus = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return null;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return null;
   return {
@@ -8426,10 +10811,12 @@ function beginEditorHistory(ownerType, ownerId, focus = null) {
 
 function commitEditorHistory(token, focus = null) {
   if (!token || !token.ownerType || !token.ownerId) return;
+  if (!editorOwnerMutationAllowed(token.ownerType, token.ownerId)) return;
   const item = itemById(token.ownerType, token.ownerId);
   if (!item?.blocks) return;
   const afterBlocks = cloneEditorBlocks(item.blocks);
   if (JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks)) return;
+  touchResourceForOwner(token.ownerType, token.ownerId);
   ui.editorHistory.undo.push({
     ownerType: token.ownerType,
     ownerId: token.ownerId,
@@ -8445,6 +10832,7 @@ function commitEditorHistory(token, focus = null) {
 }
 
 function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   const latest = ui.editorHistory.undo[ui.editorHistory.undo.length - 1];
   if (!latest || latest.ownerType !== ownerType || latest.ownerId !== ownerId) return;
   const item = itemById(ownerType, ownerId);
@@ -8455,6 +10843,8 @@ function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
 }
 
 function undoEditorHistory() {
+  const pending = ui.editorHistory.undo[ui.editorHistory.undo.length - 1];
+  if (pending && !editorOwnerMutationAllowed(pending.ownerType, pending.ownerId)) return false;
   const entry = ui.editorHistory.undo.pop();
   if (!entry) return false;
   ui.nativeTextUndoDepth = 0;
@@ -8465,6 +10855,8 @@ function undoEditorHistory() {
 }
 
 function redoEditorHistory() {
+  const pending = ui.editorHistory.redo[ui.editorHistory.redo.length - 1];
+  if (pending && !editorOwnerMutationAllowed(pending.ownerType, pending.ownerId)) return false;
   const entry = ui.editorHistory.redo.pop();
   if (!entry) return false;
   ui.nativeTextUndoDepth = 0;
@@ -8475,15 +10867,16 @@ function redoEditorHistory() {
 }
 
 function restoreEditorHistoryEntry(entry, direction) {
+  if (!editorOwnerMutationAllowed(entry?.ownerType, entry?.ownerId)) return;
   const item = itemById(entry.ownerType, entry.ownerId);
   if (!item) return;
   ui.pendingMarkdownTextTarget = null;
   item.blocks = cloneEditorBlocks(direction === "before" ? entry.beforeBlocks : entry.afterBlocks);
   ensureEditableBlocks(item);
+  touchResourceForOwner(entry.ownerType, entry.ownerId);
   clearBlockSelection();
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(entry.ownerType, entry.ownerId, { forceView: true });
   const focus = direction === "before" ? entry.beforeFocus : entry.afterFocus;
   restoreEditorHistoryFocus(focus);
 }
@@ -8513,6 +10906,7 @@ function restoreEditorHistoryFocus(focus = null) {
 
 function deleteSelectedBlocks() {
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) return false;
@@ -8541,8 +10935,7 @@ function deleteSelectedBlocks() {
   window.getSelection()?.removeAllRanges();
   commitEditorHistory(history, fallbackFocus);
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(selection.ownerType, selection.ownerId, { forceView: true });
   if (fallbackFocus.blockId) {
     focusBlockContentAfterRender(fallbackFocus.blockId, { position: fallbackFocus.position });
   }
@@ -8556,6 +10949,7 @@ function replaceSelectedBlocksWithText(text = "") {
     return false;
   }
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -8590,8 +10984,7 @@ function replaceSelectedBlocksWithText(text = "") {
   clearBlockSelection();
   commitEditorHistory(history, { blockId: newBlock.id, start: text.length, end: text.length });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(selection.ownerType, selection.ownerId, { forceView: true });
   const focusTarget = focusBlockContentAfterRender(newBlock.id, { range: { start: text.length, end: text.length } });
   if (text && text !== "/") {
     schedulePendingMarkdownTextTarget(selection.ownerType, selection.ownerId, newBlock);
@@ -8606,6 +10999,7 @@ function replaceSelectedBlocksWithText(text = "") {
 
 function duplicateSelectedBlocks() {
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -8639,8 +11033,7 @@ function duplicateSelectedBlocks() {
   ui.blockSelection = { ownerType: selection.ownerType, ownerId: selection.ownerId, ids: duplicatedSelectionIds };
   commitEditorHistory(history, { blockId: duplicatedSelectionIds[0], position: "end" });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(selection.ownerType, selection.ownerId, { forceView: true });
   requestAnimationFrame(() => restoreBlockSelection(selection.ownerType, selection.ownerId, duplicatedSelectionIds));
   return true;
 }
@@ -8736,13 +11129,21 @@ function handleDocumentCut(event) {
   if (!blocks.length) return;
   writeBlocksToClipboard(event.clipboardData, blocks);
   event.preventDefault();
+  if (!editorOwnerMutationAllowed(ui.blockSelection.ownerType, ui.blockSelection.ownerId)) return;
   deleteSelectedBlocks();
 }
 
 function handleDocumentPaste(event) {
   if (!event.clipboardData) return;
+  const composingTarget = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
+  if (composingTarget && isComposingBlock(composingTarget)) return;
   if (pasteEventShouldClearBlockSelection(event)) {
     clearBlockSelection();
+  }
+  const target = clipboardPasteTarget(event);
+  if (target && !editorOwnerMutationAllowed(target.ownerType, target.ownerId)) {
+    event.preventDefault();
+    return;
   }
   const customBlocks = readClipboardBlocks(event.clipboardData);
   const htmlBlocks = customBlocks.length ? [] : readHtmlClipboardBlocks(event.clipboardData);
@@ -8813,6 +11214,7 @@ function pasteTextIntoCodeBlock(event, text = "") {
   const blockContent = targetBlock || activeBlock;
   const editor = blockContent?.closest(".block-editor");
   if (!blockContent || !editor) return false;
+  if (!editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return false;
   const item = itemById(editor.dataset.ownerType, editor.dataset.ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockContent.dataset.blockContent);
   if (!block || block.type !== "code") return false;
@@ -8826,8 +11228,7 @@ function pasteTextIntoCodeBlock(event, text = "") {
   const caretOffset = start + text.length;
   commitEditorHistory(history, { blockId: block.id, start: caretOffset, end: caretOffset });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
   focusBlockContentAfterRender(block.id, { range: { start: caretOffset, end: caretOffset } });
   return true;
 }
@@ -8845,6 +11246,7 @@ function applyPastedUrlToInlineSelection(event, text) {
   if (!blockContent || blockContent !== endElement?.closest("[data-block-content]")) return false;
   if (event.target instanceof Element && !event.target.closest("[data-block-content]") && !blockContent.contains(event.target)) return false;
   const editor = blockContent.closest(".block-editor");
+  if (!editorOwnerMutationAllowed(editor?.dataset.ownerType, editor?.dataset.ownerId)) return false;
   const item = itemById(editor?.dataset.ownerType, editor?.dataset.ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockContent.dataset.blockContent);
   const offsets = selectionOffsetsInside(blockContent);
@@ -8856,8 +11258,7 @@ function applyPastedUrlToInlineSelection(event, text) {
   block.marks = normalizeInlineMarks(block.text || blockContent.textContent || "", marks);
   commitEditorHistory(history, { blockId: block.id, start: offsets.start, end: offsets.end });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
   focusBlockContentAfterRender(block.id, { range: { start: offsets.start, end: offsets.end } });
   return true;
 }
@@ -9468,6 +11869,7 @@ function parseMarkdownInlineText(text = "") {
 function pasteBlocksFromClipboard(event, blocks, options = {}) {
   const target = clipboardPasteTarget(event, options);
   if (!target) return false;
+  if (!editorOwnerMutationAllowed(target.ownerType, target.ownerId)) return false;
   const item = itemById(target.ownerType, target.ownerId);
   if (!item?.blocks) return false;
   const normalizedBlocks = normalizeClipboardBlocks(blocks);
@@ -9502,8 +11904,7 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
     ? { blockId: focusTarget.blockId, start: focusTarget.offset, end: focusTarget.offset }
     : { blockId: focusTarget.blockId, position: "end" });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(target.ownerType, target.ownerId, { forceView: true });
   focusBlockContentAfterRender(focusTarget.blockId, Number.isInteger(focusTarget.offset)
     ? { range: { start: focusTarget.offset, end: focusTarget.offset } }
     : { position: "end" });
@@ -9659,6 +12060,7 @@ function isPlainSpaceKey(event) {
 
 function toggleSelectedActionBlocks() {
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -9675,8 +12077,7 @@ function toggleSelectedActionBlocks() {
   }
   commitEditorHistory(history, { blockId: actionBlocks[0].id, position: "end" });
   saveState();
-  renderDetail({ soft: true });
-  renderView({ soft: true });
+  renderEditorMutation(selection.ownerType, selection.ownerId, { forceView: true });
   requestAnimationFrame(() => restoreBlockSelection(selection.ownerType, selection.ownerId, selection.ids));
   return true;
 }
@@ -9725,12 +12126,6 @@ function canStartEditorMarqueeDrag(resourceNote, event) {
   const editable = event.target.closest("[contenteditable='true']");
   if (editable && !canStartMarqueeFromEditableWhitespace(editable, event)) return false;
   if (!editable && editorBodyClickBandContentAtPoint(event)) return false;
-  return canStartEditorMarqueeDragWithinNote(resourceNote, event);
-}
-
-function canStartEditorMarqueeDragFromBlockHandle(resourceNote, event) {
-  if (event.target.closest(".resource-note-chrome")) return false;
-  if (blockDragHandleFromEvent(event)) return false;
   return canStartEditorMarqueeDragWithinNote(resourceNote, event);
 }
 
@@ -10048,6 +12443,13 @@ function handlePointerDown(event) {
     if (ui.resourceResize && event.type === "mousedown") return;
     if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
     beginResourceResize(resourceResizeHandle.dataset.resourceResize, event);
+    return;
+  }
+
+  const resourceSideResizeHandle = event.target.closest("[data-resource-side-resize]");
+  if (resourceSideResizeHandle) {
+    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    beginResourceSideResize(resourceSideResizeHandle, event);
     return;
   }
 
@@ -10664,6 +13066,7 @@ function commitDragAction(type, itemId, action) {
   if (type === "resources" && ["pin", "readLater", "normalResource", "archiveResource"].includes(action)) {
     const resource = itemById("resources", itemId);
     if (!resource) return false;
+    const previousState = [resource.importance, resource.pinned, resource.readLater];
     if (action === "pin") {
       resource.pinned = true;
       resource.readLater = false;
@@ -10684,6 +13087,13 @@ function commitDragAction(type, itemId, action) {
       resource.pinned = false;
       resource.readLater = false;
       showToast("일반 자료로 옮겼습니다.");
+    }
+    if (
+      previousState[0] !== resource.importance ||
+      previousState[1] !== resource.pinned ||
+      previousState[2] !== resource.readLater
+    ) {
+      touchResource(resource);
     }
     saveState();
     renderView({ soft: true, animateCards: true });
@@ -10890,6 +13300,47 @@ function stopSchedulerMonthHover() {
 
 function handleKeydown(event) {
   if (handleSlashMenuDocumentKeydown(event)) return;
+  if (handleResourceSearchKeydown(event)) return;
+  const resourceSideResize = event.target.closest("[data-resource-side-resize]");
+  if (resourceSideResize && resizeResourceSideByKeyboard(event, resourceSideResize)) return;
+  const resourcePageMenuItem = event.target.closest(".resource-page-menu [role^='menuitem']");
+  if (resourcePageMenuItem && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    const items = [...resourcePageMenuItem.closest("[role='menu']").querySelectorAll("[role^='menuitem']:not([disabled])")];
+    const currentIndex = items.indexOf(resourcePageMenuItem);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    event.preventDefault();
+    event.stopPropagation();
+    items[nextIndex]?.focus();
+    return;
+  }
+  const resourceTitleInput = event.target.closest("[data-resource-title]");
+  if (resourceTitleInput && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && (event.key === "Enter" || event.key === "ArrowDown")) {
+    const firstBlock = resourceTitleInput.closest("[data-resource-note]")?.querySelector("[data-block-content]");
+    if (firstBlock) {
+      event.preventDefault();
+      firstBlock.focus();
+      placeCaretAtStart(firstBlock);
+    }
+    return;
+  }
+  const resourceOpen = event.target.closest("[data-open-resource]");
+  if (
+    resourceOpen &&
+    !event.isComposing &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    (event.key === "Enter" || event.key === " ")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    openResourceNote(resourceOpen.dataset.openResource, { opener: resourceOpen });
+    return;
+  }
   if (ui.blockDrag && event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -10922,6 +13373,33 @@ function handleKeydown(event) {
   const ownerType = editor.dataset.ownerType;
   const ownerId = editor.dataset.ownerId;
   const blockId = blockContent.dataset.blockContent;
+  if (
+    ownerType === "resources" &&
+    event.key === "ArrowUp" &&
+    !event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    editor.querySelector("[data-block-content]") === blockContent &&
+    isCaretAtStart(blockContent)
+  ) {
+    const title = blockContent.closest("[data-resource-note]")?.querySelector(`[data-resource-title="${cssEscape(ownerId)}"]`);
+    if (title) {
+      event.preventDefault();
+      title.focus();
+      title.setSelectionRange(title.value.length, title.value.length);
+      return;
+    }
+  }
+
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) {
+    const isMutationKey = event.key.length === 1 || ["Enter", "Backspace", "Delete", "Tab"].includes(event.key);
+    if (isMutationKey || event.metaKey || event.ctrlKey) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
 
   if (isComposingInput(event, blockContent)) return;
   if (handleRecentCompositionEnter(event, ownerType, ownerId, blockId, blockContent)) return;
@@ -11076,6 +13554,7 @@ function handleKeydown(event) {
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       closeSlashMenu();
       return;
     }
@@ -11365,6 +13844,7 @@ function isPrintableBlockReplacementKey(event) {
 function handleDocumentKeydown(event) {
   if (event.key === "Shift" || event.shiftKey) ui.shiftKeyDown = true;
   if (handleSlashMenuDocumentKeydown(event)) return;
+  if (handleResourcePageFocusTrap(event)) return;
   if (ui.blockDrag && event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -11431,6 +13911,22 @@ function handleDocumentKeydown(event) {
     event.preventDefault();
     ui.commentPopover = null;
     renderOverlays();
+    return;
+  }
+  if (ui.resourcePageMenuId && event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeResourcePageMenu({ focus: true });
+    return;
+  }
+  if (ui.resourceCommentsId && event.key === "Escape") {
+    const resourceId = ui.resourceCommentsId;
+    event.preventDefault();
+    event.stopPropagation();
+    ui.resourceCommentsId = "";
+    ui.resourceCommentFocusId = "";
+    renderDetail({ soft: true });
+    requestAnimationFrame(() => document.querySelector(`[data-resource-comments-toggle="${cssEscape(resourceId)}"]`)?.focus());
     return;
   }
 
@@ -11532,10 +14028,26 @@ function handleDocumentKeydown(event) {
       closeNav();
       return;
     }
-  if (ui.commandOpen || ui.slash) {
+    if (ui.commandOpen || ui.slash) {
       ui.commandOpen = false;
       ui.slash = null;
       renderOverlays();
+      return;
+    }
+    if (ui.mention || ui.pageCommand || ui.emojiCommand || ui.inlineToolbar || ui.equationPopover) {
+      ui.mention = null;
+      ui.pageCommand = null;
+      ui.emojiCommand = null;
+      ui.inlineToolbar = null;
+      ui.equationPopover = null;
+      renderOverlays();
+      return;
+    }
+    const resourcePage = els.detailRoot?.querySelector(".resource-page-shell.is-parity-page");
+    if (resourcePage) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeResourceNote(resourcePage.dataset.resourceNote || resourcePage.dataset.resourceNotFound || "");
       return;
     }
   }
@@ -11765,6 +14277,7 @@ function inlineToolbarFromSelection() {
   if (!blockContent || blockContent !== endElement?.closest("[data-block-content]")) return null;
   const editor = blockContent.closest(".block-editor");
   if (!editor) return null;
+  if (!editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return null;
   const offsets = selectionOffsetsInside(blockContent);
   if (!offsets || offsets.collapsed || offsets.end <= offsets.start) return null;
   const rect = range.getBoundingClientRect();
@@ -11810,6 +14323,10 @@ function inlineToolbarEqual(left, right) {
 
 function handleDocumentClick(event) {
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
+
+  if (ui.resourcePageMenuId && !event.target.closest(".resource-page-menu-wrap")) {
+    closeResourcePageMenu({ focus: false });
+  }
 
   if (ui.suppressBlockClickUntil > Date.now() && event.target.closest(".block, .block-editor, .resource-note")) {
     event.preventDefault();
@@ -12218,6 +14735,7 @@ function createBox(name = "새 박스", options = {}) {
 }
 
 function createResource(title = "새 자료", options = {}) {
+  const createdAt = new Date().toISOString();
   const resource = {
     id: id(),
     title,
@@ -12229,11 +14747,16 @@ function createResource(title = "새 자료", options = {}) {
     boxId: state.boxes[0]?.id || "",
     goalId: "",
     projectId: "",
+    createdAt,
+    updatedAt: createdAt,
+    revision: 1,
+    timestampSource: "native",
     blocks: [
       { id: id(), type: "paragraph", text: "", checked: false, indent: 0, collapsed: false },
     ],
     ...(options.initial || {}),
   };
+  normalizeResourceRecord(resource, createdAt);
   state.resources.push(resource);
   if (!options.deferCreate) {
     afterCreate("resources", resource.id, options.navigate === false ? ui.view : "resources");
@@ -13328,12 +15851,17 @@ function cleanupDeletedEntityReferences(type, itemId) {
     clearFieldValue(state.goals, "boxId", itemId);
     clearFieldValue(state.projects, "boxId", itemId);
     clearFieldValue(state.tasks, "boxId", itemId);
-    clearFieldValue(state.resources, "boxId", itemId);
+    clearResourceFieldValue("boxId", itemId);
     clearFieldValue(state.habits, "boxId", itemId);
+  }
+  if (type === "goals") {
+    clearFieldValue(state.projects, "goalId", itemId);
+    clearFieldValue(state.tasks, "goalId", itemId);
+    clearResourceFieldValue("goalId", itemId);
   }
   if (type === "projects") {
     clearFieldValue(state.tasks, "projectId", itemId);
-    clearFieldValue(state.resources, "projectId", itemId);
+    clearResourceFieldValue("projectId", itemId);
     clearFieldValue(state.habits, "projectId", itemId);
     if (ui.expandedProjectId === itemId) ui.expandedProjectId = "";
     if (ui.editingProjectId === itemId) ui.editingProjectId = "";
@@ -13360,6 +15888,14 @@ function cleanupDeletedEntityReferences(type, itemId) {
 function clearFieldValue(collection, field, value) {
   for (const entry of collection) {
     if (entry[field] === value) entry[field] = "";
+  }
+}
+
+function clearResourceFieldValue(field, value) {
+  for (const resource of state.resources) {
+    if (resource[field] !== value) continue;
+    resource[field] = "";
+    touchResource(resource);
   }
 }
 
@@ -13426,8 +15962,21 @@ function itemById(type, itemId) {
   return collectionIdMap(type).get(itemId) || null;
 }
 
+function resourceMutationAllowed(resourceOrId, options = {}) {
+  const resource = typeof resourceOrId === "string"
+    ? itemById("resources", resourceOrId)
+    : resourceOrId;
+  if (!resource || resource.readOnly === true) return false;
+  return options.allowTrashed === true || !resource.trashedAt;
+}
+
+function editorOwnerMutationAllowed(ownerType, ownerId) {
+  return ownerType !== "resources" || resourceMutationAllowed(ownerId);
+}
+
 function updateBlockText(blockContent, event = null) {
   const editor = blockContent.closest(".block-editor");
+  if (!editor || !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const item = itemById(editor.dataset.ownerType, editor.dataset.ownerId);
   const block = editableBlockForContent(editor, item, blockContent);
   if (!block) return;
@@ -13451,8 +16000,7 @@ function updateBlockText(blockContent, event = null) {
     commitEditorHistory(markdownHistory, { blockId: focusBlock.id, start: (focusBlock.text || "").length, end: (focusBlock.text || "").length });
     saveState();
     if (block.type === "divider") {
-      renderDetail({ soft: true });
-      renderView({ soft: true });
+      renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
       renderOverlays();
       focusBlockContentAfterRender(focusBlock.id);
       return;
@@ -13468,6 +16016,7 @@ function updateBlockText(blockContent, event = null) {
     ui.mention = null;
     ui.pageCommand = null;
     ui.emojiCommand = null;
+    touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
     saveState();
     openSlashMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, block.id, {
       query: slashCommand.query,
@@ -13484,6 +16033,7 @@ function updateBlockText(blockContent, event = null) {
     ui.slash = null;
     ui.pageCommand = null;
     ui.emojiCommand = null;
+    touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
     saveState();
     openMentionMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, block.id, {
       query: mentionCommand.query,
@@ -13500,6 +16050,7 @@ function updateBlockText(blockContent, event = null) {
     ui.slash = null;
     ui.mention = null;
     ui.emojiCommand = null;
+    touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
     saveState();
     openPageCommandMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, block.id, {
       query: pageCommand.query,
@@ -13517,6 +16068,7 @@ function updateBlockText(blockContent, event = null) {
     ui.slash = null;
     ui.mention = null;
     ui.pageCommand = null;
+    touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
     saveState();
     openEmojiMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, block.id, {
       query: emojiCommand.query,
@@ -13541,6 +16093,7 @@ function updateBlockText(blockContent, event = null) {
   if (!refreshPendingMarkdownTextHistory(editor.dataset.ownerType, editor.dataset.ownerId, block.id)) {
     noteNativeTextInput(event);
   }
+  touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
   saveState();
   syncBlockContentMarkupFromState(blockContent, block);
   if (ui.slash?.blockId === block.id) {
@@ -13595,10 +16148,6 @@ function noteNativeTextInput(event = null) {
   ui.nativeTextUndoDepth = Math.min(200, ui.nativeTextUndoDepth + 1);
   ui.nativeTextRedoDepth = 0;
   ui.editorHistory.redo = [];
-}
-
-function slashQueryFromText(rawText) {
-  return slashCommandFromText(rawText)?.query ?? null;
 }
 
 function slashCommandFromText(rawText = "") {
@@ -13672,6 +16221,7 @@ function emojiCommandFromText(rawText = "") {
 }
 
 function toggleBlockChecked(ownerType, ownerId, blockId, button) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return;
@@ -13806,6 +16356,7 @@ function animateToggleDescendantReveal(ownerType, ownerId, blockId) {
 }
 
 function toggleBlockCollapsed(ownerType, ownerId, blockId, button) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type !== "toggle") return;
@@ -13864,6 +16415,7 @@ function toggleAllTogglesKeyboardShortcut(event) {
 }
 
 function toggleAllTogglesInEditor(ownerType, ownerId, focusBlockId = "", options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
   const toggles = item.blocks.filter((block) => block.type === "toggle");
@@ -13903,6 +16455,7 @@ function toggleAllFocusTargetBlockId(blocksList, focusBlockId, collapsing) {
 }
 
 function modifyCurrentBlockFromKeyboard(ownerType, ownerId, blockId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return false;
@@ -13920,6 +16473,7 @@ function modifyCurrentBlockFromKeyboard(ownerType, ownerId, blockId) {
 }
 
 function applyMarkdownShortcut(blockContent, block, rawText, ownerType = "", ownerId = "") {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   for (const [pattern, type, text] of MARKDOWN_SHORTCUTS) {
     if (!pattern.test(rawText)) continue;
     block.type = type;
@@ -14018,6 +16572,7 @@ function renderedNumberedMarker(ownerType = "", ownerId = "", blockId = "") {
 }
 
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
   const inline = parseMarkdownInlineText(rawText);
   if (!inline.marks.length || inline.text === rawText) return false;
@@ -14105,6 +16660,7 @@ function schedulePendingMarkdownTextTarget(ownerType, ownerId, block) {
 }
 
 function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type === "divider") return false;
@@ -14125,11 +16681,13 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
     placeCaretAtEnd(blockContent);
   }
   refreshPendingMarkdownTextHistory(ownerType, ownerId, blockId);
+  touchResourceForOwner(ownerType, ownerId);
   saveState();
   return true;
 }
 
 function refreshPendingMarkdownTextHistory(ownerType, ownerId, blockId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const pending = ui.pendingMarkdownTextTarget;
   if (!pending || pending.ownerType !== ownerType || pending.ownerId !== ownerId || pending.blockId !== blockId) return false;
   if (Date.now() > pending.expiresAt) {
@@ -14359,6 +16917,7 @@ function splitTextForBlockBreak(text = "", offsets = null) {
 }
 
 function insertCodeBlockLineBreak(ownerType, ownerId, blockId, blockContent) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type !== "code") return false;
@@ -14384,6 +16943,7 @@ function insertCodeBlockLineBreak(ownerType, ownerId, blockId, blockContent) {
 }
 
 function insertSoftLineBreak(ownerType, ownerId, blockId, blockContent) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (insertCodeBlockLineBreak(ownerType, ownerId, blockId, blockContent)) return true;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
@@ -14478,6 +17038,7 @@ function shiftInlineMarksForTextInsertion(marks = [], offset = 0, length = 0) {
 }
 
 function editCodeBlockIndent(ownerType, ownerId, blockId, blockContent, direction) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type !== "code") return false;
@@ -14579,6 +17140,7 @@ function isCaretAtEnd(element) {
 }
 
 function indentBlock(ownerType, ownerId, blockId, direction) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
   let index = item.blocks.findIndex((block) => block.id === blockId);
@@ -14606,6 +17168,7 @@ function indentBlock(ownerType, ownerId, blockId, direction) {
 
 function indentSelectedBlocks(direction) {
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -14649,6 +17212,7 @@ function indentSelectedBlocks(direction) {
 
 function moveSelectedBlocksByKeyboard(direction) {
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -14830,6 +17394,7 @@ function blockIsHiddenByCollapsedToggle(blocksList, index) {
 }
 
 function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
   const index = item.blocks.findIndex((entry) => entry.id === blockId);
@@ -14906,6 +17471,7 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
 }
 
 function handleDeleteAtBlockEnd(ownerType, ownerId, blockId, blockContent) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
   const index = item.blocks.findIndex((entry) => entry.id === blockId);
@@ -14977,6 +17543,7 @@ function emptyBlockCanExitOnSecondEnter(block) {
 }
 
 function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return false;
   let index = item.blocks.findIndex((entry) => entry.id === blockId);
@@ -15021,6 +17588,7 @@ function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
 }
 
 function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   ui.pendingMarkdownTextTarget = null;
   const item = itemById(ownerType, ownerId);
   if (!item) return;
@@ -15113,6 +17681,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
 }
 
 function insertBlock(ownerType, ownerId, afterBlockId, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return null;
   const item = itemById(ownerType, ownerId);
   if (!item) return;
   if (!item.blocks) item.blocks = [];
@@ -15140,6 +17709,7 @@ function insertBlock(ownerType, ownerId, afterBlockId, options = {}) {
 }
 
 function removeBlock(ownerType, ownerId, blockId) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   const item = itemById(ownerType, ownerId);
   if (!item || item.blocks.length <= 1) return;
   const index = item.blocks.findIndex((block) => block.id === blockId);
@@ -15177,6 +17747,7 @@ function visibleBlockFocusAfterRemoval(blocksList, removedIndex, previousVisible
 }
 
 function changeBlockType(ownerType, ownerId, blockId, type, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return null;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return null;
@@ -15222,6 +17793,7 @@ function removeTextRangeFromBlock(block, range) {
 function changeSelectedBlocksType(type) {
   if (!BLOCK_TYPES[type]) return false;
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -15297,6 +17869,7 @@ function applySelectedBlocksMenuAction(action) {
 }
 
 function applySlashBlockAction(ownerType, ownerId, blockId, action, slashRange = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (isEquationSlashAction(action)) {
     return openEquationPopoverForCommand(ownerType, ownerId, blockId, slashRange);
   }
@@ -15372,6 +17945,7 @@ function applySlashBlockAction(ownerType, ownerId, blockId, action, slashRange =
 }
 
 function applyEmojiAction(ownerType, ownerId, blockId, entry, range = null, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((candidate) => candidate.id === blockId);
   if (!block || block.type === "code" || block.type === "divider" || !entry?.emoji) return false;
@@ -15411,6 +17985,7 @@ function openEquationPopoverForCommand(ownerType, ownerId, blockId, slashRange =
 }
 
 function applyPageCommandAction(ownerType, ownerId, blockId, entry, range = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!entry) return false;
   let mentionEntry = entry;
   if (entry.commandType === "create-subpage" || entry.commandType === "create-page") {
@@ -15442,6 +18017,7 @@ function applyPageCommandAction(ownerType, ownerId, blockId, entry, range = null
 }
 
 function applyMentionAction(ownerType, ownerId, blockId, actionOrEntry, range = null, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || block.type === "divider") return false;
@@ -15536,6 +18112,7 @@ function applyLastBlockColorAction(ownerType, ownerId, blockIds, options = {}) {
 }
 
 function applyBlockColorAction(ownerType, ownerId, blockIds, action, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const colorAction = blockColorAction(action);
   if (!colorAction) return false;
   const item = itemById(ownerType, ownerId);
@@ -15599,6 +18176,7 @@ function applyBlockType(block, type) {
 function toggleSelectedBlocksInlineMark(markType) {
   if (!INLINE_FORMAT_MARK_TYPES.includes(markType) || markType === "link" || markType === "comment") return false;
   const selection = ui.blockSelection;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   if (!selection.ids.length) return false;
   const item = itemById(selection.ownerType, selection.ownerId);
   if (!item?.blocks) {
@@ -15641,6 +18219,7 @@ function toggleSelectedBlocksInlineMark(markType) {
 }
 
 function toggleInlineMark(ownerType, ownerId, blockId, markType, rangeInfo = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!INLINE_FORMAT_MARK_TYPES.includes(markType)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
@@ -15666,6 +18245,7 @@ function toggleInlineMark(ownerType, ownerId, blockId, markType, rangeInfo = nul
 }
 
 function openLinkPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRect = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || !block.text) return false;
@@ -15698,6 +18278,7 @@ function openLinkPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRe
 }
 
 function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRect = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || !block.text) return false;
@@ -15731,6 +18312,7 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
 }
 
 function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRect = null, formulaValue = "", options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || block.type === "divider") return false;
@@ -15801,6 +18383,7 @@ function selectionRangeRectForBlock(ownerType, ownerId, blockId) {
 function applyInlineLink(value) {
   const popover = ui.linkPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const href = normalizeInlineHref(value);
   if (!href) return removeInlineLink();
   const item = itemById(popover.ownerType, popover.ownerId);
@@ -15824,15 +18407,35 @@ function applyInlineLink(value) {
 function applyInlineComment(value) {
   const popover = ui.commentPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const body = String(value || "").trim();
   if (!body) return removeInlineComment();
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
+  const commentId = popover.commentId || id();
   const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end);
-  marks.push({ type: "comment", start: popover.start, end: popover.end, commentId: popover.commentId || id(), body });
+  marks.push({ type: "comment", start: popover.start, end: popover.end, commentId, body });
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
   block.marks = normalizeInlineMarks(block.text, marks);
+  if (popover.ownerType === "resources") {
+    item.commentThreads = normalizeResourceCommentThreads(item.commentThreads);
+    let thread = item.commentThreads.find((entry) => entry.id === commentId);
+    if (!thread) {
+      thread = newResourceCommentThread("inline", body, {
+        blockId: popover.blockId,
+        start: popover.start,
+        end: popover.end,
+      });
+      thread.id = commentId;
+      item.commentThreads.push(thread);
+    } else {
+      thread.body = body;
+      thread.anchor = { blockId: popover.blockId, start: popover.start, end: popover.end };
+      thread.updatedAt = new Date().toISOString();
+    }
+    touchResource(item);
+  }
   commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
@@ -15847,6 +18450,7 @@ function applyInlineComment(value) {
 function applyInlineEquation(value) {
   const popover = ui.equationPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const formula = normalizeEquationFormula(value);
   if (!formula) return removeInlineEquation();
   const item = itemById(popover.ownerType, popover.ownerId);
@@ -15880,6 +18484,7 @@ function applyInlineEquation(value) {
 function removeInlineComment() {
   const popover = ui.commentPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
@@ -15902,6 +18507,7 @@ function removeInlineComment() {
 function removeInlineEquation() {
   const popover = ui.equationPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
@@ -15924,6 +18530,7 @@ function removeInlineEquation() {
 function removeInlineLink() {
   const popover = ui.linkPopover;
   if (!popover) return false;
+  if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
@@ -16204,11 +18811,15 @@ function moveCaretHorizontallyBetweenBlocks(blockContent, key) {
 }
 
 function adjacentBlockContent(blockContent, direction) {
-  let block = blockContent.closest(".block");
-  while (block) {
-    block = direction < 0 ? block.previousElementSibling : block.nextElementSibling;
-    if (blockIsHiddenFromEditorNavigation(block)) continue;
-    const target = block?.querySelector("[data-block-content]");
+  const editor = blockContent.closest(".block-editor");
+  if (!editor) return null;
+  const contents = [...editor.querySelectorAll(".block [data-block-content]")].filter((candidate) => (
+    !blockIsHiddenFromEditorNavigation(candidate.closest(".block"))
+  ));
+  const currentIndex = contents.indexOf(blockContent);
+  if (currentIndex < 0) return null;
+  for (let index = currentIndex + (direction < 0 ? -1 : 1); index >= 0 && index < contents.length; index += direction < 0 ? -1 : 1) {
+    const target = contents[index];
     if (target) return target;
   }
   return null;
@@ -16340,6 +18951,7 @@ function setDirectionalSelection(anchorNode, anchorOffset, focusNode, focusOffse
 }
 
 function openSlashMenu(blockContent, ownerType, ownerId, blockId, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const blockRect = blockContent.getBoundingClientRect();
   const anchorRect = options.anchorRect || slashMenuAnchorRectFor(blockContent) || rectSnapshot(blockRect);
   const position = slashMenuPositionForAnchor(anchorRect, blockRect);
@@ -16402,6 +19014,7 @@ function rectSnapshot(rect) {
 function openSelectedBlocksMenu() {
   const selection = ui.blockSelection;
   if (!selection.ids.length) return false;
+  if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   const menuSelection = { ownerType: selection.ownerType, ownerId: selection.ownerId, ids: selection.ids.slice() };
   const editor = document.querySelector(`.block-editor[data-owner-type="${selection.ownerType}"][data-owner-id="${selection.ownerId}"]`);
   if (!editor) {
@@ -16439,6 +19052,7 @@ function closeSlashMenu() {
 }
 
 function openMentionMenu(blockContent, ownerType, ownerId, blockId, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const blockRect = blockContent.getBoundingClientRect();
   const anchorRect = options.anchorRect || slashMenuAnchorRectFor(blockContent) || rectSnapshot(blockRect);
   const position = slashMenuPositionForAnchor(anchorRect, blockRect);
@@ -16466,6 +19080,7 @@ function closeMentionMenu() {
 }
 
 function openPageCommandMenu(blockContent, ownerType, ownerId, blockId, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const blockRect = blockContent.getBoundingClientRect();
   const anchorRect = options.anchorRect || slashMenuAnchorRectFor(blockContent) || rectSnapshot(blockRect);
   const position = slashMenuPositionForAnchor(anchorRect, blockRect);
@@ -16495,6 +19110,7 @@ function closePageCommandMenu() {
 }
 
 function openEmojiMenu(blockContent, ownerType, ownerId, blockId, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const blockRect = blockContent.getBoundingClientRect();
   const anchorRect = options.anchorRect || slashMenuAnchorRectFor(blockContent) || rectSnapshot(blockRect);
   const position = slashMenuPositionForAnchor(anchorRect, blockRect);
@@ -16535,6 +19151,7 @@ function updateSlashQuery(query = "") {
   } else {
     renderOverlays();
   }
+  syncEditorCommandMenuAria();
   const input = focusSlashQueryInput();
   if (input) {
     const end = input.value.length;
@@ -16712,15 +19329,289 @@ async function apiJson(path, options = {}) {
     },
   });
   const payload = await response.json().catch(() => ({}));
+  const responseRevision = responseWorkspaceRevision(response, payload);
+  if (responseRevision !== null && isPlainObject(payload) && parseWorkspaceRevision(payload.revision) === null) {
+    payload.revision = responseRevision;
+  }
   if (!response.ok) {
-    throw new Error(payload.error || "요청에 실패했습니다.");
+    const error = new Error(payload.error || "요청에 실패했습니다.");
+    error.status = response.status;
+    error.code = typeof payload.code === "string" ? payload.code : "";
+    error.revision = responseRevision;
+    throw error;
   }
   return payload;
+}
+
+function cloneForLocalPersistence(value) {
+  if (typeof structuredClone === "function") return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function indexedDbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed."));
+  });
+}
+
+function indexedDbTransactionComplete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction was aborted."));
+  });
+}
+
+function openLocalResourceDatabase() {
+  if (!localResourcePersistence.available) return Promise.resolve(null);
+  localResourceDatabasePromise ||= new Promise((resolve, reject) => {
+    const request = indexedDB.open(LOCAL_RESOURCE_DATABASE_NAME, LOCAL_RESOURCE_DATABASE_VERSION);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(LOCAL_RESOURCE_SNAPSHOT_STORE)) {
+        database.createObjectStore(LOCAL_RESOURCE_SNAPSHOT_STORE, { keyPath: "workspaceId" });
+      }
+      if (!database.objectStoreNames.contains(LOCAL_RESOURCE_OPERATION_STORE)) {
+        const operations = database.createObjectStore(LOCAL_RESOURCE_OPERATION_STORE, { keyPath: "id" });
+        operations.createIndex("workspaceId", "workspaceId", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB is unavailable."));
+    request.onblocked = () => reject(new Error("IndexedDB upgrade was blocked."));
+  }).catch((error) => {
+    localResourcePersistence.available = false;
+    databaseBackendStatus.error ||= error.message || "로컬 저장소를 열지 못했습니다.";
+    return null;
+  });
+  return localResourceDatabasePromise;
+}
+
+async function readLocalResourcePersistence(workspaceId = "") {
+  const database = await openLocalResourceDatabase();
+  if (!database) return { snapshot: null, operations: [] };
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readonly");
+  const snapshotsPromise = indexedDbRequest(transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).getAll());
+  const operationsPromise = indexedDbRequest(transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE).getAll());
+  const [snapshots, operations] = await Promise.all([snapshotsPromise, operationsPromise]);
+  await indexedDbTransactionComplete(transaction);
+  const snapshot = workspaceId
+    ? snapshots.find((entry) => entry.workspaceId === workspaceId) || null
+    : [...snapshots].sort((left, right) => String(right.savedAt || "").localeCompare(String(left.savedAt || "")))[0] || null;
+  const selectedWorkspaceId = workspaceId || snapshot?.workspaceId || "";
+  return {
+    snapshot,
+    operations: operations
+      .filter((entry) => entry.workspaceId === selectedWorkspaceId)
+      .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")) || String(left.id || "").localeCompare(String(right.id || ""))),
+  };
+}
+
+async function initializeLocalResourcePersistence() {
+  if (!localResourcePersistence.available) {
+    localResourcePersistence.ready = true;
+    return;
+  }
+  try {
+    const local = await readLocalResourcePersistence();
+    localResourcePersistence = {
+      ...localResourcePersistence,
+      ready: true,
+      workspaceId: local.snapshot?.workspaceId || "",
+      snapshot: local.snapshot,
+      operations: local.operations,
+      pending: local.operations.length > 0,
+    };
+    if (local.snapshot?.state && isPlainObject(local.snapshot.state)) {
+      const localState = normalizeState(cloneForLocalPersistence(local.snapshot.state));
+      localState.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, localState.revision);
+      state = localState;
+      databaseBackendStatus.revision = localState.revision;
+      localStateHadStoredState = true;
+      localStateChangedBeforeDatabaseReady = local.operations.length > 0;
+      rerenderAfterStateReplace();
+    }
+  } catch (error) {
+    localResourcePersistence.available = false;
+    localResourcePersistence.ready = true;
+    databaseBackendStatus.error ||= error.message || "로컬 draft를 불러오지 못했습니다.";
+  }
+  patchResourcePageSaveStatus();
+}
+
+async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
+  if (!normalizedWorkspaceId || !localResourcePersistence.available) return { snapshot: null, operations: [] };
+  const local = await readLocalResourcePersistence(normalizedWorkspaceId);
+  localResourcePersistence.workspaceId = normalizedWorkspaceId;
+  localResourcePersistence.snapshot = local.snapshot;
+  localResourcePersistence.operations = local.operations;
+  localResourcePersistence.pending = local.operations.length > 0;
+  if (local.snapshot?.state && local.operations.length) {
+    state = normalizeState(cloneForLocalPersistence(local.snapshot.state));
+    state.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, fallbackRevision);
+    localStateChangedBeforeDatabaseReady = true;
+    rerenderAfterStateReplace();
+  }
+  return local;
+}
+
+function activeDirtyResourceIds() {
+  return [...dirtyResourceIds].filter((resourceId) => itemById("resources", resourceId));
+}
+
+function scheduleLocalResourceDraftWrite() {
+  if (!localResourcePersistence.available) return;
+  localResourcePersistence.pending = true;
+  window.clearTimeout(localResourceWriteTimer);
+  localResourceWriteTimer = window.setTimeout(() => persistLocalResourceDraft(), LOCAL_RESOURCE_WRITE_DELAY_MS);
+}
+
+async function persistLocalResourceDraft(options = {}) {
+  window.clearTimeout(localResourceWriteTimer);
+  localResourceWriteTimer = 0;
+  if (!localResourcePersistence.available || !localResourcePersistence.ready) return false;
+  const workspaceId = String(localResourcePersistence.workspaceId || "").trim();
+  if (!workspaceId) return false;
+  const database = await openLocalResourceDatabase();
+  if (!database) return false;
+  const now = new Date().toISOString();
+  const baseRevision = localResourcePersistence.snapshot?.baseRevision ?? currentWorkspaceRevision();
+  const previousByEntity = new Map(localResourcePersistence.operations.map((operation) => [`${operation.entityType}:${operation.entityId}`, operation]));
+  const resourceIds = activeDirtyResourceIds();
+  const nextOperations = localResourcePersistence.operations.filter((operation) => operation.workspaceId === workspaceId);
+  for (const resourceId of resourceIds) {
+    const resource = itemById("resources", resourceId);
+    if (!resource) continue;
+    const previous = previousByEntity.get(`resource:${resourceId}`);
+    const operation = {
+      id: previous?.id || `resource:${workspaceId}:${resourceId}`,
+      workspaceId,
+      entityType: "resource",
+      entityId: resourceId,
+      baseRevision: previous?.baseRevision ?? baseRevision,
+      status: previous?.status === "conflict" ? "conflict" : "pending",
+      attempts: Number(previous?.attempts || 0),
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      payload: { resource: cloneForLocalPersistence(resource) },
+      ...(previous?.remoteRevision !== undefined ? { remoteRevision: previous.remoteRevision } : {}),
+    };
+    const index = nextOperations.findIndex((entry) => entry.id === operation.id);
+    if (index >= 0) nextOperations[index] = operation;
+    else nextOperations.push(operation);
+  }
+  if (localWorkspaceOperationRequired || (!resourceIds.length && options.ensureOperation === true)) {
+    const previous = previousByEntity.get(`workspace:${workspaceId}`);
+    const operation = {
+      id: previous?.id || `workspace:${workspaceId}`,
+      workspaceId,
+      entityType: "workspace",
+      entityId: workspaceId,
+      baseRevision: previous?.baseRevision ?? baseRevision,
+      status: previous?.status === "conflict" ? "conflict" : "pending",
+      attempts: Number(previous?.attempts || 0),
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      payload: { state: cloneForLocalPersistence(state) },
+    };
+    const index = nextOperations.findIndex((entry) => entry.id === operation.id);
+    if (index >= 0) nextOperations[index] = operation;
+    else nextOperations.push(operation);
+  }
+  const snapshot = {
+    workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision,
+    savedAt: now,
+    state: cloneForLocalPersistence(state),
+  };
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
+  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  for (const operation of nextOperations) operationStore.put(operation);
+  await indexedDbTransactionComplete(transaction);
+  dirtyResourceIds.clear();
+  localWorkspaceOperationRequired = false;
+  localResourcePersistence.snapshot = snapshot;
+  localResourcePersistence.operations = nextOperations;
+  localResourcePersistence.pending = nextOperations.length > 0;
+  patchResourcePageSaveStatus();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+  return true;
+}
+
+async function persistCommittedLocalResourceState(revision, options = {}) {
+  if (!localResourcePersistence.available || !localResourcePersistence.ready) return false;
+  const workspaceId = String(localResourcePersistence.workspaceId || "").trim();
+  if (!workspaceId) return false;
+  const database = await openLocalResourceDatabase();
+  if (!database) return false;
+  const committedRevision = normalizedWorkspaceRevision(revision, state.revision);
+  const snapshot = {
+    workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision: committedRevision,
+    savedAt: new Date().toISOString(),
+    state: cloneForLocalPersistence(state),
+  };
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
+  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  if (options.clearOperations !== false) {
+    for (const operation of localResourcePersistence.operations) {
+      if (operation.workspaceId === workspaceId) operationStore.delete(operation.id);
+    }
+  }
+  await indexedDbTransactionComplete(transaction);
+  localResourcePersistence.snapshot = snapshot;
+  if (options.clearOperations !== false) localResourcePersistence.operations = [];
+  localResourcePersistence.pending = localResourcePersistence.operations.length > 0;
+  localResourcePersistence.conflictRemoteState = null;
+  localResourcePersistence.conflictResourceId = "";
+  dirtyResourceIds.clear();
+  localWorkspaceOperationRequired = false;
+  patchResourcePageSaveStatus();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+  return true;
+}
+
+async function markLocalResourceOperations(status, options = {}) {
+  if (!localResourcePersistence.available || !localResourcePersistence.workspaceId || !localResourcePersistence.operations.length) return;
+  const database = await openLocalResourceDatabase();
+  if (!database) return;
+  const transaction = database.transaction(LOCAL_RESOURCE_OPERATION_STORE, "readwrite");
+  const store = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  const now = new Date().toISOString();
+  localResourcePersistence.operations = localResourcePersistence.operations.map((operation) => {
+    const next = {
+      ...operation,
+      status,
+      attempts: Number(operation.attempts || 0) + (options.incrementAttempts === false ? 0 : 1),
+      updatedAt: now,
+      ...(options.remoteRevision !== undefined ? { remoteRevision: options.remoteRevision } : {}),
+    };
+    store.put(next);
+    return next;
+  });
+  await indexedDbTransactionComplete(transaction);
+  localResourcePersistence.pending = localResourcePersistence.operations.length > 0;
+  patchResourcePageSaveStatus();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+}
+
+function localResourceOperation(resourceId = "") {
+  return localResourcePersistence.operations.find((operation) => (
+    operation.entityType === "resource" && (!resourceId || operation.entityId === resourceId)
+  )) || null;
 }
 
 async function initializeDatabaseState() {
   try {
     const status = await apiJson("/api/state/status");
+    const statusRevision = workspaceRevisionFromPayload(status, state.revision);
+    const local = await selectLocalResourceWorkspace(status.appStateId || localResourcePersistence.workspaceId, statusRevision);
     databaseBackendStatus = {
       ...databaseBackendStatus,
       configured: Boolean(status.configured),
@@ -16728,34 +19619,76 @@ async function initializeDatabaseState() {
       loading: false,
       error: status.error || "",
       lastSyncedAt: status.updatedAt || "",
+      revision: statusRevision,
+      conflict: null,
     };
+    remoteStateSaveBlocked = false;
     if (!databaseBackendStatus.connected) {
+      if (localResourcePersistence.pending) await persistLocalResourceDraft();
       renderDatabaseStatusIfVisible();
       return;
     }
 
     const payload = await apiJson("/api/state");
+    const remoteRevision = workspaceRevisionFromPayload(payload, statusRevision);
+    databaseBackendStatus.revision = remoteRevision;
     if (payload.state) {
-      const shouldCleanRemoteState = hasDeprecatedSettings(payload.state);
+      const shouldCleanRemoteState = stateNeedsClientMigration(payload.state);
       const remoteState = normalizeState(payload.state);
+      remoteState.revision = remoteRevision;
+      if (local.operations.length) {
+        const localBaseRevision = normalizedWorkspaceRevision(local.snapshot?.baseRevision, state.revision);
+        if (localBaseRevision !== remoteRevision) {
+          remoteStateSaveBlocked = true;
+          databaseBackendStatus = {
+            ...databaseBackendStatus,
+            connected: true,
+            loading: false,
+            saving: false,
+            revision: remoteRevision,
+            conflict: {
+              status: 409,
+              code: "LOCAL_STATE_REVISION_CONFLICT",
+              localRevision: localBaseRevision,
+              remoteRevision,
+            },
+          };
+          localResourcePersistence.conflictRemoteState = remoteState;
+          localResourcePersistence.conflictResourceId = local.operations.find((operation) => operation.entityType === "resource")?.entityId || "";
+          await markLocalResourceOperations("conflict", { remoteRevision, incrementAttempts: false });
+          renderDatabaseStatusIfVisible();
+          renderDetail({ soft: true });
+          return;
+        }
+        state.revision = remoteRevision;
+        remoteStateSavePending = true;
+        await saveStateRemoteNow();
+        localStateChangedBeforeDatabaseReady = false;
+        return;
+      }
       const shouldUploadLocal =
         localStateChangedBeforeDatabaseReady ||
         (localStateHadStoredState &&
           stateTimestamp(state.updatedAt) > stateTimestamp(remoteState.updatedAt) + 1000);
       if (shouldUploadLocal) {
+        state.revision = remoteRevision;
         await saveStateRemoteNow();
       } else {
         state = remoteState;
         clearLegacyLocalState();
         databaseBackendStatus.lastSyncedAt = payload.updatedAt || remoteState.updatedAt || "";
         rerenderAfterStateReplace();
+        await persistCommittedLocalResourceState(remoteRevision);
         if (shouldCleanRemoteState) await saveStateRemoteNow();
       }
     } else {
       const shouldSeedInitialRemoteState = !localStateHadStoredState && !localStateChangedBeforeDatabaseReady;
       if (shouldSeedInitialRemoteState) {
         state = createSeedState();
+        state.revision = remoteRevision;
         rerenderAfterStateReplace();
+      } else {
+        state.revision = remoteRevision;
       }
       await saveStateRemoteNow();
     }
@@ -16769,20 +19702,26 @@ async function initializeDatabaseState() {
       saving: false,
       error: error.message || "PostgreSQL 상태를 불러오지 못했습니다.",
     };
+    if (localResourcePersistence.pending) await persistLocalResourceDraft();
     renderDatabaseStatusIfVisible();
   }
 }
 
 function rerenderAfterStateReplace() {
+  clearResourceTransientState();
   clearStateIndexes();
+  resourceSearchTextCache.clear();
   renderNav();
   renderView({ soft: true });
-  renderDetail();
+  const activeResourceRoute = ui.resourceRouteReady ? resourceRouteFromLocation() : null;
+  if (activeResourceRoute) applyResourceRoute(activeResourceRoute, { focus: false });
+  else renderDetail();
   renderOverlays();
   updateTopbarStickiness();
 }
 
 function renderDatabaseStatusIfVisible() {
+  patchResourcePageSaveStatus();
   if (ui.view === "database") {
     renderView({ soft: true });
   }
@@ -16793,19 +19732,219 @@ function stateTimestamp(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
-function stateRequestBody() {
-  return JSON.stringify({ state });
+function parseWorkspaceRevision(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
 }
 
-function hasDeprecatedSettings(nextState) {
+function normalizedWorkspaceRevision(value, fallback = 0) {
+  return parseWorkspaceRevision(value) ?? parseWorkspaceRevision(fallback) ?? 0;
+}
+
+function workspaceRevisionFromPayload(payload, fallback = 0) {
+  return normalizedWorkspaceRevision(payload?.revision, payload?.state?.revision ?? fallback);
+}
+
+function responseWorkspaceRevision(response, payload = {}) {
+  const headerRevision = parseWorkspaceRevision(response.headers.get("x-state-revision"));
+  if (headerRevision !== null) return headerRevision;
+  const etag = String(response.headers.get("etag") || "").match(/^(?:W\/)?"?(?:state-)?(\d+)"?$/i);
+  if (etag) return parseWorkspaceRevision(etag[1]);
+  return parseWorkspaceRevision(payload?.revision);
+}
+
+function normalizedIsoTimestamp(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) ? new Date(time).toISOString() : "";
+}
+
+function normalizedResourceRevision(value) {
+  const revision = Number.parseInt(value, 10);
+  return Number.isFinite(revision) && revision >= 1 ? revision : 1;
+}
+
+function normalizeResourceRecords(resources, migrationAt = new Date().toISOString()) {
+  if (!Array.isArray(resources)) return [];
+  const fallbackTimestamp = normalizedIsoTimestamp(migrationAt) || new Date().toISOString();
+  for (const resource of resources) normalizeResourceRecord(resource, fallbackTimestamp);
+  return resources;
+}
+
+function normalizeResourceRecord(resource, migrationAt = new Date().toISOString()) {
+  if (!isPlainObject(resource)) return resource;
+  const fallbackTimestamp = normalizedIsoTimestamp(migrationAt) || new Date().toISOString();
+  const existingCreatedAt = normalizedIsoTimestamp(resource.createdAt);
+  const existingUpdatedAt = normalizedIsoTimestamp(resource.updatedAt);
+  const migratedTimestamp = !existingCreatedAt || !existingUpdatedAt;
+  resource.createdAt = existingCreatedAt || fallbackTimestamp;
+  resource.updatedAt = existingUpdatedAt || fallbackTimestamp;
+  if (stateTimestamp(resource.updatedAt) < stateTimestamp(resource.createdAt)) resource.updatedAt = resource.createdAt;
+  resource.revision = normalizedResourceRevision(resource.revision);
+  if (!String(resource.timestampSource || "").trim()) {
+    resource.timestampSource = migratedTimestamp ? "migration" : "existing";
+  }
+  resource.parentId = typeof resource.parentId === "string" ? resource.parentId : "";
+  resource.childOrder = Array.isArray(resource.childOrder)
+    ? [...new Set(resource.childOrder.filter((childId) => typeof childId === "string" && childId && childId !== resource.id))]
+    : [];
+  resource.pageSettings = normalizeResourcePageSettings(resource.pageSettings);
+  resource.trashedAt = normalizedIsoTimestamp(resource.trashedAt);
+  resource.commentThreads = normalizeResourceCommentThreads(resource.commentThreads);
+  resource.icon = normalizeResourceIcon(resource.icon);
+  resource.cover = normalizeResourceCover(resource.cover);
+  resource.readOnly = resource.readOnly === true;
+  return resource;
+}
+
+function normalizeResourceIcon(value) {
+  const icon = typeof value === "string" ? value.trim() : "";
+  if (!icon || icon.length > 16 || /[<>]/.test(icon)) return "";
+  return icon;
+}
+
+function normalizeResourceCover(value) {
+  const source = isPlainObject(value) ? value : {};
+  const rawUrl = String(source.url || "").trim();
+  let url = "";
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === "https:") url = parsed.href;
+  } catch {}
+  const position = Number(source.position);
+  return {
+    url,
+    position: Number.isFinite(position) ? Math.max(0, Math.min(100, Math.round(position))) : 50,
+  };
+}
+
+function normalizeResourcePageSettings(value) {
+  const source = isPlainObject(value) ? value : {};
+  return {
+    font: ["default", "serif", "mono"].includes(source.font) ? source.font : "default",
+    smallText: source.smallText === true,
+    fullWidth: source.fullWidth === true,
+  };
+}
+
+function normalizeResourceCommentThreads(value) {
+  if (!Array.isArray(value)) return [];
+  const threads = [];
+  const threadIds = new Set();
+  for (const entry of value) {
+    if (!isPlainObject(entry)) continue;
+    const threadId = String(entry.id || "").trim();
+    const scope = entry.scope === "inline" ? "inline" : entry.scope === "page" ? "page" : "";
+    const body = String(entry.body || "").trim();
+    if (!threadId || threadIds.has(threadId) || !scope || !body) continue;
+    const createdAt = normalizedIsoTimestamp(entry.createdAt) || new Date().toISOString();
+    const anchorSource = isPlainObject(entry.anchor) ? entry.anchor : {};
+    const anchor = scope === "inline"
+      ? {
+          blockId: String(anchorSource.blockId || ""),
+          start: Math.max(0, Number.parseInt(anchorSource.start, 10) || 0),
+          end: Math.max(0, Number.parseInt(anchorSource.end, 10) || 0),
+        }
+      : null;
+    if (scope === "inline" && (!anchor.blockId || anchor.end <= anchor.start)) continue;
+    const replies = [];
+    const replyIds = new Set();
+    for (const reply of Array.isArray(entry.replies) ? entry.replies : []) {
+      if (!isPlainObject(reply)) continue;
+      const replyId = String(reply.id || "").trim();
+      const replyBody = String(reply.body || "").trim();
+      if (!replyId || replyIds.has(replyId) || !replyBody) continue;
+      const replyCreatedAt = normalizedIsoTimestamp(reply.createdAt) || createdAt;
+      replies.push({
+        id: replyId,
+        body: replyBody,
+        createdAt: replyCreatedAt,
+        updatedAt: normalizedIsoTimestamp(reply.updatedAt) || replyCreatedAt,
+        deletedAt: normalizedIsoTimestamp(reply.deletedAt),
+      });
+      replyIds.add(replyId);
+    }
+    threads.push({
+      id: threadId,
+      scope,
+      anchor,
+      body,
+      createdAt,
+      updatedAt: normalizedIsoTimestamp(entry.updatedAt) || createdAt,
+      resolvedAt: normalizedIsoTimestamp(entry.resolvedAt),
+      deletedAt: normalizedIsoTimestamp(entry.deletedAt),
+      replies,
+    });
+    threadIds.add(threadId);
+  }
+  return threads;
+}
+
+function resourceNeedsMigration(resource) {
+  if (!isPlainObject(resource)) return true;
+  return (
+    !normalizedIsoTimestamp(resource.createdAt) ||
+    !normalizedIsoTimestamp(resource.updatedAt) ||
+    normalizedResourceRevision(resource.revision) !== resource.revision ||
+    !String(resource.timestampSource || "").trim() ||
+    typeof resource.parentId !== "string" ||
+    !Array.isArray(resource.childOrder) ||
+    !isPlainObject(resource.pageSettings) ||
+    typeof resource.trashedAt !== "string" ||
+    !Array.isArray(resource.commentThreads) ||
+    typeof resource.icon !== "string" ||
+    !isPlainObject(resource.cover) ||
+    typeof resource.readOnly !== "boolean"
+  );
+}
+
+function touchResource(resourceOrId, options = {}) {
+  const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
+  if (!resourceMutationAllowed(resource, { allowTrashed: true })) return null;
+  normalizeResourceRecord(resource, options.at || new Date().toISOString());
+  const previousUpdatedAt = stateTimestamp(resource.updatedAt);
+  const requestedAt = stateTimestamp(options.at || "") || Date.now();
+  resource.updatedAt = new Date(Math.max(requestedAt, previousUpdatedAt + 1)).toISOString();
+  resource.revision = normalizedResourceRevision(resource.revision) + 1;
+  if (!String(resource.timestampSource || "").trim()) resource.timestampSource = "native";
+  dirtyResourceIds.add(resource.id);
+  resourceSearchTextCache.delete(resource.id);
+  return resource;
+}
+
+function touchResourceForOwner(ownerType, ownerId, options = {}) {
+  return ownerType === "resources" ? touchResource(ownerId, options) : null;
+}
+
+function stateRequestBody(baseRevision = currentWorkspaceRevision()) {
+  return JSON.stringify({ state, baseRevision });
+}
+
+function currentWorkspaceRevision() {
+  return normalizedWorkspaceRevision(databaseBackendStatus.revision, state.revision);
+}
+
+function stateNeedsClientMigration(nextState) {
   const settings = nextState?.settings || {};
-  return Object.prototype.hasOwnProperty.call(settings, "appMode") || Object.prototype.hasOwnProperty.call(settings, "notionSyncMode");
+  return (
+    Number(nextState?.version) !== APP_STATE_VERSION ||
+    Object.prototype.hasOwnProperty.call(settings, "appMode") ||
+    Object.prototype.hasOwnProperty.call(settings, "notionSyncMode") ||
+    typeof settings.notionParityMode !== "boolean" ||
+    typeof settings.advancedWindowMode !== "boolean" ||
+    !isPlainObject(settings.openPagesIn) ||
+    Object.keys(DEFAULT_RESOURCE_OPEN_PAGES_IN).some((view) => !RESOURCE_OPEN_PAGE_MODES.has(settings.openPagesIn?.[view])) ||
+    !RESOURCE_SEARCH_SCOPES.has(settings.viewControls?.resources?.searchScope) ||
+    (nextState?.resources || []).some(resourceNeedsMigration)
+  );
 }
 
 function queueRemoteStateSave(options = {}) {
   if (!databaseBackendStatus.connected) return;
   remoteStateSavePending = true;
+  patchResourcePageSaveStatus();
   window.clearTimeout(remoteStateSaveTimer);
+  if (remoteStateSaveBlocked) return;
   if (options.immediate) {
     flushRemoteStateSave(options);
     return;
@@ -16814,7 +19953,7 @@ function queueRemoteStateSave(options = {}) {
 }
 
 async function flushRemoteStateSave(options = {}) {
-  if (!databaseBackendStatus.connected || remoteStateSaveInFlight || !remoteStateSavePending) return;
+  if (!databaseBackendStatus.connected || remoteStateSaveBlocked || remoteStateSaveInFlight || !remoteStateSavePending) return;
   remoteStateSavePending = false;
   remoteStateSaveInFlight = true;
   let retryLater = false;
@@ -16822,25 +19961,31 @@ async function flushRemoteStateSave(options = {}) {
     const saved = await saveStateRemoteNow(options);
     if (!saved && databaseBackendStatus.connected) {
       remoteStateSavePending = true;
-      retryLater = !options.keepalive;
+      retryLater = !options.keepalive && !remoteStateSaveBlocked;
     }
   } finally {
     remoteStateSaveInFlight = false;
+    patchResourcePageSaveStatus();
+    renderServiceWorkerUpdateNoticeIfNeeded();
     if (retryLater) {
       window.clearTimeout(remoteStateSaveTimer);
       remoteStateSaveTimer = window.setTimeout(flushRemoteStateSave, REMOTE_STATE_RETRY_DELAY_MS);
-    } else if (remoteStateSavePending) {
+    } else if (remoteStateSavePending && !remoteStateSaveBlocked) {
       queueRemoteStateSave({ immediate: true });
     }
   }
 }
 
 function handleVisibilityStateSave() {
-  if (document.visibilityState === "hidden") flushRemoteStateSave({ keepalive: true });
+  if (document.visibilityState === "hidden") {
+    flushPendingResourceControlSaves();
+    flushRemoteStateSave({ keepalive: true });
+  }
 }
 
 function handlePageHideStateSave() {
-  if (!databaseBackendStatus.connected || !remoteStateSavePending) return;
+  flushPendingResourceControlSaves();
+  if (!databaseBackendStatus.connected || remoteStateSaveBlocked || !remoteStateSavePending) return;
   if (sendRemoteStateBeacon()) {
     remoteStateSavePending = false;
     window.clearTimeout(remoteStateSaveTimer);
@@ -16852,7 +19997,7 @@ function handlePageHideStateSave() {
 function sendRemoteStateBeacon() {
   if (!navigator.sendBeacon) return false;
   try {
-    const body = stateRequestBody();
+    const body = stateRequestBody(currentWorkspaceRevision());
     const blob = new Blob([body], { type: "application/json" });
     return navigator.sendBeacon("/api/state", blob);
   } catch {
@@ -16862,9 +20007,14 @@ function sendRemoteStateBeacon() {
 
 async function saveStateRemoteNow(options = {}) {
   if (!databaseBackendStatus.connected) return null;
+  const queuedOperations = localResourcePersistence.operations.filter((operation) => operation.workspaceId === localResourcePersistence.workspaceId);
+  if (queuedOperations.length && queuedOperations.every((operation) => operation.entityType === "resource")) {
+    return saveQueuedResourceOperations(options);
+  }
   const renderStatus = !options.keepalive;
   const outgoingUpdatedAt = state.updatedAt;
-  const body = stateRequestBody();
+  const baseRevision = currentWorkspaceRevision();
+  const body = stateRequestBody(baseRevision);
   if (renderStatus) {
     databaseBackendStatus.saving = true;
     renderDatabaseStatusIfVisible();
@@ -16873,12 +20023,18 @@ async function saveStateRemoteNow(options = {}) {
     const payload = await apiJson("/api/state", {
       method: options.keepalive ? "POST" : "PUT",
       keepalive: Boolean(options.keepalive),
+      headers: { "If-Match": `"state-${baseRevision}"` },
       body,
     });
+    const savedRevision = workspaceRevisionFromPayload(payload, baseRevision + 1);
     if (payload.state && state.updatedAt === outgoingUpdatedAt) {
       state = normalizeState(payload.state);
+      state.revision = savedRevision;
       clearStateIndexes();
+    } else {
+      state.revision = savedRevision;
     }
+    remoteStateSaveBlocked = false;
     databaseBackendStatus = {
       ...databaseBackendStatus,
       configured: true,
@@ -16886,18 +20042,282 @@ async function saveStateRemoteNow(options = {}) {
       saving: false,
       error: "",
       lastSyncedAt: payload.updatedAt || new Date().toISOString(),
+      revision: savedRevision,
+      conflict: null,
     };
     clearLegacyLocalState();
+    await persistCommittedLocalResourceState(savedRevision);
     if (renderStatus) renderDatabaseStatusIfVisible();
     return payload;
   } catch (error) {
+    const terminalConflict = error.status === 409 || error.status === 428;
+    if (terminalConflict) remoteStateSaveBlocked = true;
+    const operation = localResourcePersistence.operations.find((entry) => entry.entityType === "resource") || null;
     databaseBackendStatus = {
       ...databaseBackendStatus,
       saving: false,
       error: error.message || "PostgreSQL 저장에 실패했습니다.",
+      conflict: terminalConflict
+        ? {
+            status: error.status,
+            code: error.code || "",
+            localRevision: baseRevision,
+            remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
+          }
+        : databaseBackendStatus.conflict,
     };
+    if (terminalConflict) {
+      localResourcePersistence.conflictResourceId = operation?.entityId || ui.resourceNotes[0]?.id || "";
+      await markLocalResourceOperations("conflict", {
+        remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
+      });
+      await loadRemoteResourceConflictPreview();
+    } else {
+      await markLocalResourceOperations(navigator.onLine === false ? "pending" : "retrying");
+    }
     if (renderStatus) renderDatabaseStatusIfVisible();
+    renderDetail({ soft: true });
     return null;
+  }
+}
+
+async function saveQueuedResourceOperations(options = {}) {
+  const renderStatus = !options.keepalive;
+  if (renderStatus) {
+    databaseBackendStatus.saving = true;
+    renderDatabaseStatusIfVisible();
+  }
+  let lastPayload = null;
+  for (const queued of [...localResourcePersistence.operations]) {
+    const operation = localResourcePersistence.operations.find((entry) => entry.id === queued.id);
+    if (!operation || operation.entityType !== "resource") continue;
+    const resource = itemById("resources", operation.entityId);
+    if (!resource) continue;
+    const baseRevision = normalizedWorkspaceRevision(operation.baseRevision, currentWorkspaceRevision());
+    const outgoingResource = cloneForLocalPersistence(resource);
+    try {
+      const payload = await apiJson(`/api/resources/${encodeURIComponent(resource.id)}`, {
+        method: "PUT",
+        keepalive: Boolean(options.keepalive),
+        headers: { "If-Match": `"state-${baseRevision}"` },
+        body: JSON.stringify({ resource: outgoingResource, baseRevision }),
+      });
+      const savedRevision = workspaceRevisionFromPayload(payload, baseRevision + 1);
+      await commitLocalResourceOperationSuccess(operation, outgoingResource, payload.resource, savedRevision);
+      databaseBackendStatus = {
+        ...databaseBackendStatus,
+        configured: true,
+        connected: true,
+        saving: false,
+        error: "",
+        lastSyncedAt: payload.updatedAt || new Date().toISOString(),
+        revision: savedRevision,
+        conflict: null,
+      };
+      remoteStateSaveBlocked = false;
+      lastPayload = payload;
+    } catch (error) {
+      const terminalConflict = error.status === 409 || error.status === 428;
+      if (terminalConflict) remoteStateSaveBlocked = true;
+      const remoteRevision = normalizedWorkspaceRevision(error.revision, baseRevision);
+      databaseBackendStatus = {
+        ...databaseBackendStatus,
+        saving: false,
+        error: error.message || "Resource 저장에 실패했습니다.",
+        conflict: terminalConflict
+          ? {
+              status: error.status,
+              code: error.code || "",
+              localRevision: baseRevision,
+              remoteRevision,
+            }
+          : databaseBackendStatus.conflict,
+      };
+      if (terminalConflict) {
+        localResourcePersistence.conflictResourceId = operation.entityId;
+        await markLocalResourceOperations("conflict", { remoteRevision });
+        await loadRemoteResourceConflictPreview();
+      } else {
+        await markLocalResourceOperations(navigator.onLine === false ? "pending" : "retrying");
+      }
+      if (renderStatus) renderDatabaseStatusIfVisible();
+      renderDetail({ soft: true });
+      return null;
+    }
+  }
+  remoteStateSavePending = localResourcePersistence.operations.length > 0;
+  databaseBackendStatus.saving = false;
+  clearLegacyLocalState();
+  if (renderStatus) renderDatabaseStatusIfVisible();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+  return lastPayload;
+}
+
+async function commitLocalResourceOperationSuccess(operation, outgoingResource, savedResource, savedRevision) {
+  const currentResource = itemById("resources", operation.entityId);
+  const unchangedDuringSave = currentResource && currentResource.revision === outgoingResource.revision && currentResource.updatedAt === outgoingResource.updatedAt;
+  if (unchangedDuringSave && savedResource) {
+    const index = state.resources.findIndex((resource) => resource.id === operation.entityId);
+    if (index >= 0) {
+      state.resources[index] = normalizeResourceRecord(cloneForLocalPersistence(savedResource));
+      clearStateIndexes();
+    }
+  }
+  state.revision = savedRevision;
+  const database = await openLocalResourceDatabase();
+  if (!database) return;
+  let remaining = localResourcePersistence.operations.filter((entry) => entry.id !== operation.id);
+  if (!unchangedDuringSave && currentResource) {
+    remaining.push({
+      ...operation,
+      baseRevision: savedRevision,
+      status: "pending",
+      updatedAt: new Date().toISOString(),
+      payload: { resource: cloneForLocalPersistence(currentResource) },
+    });
+  }
+  remaining = remaining.map((entry) => ({
+    ...entry,
+    baseRevision: savedRevision,
+    status: entry.status === "conflict" ? "conflict" : "pending",
+  }));
+  const snapshot = {
+    workspaceId: localResourcePersistence.workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision: savedRevision,
+    savedAt: new Date().toISOString(),
+    state: cloneForLocalPersistence(state),
+  };
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  const store = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  store.delete(operation.id);
+  for (const entry of remaining) store.put(entry);
+  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
+  await indexedDbTransactionComplete(transaction);
+  localResourcePersistence.operations = remaining;
+  localResourcePersistence.snapshot = snapshot;
+  localResourcePersistence.pending = remaining.length > 0;
+  localResourcePersistence.conflictRemoteState = null;
+  localResourcePersistence.conflictResourceId = "";
+  patchResourcePageSaveStatus();
+  renderServiceWorkerUpdateNoticeIfNeeded();
+}
+
+async function loadRemoteResourceConflictPreview() {
+  if (!databaseBackendStatus.conflict) return null;
+  try {
+    const payload = await apiJson("/api/state");
+    if (!payload.state) return null;
+    const remoteState = normalizeState(payload.state);
+    remoteState.revision = workspaceRevisionFromPayload(payload, databaseBackendStatus.conflict.remoteRevision);
+    localResourcePersistence.conflictRemoteState = remoteState;
+    renderDetail({ soft: true });
+    return remoteState;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveResourceSyncConflict(resourceId, resolution) {
+  const remoteState = localResourcePersistence.conflictRemoteState;
+  const remoteRevision = normalizedWorkspaceRevision(databaseBackendStatus.conflict?.remoteRevision, remoteState?.revision);
+  const remoteResource = remoteState?.resources?.find((entry) => entry.id === resourceId) || null;
+  const operation = localResourceOperation(resourceId);
+  if (!remoteResource || !operation || !["keep-local", "use-remote"].includes(resolution)) return false;
+  if (resolution === "use-remote") {
+    state = normalizeState(cloneForLocalPersistence(remoteState));
+    state.revision = remoteRevision;
+    remoteStateSaveBlocked = false;
+    remoteStateSavePending = false;
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      connected: true,
+      saving: false,
+      error: "",
+      revision: remoteRevision,
+      conflict: null,
+    };
+    await persistCommittedLocalResourceState(remoteRevision);
+    rerenderAfterStateReplace();
+    showToast("원격 Resource를 사용했습니다.");
+    return true;
+  }
+  const database = await openLocalResourceDatabase();
+  if (!database) return false;
+  operation.baseRevision = remoteRevision;
+  operation.status = "pending";
+  operation.remoteRevision = remoteRevision;
+  operation.updatedAt = new Date().toISOString();
+  const transaction = database.transaction(LOCAL_RESOURCE_OPERATION_STORE, "readwrite");
+  transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE).put(operation);
+  await indexedDbTransactionComplete(transaction);
+  state.revision = remoteRevision;
+  localResourcePersistence.snapshot.baseRevision = remoteRevision;
+  localResourcePersistence.operations = [operation];
+  localResourcePersistence.pending = true;
+  localResourcePersistence.conflictRemoteState = null;
+  localResourcePersistence.conflictResourceId = "";
+  remoteStateSaveBlocked = false;
+  databaseBackendStatus = {
+    ...databaseBackendStatus,
+    connected: true,
+    saving: false,
+    error: "",
+    revision: remoteRevision,
+    conflict: null,
+  };
+  remoteStateSavePending = true;
+  renderDetail({ soft: true });
+  queueRemoteStateSave({ immediate: true });
+  return true;
+}
+
+async function reloadRemoteStateAfterConflict() {
+  if (!databaseBackendStatus.connected || !databaseBackendStatus.conflict || databaseBackendStatus.loading) return false;
+  window.clearTimeout(remoteStateSaveTimer);
+  databaseBackendStatus = {
+    ...databaseBackendStatus,
+    loading: true,
+    saving: false,
+    error: "",
+  };
+  renderDatabaseStatusIfVisible();
+  try {
+    const payload = await apiJson("/api/state");
+    if (!payload.state) throw new Error("원격 상태가 비어 있어 다시 불러오지 못했습니다.");
+    const remoteRevision = workspaceRevisionFromPayload(payload, databaseBackendStatus.conflict?.remoteRevision);
+    const remoteState = normalizeState(payload.state);
+    remoteState.revision = remoteRevision;
+    clearResourceTransientState();
+    state = remoteState;
+    remoteStateSavePending = false;
+    remoteStateSaveBlocked = false;
+    localStateChangedBeforeDatabaseReady = false;
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      configured: true,
+      connected: true,
+      loading: false,
+      saving: false,
+      error: "",
+      lastSyncedAt: payload.updatedAt || remoteState.updatedAt || "",
+      revision: remoteRevision,
+      conflict: null,
+    };
+    clearLegacyLocalState();
+    await persistCommittedLocalResourceState(remoteRevision);
+    rerenderAfterStateReplace();
+    showToast("원격 상태를 다시 불러왔습니다.");
+    return true;
+  } catch (error) {
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      loading: false,
+      saving: false,
+      error: error.message || "원격 상태를 다시 불러오지 못했습니다.",
+    };
+    renderDatabaseStatusIfVisible();
+    return false;
   }
 }
 
@@ -17069,6 +20489,7 @@ function exportJson() {
 }
 
 function resetDemoData() {
+  clearResourceTransientState();
   state = createSeedState();
   googleBackendStatus = {
     ...googleBackendStatus,
@@ -17120,7 +20541,18 @@ function normalizeState(next) {
   settings.navOrder = normalizeNavOrder(settings.navOrder);
   settings.calendarSources = normalizeCalendarSources(settings.calendarSources);
   settings.viewControls = normalizeViewControls(settings.viewControls);
+  settings.notionParityMode = nextSettings.notionParityMode !== false;
+  settings.advancedWindowMode = nextSettings.advancedWindowMode === true;
+  settings.openPagesIn = normalizeResourceOpenPagesIn(nextSettings.openPagesIn);
+  settings.resourceSideWidth = Number.isFinite(Number(nextSettings.resourceSideWidth)) && Number(nextSettings.resourceSideWidth) > 0
+    ? Math.round(Number(nextSettings.resourceSideWidth))
+    : 0;
   settings.visibleGoogleCalendars = isPlainObject(settings.visibleGoogleCalendars) ? { ...settings.visibleGoogleCalendars } : {};
+  const resourceMigrationAt = new Date().toISOString();
+  const resources = normalizeResourceRecords(
+    objectArrayOrFallback(next.resources, fallbackCollection(fallbackState, "resources")),
+    resourceMigrationAt,
+  );
   const googleCalendars = normalizeGoogleCalendarEntries(objectArrayOrFallback(next.googleCalendars, []));
   for (const calendar of googleCalendars) {
     if (settings.visibleGoogleCalendars[calendar.id] === undefined) {
@@ -17128,7 +20560,8 @@ function normalizeState(next) {
     }
   }
   const normalized = {
-    version: 3,
+    version: APP_STATE_VERSION,
+    revision: normalizedWorkspaceRevision(next.revision, 0),
     createdAt: next.createdAt || fallbackState().createdAt,
     updatedAt: next.updatedAt || fallbackState().updatedAt,
     settings,
@@ -17137,7 +20570,7 @@ function normalizeState(next) {
     goals: objectArrayOrFallback(next.goals, fallbackCollection(fallbackState, "goals")),
     projects: objectArrayOrFallback(next.projects, fallbackCollection(fallbackState, "projects")),
     tasks,
-    resources: objectArrayOrFallback(next.resources, fallbackCollection(fallbackState, "resources")),
+    resources,
     habits: objectArrayOrFallback(next.habits, []),
     habitInstances: objectArrayOrFallback(next.habitInstances, []),
     journals,
@@ -17158,6 +20591,10 @@ function createDefaultSettings() {
     calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
     visibleGoogleCalendars: {},
     viewControls: defaultViewControls(),
+    notionParityMode: true,
+    advancedWindowMode: false,
+    openPagesIn: { ...DEFAULT_RESOURCE_OPEN_PAGES_IN },
+    resourceSideWidth: 0,
     statsDemoDataSeeded: false,
   };
 }
@@ -17196,6 +20633,7 @@ function normalizeViewControls(value) {
     delete controls[key].filter;
     if (key === "resources") {
       controls[key].search = typeof saved.search === "string" ? saved.search : controls[key].search;
+      controls[key].searchScope = normalizeResourceSearchScope(saved.searchScope);
     }
   }
   return controls;
@@ -17213,6 +20651,13 @@ function normalizeSavedFilterValues(view, saved, fallback = ["all"]) {
       if (optionValueAllowed(VIEW_FILTER_OPTIONS[view], value) && !normalized.includes(value)) normalized.push(value);
     }
   }
+  if (
+    view === "resources" &&
+    !normalized.includes("all") &&
+    !normalized.some((value) => value === "active" || value === "archived")
+  ) {
+    normalized.unshift("active");
+  }
   return orderedFilterValues(view, normalized);
 }
 
@@ -17221,6 +20666,16 @@ function normalizeViewControlPanels(value) {
     filter: isPlainObject(value) && value.filter === true,
     sort: isPlainObject(value) && value.sort === true,
   };
+}
+
+function normalizeResourceOpenPagesIn(value) {
+  const source = isPlainObject(value) ? value : {};
+  const normalized = {};
+  for (const view of Object.keys(DEFAULT_RESOURCE_OPEN_PAGES_IN)) {
+    const candidate = source[view];
+    normalized[view] = RESOURCE_OPEN_PAGE_MODES.has(candidate) ? candidate : DEFAULT_RESOURCE_OPEN_PAGES_IN[view];
+  }
+  return normalized;
 }
 
 function optionValueAllowed(options, value) {
@@ -17280,7 +20735,10 @@ function isPlainObject(value) {
 
 function saveState() {
   clearStateIndexes();
+  state.version = APP_STATE_VERSION;
   state.updatedAt = new Date().toISOString();
+  if (!dirtyResourceIds.size) localWorkspaceOperationRequired = true;
+  scheduleLocalResourceDraftWrite();
   if (databaseBackendStatus.connected) {
     clearLegacyLocalState();
     queueRemoteStateSave();
@@ -17288,7 +20746,7 @@ function saveState() {
   }
   localStateChangedBeforeDatabaseReady = true;
   if (!databaseBackendStatus.loading) {
-    databaseBackendStatus.error ||= "PostgreSQL 연결 전이라 변경 사항은 메모리에만 대기 중입니다.";
+    databaseBackendStatus.error ||= "PostgreSQL 연결 전이라 변경 사항은 IndexedDB 대기열에 보관 중입니다.";
     renderDatabaseStatusIfVisible();
   }
 }
@@ -17312,20 +20770,11 @@ function createMinimalSeedState() {
   const resourceId = id();
 
   return {
-    version: 3,
+    version: APP_STATE_VERSION,
+    revision: 0,
     createdAt,
     updatedAt: createdAt,
-    settings: {
-      navOrder: defaultNavOrder(),
-      googleCalendarId: "primary",
-      googleConnectedAt: "",
-      lastGoogleFetchAt: "",
-      lastGoogleSyncAt: "",
-      calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
-      visibleGoogleCalendars: {},
-      viewControls: defaultViewControls(),
-      statsDemoDataSeeded: false,
-    },
+    settings: createDefaultSettings(),
     captures: [
       {
         id: id(),
@@ -17378,6 +20827,10 @@ function createMinimalSeedState() {
         boxId,
         goalId,
         projectId,
+        createdAt,
+        updatedAt: createdAt,
+        revision: 1,
+        timestampSource: "native",
         blocks: blocks("Task 분류 흐름 검증용 최소 Resource."),
       },
     ],
@@ -17446,6 +20899,7 @@ function ensureStatsDemoData(targetState, options = {}) {
     });
   }
   const demoResources = [];
+  const demoResourceTimestamp = normalizedIsoTimestamp(targetState.updatedAt) || new Date().toISOString();
   for (let index = 0; index < 14; index += 1) {
     const project = demoProjects[index % demoProjects.length];
     demoResources.push({
@@ -17459,6 +20913,10 @@ function ensureStatsDemoData(targetState, options = {}) {
       boxId: project.boxId,
       goalId: project.goalId,
       projectId: project.id,
+      createdAt: demoResourceTimestamp,
+      updatedAt: demoResourceTimestamp,
+      revision: 1,
+      timestampSource: "seed",
       blocks: blocks("통계 확인용 Resource입니다."),
     });
   }
@@ -17488,6 +20946,7 @@ function ensureStatsDemoData(targetState, options = {}) {
   addMissingById(targetState.projects, demoProjects);
   addMissingById(targetState.tasks, demoTasks);
   addMissingById(targetState.resources, demoResources);
+  normalizeResourceRecords(targetState.resources, new Date().toISOString());
   addMissingById(targetState.habits, demoHabits);
   addMissingById(targetState.habitInstances, demoHabitInstances);
   targetState.settings.statsDemoDataSeeded = true;
@@ -17512,7 +20971,17 @@ function blocks(text = "") {
 }
 
 function id() {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const random = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues?.(random);
+  if (random.some((value) => value !== 0)) {
+    random[6] = (random[6] & 0x0f) | 0x40;
+    random[8] = (random[8] & 0x3f) | 0x80;
+    const hex = [...random].map((value) => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  fallbackIdCounter += 1;
+  return `legacy-${Date.now().toString(36)}-${fallbackIdCounter.toString(36)}`;
 }
 
 function projectStats(project, relations = projectStatsRelations(project)) {

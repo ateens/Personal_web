@@ -7,9 +7,15 @@
     "build": "node scripts/build.mjs",
     "start": "node server.js",
     "preview": "STATIC_ROOT=dist/client node server.js",
-    "check": "node --check app.js && node --check server.js && node --check server/storage.js && node --check worker/index.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-worker.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-worker.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:baseline": "playwright test tests/e2e/resource-baseline.spec.js tests/e2e/resource-p0.spec.js",
+    "test:e2e:p0": "playwright test tests/e2e/resource-p0.spec.js",
+    "test:e2e:shell": "playwright test tests/e2e/resource-page-shell.spec.js",
+    "check": "node --check app.js && node --check server.js && node --check server/storage.js && node --check worker/index.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-worker.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/check-api-proxy-auth.mjs && node --check scripts/configure-api-proxy-auth.mjs && node --check scripts/manage-state-backups.mjs && node --check scripts/check-state-migration-backups.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-worker.mjs",
     "check:build": "npm run build && node scripts/check-build.mjs",
-    "check:postgres": "node --env-file-if-exists=.env scripts/check-postgres-state.mjs"
+    "check:postgres": "node --env-file-if-exists=.env scripts/check-postgres-state.mjs",
+    "check:api-auth": "node --env-file-if-exists=.env scripts/check-api-proxy-auth.mjs && node --env-file-if-exists=.env scripts/configure-api-proxy-auth.mjs self-test --confirm",
+    "check:backups": "node --env-file-if-exists=.env scripts/check-state-migration-backups.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -18,6 +24,7 @@
     "pg": "^8.22.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "esbuild": "^0.28.1"
   }
 }
