@@ -9,7 +9,7 @@ Audit point: tested source is deployed; private Sites and direct Railway access-
 ## Result at a glance
 
 - `[Verified]` Every functional P0 identified in the pre-change audit has an implementation and isolated automated coverage in the current branch: minimal Resource list/detail patching, IME-safe search/title editing, Resource v4 timestamps/revisions, durable local recovery, optimistic concurrency, keyboard-openable cards, parity/Advanced mode separation, Center/Side/Full shells, deep links, server/Worker/service-worker navigation fallback, strict state validation, semantic block structure, and client/server URL allowlists.
-- `[Verified deployed]` PR #1 merged the Resource rebuild at `665b237`; PR #2 merged the exact-target one-way API verifier at `617f44e`. Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` is `ACTIVE` and `Deployment successful`. Production migrated v3→v4 at revision 1, retains its manual predeploy backup, and reported revision 2 after the final authenticated smoke test.
+- `[Verified deployed]` PR #1 merged the Resource rebuild at `665b237`; PR #2 merged the exact-target one-way API verifier at `617f44e`. Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` reported `ACTIVE` and `Deployment successful` during auth verification. Production migrated v3→v4 at revision 1, retains its manual predeploy backup, and reported revision 2 after the final authenticated smoke test.
 - `[Verified]` Anonymous Sites requests to `/`, `/api/state/status`, and `/health` return `401`, so the deployed Worker gate is active for anonymous traffic.
 - `[Verified]` The exact Railway project/environment/service target forces the committed SHA-256 verifier and state preconditions without storing the token in source. Direct Railway `/api/state/status` returns `401 AUTH_REQUIRED` for missing and wrong credentials and `200` for the matching Sites credential; authenticated state reads return `ETag: "state-2"` and `X-State-Concurrency: required`; `/health` remains `200` by design.
 - `[Verified]` The signed-in owner Sites path returns `200`, reported revision 2, rendered the production Resources view, and opened a real Center peek. This proves the Worker secret still matches the deployed Railway verifier after enforcement.
@@ -134,7 +134,7 @@ Completed and verified:
 4. The existing 32-byte random Sites credential matches the committed one-way verifier; the temporary recovery file was mode `0600` and was deleted after verification.
 5. Sites version 8 was saved from `0bb41c3` and deployed owner-only/custom with environment revision 1, `API_BEARER_TOKEN`, and `REQUIRE_AUTHENTICATED_PROXY=1`.
 6. Anonymous Sites `/`, `/api/state/status`, and `/health` return `401`.
-7. Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` is active and successful.
+7. Railway deployment `32e9cf58-b0ca-4342-9638-e1bf078e071c` was the successful auth-implementation deployment used for live verification.
 8. Direct Railway status is `401/401/200` for missing/wrong/correct bearer credentials; authenticated state is revision 2 with `ETag: "state-2"` and `X-State-Concurrency: required`; `/health` is `200`.
 9. Signed-in Sites status is `200` at revision 2, and the production Resources view plus a Center peek rendered successfully.
 
