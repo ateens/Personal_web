@@ -538,6 +538,14 @@ const LOCAL_RESOURCE_SCHEMA_VERSION = 1;
 const LOCAL_RESOURCE_METADATA_SCHEMA_VERSION = 1;
 const LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID = "__sygma_provisional_workspace_v1__";
 const LOCAL_RESOURCE_WRITE_DELAY_MS = 60;
+
+const RESOURCE_PASTE_RAW_TEXT_MAX_BYTES = 5_000_000;
+const RESOURCE_PASTE_REPRESENTATION_MAX_BYTES = 250_000;
+const RESOURCE_PASTE_MAX_BLOCKS = 5_000;
+const RESOURCE_PASTE_MAX_BLOCK_TEXT_LENGTH = 250_000;
+const RESOURCE_PASTE_MAX_PUT_BODY_BYTES = 5_000_000;
+const RESOURCE_PASTE_REJECTION_MESSAGE = "Resource paste limit exceeded.";
+
 const dirtyResourceIds = new Set();
 let pendingResourceOperationGroups = [];
 let localWorkspaceOperationRequired = false;
@@ -13487,12 +13495,12 @@ function handleDocumentCut(event) {
 
 function handleDocumentPaste(event) {
   if (!event.clipboardData) return;
+  if (rejectResourceFileIngress(event, event.clipboardData)) return;
+  if (rejectOversizedResourceClipboardRepresentations(event, event.clipboardData)) return;
   if (pasteResourceTitle(event)) return;
   const composingTarget = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
   if (composingTarget && isComposingBlock(composingTarget)) return;
-  if (pasteEventShouldClearBlockSelection(event)) {
-    clearBlockSelection();
-  }
+  const shouldClearBlockSelection = pasteEventShouldClearBlockSelection(event);
   const target = clipboardPasteTarget(event);
   if (target && !editorOwnerMutationAllowed(target.ownerType, target.ownerId)) {
     event.preventDefault();
@@ -13501,6 +13509,7 @@ function handleDocumentPaste(event) {
   const customBlocks = readClipboardBlocks(event.clipboardData);
   const htmlBlocks = customBlocks.length ? [] : readHtmlClipboardBlocks(event.clipboardData);
   const text = codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks) || event.clipboardData.getData("text/plain");
+  if (shouldClearBlockSelection) clearBlockSelection();
   if (pasteTextIntoCodeBlock(event, text)) {
     event.preventDefault();
     return;
@@ -13547,6 +13556,68 @@ function pasteResourceTitle(event) {
   input.setSelectionRange(caret, caret);
   updateResourceTitleFromInput(input, event, { force: true });
   return true;
+}
+
+function rejectResourceFileIngress(event, dataTransfer) {
+  if (!resourceIngressEventScope(event) || !dataTransferHasFiles(dataTransfer)) return false;
+  event.preventDefault();
+  const scope = resourceIngressEventScope(event);
+  if (scope.resource && !resourceMutationAllowed(scope.resource)) return true;
+  rejectResourcePasteIngress();
+  return true;
+}
+
+function resourceIngressEventScope(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return null;
+  const title = target.closest("[data-resource-title]");
+  if (title) return { kind: "title", resource: itemById("resources", title.dataset.resourceTitle || "") };
+  const blockContent = target.closest("[data-block-content]");
+  const editor = blockContent?.closest(".block-editor");
+  if (editor?.dataset.ownerType === "resources") return { kind: "block", resource: itemById("resources", editor.dataset.ownerId || ""), editor };
+  const page = target.closest("[data-resource-note].resource-page-shell, .resource-page-shell[data-resource-note]");
+  if (page) return { kind: "page", resource: itemById("resources", page.dataset.resourceNote || "") };
+  return null;
+}
+
+function dataTransferHasFiles(dataTransfer) {
+  if (!dataTransfer) return false;
+  if (dataTransfer.files?.length) return true;
+  return [...(dataTransfer.items || [])].some((item) => item?.kind === "file");
+}
+
+function rejectOversizedResourceClipboardRepresentations(event, clipboardData) {
+  const scope = resourceIngressEventScope(event);
+  if (!scope || scope.resource && !resourceMutationAllowed(scope.resource)) return false;
+  const plain = String(clipboardData.getData("text/plain") || "");
+  if (utf8ByteLength(plain) > RESOURCE_PASTE_RAW_TEXT_MAX_BYTES) {
+    event.preventDefault();
+    rejectResourcePasteIngress();
+    return true;
+  }
+  const custom = String(clipboardData.getData(BLOCK_CLIPBOARD_MIME) || "");
+  if (custom && utf8ByteLength(custom) > RESOURCE_PASTE_REPRESENTATION_MAX_BYTES) {
+    event.preventDefault();
+    rejectResourcePasteIngress();
+    return true;
+  }
+  const customValid = custom && readClipboardBlocks(clipboardData).length;
+  const html = String(clipboardData.getData("text/html") || "");
+  if (!customValid && html && utf8ByteLength(html) > RESOURCE_PASTE_REPRESENTATION_MAX_BYTES) {
+    event.preventDefault();
+    rejectResourcePasteIngress();
+    return true;
+  }
+  return false;
+}
+
+function utf8ByteLength(value = "") {
+  return new TextEncoder().encode(String(value || "")).length;
+}
+
+function rejectResourcePasteIngress() {
+  showToast(RESOURCE_PASTE_REJECTION_MESSAGE);
+  announceAppStatus(RESOURCE_PASTE_REJECTION_MESSAGE);
 }
 
 function pasteEventShouldClearBlockSelection(event) {
@@ -13600,8 +13671,20 @@ function pasteTextIntoCodeBlock(event, text = "") {
   const offsets = selectionOffsetsInside(blockContent) || { start: originalText.length, end: originalText.length };
   const start = Math.max(0, Math.min(originalText.length, Number.parseInt(offsets.start, 10) || 0));
   const end = Math.max(start, Math.min(originalText.length, Number.parseInt(offsets.end, 10) || start));
+  const nextText = `${originalText.slice(0, start)}${text}${originalText.slice(end)}`;
+  if (editor.dataset.ownerType === "resources") {
+    const projectedItem = cloneForLocalPersistence(item);
+    const projectedBlock = projectedItem.blocks?.find((entry) => entry.id === block.id);
+    if (!projectedBlock) return false;
+    projectedBlock.text = nextText;
+    projectedBlock.marks = [];
+    if (!resourcePasteProjectionValid(projectedItem)) {
+      rejectResourcePasteIngress();
+      return true;
+    }
+  }
   const history = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start, end });
-  block.text = `${originalText.slice(0, start)}${text}${originalText.slice(end)}`;
+  block.text = nextText;
   block.marks = [];
   const caretOffset = start + text.length;
   commitEditorHistory(history, { blockId: block.id, start: caretOffset, end: caretOffset });
@@ -14530,8 +14613,33 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
   if (!editorOwnerMutationAllowed(target.ownerType, target.ownerId)) return false;
   const item = itemById(target.ownerType, target.ownerId);
   if (!item?.blocks) return false;
+  const prepared = prepareClipboardBlockPaste(item, target, blocks);
+  if (!prepared) return false;
+  if (!validatePreparedResourcePaste(target.ownerType, prepared.item)) return false;
+  const focusTarget = prepared.focusTarget;
+  const history = beginEditorHistory(
+    target.ownerType,
+    target.ownerId,
+    { blockId: target.replaceSelection ? target.selection?.ids?.[0] : target.blockId, position: "end" },
+  );
+  item.blocks = prepared.item.blocks;
+  ensureEditableBlocks(item);
+  clearBlockSelection();
+  commitEditorHistory(history, Number.isInteger(focusTarget.offset)
+    ? { blockId: focusTarget.blockId, start: focusTarget.offset, end: focusTarget.offset }
+    : { blockId: focusTarget.blockId, position: "end" });
+  saveState();
+  renderEditorMutation(target.ownerType, target.ownerId, { forceView: true });
+  focusBlockContentAfterRender(focusTarget.blockId, Number.isInteger(focusTarget.offset)
+    ? { range: { start: focusTarget.offset, end: focusTarget.offset } }
+    : { position: "end" });
+  return true;
+}
+
+function prepareClipboardBlockPaste(item, target, blocks) {
+  const projectedItem = cloneForLocalPersistence(item);
   const normalizedBlocks = normalizeClipboardBlocks(blocks);
-  const baseIndent = clipboardPasteBaseIndent(item.blocks, target);
+  const baseIndent = clipboardPasteBaseIndent(projectedItem.blocks, target);
   const minIndent = minimumClipboardIndent(normalizedBlocks);
   const pasted = [];
   for (const block of normalizedBlocks) {
@@ -14547,28 +14655,32 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
     if (isUrlPreviewBlockType(block.type)) pastedBlock.url = normalizeStandaloneHttpsUrl(block.url || block.text || "");
     pasted.push(pastedBlock);
   }
-  if (!pasted.length) return false;
+  if (!pasted.length) return null;
   let focusTarget = { blockId: pasted[pasted.length - 1].id };
-  const history = beginEditorHistory(
-    target.ownerType,
-    target.ownerId,
-    { blockId: target.replaceSelection ? target.selection?.ids?.[0] : target.blockId, position: "end" },
-  );
   if (target.replaceSelection) {
-    replaceSelectedBlocksWithPasted(item, pasted, target.selection);
+    replaceSelectedBlocksWithPasted(projectedItem, pasted, target.selection);
   } else {
-    focusTarget = insertPastedBlocksAtTarget(item, pasted, target);
+    focusTarget = insertPastedBlocksAtTarget(projectedItem, pasted, target);
   }
-  clearBlockSelection();
-  commitEditorHistory(history, Number.isInteger(focusTarget.offset)
-    ? { blockId: focusTarget.blockId, start: focusTarget.offset, end: focusTarget.offset }
-    : { blockId: focusTarget.blockId, position: "end" });
-  saveState();
-  renderEditorMutation(target.ownerType, target.ownerId, { forceView: true });
-  focusBlockContentAfterRender(focusTarget.blockId, Number.isInteger(focusTarget.offset)
-    ? { range: { start: focusTarget.offset, end: focusTarget.offset } }
-    : { position: "end" });
+  return { item: projectedItem, focusTarget };
+}
+
+function validatePreparedResourcePaste(ownerType, projectedItem) {
+  if (ownerType !== "resources") return true;
+  if (!resourcePasteProjectionValid(projectedItem)) {
+    rejectResourcePasteIngress();
+    return false;
+  }
   return true;
+}
+
+function resourcePasteProjectionValid(resource) {
+  const blocks = Array.isArray(resource?.blocks) ? resource.blocks : [];
+  if (blocks.length > RESOURCE_PASTE_MAX_BLOCKS) return false;
+  if (blocks.some((block) => String(block?.text || "").length > RESOURCE_PASTE_MAX_BLOCK_TEXT_LENGTH)) return false;
+  const baseRevision = currentWorkspaceRevision();
+  const body = JSON.stringify({ resource: cloneForLocalPersistence(resource), baseRevision, ...e2eFixtureGenerationRequestFields() });
+  return utf8ByteLength(body) <= RESOURCE_PASTE_MAX_PUT_BODY_BYTES;
 }
 
 function clipboardPasteBaseIndent(blocksList, target) {
@@ -14590,6 +14702,11 @@ function minimumClipboardIndent(blocks) {
 
 function clipboardPasteTarget(event, options = {}) {
   if (ui.blockSelection.ids.length) {
+    const eventBlock = pasteEventBlockContent(event);
+    const eventEditor = eventBlock?.closest(".block-editor");
+    if (eventBlock && (!eventEditor || eventEditor.dataset.ownerType !== ui.blockSelection.ownerType || eventEditor.dataset.ownerId !== ui.blockSelection.ownerId || !ui.blockSelection.ids.includes(eventBlock.dataset.blockContent || ""))) {
+      return clipboardPasteTargetFromBlockContent(eventBlock, options);
+    }
     return {
       ownerType: ui.blockSelection.ownerType,
       ownerId: ui.blockSelection.ownerId,
@@ -14599,7 +14716,10 @@ function clipboardPasteTarget(event, options = {}) {
   }
   const targetBlock = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
   const activeBlock = document.activeElement instanceof Element ? document.activeElement.closest("[data-block-content]") : null;
-  const blockContent = targetBlock || activeBlock;
+  return clipboardPasteTargetFromBlockContent(targetBlock || activeBlock, options);
+}
+
+function clipboardPasteTargetFromBlockContent(blockContent, options = {}) {
   const editor = blockContent?.closest(".block-editor");
   if (!blockContent || !editor) return null;
   const target = {
@@ -17257,6 +17377,7 @@ function handleDragLeave(event) {
 }
 
 function handleDrop(event) {
+  if (rejectResourceFileIngress(event, event.dataTransfer)) return;
   if (handleNavDrop(event)) return;
   const zone = event.target.closest("[data-drop-date]");
   if (!zone) return;
