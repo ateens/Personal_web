@@ -544,7 +544,8 @@ const RESOURCE_PASTE_REPRESENTATION_MAX_BYTES = 250_000;
 const RESOURCE_PASTE_MAX_BLOCKS = 5_000;
 const RESOURCE_PASTE_MAX_BLOCK_TEXT_LENGTH = 250_000;
 const RESOURCE_PASTE_MAX_PUT_BODY_BYTES = 5_000_000;
-const RESOURCE_PASTE_REJECTION_MESSAGE = "Resource paste limit exceeded.";
+const RESOURCE_PASTE_REJECTION_MESSAGE = "Resource에 붙여넣을 수 있는 용량을 초과했어요.";
+const RESOURCE_FILE_INGRESS_REJECTION_MESSAGE = "Resource에는 파일 붙여넣기나 파일 드롭을 지원하지 않아요.";
 
 const dirtyResourceIds = new Set();
 let pendingResourceOperationGroups = [];
@@ -13509,16 +13510,16 @@ function handleDocumentPaste(event) {
   const customBlocks = readClipboardBlocks(event.clipboardData);
   const htmlBlocks = customBlocks.length ? [] : readHtmlClipboardBlocks(event.clipboardData);
   const text = codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks) || event.clipboardData.getData("text/plain");
-  if (shouldClearBlockSelection) clearBlockSelection();
-  if (pasteTextIntoCodeBlock(event, text)) {
+  if (pasteTextIntoCodeBlock(event, text, { clearBlockSelectionBeforeCommit: shouldClearBlockSelection && pasteEventTargetBlockContent(event) && pasteEventTargetsCodeBlock(event, { actualTargetOnly: true }) })) {
     event.preventDefault();
     return;
   }
-  if (!customBlocks.length && openUrlPasteChoice(event, text)) {
+  const standaloneHttpsUrl = customBlocks.length ? "" : normalizeStandaloneHttpsUrl(text);
+  if (shouldClearBlockSelection && standaloneHttpsUrl) clearBlockSelection();
+  if (standaloneHttpsUrl && openUrlPasteChoice(event, standaloneHttpsUrl)) {
     event.preventDefault();
     return;
   }
-  if (!ui.blockSelection.ids.length && pasteEventBlockContent(event) && !shouldPastePlainTextAsBlocks(event, text)) return;
   if (customBlocks.length && pasteBlocksFromClipboard(event, customBlocks)) {
     event.preventDefault();
     return;
@@ -13527,9 +13528,18 @@ function handleDocumentPaste(event) {
     event.preventDefault();
     return;
   }
+  const shouldNativeSingleLineFallthrough = (shouldClearBlockSelection || !ui.blockSelection.ids.length) && pasteEventBlockContent(event) && !shouldPastePlainTextAsBlocks(event, text);
+  if (shouldNativeSingleLineFallthrough) {
+    if (shouldClearBlockSelection) clearBlockSelection();
+    return;
+  }
   const plainBlocks = plainTextToClipboardBlocks(text);
   if (!plainBlocks.length) return;
-  if (!ui.blockSelection.ids.length && !shouldPastePlainTextAsBlocks(event, text)) return;
+  const shouldPlainNativeFallthrough = (shouldClearBlockSelection || !ui.blockSelection.ids.length) && !shouldPastePlainTextAsBlocks(event, text);
+  if (shouldPlainNativeFallthrough) {
+    if (shouldClearBlockSelection) clearBlockSelection();
+    return;
+  }
   if (pasteBlocksFromClipboard(event, plainBlocks, { mergeIntoTarget: true })) event.preventDefault();
 }
 
@@ -13561,9 +13571,7 @@ function pasteResourceTitle(event) {
 function rejectResourceFileIngress(event, dataTransfer) {
   if (!resourceIngressEventScope(event) || !dataTransferHasFiles(dataTransfer)) return false;
   event.preventDefault();
-  const scope = resourceIngressEventScope(event);
-  if (scope.resource && !resourceMutationAllowed(scope.resource)) return true;
-  rejectResourcePasteIngress();
+  rejectResourceFileIngressMessage();
   return true;
 }
 
@@ -13588,7 +13596,7 @@ function dataTransferHasFiles(dataTransfer) {
 
 function rejectOversizedResourceClipboardRepresentations(event, clipboardData) {
   const scope = resourceIngressEventScope(event);
-  if (!scope || scope.resource && !resourceMutationAllowed(scope.resource)) return false;
+  if (!scope) return false;
   const plain = String(clipboardData.getData("text/plain") || "");
   if (utf8ByteLength(plain) > RESOURCE_PASTE_RAW_TEXT_MAX_BYTES) {
     event.preventDefault();
@@ -13620,6 +13628,11 @@ function rejectResourcePasteIngress() {
   announceAppStatus(RESOURCE_PASTE_REJECTION_MESSAGE);
 }
 
+function rejectResourceFileIngressMessage() {
+  showToast(RESOURCE_FILE_INGRESS_REJECTION_MESSAGE);
+  announceAppStatus(RESOURCE_FILE_INGRESS_REJECTION_MESSAGE);
+}
+
 function pasteEventShouldClearBlockSelection(event) {
   if (!ui.blockSelection.ids.length) return false;
   const blockContent = pasteEventBlockContent(event);
@@ -13637,10 +13650,14 @@ function codeBlockPasteTextFromBlocks(event, blocks) {
   return clipboardBlocksCodeText(blocks);
 }
 
-function pasteEventTargetsCodeBlock(event) {
-  const targetBlock = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
+function pasteEventTargetBlockContent(event) {
+  return event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
+}
+
+function pasteEventTargetsCodeBlock(event, options = {}) {
+  const targetBlock = pasteEventTargetBlockContent(event);
   const activeBlock = document.activeElement instanceof Element ? document.activeElement.closest("[data-block-content]") : null;
-  const blockContent = targetBlock || activeBlock;
+  const blockContent = options.actualTargetOnly ? targetBlock : targetBlock || activeBlock;
   const editor = blockContent?.closest(".block-editor");
   if (!blockContent || !editor) return false;
   const item = itemById(editor.dataset.ownerType, editor.dataset.ownerId);
@@ -13656,8 +13673,8 @@ function clipboardBlocksCodeText(blocks) {
   return lines.join("\n");
 }
 
-function pasteTextIntoCodeBlock(event, text = "") {
-  if (ui.blockSelection.ids.length || !text) return false;
+function pasteTextIntoCodeBlock(event, text = "", options = {}) {
+  if ((ui.blockSelection.ids.length && !options.clearBlockSelectionBeforeCommit) || !text) return false;
   const targetBlock = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
   const activeBlock = document.activeElement instanceof Element ? document.activeElement.closest("[data-block-content]") : null;
   const blockContent = targetBlock || activeBlock;
@@ -13683,6 +13700,7 @@ function pasteTextIntoCodeBlock(event, text = "") {
       return true;
     }
   }
+  if (options.clearBlockSelectionBeforeCommit) clearBlockSelection();
   const history = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start, end });
   block.text = nextText;
   block.marks = [];

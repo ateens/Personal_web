@@ -30,6 +30,7 @@ async function captureNoop(page, request) {
     dom: await page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`).evaluate((node) => node.innerHTML.replace(/ is-icon-hover/g, "").replace(/class="block "/g, "class=\"block\"").replace(/overflow-anchor: none;/g, "").replace(/ style=""/g, "")),
     focus: await page.evaluate(() => document.activeElement?.getAttribute("data-block-content") || document.activeElement?.getAttribute("data-resource-title") || document.activeElement?.tagName || ""),
     selection: await page.evaluate(() => ({ ...ui.blockSelection, ids: ui.blockSelection.ids.slice() })),
+    selectedDom: await page.evaluate(() => [...document.querySelectorAll(".block.is-selected[data-block-id]")].map((node) => node.dataset.blockId)),
   };
 }
 
@@ -43,6 +44,7 @@ async function expectNoop(page, request, before) {
   expect(after.dom).toBe(before.dom);
   expect(after.focus).toBe(before.focus);
   expect(after.selection).toEqual(before.selection);
+  expect(after.selectedDom).toEqual(before.selectedDom);
 }
 
 async function appPasteBlocks(locator, blocks, options = {}) {
@@ -68,6 +70,13 @@ async function dispatchDrop(locator, file = true) {
   }, file);
 }
 
+async function selectFixtureParagraphBlock(page) {
+  await page.evaluate((resourceId) => {
+    ui.blockSelection = { ownerType: "resources", ownerId: resourceId, ids: ["fixture-block-paragraph"] };
+    renderDetail({ soft: true });
+  }, FIXTURE_IDS.resource);
+}
+
 test.beforeEach(async ({ request }) => {
   await resetFixture(request);
 });
@@ -78,11 +87,13 @@ test("file paste/drop on Resource title, block, and page are atomic and leave un
   for (const target of [paragraph, title]) {
     const before = await captureNoop(page, request);
     expect(await dispatchPaste(target, { plain: "kept", file: true })).toBe(false);
+    await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에는 파일 붙여넣기나 파일 드롭을 지원하지 않아요." }).first()).toBeVisible();
     await expectNoop(page, request, before);
   }
   for (const target of [paragraph, title, note]) {
     const before = await captureNoop(page, request);
     expect(await dispatchDrop(target)).toBe(false);
+    await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에는 파일 붙여넣기나 파일 드롭을 지원하지 않아요." }).first()).toBeVisible();
     await expectNoop(page, request, before);
   }
   expect(await page.evaluate(() => [...document.querySelectorAll("img,iframe,object,embed,a[download]")].some((node) => /^(data|blob):/i.test(node.src || node.href || "")))).toBe(false);
@@ -98,6 +109,7 @@ test("oversized raw/custom/html representations reject before native or fallback
   ]) {
     const before = await captureNoop(page, request);
     expect(await dispatchPaste(paragraph, payload)).toBe(false);
+    await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에 붙여넣을 수 있는 용량을 초과했어요." }).first()).toBeVisible();
     await expectNoop(page, request, before);
   }
 });
@@ -120,18 +132,24 @@ test("Resource structural projection enforces exact block, text, and body limits
   const before = await captureNoop(page, request);
   expect(await appPasteBlocks(paragraph, textOverflow)).toBe(false);
   await expectNoop(page, request, before);
+
+  const bodyOverflowBlocks = Array.from({ length: 18 }, (_, index) => ({ type: "paragraph", text: `${index}-` + "z".repeat(249_000) }));
+  const bodyBefore = await captureNoop(page, request);
+  expect(await dispatchPaste(paragraph, { custom: JSON.stringify({ version: 1, blocks: bodyOverflowBlocks }), plain: "fallback" })).toBe(false);
+  await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에 붙여넣을 수 있는 용량을 초과했어요." }).first()).toBeVisible();
+  await expectNoop(page, request, bodyBefore);
 });
 
-test("accepted custom, html, markdown/plain, code, url and native single-line paths still work", async ({ page, request }) => {
+test("accepted custom, html, markdown/plain transport paths still work through real paste events", async ({ page, request }) => {
   const { paragraph } = await openEditor(page);
   await paragraph.focus();
-  expect(await appPasteBlocks(paragraph, [{ type: "heading2", text: "custom ok" }])).toBe(true);
+  expect(await dispatchPaste(paragraph, { custom: JSON.stringify({ version: 1, blocks: [{ type: "heading2", text: "custom ok" }] }), plain: "custom ok" })).toBe(false);
   await expect(page.locator("text=custom ok")).toBeVisible();
   await paragraph.focus();
-  expect(await appPasteBlocks(paragraph, [{ type: "heading3", text: "html ok" }])).toBe(true);
+  expect(await dispatchPaste(paragraph, { html: '<h3 data-block-type="heading3">html ok</h3>', plain: "html ok" })).toBe(false);
   await expect(page.locator("text=html ok")).toBeVisible();
   await paragraph.focus();
-  expect(await appPasteBlocks(paragraph, [{ type: "bullet", text: "markdown ok" }])).toBe(true);
+  expect(await dispatchPaste(paragraph, { plain: "- markdown ok" })).toBe(false);
   await expect(page.locator("text=markdown ok")).toBeVisible();
   await expect.poll(async () => (await resourceState(request)).resource.blocks.some((block) => block.text === "custom ok")).toBe(true);
 });
@@ -142,10 +160,46 @@ test("block selection survives rejected ingress and undo reaches the prior real 
   await appPasteBlocks(paragraph, [{ type: "paragraph", text: "real edit" }]);
   await expect(page.locator("text=real edit")).toBeVisible();
   await expect.poll(async () => (await resourceState(request)).resource.blocks.some((block) => block.text === "real edit")).toBe(true);
-  await page.evaluate(() => { ui.blockSelection = { ownerType: "resources", ownerId: "res-e2e-main", ids: ["fixture-block-paragraph"] }; renderDetail({ soft: true }); });
+  await selectFixtureParagraphBlock(page);
   const before = await captureNoop(page, request);
-  await dispatchPaste(paragraph, { plain: "x".repeat(5_000_001) });
+  await dispatchPaste(paragraph, { custom: JSON.stringify({ version: 1, blocks: [{ type: "paragraph", text: "x".repeat(250_001) }] }), plain: "fallback" });
   await expectNoop(page, request, before);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
   await expect(page.locator("text=real edit")).toHaveCount(0);
+});
+
+test("stale selection branch clearing is scoped to accepted code, url, and native paths", async ({ page, request }) => {
+  const { note } = await openEditor(page);
+  const code = note.locator('[data-block-content="fixture-block-code"]');
+  await code.focus();
+  await selectFixtureParagraphBlock(page);
+  const codeBefore = await captureNoop(page, request);
+  expect(await dispatchPaste(code, { plain: "c".repeat(250_001) })).toBe(false);
+  await expectNoop(page, request, codeBefore);
+
+  await code.focus();
+  await selectFixtureParagraphBlock(page);
+  expect(await dispatchPaste(code, { plain: "code ok" })).toBe(false);
+  await expect.poll(async () => (await page.evaluate(() => ui.blockSelection.ids.length))).toBe(0);
+  await expect(code).toContainText("code ok");
+
+  const heading = note.locator('[data-block-content="fixture-block-heading-1"]');
+  await heading.focus();
+  await selectFixtureParagraphBlock(page);
+  await heading.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  expect(await dispatchPaste(heading, { plain: "https://example.com/resource" })).toBe(false);
+  await expect.poll(async () => page.evaluate(() => Boolean(ui.urlPasteChoice))).toBe(true);
+  expect(await page.evaluate(() => ui.blockSelection.ids.length)).toBe(0);
+
+  await page.keyboard.press("Escape");
+  await heading.focus();
+  await selectFixtureParagraphBlock(page);
+  expect(await dispatchPaste(heading, { plain: "native single line" })).toBe(true);
+  expect(await page.evaluate(() => ui.blockSelection.ids.length)).toBe(0);
 });
