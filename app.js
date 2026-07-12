@@ -13520,12 +13520,14 @@ function handleDocumentPaste(event) {
     event.preventDefault();
     return;
   }
-  if (customBlocks.length && pasteBlocksFromClipboard(event, customBlocks)) {
+  if (customBlocks.length && target) {
     event.preventDefault();
+    pasteBlocksFromClipboard(event, customBlocks);
     return;
   }
-  if (htmlBlocks.length && pasteBlocksFromClipboard(event, htmlBlocks)) {
+  if (htmlBlocks.length && target) {
     event.preventDefault();
+    pasteBlocksFromClipboard(event, htmlBlocks);
     return;
   }
   const shouldNativeSingleLineFallthrough = (shouldClearBlockSelection || !ui.blockSelection.ids.length) && pasteEventBlockContent(event) && !shouldPastePlainTextAsBlocks(event, text);
@@ -13540,7 +13542,10 @@ function handleDocumentPaste(event) {
     if (shouldClearBlockSelection) clearBlockSelection();
     return;
   }
-  if (pasteBlocksFromClipboard(event, plainBlocks, { mergeIntoTarget: true })) event.preventDefault();
+  if (target) {
+    event.preventDefault();
+    pasteBlocksFromClipboard(event, plainBlocks, { mergeIntoTarget: true });
+  }
 }
 
 function pasteResourceTitle(event) {

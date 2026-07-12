@@ -70,11 +70,25 @@ async function dispatchDrop(locator, file = true) {
   }, file);
 }
 
-async function selectFixtureParagraphBlock(page) {
-  await page.evaluate((resourceId) => {
-    ui.blockSelection = { ownerType: "resources", ownerId: resourceId, ids: ["fixture-block-paragraph"] };
+async function selectResourceBlock(page, blockId) {
+  await page.evaluate(({ resourceId, blockId }) => {
+    ui.blockSelection = { ownerType: "resources", ownerId: resourceId, ids: [blockId] };
     renderDetail({ soft: true });
-  }, FIXTURE_IDS.resource);
+  }, { resourceId: FIXTURE_IDS.resource, blockId });
+}
+
+async function selectFixtureParagraphBlock(page) {
+  await selectResourceBlock(page, "fixture-block-paragraph");
+}
+
+async function seedResourceBlocks(page, request, blocks) {
+  await page.evaluate(({ resourceId, blocks }) => {
+    const resource = itemById("resources", resourceId);
+    resource.blocks = blocks;
+    saveState();
+    renderDetail({ soft: true });
+  }, { resourceId: FIXTURE_IDS.resource, blocks });
+  await expect.poll(async () => (await resourceState(request)).resource.blocks.map((block) => block.id), { timeout: 15_000 }).toEqual(blocks.map((block) => block.id));
 }
 
 test.beforeEach(async ({ request }) => {
@@ -115,8 +129,8 @@ test("oversized raw/custom/html representations reject before native or fallback
 });
 
 test("Resource structural projection enforces exact block, text, and body limits atomically", async ({ page, request }) => {
-  const { paragraph } = await openEditor(page);
-  await paragraph.focus();
+  test.setTimeout(120_000);
+  await openEditor(page);
   expect(await page.evaluate(() => {
     const resource = cloneForLocalPersistence(itemById("resources", "fixture-resource-main"));
     resource.blocks = Array.from({ length: 5000 }, (_, index) => ({ id: `limit-${index}`, type: "paragraph", text: "x", marks: [], checked: false, indent: 0, collapsed: false }));
@@ -128,14 +142,55 @@ test("Resource structural projection enforces exact block, text, and body limits
     return resourcePasteProjectionValid(resource);
   })).toBe(false);
 
-  const textOverflow = [{ type: "paragraph", text: "y".repeat(250_001) }];
-  const before = await captureNoop(page, request);
-  expect(await appPasteBlocks(paragraph, textOverflow)).toBe(false);
-  await expectNoop(page, request, before);
+  await seedResourceBlocks(page, request, [
+    { id: "stale-selected", type: "paragraph", text: "stale selection", marks: [], checked: false, indent: 0, collapsed: false },
+    { id: "large-target", type: "paragraph", text: "L".repeat(200_000), marks: [], checked: false, indent: 0, collapsed: false },
+  ]);
+  let target = page.locator('[data-block-content="large-target"]');
+  await target.focus();
+  expect(await appPasteBlocks(target, [{ type: "paragraph", text: "prior real edit" }])).toBe(true);
+  await expect.poll(async () => (await resourceState(request)).resource.blocks.some((block) => block.text === "prior real edit")).toBe(true);
+  await selectResourceBlock(page, "stale-selected");
+  await expect(page.locator('.block.is-selected[data-block-id="stale-selected"]')).toHaveCount(1);
+  const mergeBefore = await captureNoop(page, request);
+  const mergeOverflow = `- ${"x".repeat(50_001)}`;
+  expect(new TextEncoder().encode(mergeOverflow).length).toBeLessThan(250_000);
+  expect(await dispatchPaste(target, { plain: mergeOverflow })).toBe(false);
+  await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에 붙여넣을 수 있는 용량을 초과했어요." }).first()).toBeVisible();
+  await expectNoop(page, request, mergeBefore);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
+  await expect(page.locator("text=prior real edit")).toHaveCount(0);
 
-  const bodyOverflowBlocks = Array.from({ length: 18 }, (_, index) => ({ type: "paragraph", text: `${index}-` + "z".repeat(249_000) }));
+  await resetFixture(request);
+  await openEditor(page);
+  await seedResourceBlocks(page, request, [
+    { id: "boundary-target", type: "paragraph", text: "B".repeat(199_999), marks: [], checked: false, indent: 0, collapsed: false },
+  ]);
+  target = page.locator('[data-block-content="boundary-target"]');
+  await target.focus();
+  const exactBoundary = `- ${"c".repeat(50_001)}`;
+  expect(await dispatchPaste(target, { plain: exactBoundary })).toBe(false);
+  await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(250_000);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
+  await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(199_999);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+Z" : "Control+Y");
+  await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(250_000);
+
+  await resetFixture(request);
+  await openEditor(page);
+  const nearBodyLimit = Array.from({ length: 21 }, (_, index) => ({ id: `body-${index}`, type: "paragraph", text: "z".repeat(237_000), marks: [], checked: false, indent: 0, collapsed: false }));
+  await seedResourceBlocks(page, request, nearBodyLimit);
+  target = page.locator('[data-block-content="body-0"]');
+  await target.focus();
+  const setupBodyBytes = await page.evaluate(() => {
+    const resource = cloneForLocalPersistence(itemById("resources", "fixture-resource-main"));
+    return utf8ByteLength(JSON.stringify({ resource, baseRevision: currentWorkspaceRevision(), ...e2eFixtureGenerationRequestFields() }));
+  });
+  expect(setupBodyBytes).toBeLessThan(5_000_000);
   const bodyBefore = await captureNoop(page, request);
-  expect(await dispatchPaste(paragraph, { custom: JSON.stringify({ version: 1, blocks: bodyOverflowBlocks }), plain: "fallback" })).toBe(false);
+  const bodyPayload = JSON.stringify({ version: 1, blocks: [{ type: "paragraph", text: "p".repeat(237_000) }] });
+  expect(new TextEncoder().encode(bodyPayload).length).toBeLessThanOrEqual(250_000);
+  expect(await dispatchPaste(target, { custom: bodyPayload, plain: "fallback" })).toBe(false);
   await expect(page.locator("#toast, #appAnnouncements").filter({ hasText: "Resource에 붙여넣을 수 있는 용량을 초과했어요." }).first()).toBeVisible();
   await expectNoop(page, request, bodyBefore);
 });
