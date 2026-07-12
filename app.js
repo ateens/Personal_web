@@ -16006,11 +16006,10 @@ function handleKeydown(event) {
   }
   const resourceTitleInput = event.target.closest("[data-resource-title]");
   if (resourceTitleInput && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && (event.key === "Enter" || event.key === "ArrowDown")) {
-    const firstBlock = resourceTitleInput.closest("[data-resource-note]")?.querySelector("[data-block-content]");
-    if (firstBlock) {
+    const firstBlockId = resourceTitleInput.closest("[data-resource-note]")?.querySelector("[data-block-content]")?.dataset.blockContent;
+    if (firstBlockId) {
       event.preventDefault();
-      firstBlock.focus();
-      placeCaretAtStart(firstBlock);
+      focusBlockContentAfterRender(firstBlockId, { position: "start", transaction: true });
     }
     return;
   }
@@ -16087,8 +16086,7 @@ function handleKeydown(event) {
     const title = blockContent.closest("[data-resource-note]")?.querySelector(`[data-resource-title="${cssEscape(ownerId)}"]`);
     if (title) {
       event.preventDefault();
-      title.focus();
-      title.setSelectionRange(title.value.length, title.value.length);
+      focusResourceTitleAfterRender(ownerId);
       return;
     }
   }
@@ -21720,6 +21718,25 @@ function focusBlockContentAfterRender(blockId, options = {}) {
   };
   if (options.transaction === true || !focusIsSettled(target)) requestAnimationFrame(verifyFocus);
   return target;
+}
+
+function focusResourceTitleAfterRender(resourceId) {
+  const focusTarget = () => {
+    const target = document.querySelector(`[data-resource-title="${cssEscape(resourceId)}"]`);
+    if (!target) return null;
+    target.focus();
+    target.setSelectionRange(target.value.length, target.value.length);
+    return target;
+  };
+  focusTarget();
+  let remainingChecks = 4;
+  const verifyFocus = () => {
+    const currentTitle = document.querySelector(`[data-resource-title="${cssEscape(resourceId)}"]`);
+    if (currentTitle && document.activeElement !== currentTitle) focusTarget();
+    remainingChecks -= 1;
+    if (remainingChecks > 0) requestAnimationFrame(verifyFocus);
+  };
+  requestAnimationFrame(verifyFocus);
 }
 
 function focusBlockContentAtClientPoint(element, clientX, clientY) {
