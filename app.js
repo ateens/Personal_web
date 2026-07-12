@@ -15182,7 +15182,7 @@ function handlePointerDown(event) {
   }
 
   const deleteDragCard = event.target.closest("[data-delete-drag-type][data-delete-drag-id]");
-  if (deleteDragCard && ["inbox", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, a, [contenteditable='true']")) {
+  if (deleteDragCard && ["inbox", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
     window.getSelection()?.removeAllRanges();
     ui.pendingDeleteDrag = {
