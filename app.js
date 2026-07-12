@@ -14,6 +14,7 @@ const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
 };
 const RESOURCE_SEARCH_SAVE_DELAY_MS = 320;
 const RESOURCE_TITLE_SAVE_DELAY_MS = 360;
+const EDITOR_TEXT_HISTORY_IDLE_MS = 720;
 const MAX_RESOURCE_TITLE_LENGTH = 20_000;
 const MAX_RESOURCE_COMMENT_BODY_LENGTH = 20_000;
 const MAX_RESOURCE_COMMENT_THREADS = 1_000;
@@ -21,6 +22,20 @@ const MAX_RESOURCE_COMMENT_REPLIES = 500;
 const MAX_RESOURCE_SAVE_ERROR_MESSAGE_LENGTH = 240;
 const MAX_RESOURCE_SAVE_ERROR_PATH_LENGTH = 160;
 const MAX_RESOURCE_SAVE_ERROR_CODE_LENGTH = 64;
+const RESOURCE_PAGE_HISTORY_FIELDS = Object.freeze([
+  "title",
+  "type",
+  "importance",
+  "boxId",
+  "goalId",
+  "projectId",
+  "url",
+  "pinned",
+  "readLater",
+  "icon",
+  "cover",
+  "pageSettings",
+]);
 const DEFAULT_CALENDAR_SOURCES = {
   tasks: true,
   projects: true,
@@ -676,8 +691,7 @@ let ui = {
     redo: [],
     limit: 80,
   },
-  nativeTextUndoDepth: 0,
-  nativeTextRedoDepth: 0,
+  pendingEditorTextHistory: null,
   pendingEditorMarquee: null,
   editorMarquee: null,
   dragAutoScroll: null,
@@ -2376,14 +2390,26 @@ function commitResourceSearchSave(options = {}) {
   return true;
 }
 
-function ensureResourceTitleDraft(resourceId) {
+function resourceTitleHistoryFocus(resourceId, fallbackLength = 0) {
+  const input = document.querySelector(`[data-resource-title="${cssEscape(resourceId)}"]`);
+  const start = Number.isInteger(input?.selectionStart) ? input.selectionStart : fallbackLength;
+  const end = Number.isInteger(input?.selectionEnd) ? input.selectionEnd : start;
+  return { control: "title", start, end };
+}
+
+function ensureResourceTitleDraft(resourceId, options = {}) {
   const resource = itemById("resources", resourceId);
   if (!resourceMutationAllowed(resource)) return null;
   if (!ui.resourceTitleDrafts[resourceId]) {
+    const focus = options.focus || resourceTitleHistoryFocus(resourceId, (resource.title || "").length);
     ui.resourceTitleDrafts[resourceId] = {
       initial: resource.title || "",
       value: resource.title || "",
       staged: false,
+      history: beginResourcePageHistory(resourceId, focus, {
+        skipTitleFlush: true,
+        fields: ["title"],
+      }),
     };
   }
   return ui.resourceTitleDrafts[resourceId];
@@ -2499,6 +2525,7 @@ function commitResourceTitleDraft(resourceId, options = {}) {
     patchResourcePageSaveStatus();
     return false;
   }
+  commitResourcePageHistory(draft.history, resourceTitleHistoryFocus(resourceId, resource.title.length));
   if (options.save !== false) {
     if (dirtyResourceIds.has(resource.id)) {
       saveState();
@@ -2535,6 +2562,10 @@ function clearResourceTransientState() {
   resourceSearchSavePending = false;
   for (const timer of resourceTitleSaveTimers.values()) window.clearTimeout(timer);
   resourceTitleSaveTimers.clear();
+  window.clearTimeout(ui.pendingEditorTextHistory?.timerId);
+  ui.pendingEditorTextHistory = null;
+  ui.editorHistory.undo = [];
+  ui.editorHistory.redo = [];
   ui.resourceSearchComposing = false;
   ui.resourceTitleComposingIds.clear();
   ui.resourceTitleDrafts = {};
@@ -9278,8 +9309,18 @@ function handleChange(event) {
     return;
   }
   const previousValue = item[field.dataset.field];
+  const history = ownerType === "resources" && !Object.is(previousValue, value)
+    ? beginResourcePageHistory(
+      item.id,
+      { control: "property", field: field.dataset.field },
+      { fields: [field.dataset.field] },
+    )
+    : null;
   applyFieldValue(ownerType, item, field.dataset.field, value);
-  if (ownerType === "resources" && !Object.is(previousValue, item[field.dataset.field])) touchResource(item);
+  if (ownerType === "resources" && !Object.is(previousValue, item[field.dataset.field])) {
+    touchResource(item);
+    commitResourcePageHistory(history, { control: "property", field: field.dataset.field });
+  }
   saveState();
   renderView({ soft: true });
   renderDetail({ soft: Boolean(resourceNote) });
@@ -9315,6 +9356,35 @@ function handleBeforeInput(event) {
   if (handleSlashMenuBeforeInput(event)) return;
 
   const blockContent = event.target.closest("[data-block-content]");
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (
+    (blockContent || resourceTitle)
+    && (event.inputType === "historyUndo" || event.inputType === "historyRedo")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (resourceTitle) commitResourceTitleDraft(resourceTitle.dataset.resourceTitle);
+    if (event.inputType === "historyRedo") redoEditorHistory();
+    else undoEditorHistory();
+    return;
+  }
+  if (resourceTitle) {
+    const inputType = String(event.inputType || "");
+    if (
+      !event.isComposing
+      && (inputType.startsWith("insert") || inputType.startsWith("delete"))
+      && inputType !== "insertParagraph"
+      && inputType !== "insertLineBreak"
+    ) {
+      ensureResourceTitleDraft(resourceTitle.dataset.resourceTitle, {
+        focus: resourceTitleHistoryFocus(
+          resourceTitle.dataset.resourceTitle,
+          resourceTitle.value.length,
+        ),
+      });
+    }
+    return;
+  }
   if (!blockContent) return;
   const ownerEditor = blockContent.closest(".block-editor");
   if (ownerEditor && !editorOwnerMutationAllowed(ownerEditor.dataset.ownerType, ownerEditor.dataset.ownerId)) {
@@ -9341,6 +9411,7 @@ function handleBeforeInput(event) {
     insertBlockFromCaret(editor.dataset.ownerType, editor.dataset.ownerId, blockContent.dataset.blockContent, blockContent);
     return;
   }
+  stageEditorTextHistoryBeforeInput(event, blockContent);
   if (event.inputType === "insertText" && event.data === "/" && blockContent.textContent === "") {
     const editor = blockContent.closest(".block-editor");
     requestAnimationFrame(() => openSlashMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, blockContent.dataset.blockContent));
@@ -9392,6 +9463,7 @@ function handleCompositionStart(event) {
   if (resourceTitle) {
     const resourceId = resourceTitle.dataset.resourceTitle;
     if (!resourceMutationAllowed(resourceId)) return;
+    commitResourceTitleDraft(resourceId);
     ui.resourceTitleComposingIds.add(resourceId);
     ensureResourceTitleDraft(resourceId);
     return;
@@ -9399,8 +9471,19 @@ function handleCompositionStart(event) {
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
   const editor = blockContent.closest(".block-editor");
-  if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
+  if (!editor || !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const offsets = selectionOffsetsInside(blockContent);
+  beginEditorTextHistory(
+    editor.dataset.ownerType,
+    editor.dataset.ownerId,
+    blockContent.dataset.blockContent,
+    {
+      blockId: blockContent.dataset.blockContent,
+      start: offsets?.start ?? 0,
+      end: offsets?.end ?? offsets?.start ?? 0,
+    },
+    { forceNew: true },
+  );
   ui.composingBlockId = blockContent.dataset.blockContent;
   ui.compositionState = {
     blockId: blockContent.dataset.blockContent,
@@ -9557,6 +9640,11 @@ function handleFocusOut(event) {
   }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
+  if (pendingEditorTextHistoryMatches(
+    blockContent.closest(".block-editor")?.dataset.ownerType,
+    blockContent.closest(".block-editor")?.dataset.ownerId,
+    blockContent.dataset.blockContent,
+  )) flushPendingEditorTextHistory();
   rememberEditableControlFocusRangeFromFocusOut(blockContent, event.relatedTarget);
   blockContent.classList.remove("is-active");
   blockContent.closest(".block")?.classList.remove("is-active-block");
@@ -10301,9 +10389,11 @@ function setResourcePageSetting(resourceId, key, value) {
   if (!resourceMutationAllowed(resource)) return;
   const settings = normalizeResourcePageSettings(resource.pageSettings);
   if (key !== "font" || !["default", "serif", "mono"].includes(value) || settings.font === value) return;
+  const history = beginResourcePageHistory(resourceId, { control: "page-menu" }, { fields: ["pageSettings"] });
   settings.font = value;
   resource.pageSettings = settings;
   touchResource(resource);
+  commitResourcePageHistory(history, { control: "page-menu" });
   saveState();
   patchResourcePageSettings(resource);
   closeResourcePageMenu({ focus: true });
@@ -10312,10 +10402,12 @@ function setResourcePageSetting(resourceId, key, value) {
 function toggleResourcePageSetting(resourceId, key) {
   const resource = itemById("resources", resourceId);
   if (!resourceMutationAllowed(resource) || !["smallText", "fullWidth"].includes(key)) return;
+  const history = beginResourcePageHistory(resourceId, { control: "page-menu" }, { fields: ["pageSettings"] });
   const settings = normalizeResourcePageSettings(resource.pageSettings);
   settings[key] = !settings[key];
   resource.pageSettings = settings;
   touchResource(resource);
+  commitResourcePageHistory(history, { control: "page-menu" });
   saveState();
   patchResourcePageSettings(resource);
   closeResourcePageMenu({ focus: true });
@@ -10358,6 +10450,12 @@ function patchResourceMedia(resource) {
   current.replaceWith(template.content.firstElementChild);
 }
 
+function focusResourceControlAfterPatch(resourceId, selector) {
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-resource-note="${cssEscape(resourceId)}"] ${selector}`)?.focus?.({ preventScroll: true });
+  });
+}
+
 function toggleResourceIconPicker(resourceId) {
   const resource = itemById("resources", resourceId);
   if (!resourceMutationAllowed(resource)) return;
@@ -10373,11 +10471,14 @@ function setResourceIcon(resourceId, value) {
   const icon = normalizeResourceIcon(value);
   ui.resourceIconPickerId = "";
   if (resource.icon !== icon) {
+    const history = beginResourcePageHistory(resourceId, { control: "icon" }, { fields: ["icon"] });
     resource.icon = icon;
     touchResource(resource);
+    commitResourcePageHistory(history, { control: "icon" });
     saveState();
   }
   patchResourceMedia(resource);
+  focusResourceControlAfterPatch(resourceId, `[data-resource-icon-edit="${cssEscape(resourceId)}"]`);
 }
 
 function toggleResourceCoverEditor(resourceId) {
@@ -10405,21 +10506,27 @@ function applyResourceCover(resourceId) {
     return;
   }
   const position = Number(document.querySelector(`[data-resource-cover-position="${cssEscape(resourceId)}"]`)?.value ?? resource.cover?.position ?? 50);
+  const history = beginResourcePageHistory(resourceId, { control: "cover" }, { fields: ["cover"] });
   resource.cover = normalizeResourceCover({ url, position });
   ui.resourceCoverEditorId = "";
   touchResource(resource);
+  commitResourcePageHistory(history, { control: "cover" });
   saveState();
   patchResourceMedia(resource);
+  focusResourceControlAfterPatch(resourceId, `[data-resource-cover-edit="${cssEscape(resourceId)}"]`);
 }
 
 function removeResourceCover(resourceId) {
   const resource = itemById("resources", resourceId);
   if (!resourceMutationAllowed(resource)) return;
+  const history = beginResourcePageHistory(resourceId, { control: "cover" }, { fields: ["cover"] });
   resource.cover = { url: "", position: 50 };
   ui.resourceCoverEditorId = "";
   touchResource(resource);
+  commitResourcePageHistory(history, { control: "cover" });
   saveState();
   patchResourceMedia(resource);
+  focusResourceControlAfterPatch(resourceId, `[data-resource-cover-edit="${cssEscape(resourceId)}"]`);
 }
 
 function setResourceCoverPosition(resourceId, value) {
@@ -10427,10 +10534,16 @@ function setResourceCoverPosition(resourceId, value) {
   if (!resourceMutationAllowed(resource) || !resource.cover?.url) return;
   const position = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
   if (resource.cover.position === position) return;
+  const history = beginResourcePageHistory(
+    resourceId,
+    { control: "cover", part: "position" },
+    { fields: ["cover"] },
+  );
   resource.cover.position = position;
   const image = document.querySelector(`[data-resource-cover="${cssEscape(resourceId)}"]`);
   if (image) image.style.objectPosition = `center ${position}%`;
   touchResource(resource);
+  commitResourcePageHistory(history, { control: "cover", part: "position" });
   saveState();
 }
 
@@ -10735,12 +10848,18 @@ function updateResourceUrl(resourceId, value) {
   const nextValue = String(value || "").trim();
   ui.resourceUrlEditorId = "";
   if (resource.url !== nextValue) {
+    const history = beginResourcePageHistory(resourceId, { control: "url" }, { fields: ["url"] });
     resource.url = nextValue;
     touchResource(resource);
+    commitResourcePageHistory(history, { control: "url" });
     saveState();
     renderView({ soft: true });
   }
   renderDetail({ soft: true });
+  focusResourceControlAfterPatch(
+    resourceId,
+    `[data-resource-url-action="edit"][data-resource-url-owner="${cssEscape(resourceId)}"]`,
+  );
 }
 
 async function handleResourceUrlAction(resourceId, action) {
@@ -12441,7 +12560,85 @@ function blockRangeSelectionAnchorId(ownerType, ownerId, visibleIds, fallbackId)
   return fallbackId;
 }
 
-function beginEditorHistory(ownerType, ownerId, focus = null) {
+function flushPendingResourceTitleHistories(options = {}) {
+  let changed = false;
+  for (const resourceId of Object.keys(ui.resourceTitleDrafts)) {
+    if (resourceId === options.excludeResourceId) continue;
+    changed = commitResourceTitleDraft(resourceId, options) || changed;
+  }
+  return changed;
+}
+
+function normalizedResourcePageHistoryFields(fields = RESOURCE_PAGE_HISTORY_FIELDS) {
+  const requested = Array.isArray(fields) ? fields : [];
+  return [...new Set(requested.filter((field) => RESOURCE_PAGE_HISTORY_FIELDS.includes(field)))];
+}
+
+function resourcePageHistorySnapshot(resource, fields = RESOURCE_PAGE_HISTORY_FIELDS) {
+  if (!resource) return null;
+  const snapshot = {};
+  for (const field of normalizedResourcePageHistoryFields(fields)) {
+    snapshot[field] = cloneForLocalPersistence(resource[field]);
+  }
+  return snapshot;
+}
+
+function normalizeResourcePageHistoryFocus(focus = null) {
+  if (!focus?.control) return null;
+  const normalized = { control: String(focus.control) };
+  if (focus.field) normalized.field = String(focus.field);
+  if (focus.part) normalized.part = String(focus.part);
+  if (Number.isInteger(focus.start)) normalized.start = Math.max(0, focus.start);
+  if (Number.isInteger(focus.end)) normalized.end = Math.max(0, focus.end);
+  return normalized;
+}
+
+function beginResourcePageHistory(resourceId, focus = null, options = {}) {
+  if (!options.skipTitleFlush) flushPendingResourceTitleHistories();
+  flushPendingEditorTextHistory();
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource)) return null;
+  const fields = normalizedResourcePageHistoryFields(options.fields);
+  if (!fields.length) return null;
+  return {
+    kind: "resource-page",
+    ownerType: "resources",
+    ownerId: resource.id,
+    fields,
+    beforePage: resourcePageHistorySnapshot(resource, fields),
+    beforeFocus: normalizeResourcePageHistoryFocus(focus),
+  };
+}
+
+function commitResourcePageHistory(token, focus = null) {
+  if (token?.kind !== "resource-page" || !resourceMutationAllowed(token.ownerId)) return false;
+  const resource = itemById("resources", token.ownerId);
+  const fields = normalizedResourcePageHistoryFields(token.fields);
+  const afterPage = resourcePageHistorySnapshot(resource, fields);
+  if (!resource || JSON.stringify(token.beforePage) === JSON.stringify(afterPage)) return false;
+  return pushEditorHistoryEntry({
+    kind: "resource-page",
+    ownerType: "resources",
+    ownerId: resource.id,
+    fields,
+    beforePage: token.beforePage,
+    afterPage,
+    beforeFocus: token.beforeFocus,
+    afterFocus: normalizeResourcePageHistoryFocus(focus),
+  });
+}
+
+function pushEditorHistoryEntry(entry) {
+  if (!entry) return false;
+  ui.editorHistory.undo.push(entry);
+  if (ui.editorHistory.undo.length > ui.editorHistory.limit) ui.editorHistory.undo.shift();
+  ui.editorHistory.redo = [];
+  return true;
+}
+
+function beginEditorHistory(ownerType, ownerId, focus = null, options = {}) {
+  if (!options.skipTitleFlush) flushPendingResourceTitleHistories();
+  if (!options.skipPendingTextFlush) flushPendingEditorTextHistory();
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return null;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return null;
@@ -12455,6 +12652,8 @@ function beginEditorHistory(ownerType, ownerId, focus = null) {
 }
 
 function beginMultiResourceEditorHistory(resourceIds, focus = null) {
+  flushPendingResourceTitleHistories();
+  flushPendingEditorTextHistory();
   const orderedIds = [...new Set((resourceIds || []).map((resourceId) => String(resourceId || "").trim()).filter(Boolean))];
   if (orderedIds.length < 2 || orderedIds.some((resourceId) => !resourceMutationAllowed(resourceId))) return null;
   const resources = orderedIds.map((resourceId) => {
@@ -12473,7 +12672,7 @@ function beginMultiResourceEditorHistory(resourceIds, focus = null) {
   };
 }
 
-function commitEditorHistory(token, focus = null) {
+function commitEditorHistory(token, focus = null, options = {}) {
   if (!token || !token.ownerType || !token.ownerId) return false;
   if (!editorOwnerMutationAllowed(token.ownerType, token.ownerId)) return false;
   const item = itemById(token.ownerType, token.ownerId);
@@ -12485,8 +12684,8 @@ function commitEditorHistory(token, focus = null) {
     JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks) &&
     JSON.stringify(token.beforeCommentThreads) === JSON.stringify(afterCommentThreads)
   ) return false;
-  touchResourceForOwner(token.ownerType, token.ownerId);
-  ui.editorHistory.undo.push({
+  if (options.touch !== false) touchResourceForOwner(token.ownerType, token.ownerId);
+  return pushEditorHistoryEntry({
     ownerType: token.ownerType,
     ownerId: token.ownerId,
     beforeBlocks: token.beforeBlocks,
@@ -12496,11 +12695,6 @@ function commitEditorHistory(token, focus = null) {
     beforeFocus: token.beforeFocus,
     afterFocus: normalizeEditorHistoryFocus(focus),
   });
-  if (ui.editorHistory.undo.length > ui.editorHistory.limit) ui.editorHistory.undo.shift();
-  ui.editorHistory.redo = [];
-  ui.nativeTextUndoDepth = 0;
-  ui.nativeTextRedoDepth = 0;
-  return true;
 }
 
 function commitMultiResourceEditorHistory(token, focus = null) {
@@ -12523,7 +12717,7 @@ function commitMultiResourceEditorHistory(token, focus = null) {
     JSON.stringify(snapshot.beforeCommentThreads) === JSON.stringify(snapshot.afterCommentThreads)
   ))) return false;
   for (const snapshot of resources) touchResourceForOwner(snapshot.ownerType, snapshot.ownerId);
-  ui.editorHistory.undo.push({
+  return pushEditorHistoryEntry({
     kind: "multi-resource",
     ownerType: "resources",
     ownerId: resources[0].ownerId,
@@ -12531,17 +12725,19 @@ function commitMultiResourceEditorHistory(token, focus = null) {
     beforeFocus: token.beforeFocus,
     afterFocus: normalizeMultiResourceHistoryFocus(focus),
   });
-  if (ui.editorHistory.undo.length > ui.editorHistory.limit) ui.editorHistory.undo.shift();
-  ui.editorHistory.redo = [];
-  ui.nativeTextUndoDepth = 0;
-  ui.nativeTextRedoDepth = 0;
-  return true;
 }
 
 function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
   const latest = ui.editorHistory.undo[ui.editorHistory.undo.length - 1];
-  if (!latest || latest.ownerType !== ownerType || latest.ownerId !== ownerId) return;
+  if (
+    !latest
+    || latest.kind === "resource-page"
+    || latest.kind === "multi-resource"
+    || latest.ownerType !== ownerType
+    || latest.ownerId !== ownerId
+    || !Array.isArray(latest.afterBlocks)
+  ) return;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return;
   reconcileEditorCommentAnchors(ownerType, ownerId);
@@ -12552,24 +12748,24 @@ function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
 }
 
 function undoEditorHistory() {
+  flushPendingResourceTitleHistories();
+  flushPendingEditorTextHistory();
   const pending = ui.editorHistory.undo[ui.editorHistory.undo.length - 1];
   if (pending && !editorHistoryEntryMutationAllowed(pending)) return false;
   const entry = ui.editorHistory.undo.pop();
   if (!entry) return false;
-  ui.nativeTextUndoDepth = 0;
-  ui.nativeTextRedoDepth = 0;
   ui.editorHistory.redo.push(entry);
   restoreEditorHistoryEntry(entry, "before");
   return true;
 }
 
 function redoEditorHistory() {
+  flushPendingResourceTitleHistories();
+  flushPendingEditorTextHistory();
   const pending = ui.editorHistory.redo[ui.editorHistory.redo.length - 1];
   if (pending && !editorHistoryEntryMutationAllowed(pending)) return false;
   const entry = ui.editorHistory.redo.pop();
   if (!entry) return false;
-  ui.nativeTextUndoDepth = 0;
-  ui.nativeTextRedoDepth = 0;
   ui.editorHistory.undo.push(entry);
   restoreEditorHistoryEntry(entry, "after");
   return true;
@@ -12578,6 +12774,10 @@ function redoEditorHistory() {
 function restoreEditorHistoryEntry(entry, direction) {
   if (entry?.kind === "multi-resource") {
     restoreMultiResourceEditorHistoryEntry(entry, direction);
+    return;
+  }
+  if (entry?.kind === "resource-page") {
+    restoreResourcePageHistoryEntry(entry, direction);
     return;
   }
   if (!editorHistoryEntryMutationAllowed(entry)) return;
@@ -12606,7 +12806,186 @@ function editorHistoryEntryMutationAllowed(entry) {
       snapshot?.ownerType === "resources" && editorOwnerMutationAllowed(snapshot.ownerType, snapshot.ownerId)
     ));
   }
+  if (entry?.kind === "resource-page") {
+    return entry.ownerType === "resources" && resourceMutationAllowed(entry.ownerId);
+  }
   return Boolean(entry?.ownerType && entry?.ownerId && editorOwnerMutationAllowed(entry.ownerType, entry.ownerId));
+}
+
+function restoreResourcePageHistoryEntry(entry, direction) {
+  if (!editorHistoryEntryMutationAllowed(entry)) return false;
+  const resource = itemById("resources", entry.ownerId);
+  const snapshot = direction === "before" ? entry.beforePage : entry.afterPage;
+  if (!resource || !snapshot) return false;
+  window.clearTimeout(resourceTitleSaveTimers.get(resource.id));
+  resourceTitleSaveTimers.delete(resource.id);
+  delete ui.resourceTitleDrafts[resource.id];
+  for (const field of normalizedResourcePageHistoryFields(entry.fields)) {
+    resource[field] = cloneForLocalPersistence(snapshot[field]);
+  }
+  const focus = direction === "before" ? entry.beforeFocus : entry.afterFocus;
+  ui.resourceIconPickerId = "";
+  ui.resourceCoverEditorId = focus?.control === "cover" && focus.part === "position" ? resource.id : "";
+  ui.resourceUrlEditorId = "";
+  ui.resourcePageMenuId = "";
+  touchResource(resource);
+  saveState();
+  renderView({ soft: true });
+  renderDetail({ soft: true });
+  patchResourcePageHistoryControls(resource);
+  restoreResourcePageHistoryFocus(resource.id, focus);
+  return true;
+}
+
+function patchResourcePageHistoryControls(resource) {
+  const resourceId = cssEscape(resource.id);
+  document.querySelectorAll(`[data-resource-title="${resourceId}"]`).forEach((input) => {
+    if (input.value !== resource.title) input.value = resource.title || "";
+  });
+  document.querySelectorAll(`[data-resource-note="${resourceId}"] [data-field]`).forEach((control) => {
+    const field = control.dataset.field || "";
+    if (!RESOURCE_PAGE_HISTORY_FIELDS.includes(field)) return;
+    if (control instanceof HTMLInputElement && control.type === "checkbox") {
+      control.checked = Boolean(resource[field]);
+    } else if ("value" in control) {
+      control.value = String(resource[field] ?? "");
+    }
+  });
+  patchResourceMedia(resource);
+}
+
+function restoreResourcePageHistoryFocus(resourceId, focus = null) {
+  if (!focus?.control) return;
+  requestAnimationFrame(() => {
+    const note = document.querySelector(`[data-resource-note="${cssEscape(resourceId)}"]`);
+    if (!note) return;
+    let target = null;
+    if (focus.control === "title") {
+      target = note.querySelector(`[data-resource-title="${cssEscape(resourceId)}"]`);
+    } else if (focus.control === "property" && focus.field) {
+      target = note.querySelector(`[data-field="${cssEscape(focus.field)}"]`);
+    } else if (focus.control === "url") {
+      target = note.querySelector(`[data-resource-url-action="edit"][data-resource-url-owner="${cssEscape(resourceId)}"]`);
+    } else if (focus.control === "icon") {
+      target = note.querySelector(`[data-resource-icon-edit="${cssEscape(resourceId)}"]`);
+    } else if (focus.control === "cover") {
+      target = focus.part === "position"
+        ? note.querySelector(`[data-resource-cover-position="${cssEscape(resourceId)}"]`)
+        : note.querySelector(`[data-resource-cover-edit="${cssEscape(resourceId)}"]`);
+    } else if (focus.control === "page-menu") {
+      target = note.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`);
+    }
+    target?.focus?.({ preventScroll: true });
+    if (focus.control === "title" && typeof target?.setSelectionRange === "function") {
+      const length = target.value.length;
+      const start = Math.min(length, Number.isInteger(focus.start) ? focus.start : length);
+      const end = Math.min(length, Number.isInteger(focus.end) ? focus.end : start);
+      target.setSelectionRange(start, Math.max(start, end));
+    }
+  });
+}
+
+function pendingEditorTextHistoryMatches(ownerType, ownerId, blockId) {
+  const pending = ui.pendingEditorTextHistory;
+  return Boolean(
+    pending
+    && pending.ownerType === ownerType
+    && pending.ownerId === ownerId
+    && pending.blockId === blockId,
+  );
+}
+
+function beginEditorTextHistory(ownerType, ownerId, blockId, focus = null, options = {}) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId) || !blockId) return null;
+  if (options.forceNew || !pendingEditorTextHistoryMatches(ownerType, ownerId, blockId)) {
+    flushPendingEditorTextHistory();
+  }
+  if (!ui.pendingEditorTextHistory) {
+    const token = beginEditorHistory(ownerType, ownerId, focus, { skipPendingTextFlush: true });
+    if (!token) return null;
+    ui.pendingEditorTextHistory = {
+      ownerType,
+      ownerId,
+      blockId,
+      token,
+      timerId: 0,
+    };
+  }
+  schedulePendingEditorTextHistoryCommit();
+  return ui.pendingEditorTextHistory;
+}
+
+function schedulePendingEditorTextHistoryCommit() {
+  const pending = ui.pendingEditorTextHistory;
+  if (!pending) return;
+  window.clearTimeout(pending.timerId);
+  pending.timerId = window.setTimeout(flushPendingEditorTextHistory, EDITOR_TEXT_HISTORY_IDLE_MS);
+}
+
+function currentEditorTextHistoryFocus(pending) {
+  const blockContent = document.querySelector(`[data-block-content="${cssEscape(pending.blockId)}"]`);
+  const editor = blockContent?.closest(".block-editor");
+  if (
+    blockContent
+    && editor?.dataset.ownerType === pending.ownerType
+    && editor?.dataset.ownerId === pending.ownerId
+  ) {
+    const offsets = selectionOffsetsInside(blockContent);
+    if (offsets) return { blockId: pending.blockId, start: offsets.start, end: offsets.end };
+  }
+  const item = itemById(pending.ownerType, pending.ownerId);
+  const block = item?.blocks?.find((entry) => entry.id === pending.blockId);
+  const length = typeof block?.text === "string" ? block.text.length : 0;
+  return { blockId: pending.blockId, start: length, end: length };
+}
+
+function flushPendingEditorTextHistory(focus = null) {
+  const pending = ui.pendingEditorTextHistory;
+  if (!pending) return false;
+  window.clearTimeout(pending.timerId);
+  ui.pendingEditorTextHistory = null;
+  return commitEditorHistory(pending.token, focus || currentEditorTextHistoryFocus(pending), { touch: false });
+}
+
+function stageEditorTextHistoryBeforeInput(event, blockContent) {
+  const inputType = String(event?.inputType || "");
+  if (
+    !blockContent
+    || event?.isComposing
+    || (!inputType.startsWith("insert") && !inputType.startsWith("delete"))
+    || inputType === "insertParagraph"
+    || inputType === "insertLineBreak"
+    || inputType === "historyUndo"
+    || inputType === "historyRedo"
+  ) return false;
+  const editor = blockContent.closest(".block-editor");
+  if (!editor) return false;
+  const offsets = selectionOffsetsInside(blockContent);
+  beginEditorTextHistory(
+    editor.dataset.ownerType,
+    editor.dataset.ownerId,
+    blockContent.dataset.blockContent,
+    {
+      blockId: blockContent.dataset.blockContent,
+      start: offsets?.start ?? 0,
+      end: offsets?.end ?? offsets?.start ?? 0,
+    },
+  );
+  return true;
+}
+
+function ensureEditorTextHistoryForInput(ownerType, ownerId, block, blockContent) {
+  if (!block || pendingEditorTextHistoryMatches(ownerType, ownerId, block.id)) {
+    schedulePendingEditorTextHistoryCommit();
+    return;
+  }
+  const offsets = selectionOffsetsInside(blockContent);
+  const length = typeof block.text === "string" ? block.text.length : 0;
+  beginEditorTextHistory(ownerType, ownerId, block.id, {
+    blockId: block.id,
+    start: Math.min(length, offsets?.start ?? length),
+    end: Math.min(length, offsets?.end ?? offsets?.start ?? length),
+  });
 }
 
 function restoreMultiResourceEditorHistoryEntry(entry, direction) {
@@ -13066,6 +13445,7 @@ function handleDocumentCut(event) {
 
 function handleDocumentPaste(event) {
   if (!event.clipboardData) return;
+  if (pasteResourceTitle(event)) return;
   const composingTarget = event.target instanceof Element ? event.target.closest("[data-block-content]") : null;
   if (composingTarget && isComposingBlock(composingTarget)) return;
   if (pasteEventShouldClearBlockSelection(event)) {
@@ -13100,6 +13480,31 @@ function handleDocumentPaste(event) {
   if (!plainBlocks.length) return;
   if (!ui.blockSelection.ids.length && !shouldPastePlainTextAsBlocks(event, text)) return;
   if (pasteBlocksFromClipboard(event, plainBlocks, { mergeIntoTarget: true })) event.preventDefault();
+}
+
+function pasteResourceTitle(event) {
+  const input = event.target instanceof Element ? event.target.closest("[data-resource-title]") : null;
+  if (!input) return false;
+  event.preventDefault();
+  const resourceId = input.dataset.resourceTitle || "";
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource) || ui.resourceTitleComposingIds.has(resourceId)) return true;
+  commitResourceTitleDraft(resourceId);
+  const pasted = String(event.clipboardData?.getData("text/plain") || "").replace(/[\r\n]+/g, " ");
+  const start = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+  const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+  const nextValue = `${input.value.slice(0, start)}${pasted}${input.value.slice(end)}`;
+  if (nextValue.length > MAX_RESOURCE_TITLE_LENGTH) {
+    markResourceInputLimitError(input, `Resource 제목은 최대 ${MAX_RESOURCE_TITLE_LENGTH}자입니다.`);
+    return true;
+  }
+  clearResourceInputLimitError(input);
+  ensureResourceTitleDraft(resourceId);
+  input.value = nextValue;
+  const caret = start + pasted.length;
+  input.setSelectionRange(caret, caret);
+  updateResourceTitleFromInput(input, event, { force: true });
+  return true;
 }
 
 function pasteEventShouldClearBlockSelection(event) {
@@ -16118,20 +16523,29 @@ function handleDocumentKeydown(event) {
   if (handlePendingEmptyContinuationTab(event)) return;
   if (handlePendingMarkdownTargetTab(event)) return;
   if (handlePendingMarkdownTextKey(event)) return;
-  if (shouldUseNativeTextHistory(event)) return;
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "z") {
-    const handled = event.shiftKey ? redoEditorHistory() : undoEditorHistory();
-    if (handled) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
+  if (
+    editorHistoryShortcutContext(event)
+    && (event.metaKey || event.ctrlKey)
+    && !event.altKey
+    && event.key.toLowerCase() === "z"
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.shiftKey) redoEditorHistory();
+    else undoEditorHistory();
     return;
   }
-  if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "y") {
-    if (redoEditorHistory()) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
+  if (
+    editorHistoryShortcutContext(event)
+    && event.ctrlKey
+    && !event.metaKey
+    && !event.altKey
+    && !event.shiftKey
+    && event.key.toLowerCase() === "y"
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    redoEditorHistory();
     return;
   }
 
@@ -16316,6 +16730,20 @@ function handleDocumentKeydown(event) {
   }
 }
 
+function editorHistoryShortcutContext(event) {
+  const target = event?.target instanceof Element ? event.target : null;
+  const editable = target?.closest("input, textarea, select, [contenteditable='true']");
+  if (editable) {
+    return Boolean(editable.matches(
+      "[data-resource-title], [data-block-content], [data-field], [data-resource-cover-position]",
+    ));
+  }
+  if (target?.closest("[data-resource-note], [data-block-content]")) return true;
+  if (ui.blockSelection.ids.length) return true;
+  const recent = ui.recentBlockFocus;
+  return Boolean(recent?.ownerType && recent?.ownerId && recent?.blockId && Date.now() <= recent.expiresAt);
+}
+
 function recentBlockContentForSelectionShortcut() {
   const recent = ui.recentBlockFocus;
   if (!recent || Date.now() > recent.expiresAt || !recent.ownerType || !recent.ownerId || !recent.blockId) {
@@ -16329,26 +16757,6 @@ function recentBlockContentForSelectionShortcut() {
     return null;
   }
   return { blockContent, ownerType: recent.ownerType, ownerId: recent.ownerId };
-}
-
-function shouldUseNativeTextHistory(event) {
-  if (!isEditableShortcutTarget(event.target)) return false;
-  const key = event.key.toLowerCase();
-  const undoKey = (event.metaKey || event.ctrlKey) && !event.altKey && key === "z" && !event.shiftKey;
-  const redoKey =
-    ((event.metaKey || event.ctrlKey) && !event.altKey && key === "z" && event.shiftKey) ||
-    (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && key === "y");
-  if (undoKey && ui.nativeTextUndoDepth > 0) {
-    ui.nativeTextUndoDepth -= 1;
-    ui.nativeTextRedoDepth += 1;
-    return true;
-  }
-  if (redoKey && ui.nativeTextRedoDepth > 0) {
-    ui.nativeTextRedoDepth -= 1;
-    ui.nativeTextUndoDepth += 1;
-    return true;
-  }
-  return false;
 }
 
 function handlePendingEmptyContinuationEnter(event) {
@@ -18368,6 +18776,18 @@ function updateBlockText(blockContent, event = null) {
   const block = editableBlockForContent(editor, item, blockContent);
   if (!block) return;
   const rawText = normalizeEditorPlainText(blockContent.textContent || "");
+  const previousText = typeof block.text === "string" ? block.text : "";
+  const pendingMarkdownText = ui.pendingMarkdownTextTarget;
+  const extendsPendingMarkdownHistory = Boolean(
+    pendingMarkdownText
+    && pendingMarkdownText.ownerType === editor.dataset.ownerType
+    && pendingMarkdownText.ownerId === editor.dataset.ownerId
+    && pendingMarkdownText.blockId === block.id
+    && Date.now() <= pendingMarkdownText.expiresAt,
+  );
+  if (rawText !== previousText && !extendsPendingMarkdownHistory) {
+    ensureEditorTextHistoryForInput(editor.dataset.ownerType, editor.dataset.ownerId, block, blockContent);
+  }
   blockContent.classList.toggle("is-empty", rawText === "");
   let markdownHistory = null;
   if (textMatchesMarkdownShortcut(rawText)) {
@@ -18468,7 +18888,6 @@ function updateBlockText(blockContent, event = null) {
     return;
   }
   const nextMarks = inlineMarksForContentUpdate(block, blockContent, rawText);
-  const previousText = typeof block.text === "string" ? block.text : "";
   const previousMarks = normalizeInlineMarks(previousText, block.marks || []);
   if (rawText === previousText && inlineMarksEqual(nextMarks, previousMarks)) {
     syncBlockContentMarkupFromState(blockContent, block);
@@ -18478,7 +18897,7 @@ function updateBlockText(blockContent, event = null) {
   block.marks = nextMarks;
   clearPendingEmptyContinuationExitForText(editor.dataset.ownerType, editor.dataset.ownerId, block.id, rawText);
   if (!refreshPendingMarkdownTextHistory(editor.dataset.ownerType, editor.dataset.ownerId, block.id)) {
-    noteNativeTextInput(event);
+    schedulePendingEditorTextHistoryCommit();
   }
   touchResourceForOwner(editor.dataset.ownerType, editor.dataset.ownerId);
   saveState();
@@ -18527,14 +18946,6 @@ function editableBlockForContent(editor, item, blockContent) {
   block.id = blockId;
   clearStateIndexes();
   return block;
-}
-
-function noteNativeTextInput(event = null) {
-  const inputType = event?.inputType || "";
-  if (inputType === "historyUndo" || inputType === "historyRedo") return;
-  ui.nativeTextUndoDepth = Math.min(200, ui.nativeTextUndoDepth + 1);
-  ui.nativeTextRedoDepth = 0;
-  ui.editorHistory.redo = [];
 }
 
 function slashCommandFromText(rawText = "") {
