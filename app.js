@@ -17225,6 +17225,10 @@ function handleDocumentClick(event) {
 
 function handleDragStart(event) {
   if (handleNavDragStart(event)) return;
+  if (["inbox", "boxes", "resources"].includes(ui.view) && event.target.closest("[data-delete-drag-type][data-delete-drag-id]")) {
+    event.preventDefault();
+    return;
+  }
   if (ui.view === "today" && event.target.closest("[data-today-task-id]")) {
     event.preventDefault();
     return;
