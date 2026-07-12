@@ -18855,7 +18855,7 @@ function updateBlockText(blockContent, event = null) {
     if (block.type === "divider") {
       renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
       renderOverlays();
-      focusBlockContentAfterRender(focusBlock.id);
+      focusBlockContentAfterRender(focusBlock.id, { position: "start", transaction: true });
       return;
     }
     focusBlockContentAfterRender(focusBlock.id);
@@ -21708,8 +21708,16 @@ function focusBlockContentAfterRender(blockId, options = {}) {
     if (target && options.caret === "start") placeCaretAtStart(target);
     return target;
   };
+  const focusIsSettled = (candidate) => Boolean(candidate && document.activeElement === candidate);
   const target = focusTarget();
-  if (!target) requestAnimationFrame(focusTarget);
+  let remainingChecks = options.transaction === true ? 4 : 1;
+  const verifyFocus = () => {
+    const candidate = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
+    if (!focusIsSettled(candidate)) focusTarget();
+    remainingChecks -= 1;
+    if (remainingChecks > 0) requestAnimationFrame(verifyFocus);
+  };
+  if (options.transaction === true || !focusIsSettled(target)) requestAnimationFrame(verifyFocus);
   return target;
 }
 
