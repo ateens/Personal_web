@@ -179,3 +179,17 @@ This audit remains conservative. The current cloud workspace refreshed non-brows
 | Whitespace | Verified in cloud | `git diff --check` passed. |
 
 Remaining conservative gaps are unchanged: matched authenticated Notion state pairs, real iOS/Android soft keyboards and touch drag, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, unified title/property/media/native-text history, tenant ACL/RBAC, entity-level Block/Comment persistence, production/deployed fallback verification, and any visual token that has not been measured from matched authenticated references.
+
+## 2026-07-12 Codex Cloud browser and PostgreSQL evidence supersession for commit 29d28569
+
+This section supersedes the earlier Cloud statements that every browser and database gate was blocked. Those attempts remain above as historical diagnostics. Overall status remains **Partial**; this is not a Notion-identical, pixel-perfect, or release-ready claim.
+
+- An isolated loopback PostgreSQL 16.14 instance with ephemeral unprinted credentials passed check:postgres, check:api-auth, and check:backups, then was removed. This is disposable-database evidence, not production DB, PITR, dump, or deployed-service evidence.
+- check and check:build passed. Build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
+- Node 22.23.1 plus temporary Sparticuz Chromium 149.0.7827.0, with graphics off and minimal launch arguments, passed an eight-context smoke 8/8 with zero disconnects, crashes, OOM events, or abnormal exits.
+- resource-page-command-mentions passed 2/2 in 29.1 seconds, proving the scoped selector fix only under this Cloud headless-shell route.
+- A fresh-browser-per-file campaign ran all 174 tests in 29 files: 170 passed, 4 failed, 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
+- The four campaign assertions were divider continuation focus, inline-toolbar viewport inset, 400-block performance, and visual-state settle evidence. The divider probe actually focused the generated continuation block; the toolbar was one headless pixel outside the bound, bottom 289 versus 288; performance measured 4,557 DOM nodes, property patch 874.9ms, scroll response 1690.5ms, max long task 299ms, total long tasks 1039ms, seven long tasks, and ready 1944ms; visual capture timed out with fonts loaded and animations still present.
+- Prior local real-Chrome property and scroll values were about 23.6ms and 16.2ms. The headless-shell measurements must not relax product budgets or be called a product regression by themselves. A diagnostic rerun also produced nondeterministic headless timing around Backspace and visual settle.
+
+This is not a clean 174/174 real-Chrome run. It does not prove CSP or cross-origin browser security, real mobile or soft-keyboard behavior, VoiceOver, TalkBack, NVDA, matched authenticated Notion visuals, pixel parity, production persistence, or deployed fallback behavior.
