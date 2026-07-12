@@ -3,6 +3,7 @@ import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
 
 const CUSTOM_BLOCK_MIME = "application/x-sygma-blocks";
 const INTEGRITY_RESOURCE_ID = "fixture-resource-comment-integrity";
+const PERSISTENCE_TIMEOUT_MS = 20_000;
 
 test.beforeEach(async ({ request }) => {
   await resetFixture(request);
@@ -208,9 +209,17 @@ test("inline comment creation and page discussion lifecycle are atomic undo/redo
     return inlineThreadId;
   }).not.toBe("");
   await page.keyboard.press("Meta+z");
-  await expect.poll(async () => Boolean(await threadState(request, inlineThreadId))).toBe(false);
+  await expect(paragraph.locator(`[data-inline-comment-id="${inlineThreadId}"]`)).toHaveCount(0);
+  await expect.poll(
+    async () => Boolean(await threadState(request, inlineThreadId)),
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe(false);
   await page.keyboard.press("Meta+Shift+z");
-  await expect.poll(async () => (await threadState(request, inlineThreadId))?.anchor).toEqual({
+  await expect(paragraph.locator(`[data-inline-comment-id="${inlineThreadId}"]`)).toHaveCount(1);
+  await expect.poll(
+    async () => (await threadState(request, inlineThreadId))?.anchor,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toEqual({
     blockId: "fixture-block-paragraph",
     start: 0,
     end: 9,
@@ -227,9 +236,17 @@ test("inline comment creation and page discussion lifecycle are atomic undo/redo
     return pageThreadId;
   }).not.toBe("");
   await page.keyboard.press("Meta+z");
-  await expect.poll(async () => Boolean(await threadState(request, pageThreadId))).toBe(false);
+  await expect(pane.locator(`[data-comment-thread="${pageThreadId}"]`)).toHaveCount(0);
+  await expect.poll(
+    async () => Boolean(await threadState(request, pageThreadId)),
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe(false);
   await page.keyboard.press("Meta+Shift+z");
-  await expect.poll(async () => (await threadState(request, pageThreadId))?.scope).toBe("page");
+  await expect(pane.locator(`[data-comment-thread="${pageThreadId}"]`)).toHaveCount(1);
+  await expect.poll(
+    async () => (await threadState(request, pageThreadId))?.scope,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe("page");
 
   let thread = pane.locator(`[data-comment-thread="${FIXTURE_IDS.pageThread}"]`);
   await thread.locator(`[data-comment-reply-input="${FIXTURE_IDS.pageThread}"]`).fill("Undoable reply");

@@ -10758,13 +10758,13 @@ function submitPageDiscussion(resourceId) {
     return rejectResourceCommentInput(composer, `댓글 스레드는 Resource당 최대 ${MAX_RESOURCE_COMMENT_THREADS}개입니다.`);
   }
   clearResourceInputLimitError(composer);
-  const history = beginEditorHistory("resources", resource.id);
+  const history = beginResourceCommentHistory(resource.id);
   resource.commentThreads = normalizeResourceCommentThreads(resource.commentThreads);
   const thread = newResourceCommentThread("page", body, null);
   resource.commentThreads.push(thread);
   updateResourceCommentReadAt(resource.id, thread.updatedAt);
   ui.resourceCommentFocusId = thread.id;
-  commitEditorHistory(history);
+  commitResourceCommentHistory(history);
   saveState();
   renderDetail({ soft: true });
 }
@@ -12651,6 +12651,45 @@ function beginEditorHistory(ownerType, ownerId, focus = null, options = {}) {
   };
 }
 
+
+function beginResourceCommentHistory(resourceId, focus = null) {
+  flushPendingResourceTitleHistories();
+  flushPendingEditorTextHistory();
+  const resource = itemById("resources", resourceId);
+  if (!resourceMutationAllowed(resource) || !resource?.blocks) return null;
+  return {
+    ownerType: "resources",
+    ownerId: resource.id,
+    beforeBlocks: cloneEditorBlocks(resource.blocks),
+    beforeCommentThreads: cloneEditorCommentThreads(resource.commentThreads || []),
+    beforeFocus: normalizeEditorHistoryFocus(focus),
+  };
+}
+
+function commitResourceCommentHistory(token, focus = null, options = {}) {
+  const committed = commitEditorHistory(token, focus, options);
+  if (committed || !token || token.ownerType !== "resources") return committed;
+  const resource = itemById("resources", token.ownerId);
+  if (!resourceMutationAllowed(resource) || !resource?.blocks) return false;
+  const afterBlocks = cloneEditorBlocks(resource.blocks);
+  const afterCommentThreads = cloneEditorCommentThreads(resource.commentThreads || []);
+  if (
+    JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks)
+    && JSON.stringify(token.beforeCommentThreads) === JSON.stringify(afterCommentThreads)
+  ) return false;
+  if (options.touch !== false) touchResourceForOwner("resources", resource.id);
+  return pushEditorHistoryEntry({
+    ownerType: "resources",
+    ownerId: resource.id,
+    beforeBlocks: token.beforeBlocks,
+    afterBlocks,
+    beforeCommentThreads: token.beforeCommentThreads,
+    afterCommentThreads,
+    beforeFocus: token.beforeFocus,
+    afterFocus: normalizeEditorHistoryFocus(focus),
+  });
+}
+
 function beginMultiResourceEditorHistory(resourceIds, focus = null) {
   flushPendingResourceTitleHistories();
   flushPendingEditorTextHistory();
@@ -12796,6 +12835,7 @@ function restoreEditorHistoryEntry(entry, direction) {
   clearBlockSelection();
   saveState();
   renderEditorMutation(entry.ownerType, entry.ownerId, { forceView: true });
+  if (entry.ownerType === "resources") renderDetail({ soft: true });
   const focus = direction === "before" ? entry.beforeFocus : entry.afterFocus;
   restoreEditorHistoryFocus(focus);
 }
@@ -16739,6 +16779,10 @@ function editorHistoryShortcutContext(event) {
     ));
   }
   if (target?.closest("[data-resource-note], [data-block-content]")) return true;
+  if (
+    (target === document.body || target === document.documentElement)
+    && document.querySelector("[data-resource-note]")
+  ) return true;
   if (ui.blockSelection.ids.length) return true;
   const recent = ui.recentBlockFocus;
   return Boolean(recent?.ownerType && recent?.ownerId && recent?.blockId && Date.now() <= recent.expiresAt);
