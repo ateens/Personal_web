@@ -216,7 +216,7 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 - Cross-entity backlink surfaces/indexing beyond the verified Resource/Project/Goal/Box/Task/Habit mention navigation.
 - Reply-level comment deletion plus attributed author/permission/notification and multi-user unread semantics. Thread delete, anchor-loss/rebase, and durable local-only single-user read cursors are implemented.
 - Page version history. Current Duplicate/Move/Lock/Markdown export actions are not version history.
-- Full slash/media block catalog, image/file and large-paste flow, remote bookmark metadata/real iframe policy, complete inline-link actions, columns, and page version history. The selected-block action menu and URL Link/Bookmark/Embed chooser now cover their defined local subset.
+- Full slash/media block catalog, image/file and large-paste flow, remote bookmark metadata/real iframe policy, complete inline-link actions, and columns. The selected-block action menu and URL Link/Bookmark/Embed chooser now cover their defined local subset.
 
 ### P2
 
