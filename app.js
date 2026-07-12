@@ -600,6 +600,7 @@ let databaseBackendStatus = {
   lastSyncedAt: "",
   revision: Number.isSafeInteger(state.revision) ? state.revision : 0,
   conflict: null,
+  e2eFixtureGeneration: null,
 };
 let els = {};
 let appAnnouncementTimer = 0;
@@ -23406,6 +23407,7 @@ async function initializeDatabaseStateNow() {
       lastSyncedAt: status.updatedAt || "",
       revision: statusRevision,
       conflict: null,
+      e2eFixtureGeneration: Number.isSafeInteger(status.resetGeneration) ? status.resetGeneration : databaseBackendStatus.e2eFixtureGeneration,
     };
     remoteStateSaveBlocked = false;
     lastRemoteSaveFailureKind = "";
@@ -23763,8 +23765,16 @@ function touchResourceForOwner(ownerType, ownerId, options = {}) {
   return ownerType === "resources" ? touchResource(ownerId, options) : null;
 }
 
+function e2eFixtureGenerationRequestFields() {
+  return Number.isSafeInteger(databaseBackendStatus.e2eFixtureGeneration)
+    ? { e2eFixtureGeneration: databaseBackendStatus.e2eFixtureGeneration }
+    : {};
+}
+
 function stateRequestBody(baseRevision = currentWorkspaceRevision()) {
-  return JSON.stringify({ state, baseRevision });
+  const fixtureFields = e2eFixtureGenerationRequestFields();
+  if (!Object.keys(fixtureFields).length) return JSON.stringify({ state, baseRevision });
+  return JSON.stringify({ state, baseRevision, ...fixtureFields });
 }
 
 function currentWorkspaceRevision() {
@@ -23979,7 +23989,7 @@ async function saveQueuedResourceOperations(options = {}) {
         method: "PUT",
         keepalive: Boolean(options.keepalive),
         headers: { "If-Match": `"state-${baseRevision}"` },
-        body: JSON.stringify({ resource: outgoingResource, baseRevision }),
+        body: JSON.stringify({ resource: outgoingResource, baseRevision, ...e2eFixtureGenerationRequestFields() }),
       });
       const savedRevision = workspaceRevisionFromPayload(payload, baseRevision + 1);
       await commitLocalResourceOperationSuccess(operation, outgoingResource, payload.resource, savedRevision);

@@ -51,6 +51,7 @@ let writes = [];
 let writeAttempts = [];
 let externalWrites = [];
 let serverRevision = 1;
+let resetGeneration = 1;
 let serviceWorkerVersion = 1;
 
 const server = createServer(async (request, response) => {
@@ -78,6 +79,7 @@ const server = createServer(async (request, response) => {
         collectionSource: "fixture",
         updatedAt: state.updatedAt,
         revision: serverRevision,
+        resetGeneration,
       }, stateRevisionHeaders());
       return;
     }
@@ -92,14 +94,27 @@ const server = createServer(async (request, response) => {
         return;
       }
       const baseRevision = requestBaseRevision(request, body);
+      const suppliedGeneration = optionalResetGeneration(body);
       const attempt = {
         method: request.method,
         baseRevision,
         ifMatch: String(request.headers["if-match"] || ""),
         serverRevision,
+        resetGeneration,
+        suppliedGeneration,
         outcome: "pending",
       };
       writeAttempts.push(attempt);
+      if (suppliedGeneration !== null && suppliedGeneration !== resetGeneration) {
+        attempt.outcome = "generation-conflict";
+        sendJson(response, 409, {
+          error: "E2E fixture generation conflict.",
+          code: "E2E_FIXTURE_GENERATION_CONFLICT",
+          revision: serverRevision,
+          resetGeneration,
+        }, stateRevisionHeaders("generation-conflict"));
+        return;
+      }
       if (baseRevision === null) {
         attempt.outcome = "precondition-required";
         sendJson(response, 428, {
@@ -188,15 +203,28 @@ const server = createServer(async (request, response) => {
         return;
       }
       const baseRevision = requestBaseRevision(request, body);
+      const suppliedGeneration = optionalResetGeneration(body);
       const attempt = {
         method: request.method,
         resourceId,
         baseRevision,
         ifMatch: String(request.headers["if-match"] || ""),
         serverRevision,
+        resetGeneration,
+        suppliedGeneration,
         outcome: "pending",
       };
       writeAttempts.push(attempt);
+      if (suppliedGeneration !== null && suppliedGeneration !== resetGeneration) {
+        attempt.outcome = "generation-conflict";
+        sendJson(response, 409, {
+          error: "E2E fixture generation conflict.",
+          code: "E2E_FIXTURE_GENERATION_CONFLICT",
+          revision: serverRevision,
+          resetGeneration,
+        }, stateRevisionHeaders("generation-conflict"));
+        return;
+      }
       if (baseRevision === null) {
         attempt.outcome = "precondition-required";
         sendJson(response, 428, {
@@ -278,8 +306,9 @@ const server = createServer(async (request, response) => {
       writeAttempts = [];
       externalWrites = [];
       serverRevision = 1;
+      resetGeneration += 1;
       serviceWorkerVersion = 1;
-      sendJson(response, 200, { ok: true, appStateId: FIXTURE_IDS.appState });
+      sendJson(response, 200, { ok: true, appStateId: FIXTURE_IDS.appState, resetGeneration });
       return;
     }
     if (request.method === "POST" && path === "/__e2e__/service-worker-version") {
@@ -324,6 +353,7 @@ const server = createServer(async (request, response) => {
         productionWritesBlocked: true,
         appStateId: FIXTURE_IDS.appState,
         serverRevision,
+        resetGeneration,
         writes: structuredClone(writes),
         writeAttempts: structuredClone(writeAttempts),
         externalWrites: structuredClone(externalWrites),
@@ -374,6 +404,7 @@ function statePayload() {
     appStateId: FIXTURE_IDS.appState,
     updatedAt: state.updatedAt,
     revision: serverRevision,
+    resetGeneration,
     state: structuredClone(state),
   };
 }
@@ -701,6 +732,17 @@ function requestBaseRevision(request, body) {
     throw error;
   }
   return headerRevision ?? bodyRevision;
+}
+
+function optionalResetGeneration(body) {
+  if (body.e2eFixtureGeneration === undefined || body.e2eFixtureGeneration === null || body.e2eFixtureGeneration === "") return null;
+  const generation = Number(body.e2eFixtureGeneration);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    const error = new Error("e2eFixtureGeneration must be a non-negative integer when supplied.");
+    error.status = 400;
+    throw error;
+  }
+  return generation;
 }
 
 function stateRevisionHeaders(mode = "fixture-optional") {
