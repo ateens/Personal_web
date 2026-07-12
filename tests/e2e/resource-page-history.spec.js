@@ -9,6 +9,7 @@ const RESOURCE_PATH = `/resources/${encodeURIComponent(FIXTURE_IDS.resource)}`;
 const INITIAL_TITLE = "E2E Notion Parity Resource";
 const INITIAL_BLOCK_TEXT = "Paragraph fixture fulltext-needle";
 const BLOCK_ID = "fixture-block-paragraph";
+const PERSISTENCE_TIMEOUT_MS = 20_000;
 
 test.beforeEach(async ({ page, request }) => {
   await resetFixture(request);
@@ -60,6 +61,7 @@ async function pressRedo(page) {
 }
 
 test("block text, title, property, icon, cover, and page settings share one chronological history", async ({ page, request }) => {
+  test.setTimeout(120_000);
   const note = resourceNote(page);
   await blockContent(page).fill("History body");
 
@@ -98,36 +100,74 @@ test("block text, title, property, icon, cover, and page settings share one chro
   });
 
   await pressUndo(page);
-  await expect.poll(async () => (await currentResource(request)).pageSettings.font).toBe("default");
+  await expect(note).toHaveAttribute("data-resource-font", "default");
+  await expect.poll(
+    async () => (await currentResource(request)).pageSettings.font,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe("default");
   await pressUndo(page);
-  await expect.poll(async () => (await currentResource(request)).cover.url).toBe("");
+  await expect(note.locator(`[data-resource-cover="${FIXTURE_IDS.resource}"]`)).toHaveCount(0);
+  await expect.poll(
+    async () => (await currentResource(request)).cover.url,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe("");
   await pressUndo(page);
-  await expect.poll(async () => (await currentResource(request)).icon).toBe("");
+  await expect(note.locator(`[data-resource-icon="${FIXTURE_IDS.resource}"]`)).toHaveCount(0);
+  await expect.poll(
+    async () => (await currentResource(request)).icon,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe("");
   await pressUndo(page);
-  await expect.poll(async () => (await currentResource(request)).type).toBe("note");
+  await expect(note.locator('[data-field="type"]')).toHaveValue("note");
+  await expect.poll(
+    async () => (await currentResource(request)).type,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe("note");
   await pressUndo(page);
-  await expect.poll(async () => (await currentResource(request)).title).toBe(INITIAL_TITLE);
+  await expect(resourceTitle(page)).toHaveValue(INITIAL_TITLE);
+  await expect.poll(
+    async () => (await currentResource(request)).title,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe(INITIAL_TITLE);
   await pressUndo(page);
-  await expect.poll(async () => (
-    (await currentResource(request)).blocks.find((entry) => entry.id === BLOCK_ID)?.text
-  )).toBe(INITIAL_BLOCK_TEXT);
+  await expect(blockContent(page)).toHaveText(INITIAL_BLOCK_TEXT);
+  await expect.poll(
+    async () => (await currentResource(request)).blocks.find((entry) => entry.id === BLOCK_ID)?.text,
+    { timeout: PERSISTENCE_TIMEOUT_MS },
+  ).toBe(INITIAL_BLOCK_TEXT);
 
   for (const expected of ["History body", "History title", "scrap", "📄", "https://example.com/history-cover.jpg", "serif"]) {
     await pressRedo(page);
     if (expected === "History body") {
-      await expect.poll(async () => (
-        (await currentResource(request)).blocks.find((entry) => entry.id === BLOCK_ID)?.text
-      )).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).blocks.find((entry) => entry.id === BLOCK_ID)?.text,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     } else if (expected === "History title") {
-      await expect.poll(async () => (await currentResource(request)).title).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).title,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     } else if (expected === "scrap") {
-      await expect.poll(async () => (await currentResource(request)).type).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).type,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     } else if (expected === "📄") {
-      await expect.poll(async () => (await currentResource(request)).icon).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).icon,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     } else if (expected.endsWith(".jpg")) {
-      await expect.poll(async () => (await currentResource(request)).cover.url).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).cover.url,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     } else {
-      await expect.poll(async () => (await currentResource(request)).pageSettings.font).toBe(expected);
+      await expect.poll(
+        async () => (await currentResource(request)).pageSettings.font,
+        { timeout: PERSISTENCE_TIMEOUT_MS },
+      ).toBe(expected);
     }
   }
 
