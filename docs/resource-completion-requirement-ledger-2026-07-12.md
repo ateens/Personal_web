@@ -320,3 +320,36 @@ This refresh reread the source specification and treated this ledger plus the cu
 - The authoritative current suite count is **174 tests in 29 files** by Playwright discovery.
 - Visual-state matrix/contact-sheet regeneration and visual inspection were attempted only to the extent that the required Playwright browser dependency was checked; they remain **blocked** in this environment for the same missing-browser reason.
 - Preserve all explicit unverified gates: matched authenticated Notion state pairs, real iOS/Android touch keyboards, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, unified title/property/media history, tenant ACL, entity-level persistence, deployed fallback verification, and all requirements not proven by evidence.
+
+## 2026-07-12 Codex Cloud continuation from branch tip `f0167ad`
+
+This continuation first verified the checked-out commit as `f0167ad820002e3f9ca51517cf1d4a3feadacf31`. It did not use SSH, local Mac paths, external credentials, Notion credentials, API tokens, or a fabricated `DATABASE_URL`. It also does not claim Notion-identical or pixel-perfect parity.
+
+### Browser availability and bounded install attempt
+
+| Command | Outcome | Evidence interpretation |
+|---|---|---|
+| `git rev-parse HEAD` | Passed; returned `f0167ad820002e3f9ca51517cf1d4a3feadacf31`. | The cloud checkout started from the requested branch tip. |
+| `command -v chromium || true; command -v chromium-browser || true; command -v google-chrome || true; command -v google-chrome-stable || true; find ~/.cache/ms-playwright -maxdepth 3 -type f \( -name chromium -o -name chrome \) -print 2>/dev/null \| head -20; find /ms-playwright -maxdepth 3 -type f \( -name chromium -o -name chrome \) -print 2>/dev/null \| head -20` | Passed; found no runnable Chrome/Chromium or cached Playwright browser executable. | Browser-backed Playwright gates needed a local browser provision step. |
+| `apt-get update && apt-get install -y chromium` | Completed with warnings; Ubuntu's package installed the `chromium-browser` transitional snap package, while `mise.jdx.dev` apt metadata returned a 403 warning. | This was the single bounded system-package attempt. It did not install a runnable Chromium binary inside this non-snap environment. |
+| `chromium-browser --version || true` | Returned the snap prompt: `Command '/usr/bin/chromium-browser' requires the chromium snap to be installed`. | The installed command is not a runnable browser for Playwright. No repeated Playwright CDN download was attempted. |
+
+### Fresh commands and outcomes
+
+| Command | Outcome | Evidence interpretation |
+|---|---|---|
+| `npm install` | Passed; added the missing `@axe-core/playwright` and `axe-core` packages already declared in the lockfile; 0 vulnerabilities. | The pre-existing `node_modules` cache was incomplete before this step, causing Playwright discovery to fail on missing Axe imports. No package manifest or lockfile diff resulted. |
+| `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-page-command-mentions.spec.js` | Blocked before browser launch; both tests failed with `Executable doesn't exist at /root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`. | The required focused mention test could not execute because no runnable browser exists. This is an environment blocker, not a reproduced product or test defect. |
+| `PLAYWRIGHT_CHANNEL=chromium npx playwright test --list` | Passed; discovered 174 tests in 29 files. | Discovery confirms the current full-suite size but is not a pass result. |
+| `npm run check` | Passed. | Static syntax checks, source audit, and Sites worker checks passed on this checkout. |
+| `npm run check:build` | Passed; build metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. | The build gate passed without credentials. |
+| `npm run check:postgres` | Blocked; `.env` was absent and `DATABASE_URL is required`. | PostgreSQL persistence cannot be verified without a caller-provided ephemeral or real database URL. None was invented. |
+| `npm run check:api-auth` | Blocked; `.env` was absent and `DATABASE_URL is required`. | Database-backed API proxy auth cannot be verified without a caller-provided database URL. None was invented. |
+| `npm run check:backups` | Blocked; `.env` was absent and `Migration backup check requires DATABASE_URL`. | Migration-backup validation remains externally blocked in this cloud workspace. |
+
+### Current gate status after this continuation
+
+- Focused `resource-page-command-mentions`, the full 174-test Playwright suite, Axe coverage, and visual-state generation remain blocked by the absence of a runnable browser in Codex Cloud after one bounded system-package attempt.
+- Non-browser gates that do not require secrets passed: `npm run check` and `npm run check:build`.
+- Secret-free server/persistence checks were inspected through the package scripts. The available PostgreSQL, API-auth, and backup checks explicitly require `DATABASE_URL`; they were run to confirm the blocker and no fake connection string or production credential was supplied.
+- No reproduced product or test defect was found in this continuation, so no product code was changed.
