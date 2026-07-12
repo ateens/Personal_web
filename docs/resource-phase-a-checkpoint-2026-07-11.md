@@ -228,3 +228,19 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 ## Checkpoint conclusion
 
 The production access-control rollout is verified through Railway and owner-only/custom Sites. The newer Trash/guard, docked-Full, page actions, hierarchy queue, URL/toolbar/block-Move/comment/deep-link/read-cursor changes are local only. Their focused suites provide subsystem evidence, but the recorded 115-test run and build metrics predate the newest tranche; the root task must refresh the full E2E and all release gates. Phase A is still not declared complete because the matched visual state matrix and real mobile/screen-reader gates remain open; the project as a whole also remains incomplete because the listed P1/P2 capabilities remain. No exact visual parity claim is made; detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
+
+## 2026-07-12 Codex Cloud evidence refresh
+
+After rereading the original source specification, the completion ledger, and the current worktree, the checkpoint remains **Partial** and must not be described as Notion-identical.
+
+Fresh evidence on this cloud workspace:
+
+- `npm ci` passed with 47 packages installed/audited and 0 vulnerabilities.
+- `npm run check` passed.
+- `npm run check:build` passed with current metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`.
+- `npx playwright test --list` discovered **174 tests in 29 files**.
+- Focused mention rerun, full E2E, Axe checks, and visual matrix regeneration are blocked here because Playwright Chromium is missing, `npx playwright install chromium` returns `403 Domain forbidden`, and no system Chrome/Chromium executable is available.
+- `npm run check:api-auth`, `npm run check:postgres`, and `npm run check:backups` are blocked here by the absent `.env`/`DATABASE_URL` and therefore remain unverified in this environment.
+- `git diff --check` passed after this documentation update.
+
+The user's latest local real-Chrome result remains the only current full-run evidence: **173/174 passing in 6.6 minutes**, with the only failure in `resource-page-command-mentions.spec.js` reportedly fixed in commit `2cc217d` but still awaiting a browser-capable rerun.

@@ -163,3 +163,19 @@ For code/data rollback, stop or drain writes, deploy the matching code version, 
 ## Completion statement
 
 The production access-control rollout remains verified complete for the recorded deployed revision. The newer local functional P0 work—including Trash membership safety, the 768px shell fixes, URL/toolbar/block-Move/comment/deep-link/read-cursor changes—has focused evidence, but the historical 115-test run and build metrics are no longer current; a fresh complete E2E and release-gate pass is required. Every new local feature remains undeployed. Phase A and the project as a whole are still not complete because matched authenticated state-by-state comparison, real mobile soft-keyboard/screen-reader QA, richer property popovers, cross-entity backlinks, reply-level comment deletion and multi-user identity semantics, page version history, and full block/media/paste/unified-history coverage remain open. This is not a claim of visual identity with Notion.
+
+## 2026-07-12 Codex Cloud evidence refresh
+
+This audit remains conservative. The current cloud workspace refreshed non-browser gates but could not rerun browser-dependent proof:
+
+| Area | Current status | Evidence |
+|---|---|---|
+| Dependency/source/build | Verified in cloud | `npm ci`, `npm run check`, and `npm run check:build` passed. Current build metrics are `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. |
+| Test discovery | Verified in cloud | `npx playwright test --list` reports **174 tests in 29 files**. |
+| Focused mention fix | Unverified in cloud | `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-page-command-mentions.spec.js` could not launch because the Playwright Chromium executable is absent. |
+| Full E2E and Axe | Unverified in cloud | Browser install is blocked by `403 Domain forbidden`, no system Chrome/Chromium exists, and all Playwright/Axe reruns fail before browser launch. |
+| Visual matrix/contact sheet | Unverified in cloud | Regeneration requires the same unavailable browser dependency. Existing product screenshots remain historical artifacts, not matched Notion parity evidence. |
+| API auth/PostgreSQL/backups | Unverified in cloud | `.env`/`DATABASE_URL` is absent, so `check:api-auth`, `check:postgres`, and `check:backups` cannot prove current external services. |
+| Whitespace | Verified in cloud | `git diff --check` passed. |
+
+Remaining conservative gaps are unchanged: matched authenticated Notion state pairs, real iOS/Android soft keyboards and touch drag, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, unified title/property/media/native-text history, tenant ACL/RBAC, entity-level Block/Comment persistence, production/deployed fallback verification, and any visual token that has not been measured from matched authenticated references.

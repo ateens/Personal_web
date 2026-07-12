@@ -293,3 +293,30 @@ Ambiguities that require an explicit product decision rather than silent inferen
 8. Whether Bookmark should fetch remote metadata and Embed should ever execute a sandboxed iframe. The current explicit implementation is privacy-preserving deterministic metadata and an inert preview only.
 
 Until those decisions and the missing evidence gates are closed, this ledger must remain `Partial` and the final report must not use “Notion과 동일”, “pixel perfect”, or equivalent language.
+
+## 2026-07-12 Codex Cloud evidence refresh after commit `2cc217d`
+
+This refresh reread the source specification and treated this ledger plus the current worktree as authoritative. It does not change the objective and does not claim Notion-identical parity.
+
+### Fresh commands and outcomes
+
+| Command | Outcome | Evidence interpretation |
+|---|---|---|
+| `npm ci` | Passed; 47 packages installed/audited, 0 vulnerabilities. | Dependency installation is current for this cloud workspace. npm emitted the environment warning `Unknown env config "http-proxy"`. |
+| `npm run check` | Passed. | Syntax/source audit and Sites worker checks passed on the current worktree. |
+| `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-page-command-mentions.spec.js` | Blocked before browser launch. | The focused mention rerun could not verify the scoped `fixture-page-mention-navigation-block` fix because Playwright's Chromium executable was absent at `/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`. |
+| `npx playwright install chromium` | Failed due environment/network policy. | Browser installation attempted but every CDN attempt returned `403 Domain forbidden`; no system Chrome/Chromium executable was present. |
+| `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-a11y-axe.spec.js tests/e2e/resource-inline-toolbar.spec.js` | Blocked before browser launch. | Current Axe and inline-toolbar checks could not execute for the same missing-browser reason. |
+| `npx playwright test --list` | Passed; discovered 174 tests in 29 files. | Discovery confirms the current suite size, but is not a pass result. |
+| `npm run check:build` | Passed; build metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. | Current build gate is refreshed for this worktree. |
+| `npm run check:api-auth` | Blocked by missing environment. | `.env` was absent and `DATABASE_URL is required`; no auth gate can be claimed in this cloud workspace. |
+| `npm run check:postgres` | Blocked by missing environment. | `.env` was absent and `DATABASE_URL is required`; isolated PostgreSQL validation remains unverified here. |
+| `npm run check:backups` | Blocked by missing environment. | `.env` was absent and the migration-backup check requires `DATABASE_URL`; backup validation remains unverified here. |
+| `git diff --check` | Passed. | No whitespace errors were reported after the documentation refresh. |
+
+### Current gate status after this refresh
+
+- The latest executable full-suite result remains the user's supplied local real-Chrome checkpoint: **173/174 passing in 6.6 minutes**, with the only failure reportedly fixed in commit `2cc217d`. This cloud refresh could not confirm the fix because no runnable browser is available and browser download is blocked.
+- The authoritative current suite count is **174 tests in 29 files** by Playwright discovery.
+- Visual-state matrix/contact-sheet regeneration and visual inspection were attempted only to the extent that the required Playwright browser dependency was checked; they remain **blocked** in this environment for the same missing-browser reason.
+- Preserve all explicit unverified gates: matched authenticated Notion state pairs, real iOS/Android touch keyboards, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, unified title/property/media history, tenant ACL, entity-level persistence, deployed fallback verification, and all requirements not proven by evidence.
