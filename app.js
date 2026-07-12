@@ -20537,7 +20537,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     : { blockId: newBlock.id, start: split.after ? 0 : (newBlock.text || "").length, end: split.after ? 0 : (newBlock.text || "").length });
   saveState();
   renderEditorMutation(ownerType, ownerId);
-  focusBlockContentAfterRender(focusBlock.id, { caret: split.after && !splitAtStart ? "start" : "end" });
+  focusBlockContentAfterRender(focusBlock.id, { caret: split.after && !splitAtStart ? "start" : "end", transaction: true });
 }
 
 function insertBlock(ownerType, ownerId, afterBlockId, options = {}) {
