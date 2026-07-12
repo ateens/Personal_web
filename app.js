@@ -6917,6 +6917,7 @@ function renderOverlays() {
   decorateButtons(els.overlayRoot);
   syncEditorCommandMenuAria();
   syncInlineToolbarPosition();
+  scheduleInlineToolbarPositionSync();
 }
 
 function renderUrlPasteChoice() {
@@ -7491,7 +7492,7 @@ function renderInlineFormatToolbar() {
     toolbar.activeBackgroundColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeBackgroundColor]?.label || toolbar.activeBackgroundColor} 배경` : "",
   ].filter(Boolean).join(", ");
   return `
-    <div class="inline-format-toolbar" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.round(toolbar.x)}px;top:${Math.round(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
+    <div class="inline-format-toolbar" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" title="수식">∑</button>
       <button class="inline-format-button ${colorSummary ? "is-active" : ""}" id="${esc(`${colorMenuId}-trigger`)}" type="button" data-inline-color-menu-toggle aria-label="${esc(colorSummary ? `색상, ${colorSummary}` : "색상")}" aria-haspopup="menu" aria-expanded="${toolbar.colorMenuOpen ? "true" : "false"}" ${toolbar.colorMenuOpen ? `aria-controls="${esc(colorMenuId)}"` : ""} title="색상">A</button>
@@ -16779,10 +16780,7 @@ function editorHistoryShortcutContext(event) {
     ));
   }
   if (target?.closest("[data-resource-note], [data-block-content]")) return true;
-  if (
-    (target === document.body || target === document.documentElement)
-    && document.querySelector("[data-resource-note]")
-  ) return true;
+  if (els.detailRoot?.querySelector(".resource-page-shell.is-parity-page")) return true;
   if (ui.blockSelection.ids.length) return true;
   const recent = ui.recentBlockFocus;
   return Boolean(recent?.ownerType && recent?.ownerId && recent?.blockId && Date.now() <= recent.expiresAt);
@@ -17098,8 +17096,8 @@ function syncInlineToolbarPosition() {
   ui.inlineToolbar.x = position.x;
   ui.inlineToolbar.y = position.y;
   ui.inlineToolbar.placement = position.placement;
-  element.style.left = `${Math.round(position.x)}px`;
-  element.style.top = `${Math.round(position.y)}px`;
+  element.style.left = `${Math.floor(position.x)}px`;
+  element.style.top = `${Math.floor(position.y)}px`;
   element.dataset.placement = position.placement;
 }
 
