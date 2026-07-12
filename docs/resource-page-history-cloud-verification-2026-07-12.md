@@ -96,3 +96,81 @@ The same test failed in both the first run and the retry:
 ```
 
 Only this durable report file remains as the task diff.
+
+---
+
+## Superseding Rerun — Branch Head `b1d8f8b` — 2026-07-12
+
+### Scope and File Discipline
+
+- Supersedes the earlier run in this report for the requested branch head `b1d8f8b`.
+- Product, test, and package files were not intentionally edited for this rerun.
+- Temporary Playwright config was created as `playwright.cloud.tmp.config.js` and removed before final status capture.
+- Transient Playwright output was removed from `output/playwright-test` before final status capture.
+- `package.json` and `package-lock.json` were restored with `git checkout -- package.json package-lock.json` after installing `@sparticuz/chromium@149.0.0 --no-save`.
+
+### Runtime and Browser
+
+- Node command/version used: `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH node -v` → `v22.22.2`.
+- npm version under Node 22: `11.4.2`.
+- Cloud browser package command: `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npm install @sparticuz/chromium@149.0.0 --no-save`.
+- Cloud browser package install result: passed; `added 18 packages`, `audited 66 packages`, `found 0 vulnerabilities`; elapsed approximately 4s.
+- Chromium executable resolved by `@sparticuz/chromium`: `/tmp/chromium`.
+- Chromium version: `/tmp/chromium --version` → `Chromium 149.0.7827.0`.
+- Temporary Playwright config used `channel: undefined`, `launchOptions.executablePath = await chromium.executablePath()`, `launchOptions.args = ["--disable-gpu", "--disable-webgl"]`, and `launchOptions.ignoreDefaultArgs = ["--enable-unsafe-swiftshader"]`.
+
+### Verification Commands and Results
+
+| Step | Exact command | Result | Elapsed |
+| --- | --- | --- | --- |
+| Dependency install | `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npm ci` | Passed; `added 47 packages`, `audited 48 packages`, `found 0 vulnerabilities`. | ~1s |
+| Cloud browser package | `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npm install @sparticuz/chromium@149.0.0 --no-save` | Passed; `added 18 packages`, `audited 66 packages`, `found 0 vulnerabilities`. | ~4s |
+| Static/source checks | `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npm run check` | Passed; `Source audit passed.` and `Sites worker check passed.` | 3.006s |
+| Build check | `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npm run check:build` | Passed; built assets and `Build check passed: 1316106 -> 919621 bytes (159791 Brotli, 206249 gzip).` | 2.143s |
+| Focused page-history test | `PATH=/root/.nvm/versions/node/v22.22.2/bin:$PATH npx playwright test -c playwright.cloud.tmp.config.js tests/e2e/resource-page-history.spec.js` | Passed. | 47.404s wall time; Playwright reported 45.8s |
+
+### Static and Build Results
+
+- `npm run check`: passed all configured syntax checks, source audit, and Worker checks. Output ended with `Source audit passed.` and `Sites worker check passed.` No static failures were reported.
+- `npm run check:build`: passed. Build output reported `Built SYGMA assets: 1316106 -> 919621 bytes (70%).`, `Precompressed Brotli assets: 159791 bytes (12% of source).`, and `Build check passed: 1316106 -> 919621 bytes (159791 Brotli, 206249 gzip).`
+
+### Playwright Test Counts
+
+- Total tests executed: 5.
+- Passed: 5.
+- Failed: 0.
+- Skipped: 0.
+- Timed out tests: 0.
+- Browser/setup failures: 0.
+- Overall status: passed, exit status `0`.
+
+### Per-Test Results
+
+| Result | Test |
+| --- | --- |
+| Passed | `tests/e2e/resource-page-history.spec.js:63:1 › block text, title, property, icon, cover, and page settings share one chronological history` |
+| Passed | `tests/e2e/resource-page-history.spec.js:183:1 › title paste is plaintext-only, collapses newlines, preserves replacement caret, and rejects overflow atomically` |
+| Passed | `tests/e2e/resource-page-history.spec.js:249:1 › native draft inputs keep native undo and do not consume page history` |
+| Passed | `tests/e2e/resource-page-history.spec.js:270:1 › coalesced block text and IME commits use app history while a new edit invalidates redo` |
+| Passed | `tests/e2e/resource-page-history.spec.js:309:1 › history is session-only and a reload cannot undo a persisted pre-reload edit` |
+
+### Crash, Disconnect, and OOM Evidence
+
+- No browser crash was reported.
+- No Playwright/browser disconnect was reported.
+- No out-of-memory condition was reported.
+- The fixture server started successfully: `Memory-only Playwright fixture listening on http://127.0.0.1:43128`.
+- The only browser-run warnings observed were Node warnings that `NO_COLOR` was ignored because `FORCE_COLOR` was set.
+
+### Cleanup and Final Git Status
+
+- Removed temporary repo-local Playwright config: `playwright.cloud.tmp.config.js`.
+- Removed transient Playwright output directory: `output/playwright-test`.
+- Restored package files after `@sparticuz/chromium@149.0.0 --no-save`: `git checkout -- package.json package-lock.json`.
+- Final git status before committing this report:
+
+```text
+ M docs/resource-page-history-cloud-verification-2026-07-12.md
+```
+
+Only this durable report file remains as the task diff.
