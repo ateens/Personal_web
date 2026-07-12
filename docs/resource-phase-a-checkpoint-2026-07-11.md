@@ -103,12 +103,12 @@ The prior checkpoint's complete bundled-Chromium run reported **84 passed (3.3 m
 
 The later **115/115 bundled-Chromium run (3.8 minutes)** covered the Trash/guard, docked-Full, Lock/action, and hierarchy checkpoint, but it predates the newest URL/toolbar/block-Move/comment/deep-link/read-cursor work. It is historical and must not be presented as the current-worktree total.
 
-Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor set (deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The local metadata change also passed 13/13 offline/hierarchy regressions. Playwright discovery currently lists **162 tests in 27 files**, but discovery is not a pass result; the root task must rerun all 162 before release wording.
+Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor set (deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The local metadata change also passed 13/13 offline/hierarchy regressions. Playwright discovery currently lists **179 tests in 30 spec files**, but discovery is not a pass result; the root task must rerun all 179 before release wording.
 
 | Spec | Tests | Main evidence |
 |---|---:|---|
 | historical bundled-Chromium E2E | 115 | pre-URL/toolbar/block-Move/comment/deep-link/read-cursor checkpoint; not current |
-| current discovered E2E suite | 162 | 27 files; discovery only, fresh complete pass pending |
+| current discovered E2E suite | 179 | 30 spec files; discovery only, not a pass count; fresh complete pass pending |
 | current deep-link/read-cursor focused set | 17 | exact block success/fallback, IndexedDB cursor migration/upgrade/reload, zero-write lock/read-only behavior and related regressions |
 | current offline/hierarchy regression set | 13 | offline 7 plus hierarchy persistence 6 after local metadata changes |
 | `resource-cross-page-block-move.spec.js` | 6 | searchable/clamped submenu, source→target ordering, multi-root/nested/all-block behavior, thread transfer, collision no-mutation, multi-Resource undo/redo |
@@ -216,7 +216,7 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 - Cross-entity backlink surfaces/indexing beyond the verified Resource/Project/Goal/Box/Task/Habit mention navigation.
 - Reply-level comment deletion plus attributed author/permission/notification and multi-user unread semantics. Thread delete, anchor-loss/rebase, and durable local-only single-user read cursors are implemented.
 - Page version history. Current Duplicate/Move/Lock/Markdown export actions are not version history.
-- Full slash/media block catalog, image/file and large-paste flow, remote bookmark metadata/real iframe policy, complete inline-link actions, columns, and unified native-text/title/property/icon/cover history. The selected-block action menu and URL Link/Bookmark/Embed chooser now cover their defined local subset.
+- Full slash/media block catalog, image/file and large-paste flow, remote bookmark metadata/real iframe policy, complete inline-link actions, columns, and page version history. The selected-block action menu and URL Link/Bookmark/Embed chooser now cover their defined local subset.
 
 ### P2
 
@@ -237,24 +237,62 @@ Fresh evidence on this cloud workspace:
 
 - `npm ci` passed with 47 packages installed/audited and 0 vulnerabilities.
 - `npm run check` passed.
-- `npm run check:build` passed with current metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`.
-- `npx playwright test --list` discovered **174 tests in 29 files**.
+- `npm run check:build` passed with historical metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`.
+- `npx playwright test --list` discovered **179 tests in 30 spec files**.
 - Focused mention rerun, full E2E, Axe checks, and visual matrix regeneration are blocked here because Playwright Chromium is missing, `npx playwright install chromium` returns `403 Domain forbidden`, and no system Chrome/Chromium executable is available.
 - `npm run check:api-auth`, `npm run check:postgres`, and `npm run check:backups` are blocked here by the absent `.env`/`DATABASE_URL` and therefore remain unverified in this environment.
 - `git diff --check` passed after this documentation update.
 
-The user's latest local real-Chrome result remains the only current full-run evidence: **173/174 passing in 6.6 minutes**, with the only failure in `resource-page-command-mentions.spec.js` reportedly fixed in commit `2cc217d` but still awaiting a browser-capable rerun.
+The user's latest local real-Chrome result remains the only current full-run evidence: **173/174 passing (historical, before the current 179-test discovery) in 6.6 minutes**, with the only failure in `resource-page-command-mentions.spec.js` reportedly fixed in commit `2cc217d` but still awaiting a browser-capable rerun.
 
 ## 2026-07-12 Codex Cloud browser and PostgreSQL evidence supersession for commit 29d28569
 
 This section supersedes the earlier Cloud statements that every browser and database gate was blocked. Those attempts remain above as historical diagnostics. Overall status remains **Partial**; this is not a Notion-identical, pixel-perfect, or release-ready claim.
 
 - An isolated loopback PostgreSQL 16.14 instance with ephemeral unprinted credentials passed check:postgres, check:api-auth, and check:backups, then was removed. This is disposable-database evidence, not production DB, PITR, dump, or deployed-service evidence.
-- check and check:build passed. Build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
+- check and check:build passed. Historical build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
 - Node 22.23.1 plus temporary Sparticuz Chromium 149.0.7827.0, with graphics off and minimal launch arguments, passed an eight-context smoke 8/8 with zero disconnects, crashes, OOM events, or abnormal exits.
 - resource-page-command-mentions passed 2/2 in 29.1 seconds, proving the scoped selector fix only under this Cloud headless-shell route.
-- A fresh-browser-per-file campaign ran all 174 tests in 29 files: 170 passed, 4 failed, 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
+- A fresh-browser-per-file campaign ran all then-discovered 174 tests in 29 files: 170 passed, 4 failed (historical pre-179 discovery), 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
 - The four campaign assertions were divider continuation focus, inline-toolbar viewport inset, 400-block performance, and visual-state settle evidence. The divider probe actually focused the generated continuation block; the toolbar was one headless pixel outside the bound, bottom 289 versus 288; performance measured 4,557 DOM nodes, property patch 874.9ms, scroll response 1690.5ms, max long task 299ms, total long tasks 1039ms, seven long tasks, and ready 1944ms; visual capture timed out with fonts loaded and animations still present.
 - Prior local real-Chrome property and scroll values were about 23.6ms and 16.2ms. The headless-shell measurements must not relax product budgets or be called a product regression by themselves. A diagnostic rerun also produced nondeterministic headless timing around Backspace and visual settle.
 
-This is not a clean 174/174 real-Chrome run. It does not prove CSP or cross-origin browser security, real mobile or soft-keyboard behavior, VoiceOver, TalkBack, NVDA, matched authenticated Notion visuals, pixel parity, production persistence, or deployed fallback behavior.
+This is not a clean 179/179 real-Chrome run. It does not prove CSP or cross-origin browser security, real mobile or soft-keyboard behavior, VoiceOver, TalkBack, NVDA, matched authenticated Notion visuals, pixel parity, production persistence, or deployed fallback behavior.
+## 2026-07-12 latest-branch reconciliation
+
+This reconciliation was written after inspecting the current code/test tree and the 2026-07-12 Cloud report set. It supersedes stale current-count wording while preserving older figures as historical diagnostics. Project status remains **Partial** for Phase A, **Partial** for Phase B, **Partial** for Phase C, and **Partial** overall. There is no Notion-identical, pixel-perfect, release-ready, or fully passing claim.
+
+### Current discovery versus pass counts
+
+- Current Playwright discovery is **179 tests in 30 spec files**. Discovery is inventory only and is not a pass count.
+- The latest full Cloud postfix first-run evidence is **175/179 passing**, split as shard A **63/65**, shard B **66/66**, and shard C **46/48**. This was not a clean full run.
+- Shard A first-run failures were a comment clipboard/mark-selection flake that passed rerun and a divider-continuation focus failure that repeated on rerun.
+- Shard C first-run and rerun failures were limited to `resource-performance.spec.js` and `resource-visual-state-evidence.spec.js`.
+- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. No full 179/179 run exists after that final divider fix.
+- Focused fixes already verified outside the full run remain scoped evidence only: toolbar/history/comment/page-feature batch **45/45**; comment history twice **6/6** each; Trash focused **10/10**, full Trash **6/6 twice**, and delete guard **3/3**.
+
+### Current build evidence
+
+- Historical build values such as `1,162,032 -> 815,222` and `1,299,160 -> 908,347` are retained only as historical checkpoints.
+- Latest verified build evidence in the inspected Cloud reports is `npm run check:build` passing with `1,318,622 -> 921,298` bytes, Brotli `160,042`, gzip `206,578`.
+
+### Unified history reconciliation
+
+- Session-scoped app history now covers coalesced block text, title paste/edit, properties, icon, cover, page settings, structural block operations, comments, and multi-Resource moves.
+- Native draft inputs intentionally retain browser undo.
+- Session-scoped app history intentionally clears on reload.
+- Page version history is distinct from undo/redo history and remains absent.
+
+### Evidence report filenames
+
+- [Postfix full shard A](resource-postfix-full-cloud-verification-2026-07-12-shard-a.md): 63/65 first-run; comment clipboard flake passed rerun; divider focus repeated on rerun.
+- [Postfix full shard B](resource-postfix-full-cloud-verification-2026-07-12-shard-b.md): 66/66 first-run.
+- [Postfix full shard C](resource-postfix-full-cloud-verification-2026-07-12-shard-c.md): 46/48 first-run, with performance and visual-evidence failures repeated on rerun.
+- [Divider focus diagnosis](resource-divider-focus-cloud-diagnosis-2026-07-12.md): divider fix verified 10/10 focused, 15/15 twice, page features 19/19, DOM stability 4/4, and latest build metrics `1,318,622 -> 921,298` bytes.
+- [Toolbar/history postfix verification](resource-toolbar-history-postfix-cloud-verification-2026-07-12.md): toolbar/history/comment/page-feature batch 45/45.
+- [Comment/Trash postfix verification](resource-comment-trash-postfix-cloud-verification-2026-07-12.md): comment history twice 6/6, delete guard 3/3, and earlier Trash evidence with one unresolved Trash drag flake later superseded by the Trash drag diagnosis.
+- [Trash drag flake diagnosis](resource-trash-drag-flake-cloud-diagnosis-2026-07-12.md): Trash focused 10/10, full Trash 6/6 twice, and delete guard 3/3 after the drag fix.
+
+### Preserved open gaps
+
+The following remain real gaps or unverified gates: performance failure, visual-evidence failure, full slash/media/file/PDF/table/block catalog, image/file/large-paste flow, columns, complete inline-link actions, matched authenticated Notion comparisons, real-device and screen-reader QA, entity-level Block/Comment persistence, tenant ACL/RBAC, page version history, and deployment-only verification. Historical successful focused results do not close these gates.

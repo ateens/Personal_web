@@ -14,7 +14,7 @@ Audit point: the production access-control claims below apply to the recorded de
 - `[Verified]` The exact Railway project/environment/service target forces the committed SHA-256 verifier and state preconditions without storing the token in source. Direct Railway `/api/state/status` returns `401 AUTH_REQUIRED` for missing and wrong credentials and `200` for the matching Sites credential; authenticated state reads return `ETag: "state-2"` and `X-State-Concurrency: required`; `/health` remains `200` by design.
 - `[Verified]` The signed-in owner Sites path returns `200`, reported revision 2, rendered the production Resources view, and opened a real Center peek. This proves the Worker secret still matches the deployed Railway verifier after enforcement.
 - `[Verified]` Phase B's core is implemented: IndexedDB snapshot/operation stores, replay/retry/conflict behavior, truthful save states, Resource-level incremental writes, waiting service-worker update gating, migration snapshots, integrity-checked restore, and isolated database checks. Production v3→v4 migration revision 1 and the manual predeploy backup are also verified.
-- `[Partial]` Phase A now covers the original/default Resource page layout, the existing editor feature set, selected-block actions including cross-page Move, URL Link/Bookmark/Embed choice, inline equation/colors, comment-aware block history, exact block deep links, and local-only comment read cursors. It does not cover every current Notion block, custom database page layouts, column construction, unified title/property/icon/cover/native-text history, or real multi-user collaboration.
+- `[Partial]` Phase A now covers the original/default Resource page layout, the existing editor feature set, selected-block actions including cross-page Move, URL Link/Bookmark/Embed choice, inline equation/colors, comment-aware block history, exact block deep links, and local-only comment read cursors. It does not cover every current Notion block, custom database page layouts, column construction, page version history, or real multi-user collaboration.
 - `[Verified reference, partial comparison]` An authenticated Notion desktop session supplied ephemeral/private 768×964 captures for database Side peek (`pm=s`), Center peek (`pm=c`), and Full page. The references verify the three static shell structures at that viewport and exposed a P0 breakpoint regression: this product had collapsed fine-pointer 768px Center and Side into the compact full-screen shell. The local correction preserves a centered modal and nonmodal resizable split Side at 768px; the newer docked-Full behavior is covered by focused desktop/compact tests and the passing full E2E run.
 - `[Unverified]` The captured Notion session was dark-theme, Korean, and used a custom/pinned property layout. It is not a matched light-theme content/token baseline, and static images do not verify Back/Forward, focus, Escape order, resize behavior, interaction, or motion. Exact color, typography, shadow, radius, and the full paired state matrix therefore remain unverified. Raw Notion screenshots were not committed because they expose private workspace content.
 
@@ -90,12 +90,12 @@ The prior local checkpoint's full bundled-Chromium baseline reported **84 passed
 
 The later **115/115 bundled-Chromium E2E run in 3.8 minutes** is also historical: it covered the Trash/guard, docked-Full, Lock/action, and hierarchy-queue checkpoint, but it predates the URL chooser, expanded inline toolbar, cross-page block Move, comment-anchor/history, exact block-deep-link, and local read-cursor work. It must not be labeled a current full-worktree result.
 
-Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page block Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor integration set (block deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The read-cursor tranche also passed 13/13 offline/hierarchy persistence regressions. Playwright discovery currently lists **162 tests in 27 files**, but discovery is not a pass result. These results are subsystem evidence only; the root task must rerun all 162 tests before release wording. The fixture server exposes an explicit production-write guard, so these browser runs do not mutate production.
+Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page block Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor integration set (block deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The read-cursor tranche also passed 13/13 offline/hierarchy persistence regressions. Playwright discovery currently lists **179 tests in 30 spec files**, but discovery is not a pass result. These results are subsystem evidence only; the root task must rerun all 179 tests before release wording. The fixture server exposes an explicit production-write guard, so these browser runs do not mutate production.
 
 | Suite | Count | Covered behavior |
 |---|---:|---|
 | historical bundled-Chromium E2E | 115 | pre-URL/toolbar/block-Move/comment/deep-link/read-cursor checkpoint; not current |
-| current discovered E2E suite | 162 | 27 files; discovery only, fresh complete pass pending |
+| current discovered E2E suite | 179 | 30 spec files; discovery only, not a pass count; fresh complete pass pending |
 | current deep-link/read-cursor focused set | 17 | exact block focus/fallback, local metadata migration/upgrade/reload, zero-write lock/read-only behavior, related block-menu/permission regressions |
 | current offline/hierarchy regression set | 13 | offline 7 plus hierarchy persistence 6 after the local metadata change |
 | `resource-cross-page-block-move.spec.js` | 6 | searchable/clamped submenu, source→target ordering, multi-root/nested/all-block behavior, comment-thread transfer, collision no-mutation, multi-Resource undo/redo |
@@ -162,7 +162,7 @@ For code/data rollback, stop or drain writes, deploy the matching code version, 
 
 ## Completion statement
 
-The production access-control rollout remains verified complete for the recorded deployed revision. The newer local functional P0 work—including Trash membership safety, the 768px shell fixes, URL/toolbar/block-Move/comment/deep-link/read-cursor changes—has focused evidence, but the historical 115-test run and build metrics are no longer current; a fresh complete E2E and release-gate pass is required. Every new local feature remains undeployed. Phase A and the project as a whole are still not complete because matched authenticated state-by-state comparison, real mobile soft-keyboard/screen-reader QA, richer property popovers, cross-entity backlinks, reply-level comment deletion and multi-user identity semantics, page version history, and full block/media/paste/unified-history coverage remain open. This is not a claim of visual identity with Notion.
+The production access-control rollout remains verified complete for the recorded deployed revision. The newer local functional P0 work—including Trash membership safety, the 768px shell fixes, URL/toolbar/block-Move/comment/deep-link/read-cursor changes—has focused evidence, but the historical 115-test run and build metrics are no longer current; a fresh complete E2E and release-gate pass is required. Every new local feature remains undeployed. Phase A and the project as a whole are still not complete because matched authenticated state-by-state comparison, real mobile soft-keyboard/screen-reader QA, richer property popovers, cross-entity backlinks, reply-level comment deletion and multi-user identity semantics, page version history, and full block/media/paste coverage remain open. This is not a claim of visual identity with Notion.
 
 ## 2026-07-12 Codex Cloud evidence refresh
 
@@ -170,26 +170,64 @@ This audit remains conservative. The current cloud workspace refreshed non-brows
 
 | Area | Current status | Evidence |
 |---|---|---|
-| Dependency/source/build | Verified in cloud | `npm ci`, `npm run check`, and `npm run check:build` passed. Current build metrics are `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. |
-| Test discovery | Verified in cloud | `npx playwright test --list` reports **174 tests in 29 files**. |
+| Dependency/source/build | Verified in cloud | `npm ci`, `npm run check`, and `npm run check:build` passed. Historical build metrics are `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. |
+| Test discovery | Verified in cloud | `npx playwright test --list` reports **179 tests in 30 spec files**. |
 | Focused mention fix | Unverified in cloud | `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-page-command-mentions.spec.js` could not launch because the Playwright Chromium executable is absent. |
 | Full E2E and Axe | Unverified in cloud | Browser install is blocked by `403 Domain forbidden`, no system Chrome/Chromium exists, and all Playwright/Axe reruns fail before browser launch. |
 | Visual matrix/contact sheet | Unverified in cloud | Regeneration requires the same unavailable browser dependency. Existing product screenshots remain historical artifacts, not matched Notion parity evidence. |
 | API auth/PostgreSQL/backups | Unverified in cloud | `.env`/`DATABASE_URL` is absent, so `check:api-auth`, `check:postgres`, and `check:backups` cannot prove current external services. |
 | Whitespace | Verified in cloud | `git diff --check` passed. |
 
-Remaining conservative gaps are unchanged: matched authenticated Notion state pairs, real iOS/Android soft keyboards and touch drag, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, unified title/property/media/native-text history, tenant ACL/RBAC, entity-level Block/Comment persistence, production/deployed fallback verification, and any visual token that has not been measured from matched authenticated references.
+Remaining conservative gaps are unchanged: matched authenticated Notion state pairs, real iOS/Android soft keyboards and touch drag, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, page version history and media history, tenant ACL/RBAC, entity-level Block/Comment persistence, production/deployed fallback verification, and any visual token that has not been measured from matched authenticated references.
 
 ## 2026-07-12 Codex Cloud browser and PostgreSQL evidence supersession for commit 29d28569
 
 This section supersedes the earlier Cloud statements that every browser and database gate was blocked. Those attempts remain above as historical diagnostics. Overall status remains **Partial**; this is not a Notion-identical, pixel-perfect, or release-ready claim.
 
 - An isolated loopback PostgreSQL 16.14 instance with ephemeral unprinted credentials passed check:postgres, check:api-auth, and check:backups, then was removed. This is disposable-database evidence, not production DB, PITR, dump, or deployed-service evidence.
-- check and check:build passed. Build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
+- check and check:build passed. Historical build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
 - Node 22.23.1 plus temporary Sparticuz Chromium 149.0.7827.0, with graphics off and minimal launch arguments, passed an eight-context smoke 8/8 with zero disconnects, crashes, OOM events, or abnormal exits.
 - resource-page-command-mentions passed 2/2 in 29.1 seconds, proving the scoped selector fix only under this Cloud headless-shell route.
-- A fresh-browser-per-file campaign ran all 174 tests in 29 files: 170 passed, 4 failed, 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
+- A fresh-browser-per-file campaign ran all then-discovered 174 tests in 29 files: 170 passed, 4 failed (historical pre-179 discovery), 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
 - The four campaign assertions were divider continuation focus, inline-toolbar viewport inset, 400-block performance, and visual-state settle evidence. The divider probe actually focused the generated continuation block; the toolbar was one headless pixel outside the bound, bottom 289 versus 288; performance measured 4,557 DOM nodes, property patch 874.9ms, scroll response 1690.5ms, max long task 299ms, total long tasks 1039ms, seven long tasks, and ready 1944ms; visual capture timed out with fonts loaded and animations still present.
 - Prior local real-Chrome property and scroll values were about 23.6ms and 16.2ms. The headless-shell measurements must not relax product budgets or be called a product regression by themselves. A diagnostic rerun also produced nondeterministic headless timing around Backspace and visual settle.
 
-This is not a clean 174/174 real-Chrome run. It does not prove CSP or cross-origin browser security, real mobile or soft-keyboard behavior, VoiceOver, TalkBack, NVDA, matched authenticated Notion visuals, pixel parity, production persistence, or deployed fallback behavior.
+This is not a clean 179/179 real-Chrome run. It does not prove CSP or cross-origin browser security, real mobile or soft-keyboard behavior, VoiceOver, TalkBack, NVDA, matched authenticated Notion visuals, pixel parity, production persistence, or deployed fallback behavior.
+## 2026-07-12 latest-branch reconciliation
+
+This reconciliation was written after inspecting the current code/test tree and the 2026-07-12 Cloud report set. It supersedes stale current-count wording while preserving older figures as historical diagnostics. Project status remains **Partial** for Phase A, **Partial** for Phase B, **Partial** for Phase C, and **Partial** overall. There is no Notion-identical, pixel-perfect, release-ready, or fully passing claim.
+
+### Current discovery versus pass counts
+
+- Current Playwright discovery is **179 tests in 30 spec files**. Discovery is inventory only and is not a pass count.
+- The latest full Cloud postfix first-run evidence is **175/179 passing**, split as shard A **63/65**, shard B **66/66**, and shard C **46/48**. This was not a clean full run.
+- Shard A first-run failures were a comment clipboard/mark-selection flake that passed rerun and a divider-continuation focus failure that repeated on rerun.
+- Shard C first-run and rerun failures were limited to `resource-performance.spec.js` and `resource-visual-state-evidence.spec.js`.
+- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. No full 179/179 run exists after that final divider fix.
+- Focused fixes already verified outside the full run remain scoped evidence only: toolbar/history/comment/page-feature batch **45/45**; comment history twice **6/6** each; Trash focused **10/10**, full Trash **6/6 twice**, and delete guard **3/3**.
+
+### Current build evidence
+
+- Historical build values such as `1,162,032 -> 815,222` and `1,299,160 -> 908,347` are retained only as historical checkpoints.
+- Latest verified build evidence in the inspected Cloud reports is `npm run check:build` passing with `1,318,622 -> 921,298` bytes, Brotli `160,042`, gzip `206,578`.
+
+### Unified history reconciliation
+
+- Session-scoped app history now covers coalesced block text, title paste/edit, properties, icon, cover, page settings, structural block operations, comments, and multi-Resource moves.
+- Native draft inputs intentionally retain browser undo.
+- Session-scoped app history intentionally clears on reload.
+- Page version history is distinct from undo/redo history and remains absent.
+
+### Evidence report filenames
+
+- [Postfix full shard A](resource-postfix-full-cloud-verification-2026-07-12-shard-a.md): 63/65 first-run; comment clipboard flake passed rerun; divider focus repeated on rerun.
+- [Postfix full shard B](resource-postfix-full-cloud-verification-2026-07-12-shard-b.md): 66/66 first-run.
+- [Postfix full shard C](resource-postfix-full-cloud-verification-2026-07-12-shard-c.md): 46/48 first-run, with performance and visual-evidence failures repeated on rerun.
+- [Divider focus diagnosis](resource-divider-focus-cloud-diagnosis-2026-07-12.md): divider fix verified 10/10 focused, 15/15 twice, page features 19/19, DOM stability 4/4, and latest build metrics `1,318,622 -> 921,298` bytes.
+- [Toolbar/history postfix verification](resource-toolbar-history-postfix-cloud-verification-2026-07-12.md): toolbar/history/comment/page-feature batch 45/45.
+- [Comment/Trash postfix verification](resource-comment-trash-postfix-cloud-verification-2026-07-12.md): comment history twice 6/6, delete guard 3/3, and earlier Trash evidence with one unresolved Trash drag flake later superseded by the Trash drag diagnosis.
+- [Trash drag flake diagnosis](resource-trash-drag-flake-cloud-diagnosis-2026-07-12.md): Trash focused 10/10, full Trash 6/6 twice, and delete guard 3/3 after the drag fix.
+
+### Preserved open gaps
+
+The following remain real gaps or unverified gates: performance failure, visual-evidence failure, full slash/media/file/PDF/table/block catalog, image/file/large-paste flow, columns, complete inline-link actions, matched authenticated Notion comparisons, real-device and screen-reader QA, entity-level Block/Comment persistence, tenant ACL/RBAC, page version history, and deployment-only verification. Historical successful focused results do not close these gates.
