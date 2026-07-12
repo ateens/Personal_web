@@ -640,13 +640,40 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
         [appStateId]
       );
       const isBootstrap = bootstrap.rowCount === 1;
-      const current = await client.query("SELECT revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
-      const currentRevision = nonNegativeRevision(current.rows[0]?.revision, 0);
+      const current = await client.query("SELECT state, revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const currentRow = current.rows[0];
+      const currentRevision = nonNegativeRevision(currentRow?.revision, 0);
       if (requestedBaseRevision !== null && requestedBaseRevision !== currentRevision) {
         throw storageError(409, "STATE_REVISION_CONFLICT", "State revision conflict.", { revision: currentRevision });
       }
       if (!isBootstrap && options.requirePrecondition === true && requestedBaseRevision === null) {
         throw storageError(428, "STATE_PRECONDITION_REQUIRED", "A state revision precondition is required.", { revision: currentRevision });
+      }
+      // The public full-state API opts into this guard. Trusted operator
+      // restore/reset paths intentionally omit the option and retain their
+      // ability to replace a workspace from a confirmed snapshot.
+      if (!isBootstrap && options.rejectResourcePermanentDelete === true) {
+        const authoritative = await authoritativeStateSnapshot(client, currentRow?.state);
+        const missingResourceIds = omittedResourceIds(authoritative.state, normalized.state);
+        if (missingResourceIds.length) {
+          const visibleResourceIds = missingResourceIds.slice(0, 20);
+          throw storageError(
+            422,
+            "RESOURCE_PERMANENT_DELETE_DISABLED",
+            "Existing Resources must remain in full-state writes; move them to trash instead.",
+            {
+              revision: currentRevision,
+              issues: [{
+                path: "state.resources",
+                code: "resource_permanent_delete_disabled",
+                message: "Full-state writes may not omit existing Resource IDs.",
+                missingResourceCount: missingResourceIds.length,
+                missingResourceIds: visibleResourceIds,
+                missingResourceIdsTruncated: visibleResourceIds.length < missingResourceIds.length,
+              }],
+            }
+          );
+        }
       }
       const revision = currentRevision + 1;
       normalized.state.revision = revision;
@@ -1626,6 +1653,19 @@ function canonicalJson(value) {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`);
   return `{${entries.join(",")}}`;
+}
+
+function omittedResourceIds(currentState, incomingState) {
+  const incomingIds = new Set();
+  for (const resource of Array.isArray(incomingState?.resources) ? incomingState.resources : []) {
+    if (typeof resource?.id === "string" && resource.id) incomingIds.add(resource.id);
+  }
+  const missingIds = [];
+  for (const resource of Array.isArray(currentState?.resources) ? currentState.resources : []) {
+    const resourceId = typeof resource?.id === "string" ? resource.id : "";
+    if (resourceId && !incomingIds.has(resourceId)) missingIds.push(resourceId);
+  }
+  return missingIds.sort();
 }
 
 function storageError(status, code, message, details = undefined) {

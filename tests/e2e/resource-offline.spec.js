@@ -4,6 +4,7 @@ import { FIXTURE_IDS, fixtureSnapshot, openResources, resetFixture } from "./hel
 const LOCAL_DATABASE_NAME = "sygma-resource-local-v1";
 const SNAPSHOT_STORE = "snapshots";
 const OPERATION_STORE = "operations";
+const PROVISIONAL_WORKSPACE_ID = "__sygma_provisional_workspace_v1__";
 const RESOURCE_PATH = `/resources/${encodeURIComponent(FIXTURE_IDS.resource)}`;
 const FIXTURE_GUARD_HEADERS = { "x-e2e-reset-token": "sygma-local-e2e-reset" };
 
@@ -33,6 +34,87 @@ test("the online workspace snapshot is durable in IndexedDB before edits begin",
     expectTimestamp(local.snapshot.savedAt);
     expect(resourceTitleFromState(local.snapshot.state)).toBe("E2E Notion Parity Resource");
   } finally {
+    await context.close();
+  }
+});
+
+test("a first-offline title input survives immediate pagehide and migrates once to the real workspace", async ({ browser, request }, testInfo) => {
+  test.setTimeout(60_000);
+  const { context, page } = await openServiceWorkerControlledApp(browser, testInfo);
+  const localTitle = "First offline close-safe title";
+  let offlinePage = null;
+  let recoveredPage = null;
+  try {
+    await clearLocalPersistence(page);
+    await page.close();
+    await context.setOffline(true);
+
+    offlinePage = await context.newPage();
+    await offlinePage.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(offlinePage.locator("#app")).toBeVisible();
+    const navToggle = offlinePage.locator('[data-action="toggle-nav"]');
+    if (await navToggle.isVisible()) {
+      await navToggle.click();
+      await expect(offlinePage.locator("[data-sidebar]")).toHaveClass(/is-open/);
+    }
+    await offlinePage.locator('[data-nav-key="resources"]').click();
+    await expect(offlinePage.locator('[data-resource-view="library"]')).toBeVisible();
+    const opener = offlinePage.locator("[data-open-resource]").first();
+    const resourceId = await opener.getAttribute("data-open-resource");
+    expect(resourceId).toBeTruthy();
+    await opener.click();
+    const dynamicTitle = offlinePage.locator(`[data-resource-title="${resourceId}"]`);
+    await expect(dynamicTitle).toBeVisible();
+
+    await dynamicTitle.evaluate((input, title) => {
+      input.value = title;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: title, inputType: "insertText" }));
+      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+    }, localTitle);
+    await offlinePage.close();
+    offlinePage = null;
+
+    recoveredPage = await context.newPage();
+    await recoveredPage.goto(`/resources/${encodeURIComponent(resourceId)}`, { waitUntil: "domcontentloaded" });
+    const recoveredShell = recoveredPage.locator(`[data-resource-note="${resourceId}"]`);
+    await expect(recoveredShell).toBeVisible();
+    await expect(recoveredPage.locator(`[data-resource-title="${resourceId}"]`)).toHaveValue(localTitle);
+    await expect(recoveredShell.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "offline");
+
+    const provisional = await readAllLocalPersistence(recoveredPage);
+    expect(provisional.snapshots.filter((snapshot) => snapshot.workspaceId === PROVISIONAL_WORKSPACE_ID)).toHaveLength(1);
+    const provisionalOperations = provisional.operations.filter((operation) => operation.workspaceId === PROVISIONAL_WORKSPACE_ID);
+    expect(provisionalOperations).toHaveLength(1);
+    expect(provisionalOperations[0]).toMatchObject({
+      entityType: "resource",
+      entityId: resourceId,
+      payload: { resource: { id: resourceId, title: localTitle } },
+    });
+
+    await context.setOffline(false);
+    await expect.poll(async () => {
+      const snapshot = await fixtureSnapshot(request);
+      return snapshot.state.resources.filter((resource) => resource.id === resourceId && resource.title === localTitle).length;
+    }).toBe(1);
+    await expect(recoveredShell.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "saved");
+
+    await expect.poll(async () => (await readAllLocalPersistence(recoveredPage)).operations.length).toBe(0);
+    const migrated = await readAllLocalPersistence(recoveredPage);
+    expect(migrated.snapshots.some((snapshot) => snapshot.workspaceId === PROVISIONAL_WORKSPACE_ID)).toBe(false);
+    expect(migrated.snapshots.filter((snapshot) => snapshot.workspaceId === FIXTURE_IDS.appState)).toHaveLength(1);
+    const remote = await fixtureSnapshot(request);
+    expect(remote.writeAttempts.filter((attempt) => attempt.resourceId === resourceId)).toEqual([
+      expect.objectContaining({ baseRevision: 1, outcome: "saved" }),
+    ]);
+    expect(remote.state.resources.filter((resource) => resource.id === resourceId)).toHaveLength(1);
+
+    await recoveredPage.reload({ waitUntil: "domcontentloaded" });
+    await expect(recoveredPage.locator(`[data-resource-title="${resourceId}"]`)).toHaveValue(localTitle);
+    expect((await fixtureSnapshot(request)).state.resources.filter((resource) => resource.id === resourceId)).toHaveLength(1);
+  } finally {
+    await context.setOffline(false);
+    await offlinePage?.close();
+    await recoveredPage?.close();
     await context.close();
   }
 });
@@ -418,6 +500,56 @@ async function readLocalPersistence(page) {
     operationStore: OPERATION_STORE,
     workspaceId: FIXTURE_IDS.appState,
   });
+}
+
+async function readAllLocalPersistence(page) {
+  return page.evaluate(async ({ databaseName, snapshotStore, operationStore }) => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(databaseName);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error(`Unable to open ${databaseName}.`));
+    });
+    const transaction = database.transaction([snapshotStore, operationStore], "readonly");
+    const snapshots = await requestResult(transaction.objectStore(snapshotStore).getAll());
+    const operations = await requestResult(transaction.objectStore(operationStore).getAll());
+    await transactionComplete(transaction);
+    database.close();
+    return { snapshots, operations };
+
+    function requestResult(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("IndexedDB read failed."));
+      });
+    }
+
+    function transactionComplete(activeTransaction) {
+      return new Promise((resolve, reject) => {
+        activeTransaction.oncomplete = resolve;
+        activeTransaction.onerror = () => reject(activeTransaction.error || new Error("IndexedDB transaction failed."));
+        activeTransaction.onabort = () => reject(activeTransaction.error || new Error("IndexedDB transaction aborted."));
+      });
+    }
+  }, { databaseName: LOCAL_DATABASE_NAME, snapshotStore: SNAPSHOT_STORE, operationStore: OPERATION_STORE });
+}
+
+async function clearLocalPersistence(page) {
+  await page.evaluate(async ({ databaseName, snapshotStore, operationStore }) => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(databaseName);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error(`Unable to open ${databaseName}.`));
+    });
+    const transaction = database.transaction([snapshotStore, operationStore], "readwrite");
+    transaction.objectStore(snapshotStore).clear();
+    transaction.objectStore(operationStore).clear();
+    await new Promise((resolve, reject) => {
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error("IndexedDB clear failed."));
+      transaction.onabort = () => reject(transaction.error || new Error("IndexedDB clear aborted."));
+    });
+    database.close();
+  }, { databaseName: LOCAL_DATABASE_NAME, snapshotStore: SNAPSHOT_STORE, operationStore: OPERATION_STORE });
 }
 
 async function controlledByServiceWorker(page) {

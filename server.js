@@ -36,6 +36,9 @@ const MAX_RESOURCE_CHILDREN = 5_000;
 const MAX_COMMENT_THREADS_PER_RESOURCE = 1_000;
 const MAX_COMMENT_REPLIES_PER_THREAD = 500;
 const MAX_COMMENT_BODY_LENGTH = 20_000;
+const MAX_RESOURCE_TITLE_LENGTH = 20_000;
+const MAX_RESOURCE_METADATA_LENGTH = 128;
+const MAX_RESOURCE_TIMESTAMP_SOURCE_LENGTH = 64;
 const MAX_VALIDATION_ISSUES = 24;
 const REQUIRED_COLLECTION_KEYS = [
   "captures",
@@ -66,8 +69,12 @@ const SUPPORTED_BLOCK_TYPES = new Set([
   "callout",
   "divider",
   "code",
+  "bookmark",
+  "embed",
 ]);
-const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "comment", "mention", "equation", "link"]);
+const URL_PREVIEW_BLOCK_TYPES = new Set(["bookmark", "embed"]);
+const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link"]);
+const SUPPORTED_INLINE_COLOR_KEYS = new Set(["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
 const SUPPORTED_RESOURCE_FONTS = new Set(["default", "serif", "mono"]);
 const SUPPORTED_COMMENT_SCOPES = new Set(["page", "inline"]);
 const RELATION_COLLECTION_ALIASES = new Map([
@@ -728,6 +735,17 @@ function isSafeHttpsCoverUrl(value) {
   }
 }
 
+function isSafeHttpsBlockUrl(value) {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.length > 4096) return false;
+  if (!/^https:\/\//i.test(value) || /[\u0000-\u0020\u007f<>"'`]/.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && Boolean(parsed.hostname) && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
 function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
   const path = `state.${collectionKey}[${itemIndex}].blocks`;
   if (item.blocks === undefined && collectionKey !== "resources") return;
@@ -750,6 +768,13 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       addValidationIssue(issues, `${blockPath}.type`, "unsupported_block_type", "Unsupported Resource block type.");
     }
     if (typeof block.text !== "string") addValidationIssue(issues, `${blockPath}.text`, "invalid_block_text", "Block text must be a string.");
+    if (URL_PREVIEW_BLOCK_TYPES.has(block.type)) {
+      if (!isSafeHttpsBlockUrl(block.url)) {
+        addValidationIssue(issues, `${blockPath}.url`, "unsafe_block_url", "Bookmark and embed blocks require a credential-free HTTPS URL.");
+      } else if (block.text !== block.url) {
+        addValidationIssue(issues, `${blockPath}.text`, "invalid_url_block_text", "Bookmark and embed block text must match block.url.");
+      }
+    }
     const indent = block.indent === undefined ? 0 : block.indent;
     if (!Number.isInteger(indent) || indent < 0 || indent > MAX_BLOCK_INDENT) {
       addValidationIssue(issues, `${blockPath}.indent`, "invalid_indent", `Block indent must be between 0 and ${MAX_BLOCK_INDENT}.`);
@@ -776,6 +801,9 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       }
       if (mark.type === "link" && !isSafeStoredUrl(mark.href || mark.url || "")) {
         addValidationIssue(issues, `${markPath}.href`, "unsafe_url_protocol", "Link URL uses an unsupported or unsafe protocol.");
+      }
+      if (["textColor", "backgroundColor"].includes(mark.type) && !SUPPORTED_INLINE_COLOR_KEYS.has(mark.color)) {
+        addValidationIssue(issues, `${markPath}.color`, "unsupported_inline_color", "Inline color must use a supported palette key.");
       }
     }
   }
@@ -827,6 +855,22 @@ function validateCommentAnchor(thread, threadPath, blockTextLengths, issues) {
   }
 }
 
+function validateLostCommentAnchorMetadata(thread, threadPath, issues) {
+  validateOptionalTimestamp(thread.anchorLostAt, issues, `${threadPath}.anchorLostAt`);
+  if (thread.formerAnchor === undefined || thread.formerAnchor === null) return;
+  if (!isPlainObject(thread.formerAnchor)) {
+    addValidationIssue(issues, `${threadPath}.formerAnchor`, "invalid_former_comment_anchor", "formerAnchor must be an anchor object when present.");
+    return;
+  }
+  const { blockId, start, end } = thread.formerAnchor;
+  if (!validEntityId(blockId)) {
+    addValidationIssue(issues, `${threadPath}.formerAnchor.blockId`, "invalid_former_comment_block", "formerAnchor blockId must be a non-empty block identifier.");
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
+    addValidationIssue(issues, `${threadPath}.formerAnchor`, "invalid_former_comment_range", "formerAnchor must preserve a positive text range.");
+  }
+}
+
 function validateCommentReplies(thread, threadPath, seenIds, issues) {
   const repliesPath = `${threadPath}.replies`;
   if (!Array.isArray(thread.replies)) {
@@ -851,8 +895,129 @@ function validateCommentReplies(thread, threadPath, seenIds, issues) {
   }
 }
 
+function validateResourceCommentReferences(item, itemIndex, issues) {
+  const itemPath = `state.resources[${itemIndex}]`;
+  const threads = Array.isArray(item.commentThreads) ? item.commentThreads : [];
+  const threadLocationsById = new Map();
+  const markLocationsByCommentId = new Map();
+
+  for (let threadIndex = 0; threadIndex < threads.length; threadIndex += 1) {
+    const thread = threads[threadIndex];
+    if (!isPlainObject(thread) || !validEntityId(thread.id)) continue;
+    const locations = threadLocationsById.get(thread.id) || [];
+    locations.push({ thread, path: `${itemPath}.commentThreads[${threadIndex}]` });
+    threadLocationsById.set(thread.id, locations);
+  }
+
+  const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+  for (let blockIndex = 0; blockIndex < blocks.length && issues.length < MAX_VALIDATION_ISSUES; blockIndex += 1) {
+    const block = blocks[blockIndex];
+    if (!isPlainObject(block) || !Array.isArray(block.marks)) continue;
+    for (let markIndex = 0; markIndex < block.marks.length && issues.length < MAX_VALIDATION_ISSUES; markIndex += 1) {
+      const mark = block.marks[markIndex];
+      if (!isPlainObject(mark) || mark.type !== "comment") continue;
+      const markPath = `${itemPath}.blocks[${blockIndex}].marks[${markIndex}]`;
+      if (!validEntityId(mark.commentId)) {
+        addValidationIssue(issues, `${markPath}.commentId`, "invalid_comment_id", `Comment mark ID must be a non-empty string of at most ${MAX_ID_LENGTH} characters.`);
+        continue;
+      }
+      validateCommentBody(mark.body, issues, `${markPath}.body`);
+      const locations = markLocationsByCommentId.get(mark.commentId) || [];
+      const location = { block, mark, path: markPath };
+      locations.push(location);
+      markLocationsByCommentId.set(mark.commentId, locations);
+
+      const threadLocations = threadLocationsById.get(mark.commentId) || [];
+      if (!threadLocations.length) {
+        addValidationIssue(issues, `${markPath}.commentId`, "orphan_comment_mark", "Comment mark must reference a comment thread in the same Resource.");
+        continue;
+      }
+      if (threadLocations.length !== 1) continue;
+      const { thread } = threadLocations[0];
+      if (thread.deletedAt) {
+        addValidationIssue(issues, `${markPath}.commentId`, "deleted_comment_mark", "Deleted comment threads may not retain inline marks.");
+        continue;
+      }
+      if (thread.scope !== "inline") {
+        addValidationIssue(issues, `${markPath}.commentId`, "non_inline_comment_mark", "Page comments, including comments with lost anchors, may not retain inline marks.");
+        continue;
+      }
+      if (
+        block.id !== thread.anchor?.blockId
+        || mark.start !== thread.anchor?.start
+        || mark.end !== thread.anchor?.end
+      ) {
+        addValidationIssue(issues, markPath, "comment_anchor_mismatch", "Comment mark location must exactly match its inline thread anchor.");
+      }
+      if (
+        typeof mark.body === "string"
+        && mark.body.trim() !== ""
+        && typeof thread.body === "string"
+        && mark.body.trim() !== thread.body.trim()
+      ) {
+        addValidationIssue(issues, `${markPath}.body`, "comment_body_mismatch", "Comment mark body must match its thread body after trimming.");
+      }
+    }
+  }
+
+  for (const locations of threadLocationsById.values()) {
+    if (issues.length >= MAX_VALIDATION_ISSUES) break;
+    if (locations.length !== 1) continue;
+    const { thread, path: threadPath } = locations[0];
+    if (thread.scope !== "inline" || thread.deletedAt) continue;
+    const markLocations = markLocationsByCommentId.get(thread.id) || [];
+    const matchingLocations = markLocations.filter(({ block, mark }) => (
+      block.id === thread.anchor?.blockId
+      && mark.start === thread.anchor?.start
+      && mark.end === thread.anchor?.end
+    ));
+    if (matchingLocations.length === 0) {
+      addValidationIssue(issues, `${threadPath}.anchor`, "missing_comment_mark", "Every live inline comment thread requires one matching comment mark.");
+    }
+    if (markLocations.length > 1) {
+      addValidationIssue(issues, `${threadPath}.id`, "duplicate_comment_mark", "A live inline comment thread may have exactly one comment mark.");
+    }
+  }
+}
+
 function validateResourcePageFields(item, itemIndex, seenIds, issues) {
   const itemPath = `state.resources[${itemIndex}]`;
+  if (typeof item.title !== "string" || item.title.length > MAX_RESOURCE_TITLE_LENGTH) {
+    addValidationIssue(issues, `${itemPath}.title`, "invalid_resource_title", `Resource title must be a string of at most ${MAX_RESOURCE_TITLE_LENGTH} characters.`);
+  }
+  for (const field of ["type", "importance"]) {
+    const value = item[field];
+    if (typeof value !== "string" || value.trim() === "" || value.length > MAX_RESOURCE_METADATA_LENGTH || /[\u0000-\u001f\u007f]/.test(value)) {
+      addValidationIssue(issues, `${itemPath}.${field}`, `invalid_resource_${field}`, `Resource ${field} must be a non-empty string of at most ${MAX_RESOURCE_METADATA_LENGTH} characters without control characters.`);
+    }
+  }
+  if (typeof item.pinned !== "boolean") {
+    addValidationIssue(issues, `${itemPath}.pinned`, "invalid_resource_pinned", "Resource pinned is required and must be a boolean.");
+  }
+  if (typeof item.readLater !== "boolean") {
+    addValidationIssue(issues, `${itemPath}.readLater`, "invalid_resource_read_later", "Resource readLater is required and must be a boolean.");
+  }
+  const createdAtValid = typeof item.createdAt === "string" && item.createdAt !== "" && Number.isFinite(Date.parse(item.createdAt));
+  const updatedAtValid = typeof item.updatedAt === "string" && item.updatedAt !== "" && Number.isFinite(Date.parse(item.updatedAt));
+  if (!createdAtValid) {
+    addValidationIssue(issues, `${itemPath}.createdAt`, "invalid_resource_created_at", "Resource createdAt is required and must be an ISO-compatible timestamp.");
+  }
+  if (!updatedAtValid) {
+    addValidationIssue(issues, `${itemPath}.updatedAt`, "invalid_resource_updated_at", "Resource updatedAt is required and must be an ISO-compatible timestamp.");
+  }
+  if (createdAtValid && updatedAtValid && Date.parse(item.updatedAt) < Date.parse(item.createdAt)) {
+    addValidationIssue(issues, `${itemPath}.updatedAt`, "invalid_resource_timestamp_order", "Resource updatedAt may not be earlier than createdAt.");
+  }
+  if (!Number.isSafeInteger(item.revision) || item.revision < 1) {
+    addValidationIssue(issues, `${itemPath}.revision`, "invalid_resource_revision", "Resource revision is required and must be an integer of at least 1.");
+  }
+  if (
+    typeof item.timestampSource !== "string"
+    || item.timestampSource.length > MAX_RESOURCE_TIMESTAMP_SOURCE_LENGTH
+    || !/^[a-z][a-z0-9_-]*$/i.test(item.timestampSource)
+  ) {
+    addValidationIssue(issues, `${itemPath}.timestampSource`, "invalid_resource_timestamp_source", `Resource timestampSource must be a non-empty identifier of at most ${MAX_RESOURCE_TIMESTAMP_SOURCE_LENGTH} characters.`);
+  }
   if (item.icon !== undefined && (typeof item.icon !== "string" || item.icon.length > 16 || /[<>]/.test(item.icon))) {
     addValidationIssue(issues, `${itemPath}.icon`, "invalid_resource_icon", "Resource icon must be a string of at most 16 characters without angle brackets.");
   }
@@ -876,6 +1041,9 @@ function validateResourcePageFields(item, itemIndex, seenIds, issues) {
 
   if (item.readOnly !== undefined && typeof item.readOnly !== "boolean") {
     addValidationIssue(issues, `${itemPath}.readOnly`, "invalid_resource_read_only", "Resource readOnly must be a boolean.");
+  }
+  if (item.locked !== undefined && typeof item.locked !== "boolean") {
+    addValidationIssue(issues, `${itemPath}.locked`, "invalid_resource_locked", "Resource locked must be a boolean.");
   }
 
   if (item.childOrder !== undefined) {
@@ -915,10 +1083,14 @@ function validateResourcePageFields(item, itemIndex, seenIds, issues) {
   }
 
   validateOptionalTimestamp(item.trashedAt, issues, `${itemPath}.trashedAt`);
-  if (item.commentThreads === undefined) return;
+  if (item.commentThreads === undefined) {
+    validateResourceCommentReferences(item, itemIndex, issues);
+    return;
+  }
   const threadsPath = `${itemPath}.commentThreads`;
   if (!Array.isArray(item.commentThreads)) {
     addValidationIssue(issues, threadsPath, "invalid_comment_threads", "commentThreads must be an array.");
+    validateResourceCommentReferences(item, itemIndex, issues);
     return;
   }
   if (item.commentThreads.length > MAX_COMMENT_THREADS_PER_RESOURCE) {
@@ -946,8 +1118,10 @@ function validateResourcePageFields(item, itemIndex, seenIds, issues) {
     validateOptionalTimestamp(thread.resolvedAt, issues, `${threadPath}.resolvedAt`);
     validateOptionalTimestamp(thread.deletedAt, issues, `${threadPath}.deletedAt`);
     validateCommentAnchor(thread, threadPath, blockTextLengths, issues);
+    validateLostCommentAnchorMetadata(thread, threadPath, issues);
     validateCommentReplies(thread, threadPath, seenIds, issues);
   }
+  validateResourceCommentReferences(item, itemIndex, issues);
 }
 
 function validateResourceHierarchy(items, resourceIds, issues) {
@@ -1288,6 +1462,7 @@ async function handleStateWrite(request, response) {
     saved = await storage.writeAppState(body.state, {
       baseRevision,
       requirePrecondition: requireStatePrecondition,
+      rejectResourcePermanentDelete: true,
     });
   } finally {
     releaseStateWrite();

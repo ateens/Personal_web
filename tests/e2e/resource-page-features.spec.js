@@ -198,7 +198,7 @@ test("URL property exposes safe Open, Copy, Edit, and Clear actions and never li
   }
 });
 
-test("page menu exposes only the implemented local font, width, density, and trash features", async ({ page }) => {
+test("page menu exposes only implemented font, copy, Duplicate, Lock, Move, Export, and trash features", async ({ page }) => {
   const note = await openResource(page);
   const menu = await openPageMenu(page, note);
 
@@ -207,10 +207,15 @@ test("page menu exposes only the implemented local font, width, density, and tra
   await expect(menu.locator('[role="menuitemradio"][data-resource-page-font="mono"]')).toHaveCount(1);
   await expect(menu.locator('[role="menuitemcheckbox"][data-resource-page-option="smallText"]')).toHaveCount(1);
   await expect(menu.locator('[role="menuitemcheckbox"][data-resource-page-option="fullWidth"]')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitem"][data-resource-copy-link]')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitem"][data-resource-duplicate]')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitemcheckbox"][data-resource-page-lock]')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitem"][data-resource-move-menu]')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitem"][data-resource-export-markdown]')).toHaveCount(1);
   await expect(menu.locator('[role="menuitem"][data-resource-move-to-trash]')).toHaveCount(1);
 
   const items = menu.locator('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]');
-  await expect(items).toHaveCount(6);
+  await expect(items).toHaveCount(11);
   const accessibleNames = await items.evaluateAll((elements) => elements.map((element) => (
     element.getAttribute("aria-label") || element.textContent || ""
   ).trim()));
@@ -238,9 +243,152 @@ test("page menu keeps the editor node stable and follows keyboard, Escape, focus
 
   await trigger.click();
   await expect(menu).toBeVisible();
+  await expect(menu.locator('[data-resource-page-font="default"]')).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(menu).toHaveCount(0);
+  await expect(note.locator(`[data-resource-expand="${FIXTURE_IDS.resource}"]`)).toBeFocused();
+
+  await trigger.click();
+  await expect(menu).toBeVisible();
   await note.locator(`[data-resource-title="${FIXTURE_IDS.resource}"]`).click();
   await expect(menu).toHaveCount(0);
   expect(await note.locator(".block-editor").evaluate((editor) => editor === window.__resourceEditorIdentity)).toBe(true);
+});
+
+test("page menu Move submenu follows ArrowRight and layered Escape focus rules", async ({ page }) => {
+  const note = await openResource(page);
+  const trigger = note.locator(`[data-resource-page-menu="${FIXTURE_IDS.resource}"]`);
+  const menu = await openPageMenu(page, note);
+  const move = menu.locator(`[data-resource-move-menu="${FIXTURE_IDS.resource}"]`);
+  await move.focus();
+  await page.keyboard.press("ArrowRight");
+
+  const destinations = page.locator(`[data-resource-move-menu-panel="${FIXTURE_IDS.resource}"]`);
+  await expect(destinations).toBeVisible();
+  await expect(destinations.locator("[role^='menuitem']").first()).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(destinations).toHaveCount(0);
+  await expect(menu).toBeVisible();
+  await expect(move).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
+test("page menu and Move destinations remain scrollable inside 320px and short landscape viewports", async ({ page }) => {
+  for (const viewport of [{ width: 320, height: 568 }, { width: 568, height: 320 }]) {
+    await page.setViewportSize(viewport);
+    const note = await openResource(page);
+    const menu = await openPageMenu(page, note);
+    const move = menu.locator(`[data-resource-move-menu="${FIXTURE_IDS.resource}"]`);
+    await move.scrollIntoViewIfNeeded();
+    await move.click();
+    await expect(page.locator(`[data-resource-move-menu-panel="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+
+    const geometry = await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        viewportHeight: window.innerHeight,
+        scrollable: element.scrollHeight > element.clientHeight,
+      };
+    });
+    expect(geometry.top).toBeGreaterThanOrEqual(0);
+    expect(geometry.bottom).toBeLessThanOrEqual(geometry.viewportHeight + 1);
+    expect(geometry.scrollable).toBe(true);
+
+    const trash = menu.locator("[data-resource-move-to-trash]");
+    await trash.scrollIntoViewIfNeeded();
+    const trashBox = await trash.boundingBox();
+    expect(trashBox?.y).toBeGreaterThanOrEqual(geometry.top);
+    expect((trashBox?.y || 0) + (trashBox?.height || 0)).toBeLessThanOrEqual(geometry.bottom + 1);
+
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("Duplicate creates an independent page without copying discussions and preserves Back history", async ({ page, request }) => {
+  const before = await fixtureSnapshot(request);
+  const source = structuredClone(resourceFromSnapshot(before));
+  const note = await openResource(page);
+  const menu = await openPageMenu(page, note);
+  await menu.locator(`[data-resource-duplicate="${FIXTURE_IDS.resource}"]`).click();
+
+  let duplicate;
+  await expect.poll(async () => {
+    const snapshot = await fixtureSnapshot(request);
+    duplicate = snapshot.state.resources.find((resource) => !before.state.resources.some((entry) => entry.id === resource.id));
+    return duplicate?.title || "";
+  }).toBe(`${source.title} copy`);
+
+  expect(duplicate.id).not.toBe(source.id);
+  expect(duplicate.blocks.map(({ type, text, checked, indent }) => ({ type, text, checked, indent }))).toEqual(
+    source.blocks.map(({ type, text, checked, indent }) => ({ type, text, checked, indent })),
+  );
+  expect(new Set(duplicate.blocks.map((block) => block.id)).size).toBe(duplicate.blocks.length);
+  expect(duplicate.blocks.every((block) => !source.blocks.some((sourceBlock) => sourceBlock.id === block.id))).toBe(true);
+  expect(duplicate.blocks.flatMap((block) => block.marks || []).some((mark) => mark.type === "comment")).toBe(false);
+  expect(duplicate.commentThreads).toEqual([]);
+  expect(duplicate.childOrder).toEqual([]);
+  expect(duplicate.readOnly).toBe(false);
+  expect(duplicate.locked).toBe(false);
+  expect(duplicate.trashedAt).toBe("");
+  await expect.poll(() => new URL(page.url()).pathname).toBe(RESOURCE_PATH(duplicate.id));
+  await expect(page.locator(`[data-resource-note="${duplicate.id}"]`)).toBeVisible();
+
+  await page.goBack();
+  await expect.poll(() => new URL(page.url()).pathname).toBe(RESOURCE_PATH(source.id));
+  await expect(page.locator(`[data-resource-note="${source.id}"]`)).toBeVisible();
+  expect(resourceFromSnapshot(await fixtureSnapshot(request))).toEqual(source);
+});
+
+test("Export Markdown downloads deterministic page content without mutating state", async ({ page, request }) => {
+  const initial = await fixtureSnapshot(request);
+  const exportState = structuredClone(initial.state);
+  const longestBacktickRun = "`".repeat(7);
+  const trickyCode = `before\n${longestBacktickRun}\nafter`;
+  exportState.resources.find((resource) => resource.id === FIXTURE_IDS.resource).blocks.push({
+    id: "fixture-block-long-backticks",
+    type: "code",
+    text: trickyCode,
+    marks: [],
+    checked: false,
+    indent: 0,
+    collapsed: false,
+  });
+  const seedResponse = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${initial.serverRevision}"` },
+    data: { state: exportState, baseRevision: initial.serverRevision },
+  });
+  expect(seedResponse.ok()).toBeTruthy();
+  const before = await fixtureSnapshot(request);
+  const note = await openResource(page);
+  const menu = await openPageMenu(page, note);
+  const downloadPromise = page.waitForEvent("download");
+  await menu.locator(`[data-resource-export-markdown="${FIXTURE_IDS.resource}"]`).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("E2E Notion Parity Resource.md");
+  const stream = await download.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const markdown = Buffer.concat(chunks).toString("utf8");
+  expect(markdown).toContain('title: "E2E Notion Parity Resource"');
+  expect(markdown).toContain("# E2E Notion Parity Resource");
+  expect(markdown).toContain("# Heading one");
+  expect(markdown).toContain("- [x] Completed todo");
+  expect(markdown).toContain("> Quote fixture");
+  expect(markdown).toContain("```\nconst fixture = true;\n```");
+  const safeFence = "`".repeat(8);
+  expect(markdown).toContain(`${safeFence}\n${trickyCode}\n${safeFence}`);
+
+  const after = await fixtureSnapshot(request);
+  expect(after.serverRevision).toBe(before.serverRevision);
+  expect(after.state).toEqual(before.state);
+  expect(after.writes).toEqual(before.writes);
 });
 
 test("font, Small text, and Full width settings persist per Resource and survive reload", async ({ page, request }) => {
@@ -320,6 +468,9 @@ test("soft trash removes a Resource from normal views while direct routes can re
   await expect.poll(async () => Boolean(resourceFromSnapshot(await fixtureSnapshot(request))?.trashedAt)).toBe(true);
   const trashed = resourceFromSnapshot(await fixtureSnapshot(request));
   expect(trashed.blocks).toEqual(before.blocks);
+  const currentRecovery = page.locator(`[data-resource-trashed="${FIXTURE_IDS.resource}"]`);
+  await expect(currentRecovery).toBeVisible();
+  await expect.poll(() => currentRecovery.evaluate((element) => element.contains(document.activeElement))).toBe(true);
 
   await page.goto("/");
   await openResourcesWithoutMainRowExpectation(page);
@@ -328,10 +479,11 @@ test("soft trash removes a Resource from normal views while direct routes can re
   await page.goto(RESOURCE_PATH(FIXTURE_IDS.resource));
   const recovery = page.locator(`[data-resource-trashed="${FIXTURE_IDS.resource}"]`);
   await expect(recovery).toBeVisible();
-  await recovery.locator(`[data-resource-restore="${FIXTURE_IDS.resource}"]`).click();
+  await recovery.locator(`[data-resource-restore="${FIXTURE_IDS.resource}"]`).first().click();
 
   const restored = page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`);
   await expect(restored).toBeVisible();
+  await expect.poll(() => restored.evaluate((element) => element.contains(document.activeElement))).toBe(true);
   await expect(restored.locator('[data-block-content="fixture-block-heading-1"]')).toContainText("Heading one");
   await expect.poll(async () => resourceFromSnapshot(await fixtureSnapshot(request))?.trashedAt).toBe("");
   expect(resourceFromSnapshot(await fixtureSnapshot(request)).blocks).toEqual(before.blocks);

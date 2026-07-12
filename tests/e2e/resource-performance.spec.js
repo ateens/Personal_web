@@ -12,6 +12,7 @@ test("a 400-block Resource stays within the local render and interaction budgets
   const etag = stateResponse.headers().etag;
   const current = await stateResponse.json();
   const resource = current.state.resources.find((entry) => entry.id === FIXTURE_IDS.resource);
+  resource.commentThreads = [];
   resource.blocks = Array.from({ length: BLOCK_COUNT }, (_, index) => ({
     id: `performance-block-${index}`,
     type: index % 25 === 0 ? "heading2" : index % 11 === 0 ? "bullet" : "paragraph",

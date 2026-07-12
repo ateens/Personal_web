@@ -15,8 +15,10 @@ const port = Number(process.env.CHECK_PORT || 4199);
 const resourcePort = Number(process.env.CHECK_RESOURCE_PORT || port + 1);
 const appStateId = process.env.CHECK_APP_STATE_ID || `check-${randomBytes(6).toString("hex")}`;
 const resourceAppStateId = `${appStateId}-resource-api`;
+const operatorResetStateId = `${appStateId}-operator-reset`;
 const tokenStateId = `${appStateId}-private`;
 const legacyTokenStateId = `${appStateId}-legacy-token`;
+const checkStateIds = [appStateId, resourceAppStateId, operatorResetStateId, tokenStateId, legacyTokenStateId];
 const legacyTokenFile = `/tmp/personal-web-legacy-token-${appStateId}.json`;
 const baseUrl = `http://127.0.0.1:${port}`;
 const resourceBaseUrl = `http://127.0.0.1:${resourcePort}`;
@@ -39,6 +41,7 @@ let serverProcess;
 let resourceServerProcess;
 let tokenStorage;
 let legacyTokenStorage;
+let operatorResetStorage;
 let serverStderr = "";
 let resourceServerStderr = "";
 
@@ -130,6 +133,7 @@ try {
     "Resource cover changed during PostgreSQL round trip",
   );
   assert(firstRead.payload.state?.resources?.[0]?.readOnly === false, "Resource readOnly changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.resources?.[0]?.locked === false, "Resource locked changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[0]?.replies?.[0]?.body === "PostgreSQL check reply", "Resource comment thread changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[1]?.anchor?.blockId === "check-resource-block", "Resource inline comment anchor changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.settings?.viewControls?.resources?.searchScope === "database", "Resource searchScope changed during PostgreSQL round trip");
@@ -194,6 +198,7 @@ try {
   assert(committedRead.payload.revision === 2 && committedRead.payload.state?.revision === 2, "committed state did not remain at revision 2");
   assert(committedRead.payload.state?.resources?.[0]?.title === "PostgreSQL updated resource", "committed Resource title was not readable");
   assert(committedRead.payload.state?.resources?.[0]?.timestampSource === "server", "committed Resource timestamp source was not readable");
+  await assertResourcePermanentDeleteRejectedDoesNotMutate();
   await assertInvalidWriteDoesNotMutate(
     "duplicate ID",
     (draft) => {
@@ -215,6 +220,77 @@ try {
     },
     "unsafe_url_protocol"
   );
+  await assertInvalidWriteDoesNotMutate(
+    "missing Resource title",
+    (draft) => {
+      delete draft.resources[0].title;
+    },
+    "invalid_resource_title"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "empty Resource type",
+    (draft) => {
+      draft.resources[0].type = "";
+    },
+    "invalid_resource_type"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-string Resource importance",
+    (draft) => {
+      draft.resources[0].importance = false;
+    },
+    "invalid_resource_importance"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "missing Resource pinned",
+    (draft) => {
+      delete draft.resources[0].pinned;
+    },
+    "invalid_resource_pinned"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-boolean Resource readLater",
+    (draft) => {
+      draft.resources[0].readLater = 0;
+    },
+    "invalid_resource_read_later"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "invalid Resource createdAt",
+    (draft) => {
+      draft.resources[0].createdAt = "not-a-date";
+    },
+    "invalid_resource_created_at"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "missing Resource updatedAt",
+    (draft) => {
+      delete draft.resources[0].updatedAt;
+    },
+    "invalid_resource_updated_at"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "reversed Resource timestamps",
+    (draft) => {
+      draft.resources[0].createdAt = "2026-06-03T00:00:00.000Z";
+      draft.resources[0].updatedAt = "2026-06-02T00:00:00.000Z";
+    },
+    "invalid_resource_timestamp_order"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "invalid Resource revision",
+    (draft) => {
+      draft.resources[0].revision = 0;
+    },
+    "invalid_resource_revision"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "invalid Resource timestampSource",
+    (draft) => {
+      draft.resources[0].timestampSource = "native source";
+    },
+    "invalid_resource_timestamp_source"
+  );
   for (const unsafeInlineUrl of [
     "javascript:alert(1)",
     "JaVaScRiPt:alert(1)",
@@ -230,6 +306,33 @@ try {
       "unsafe_url_protocol"
     );
   }
+  for (const unsafeBlockUrl of [
+    "javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "http://example.com/not-https",
+    "https://user:password@example.com/private",
+  ]) {
+    await assertInvalidWriteDoesNotMutate(
+      `unsafe bookmark URL ${unsafeBlockUrl.split(":", 1)[0]}`,
+      (draft) => {
+        draft.resources[0].blocks[0].type = "bookmark";
+        draft.resources[0].blocks[0].text = unsafeBlockUrl;
+        draft.resources[0].blocks[0].url = unsafeBlockUrl;
+        draft.resources[0].blocks[0].marks = [];
+      },
+      "unsafe_block_url"
+    );
+  }
+  await assertInvalidWriteDoesNotMutate(
+    "mismatched embed URL text",
+    (draft) => {
+      draft.resources[0].blocks[0].type = "embed";
+      draft.resources[0].blocks[0].text = "https://example.com/other";
+      draft.resources[0].blocks[0].url = "https://example.com/embed";
+      draft.resources[0].blocks[0].marks = [];
+    },
+    "invalid_url_block_text"
+  );
   await assertInvalidWriteDoesNotMutate(
     "invalid Resource block",
     (draft) => {
@@ -250,6 +353,61 @@ try {
       draft.resources[0].commentThreads[1].anchor.blockId = "missing-resource-block";
     },
     "broken_comment_anchor"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "orphan inline comment mark",
+    (draft) => {
+      draft.resources[0].blocks[0].marks.find((mark) => mark.type === "comment").commentId = "missing-comment-thread";
+    },
+    "orphan_comment_mark"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "missing inline comment mark",
+    (draft) => {
+      draft.resources[0].blocks[0].marks = draft.resources[0].blocks[0].marks.filter((mark) => mark.type !== "comment");
+    },
+    "missing_comment_mark"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "mismatched inline comment anchor",
+    (draft) => {
+      const mark = draft.resources[0].blocks[0].marks.find((entry) => entry.type === "comment");
+      mark.start = 1;
+    },
+    "comment_anchor_mismatch"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "duplicate inline comment mark",
+    (draft) => {
+      const mark = draft.resources[0].blocks[0].marks.find((entry) => entry.type === "comment");
+      draft.resources[0].blocks[0].marks.push(structuredClone(mark));
+    },
+    "duplicate_comment_mark"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "mismatched inline comment body",
+    (draft) => {
+      draft.resources[0].blocks[0].marks.find((mark) => mark.type === "comment").body = "Different inline discussion";
+    },
+    "comment_body_mismatch"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "deleted inline comment retaining a mark",
+    (draft) => {
+      draft.resources[0].commentThreads[1].deletedAt = "2026-06-02T00:01:00.000Z";
+    },
+    "deleted_comment_mark"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "lost page comment retaining a mark",
+    (draft) => {
+      const thread = draft.resources[0].commentThreads[1];
+      thread.scope = "page";
+      thread.formerAnchor = structuredClone(thread.anchor);
+      thread.anchor = null;
+      thread.anchorLostAt = "2026-06-02T00:01:00.000Z";
+    },
+    "non_inline_comment_mark"
   );
   await assertInvalidWriteDoesNotMutate(
     "overlong comment body",
@@ -346,6 +504,13 @@ try {
       draft.resources[0].readOnly = "false";
     },
     "invalid_resource_read_only"
+  );
+  await assertInvalidWriteDoesNotMutate(
+    "non-boolean Resource locked",
+    (draft) => {
+      draft.resources[0].locked = "false";
+    },
+    "invalid_resource_locked"
   );
   await assertInvalidWriteDoesNotMutate(
     "Resource self parent",
@@ -548,6 +713,7 @@ try {
   assert((await fileExists(legacyTokenFile)) === false, "legacy Google token file was not removed after migration");
 
   await checkIncrementalResourceApi();
+  await checkOperatorStateResetBypass();
 
   console.log(`PostgreSQL state check passed for isolated APP_STATE_ID=${appStateId}.`);
 } catch (error) {
@@ -564,6 +730,7 @@ try {
   await pool.end().catch(() => {});
   await tokenStorage?.end().catch(() => {});
   await legacyTokenStorage?.end().catch(() => {});
+  await operatorResetStorage?.end().catch(() => {});
   await rm(legacyTokenFile, { force: true }).catch(() => {});
   if (resourceServerProcess && !resourceServerProcess.killed) {
     resourceServerProcess.kill("SIGTERM");
@@ -599,11 +766,14 @@ function makeValidState() {
     resources: [{
       id: "check-resource",
       title: "PostgreSQL check resource",
+      type: "article",
+      importance: "important",
       boxId: "check-box",
       goalId: "check-goal",
       projectId: "check-project",
       url: "https://example.com/resource",
       pinned: true,
+      readLater: false,
       createdAt,
       updatedAt: createdAt,
       revision: 1,
@@ -614,6 +784,7 @@ function makeValidState() {
       icon: "📚",
       cover: { url: "https://example.com/resource-cover.jpg", position: 37 },
       readOnly: false,
+      locked: false,
       trashedAt: "",
       commentThreads: [
         {
@@ -645,7 +816,22 @@ function makeValidState() {
           replies: [],
         },
       ],
-      blocks: [{ id: "check-resource-block", type: "paragraph", text: "PostgreSQL Resource block", indent: 0, marks: [{ type: "bold", start: 0, end: 10 }] }],
+      blocks: [{
+        id: "check-resource-block",
+        type: "paragraph",
+        text: "PostgreSQL Resource block",
+        indent: 0,
+        marks: [
+          { type: "bold", start: 0, end: 10 },
+          {
+            type: "comment",
+            start: 0,
+            end: 10,
+            commentId: "check-resource-inline-thread",
+            body: "PostgreSQL inline discussion",
+          },
+        ],
+      }],
     }],
     habits: [{ id: "check-habit", title: "PostgreSQL check habit", projectId: "check-project" }],
     habitInstances: [{ id: "check-habit-instance", habitId: "check-habit", date: "2026-06-02", completed: true }],
@@ -661,6 +847,8 @@ function makeIncrementalResource(id, title) {
   return {
     id,
     title,
+    type: "article",
+    importance: "normal",
     boxId: "check-box",
     goalId: "check-goal",
     projectId: "check-project",
@@ -677,6 +865,7 @@ function makeIncrementalResource(id, title) {
     icon: "",
     cover: { url: "", position: 50 },
     readOnly: false,
+    locked: false,
     trashedAt: "",
     commentThreads: [],
     blocks: [{ id: `${id}-block`, type: "paragraph", text: `${title} block`, indent: 0, marks: [] }],
@@ -705,13 +894,54 @@ async function checkIncrementalResourceApi() {
 
   const initialState = makeValidState();
   const peerResource = makeIncrementalResource("check-resource-peer", "Unrelated Resource baseline");
-  initialState.resources.push(peerResource);
+  const hierarchyOldParent = makeIncrementalResource("check-resource-hierarchy-old", "Hierarchy old parent");
+  const hierarchyNewParent = makeIncrementalResource("check-resource-hierarchy-new", "Hierarchy new parent");
+  const hierarchyMovedResource = makeIncrementalResource("check-resource-hierarchy-moved", "Hierarchy moved Resource");
+  hierarchyOldParent.childOrder = [hierarchyMovedResource.id];
+  hierarchyMovedResource.parentId = hierarchyOldParent.id;
+  initialState.resources.push(peerResource, hierarchyOldParent, hierarchyNewParent, hierarchyMovedResource);
   const bootstrap = await requestJsonAt(resourceBaseUrl, "/api/state", {
     method: "PUT",
     headers: { "Content-Type": "application/json", "If-Match": '"state-0"' },
     body: JSON.stringify({ state: initialState, baseRevision: 0 }),
   });
   assert(bootstrap.response.ok && bootstrap.payload.revision === 1, "incremental Resource check bootstrap failed");
+
+  const beforeInvalidResourceWrite = await pool.query(
+    "SELECT revision, state::text AS state_text FROM app_state WHERE id = $1",
+    [resourceAppStateId]
+  );
+  const beforeInvalidResourceRows = await pool.query(
+    "SELECT id, data::text AS data_text FROM resources WHERE app_state_id = $1 ORDER BY id",
+    [resourceAppStateId]
+  );
+  const invalidRequiredResource = structuredClone(initialState.resources[0]);
+  delete invalidRequiredResource.readLater;
+  const invalidRequiredWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-1"' },
+    body: JSON.stringify({ resource: invalidRequiredResource, baseRevision: 1 }),
+  });
+  assert(
+    invalidRequiredWrite.response.status === 422
+      && invalidRequiredWrite.payload.code === "INVALID_STATE"
+      && invalidRequiredWrite.payload.details?.issues?.some((issue) => issue.code === "invalid_resource_read_later"),
+    "incremental Resource write missing a required field was not rejected"
+  );
+  const afterInvalidResourceWrite = await pool.query(
+    "SELECT revision, state::text AS state_text FROM app_state WHERE id = $1",
+    [resourceAppStateId]
+  );
+  const afterInvalidResourceRows = await pool.query(
+    "SELECT id, data::text AS data_text FROM resources WHERE app_state_id = $1 ORDER BY id",
+    [resourceAppStateId]
+  );
+  assert(
+    Number(afterInvalidResourceWrite.rows[0]?.revision) === 1
+      && afterInvalidResourceWrite.rows[0]?.state_text === beforeInvalidResourceWrite.rows[0]?.state_text
+      && JSON.stringify(afterInvalidResourceRows.rows) === JSON.stringify(beforeInvalidResourceRows.rows),
+    "rejected incremental Resource required-field write mutated JSONB state or relational Resource rows"
+  );
 
   const missingPrecondition = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource", {
     method: "PUT",
@@ -794,6 +1024,7 @@ async function checkIncrementalResourceApi() {
   delete createdResource.icon;
   delete createdResource.cover;
   delete createdResource.readOnly;
+  delete createdResource.locked;
   const createWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
     method: "PUT",
     headers: { "Content-Type": "application/json", "If-Match": '"state-3"' },
@@ -804,7 +1035,7 @@ async function checkIncrementalResourceApi() {
       && createWrite.payload.created === true
       && createWrite.payload.revision === 4
       && createWrite.payload.resource?.id === createdResource.id,
-    "backward-compatible incremental Resource create without media/readOnly fields did not return the created Resource at revision 4"
+    "backward-compatible incremental Resource create without media/readOnly/locked fields did not return the created Resource at revision 4"
   );
 
   const idMismatch = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
@@ -814,20 +1045,260 @@ async function checkIncrementalResourceApi() {
   });
   assert(idMismatch.response.status === 400 && idMismatch.payload.code === "RESOURCE_ID_MISMATCH", "Resource path/body ID mismatch was not rejected");
 
+  const softTrashedResource = structuredClone(createWrite.payload.resource);
+  softTrashedResource.trashedAt = "2026-06-02T00:04:00.000Z";
+  softTrashedResource.updatedAt = "2026-06-02T00:04:00.000Z";
+  softTrashedResource.revision = Number(softTrashedResource.revision || 0) + 1;
+  const softTrashWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-4"' },
+    body: JSON.stringify({ resource: softTrashedResource, baseRevision: 4 }),
+  });
+  assert(
+    softTrashWrite.response.ok
+      && softTrashWrite.payload.revision === 5
+      && softTrashWrite.payload.resource?.trashedAt === softTrashedResource.trashedAt,
+    "incremental Resource soft trash did not persist at revision 5"
+  );
+
+  const trashedRead = await requestJsonAt(resourceBaseUrl, "/api/state");
+  const omissionState = structuredClone(trashedRead.payload.state);
+  omissionState.resources = omissionState.resources.filter((resource) => resource.id !== softTrashedResource.id);
+  const trashedOmission = await requestJsonAt(resourceBaseUrl, "/api/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-5"' },
+    body: JSON.stringify({ state: omissionState, baseRevision: 5 }),
+  });
+  assert(
+    trashedOmission.response.status === 422
+      && trashedOmission.payload.code === "RESOURCE_PERMANENT_DELETE_DISABLED"
+      && trashedOmission.payload.revision === 5
+      && trashedOmission.response.headers.get("etag") === '"state-5"',
+    "full-state write was allowed to omit a soft-trashed Resource"
+  );
+  const afterTrashedOmission = await requestJsonAt(resourceBaseUrl, "/api/state");
+  assert(
+    afterTrashedOmission.payload.revision === 5
+      && afterTrashedOmission.payload.state?.resources?.find((resource) => resource.id === softTrashedResource.id)?.trashedAt === softTrashedResource.trashedAt,
+    "rejected soft-trashed Resource omission changed revision or stored Resource state"
+  );
+
+  const restoredResource = structuredClone(softTrashWrite.payload.resource);
+  restoredResource.trashedAt = "";
+  restoredResource.updatedAt = "2026-06-02T00:05:00.000Z";
+  restoredResource.revision = Number(restoredResource.revision || 0) + 1;
+  const restoreWrite = await requestJsonAt(resourceBaseUrl, "/api/resources/check-resource-created", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-5"' },
+    body: JSON.stringify({ resource: restoredResource, baseRevision: 5 }),
+  });
+  assert(
+    restoreWrite.response.ok
+      && restoreWrite.payload.revision === 6
+      && restoreWrite.payload.resource?.trashedAt === "",
+    "incremental Resource restore did not persist at revision 6"
+  );
+
+  const unsafeNewParent = structuredClone(hierarchyNewParent);
+  unsafeNewParent.childOrder = [hierarchyMovedResource.id];
+  const unsafeHierarchyWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyNewParent.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-6"' },
+    body: JSON.stringify({ resource: unsafeNewParent, baseRevision: 6 }),
+  });
+  assert(
+    unsafeHierarchyWrite.response.status === 422
+      && unsafeHierarchyWrite.payload.code === "INVALID_STATE"
+      && unsafeHierarchyWrite.payload.details?.issues?.some((issue) => issue.code === "invalid_child_parent"),
+    "new-parent-first hierarchy write was not rejected without changing revision 6"
+  );
+  await assertIncrementalHierarchy(resourceBaseUrl, 6, hierarchyMovedResource.id, hierarchyOldParent.id, [hierarchyMovedResource.id], []);
+
+  const detachedOldParent = structuredClone(hierarchyOldParent);
+  detachedOldParent.childOrder = [];
+  detachedOldParent.updatedAt = "2026-06-02T00:06:00.000Z";
+  detachedOldParent.revision += 1;
+  const detachOldWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyOldParent.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-6"' },
+    body: JSON.stringify({ resource: detachedOldParent, baseRevision: 6 }),
+  });
+  assert(detachOldWrite.response.ok && detachOldWrite.payload.revision === 7, "old parent was not detached first at revision 7");
+
+  const movedToNewParent = structuredClone(hierarchyMovedResource);
+  movedToNewParent.parentId = hierarchyNewParent.id;
+  movedToNewParent.updatedAt = "2026-06-02T00:07:00.000Z";
+  movedToNewParent.revision += 1;
+  const moveResourceWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyMovedResource.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-7"' },
+    body: JSON.stringify({ resource: movedToNewParent, baseRevision: 7 }),
+  });
+  assert(moveResourceWrite.response.ok && moveResourceWrite.payload.revision === 8, "moved Resource parentId was not committed second at revision 8");
+
+  const attachedNewParent = structuredClone(hierarchyNewParent);
+  attachedNewParent.childOrder = [hierarchyMovedResource.id];
+  attachedNewParent.updatedAt = "2026-06-02T00:08:00.000Z";
+  attachedNewParent.revision += 1;
+  const attachNewWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyNewParent.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-8"' },
+    body: JSON.stringify({ resource: attachedNewParent, baseRevision: 8 }),
+  });
+  assert(attachNewWrite.response.ok && attachNewWrite.payload.revision === 9, "new parent was not attached third at revision 9");
+  await assertIncrementalHierarchy(resourceBaseUrl, 9, hierarchyMovedResource.id, hierarchyNewParent.id, [], [hierarchyMovedResource.id]);
+
+  const detachedNewParent = structuredClone(attachedNewParent);
+  detachedNewParent.childOrder = [];
+  detachedNewParent.updatedAt = "2026-06-02T00:09:00.000Z";
+  detachedNewParent.revision += 1;
+  const detachForRootWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyNewParent.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-9"' },
+    body: JSON.stringify({ resource: detachedNewParent, baseRevision: 9 }),
+  });
+  assert(detachForRootWrite.response.ok && detachForRootWrite.payload.revision === 10, "parent was not detached before moving to root at revision 10");
+
+  const movedToRoot = structuredClone(movedToNewParent);
+  movedToRoot.parentId = "";
+  movedToRoot.updatedAt = "2026-06-02T00:10:00.000Z";
+  movedToRoot.revision += 1;
+  const moveToRootWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyMovedResource.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-10"' },
+    body: JSON.stringify({ resource: movedToRoot, baseRevision: 10 }),
+  });
+  assert(moveToRootWrite.response.ok && moveToRootWrite.payload.revision === 11, "Resource was not moved to root at revision 11");
+  await assertIncrementalHierarchy(resourceBaseUrl, 11, hierarchyMovedResource.id, "", [], []);
+
+  const movedBackToOldParent = structuredClone(movedToRoot);
+  movedBackToOldParent.parentId = hierarchyOldParent.id;
+  movedBackToOldParent.updatedAt = "2026-06-02T00:11:00.000Z";
+  movedBackToOldParent.revision += 1;
+  const moveBackWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyMovedResource.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-11"' },
+    body: JSON.stringify({ resource: movedBackToOldParent, baseRevision: 11 }),
+  });
+  assert(moveBackWrite.response.ok && moveBackWrite.payload.revision === 12, "root Resource parentId was not committed before the parent childOrder at revision 12");
+
+  const attachedOldParent = structuredClone(detachedOldParent);
+  attachedOldParent.childOrder = [hierarchyMovedResource.id];
+  attachedOldParent.updatedAt = "2026-06-02T00:12:00.000Z";
+  attachedOldParent.revision += 1;
+  const attachOldWrite = await requestJsonAt(resourceBaseUrl, `/api/resources/${hierarchyOldParent.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-12"' },
+    body: JSON.stringify({ resource: attachedOldParent, baseRevision: 12 }),
+  });
+  assert(attachOldWrite.response.ok && attachOldWrite.payload.revision === 13, "old parent childOrder was not committed after root-to-parent move at revision 13");
+  await assertIncrementalHierarchy(resourceBaseUrl, 13, hierarchyMovedResource.id, hierarchyOldParent.id, [hierarchyMovedResource.id], []);
+
   const finalRead = await requestJsonAt(resourceBaseUrl, "/api/state");
   const finalResources = new Map(finalRead.payload.state?.resources?.map((resource) => [resource.id, resource]));
-  assert(finalRead.payload.revision === 4 && finalResources.size === 3, "incremental Resource create did not persist exactly one Resource");
+  assert(finalRead.payload.revision === 13 && finalResources.size === 6, "incremental Resource and hierarchy writes did not preserve exactly six Resources at revision 13");
   assert(finalResources.get("check-resource")?.title === primaryUpdate.title, "Resource create clobbered the existing target Resource");
   assert(finalResources.get("check-resource-peer")?.title === peerUpdate.title, "Resource create clobbered the unrelated Resource");
+  assert(finalResources.get("check-resource-created")?.trashedAt === "", "incrementally restored Resource did not remain present and active");
 
   const relationalResources = await pool.query(
     "SELECT id, title FROM resources WHERE app_state_id = $1 ORDER BY id",
     [resourceAppStateId]
   );
-  assert(relationalResources.rowCount === 3, "incremental Resource API did not synchronize the relational Resource table");
+  assert(relationalResources.rowCount === 6, "incremental Resource API did not synchronize the relational Resource table");
   assert(
     relationalResources.rows.find((row) => row.id === "check-resource-peer")?.title === peerUpdate.title,
     "incremental Resource API did not preserve the unrelated relational Resource row"
+  );
+}
+
+async function assertIncrementalHierarchy(baseUrl, expectedRevision, movedResourceId, expectedParentId, expectedOldChildOrder, expectedNewChildOrder) {
+  const read = await requestJsonAt(baseUrl, "/api/state");
+  const resources = new Map(read.payload.state?.resources?.map((resource) => [resource.id, resource]));
+  assert(read.payload.revision === expectedRevision, `incremental hierarchy read did not remain at revision ${expectedRevision}`);
+  assert(resources.get(movedResourceId)?.parentId === expectedParentId, `incremental hierarchy parentId was wrong at revision ${expectedRevision}`);
+  assert(JSON.stringify(resources.get("check-resource-hierarchy-old")?.childOrder) === JSON.stringify(expectedOldChildOrder), `old parent childOrder was wrong at revision ${expectedRevision}`);
+  assert(JSON.stringify(resources.get("check-resource-hierarchy-new")?.childOrder) === JSON.stringify(expectedNewChildOrder), `new parent childOrder was wrong at revision ${expectedRevision}`);
+}
+
+async function assertResourcePermanentDeleteRejectedDoesNotMutate() {
+  const beforeState = await pool.query("SELECT revision, state::text AS state_text FROM app_state WHERE id = $1", [appStateId]);
+  const beforeResources = await pool.query(
+    "SELECT id, title, data::text AS data_text FROM resources WHERE app_state_id = $1 ORDER BY id",
+    [appStateId]
+  );
+  const draft = structuredClone(await currentState());
+  const removedResourceId = draft.resources[0].id;
+  draft.resources = draft.resources.filter((resource) => resource.id !== removedResourceId);
+  for (const task of draft.tasks) {
+    if (task.resourceId === removedResourceId) task.resourceId = "";
+  }
+  for (const capture of draft.captures) {
+    if (capture.convertedId === removedResourceId) {
+      capture.convertedTo = "";
+      capture.convertedId = "";
+    }
+  }
+  draft.links = draft.links.filter((link) => !(
+    (link.fromType === "resources" && link.fromId === removedResourceId)
+    || (link.toType === "resources" && link.toId === removedResourceId)
+  ));
+
+  const result = await requestJson("/api/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": '"state-2"' },
+    body: JSON.stringify({ state: draft, baseRevision: 2 }),
+  });
+  assert(
+    result.response.status === 422
+      && result.payload.code === "RESOURCE_PERMANENT_DELETE_DISABLED"
+      && result.payload.revision === 2,
+    "full-state Resource omission did not return RESOURCE_PERMANENT_DELETE_DISABLED/422 at the current revision"
+  );
+  assert(result.response.headers.get("etag") === '"state-2"', "Resource omission rejection did not return the current ETag");
+  assert(
+    result.payload.details?.issues?.some((issue) => (
+      issue.path === "state.resources"
+      && issue.code === "resource_permanent_delete_disabled"
+      && issue.missingResourceCount === 1
+      && issue.missingResourceIds?.includes(removedResourceId)
+    )),
+    "Resource omission rejection did not identify the missing existing Resource"
+  );
+
+  const afterState = await pool.query("SELECT revision, state::text AS state_text FROM app_state WHERE id = $1", [appStateId]);
+  const afterResources = await pool.query(
+    "SELECT id, title, data::text AS data_text FROM resources WHERE app_state_id = $1 ORDER BY id",
+    [appStateId]
+  );
+  assert(Number(afterState.rows[0]?.revision) === Number(beforeState.rows[0]?.revision), "Resource omission rejection changed the stored revision");
+  assert(afterState.rows[0]?.state_text === beforeState.rows[0]?.state_text, "Resource omission rejection mutated the stored JSONB state");
+  assert(JSON.stringify(afterResources.rows) === JSON.stringify(beforeResources.rows), "Resource omission rejection mutated relational Resource rows");
+  await assertStoredRevisionAndTitle(2, "PostgreSQL updated resource", "Resource omission rejection mutated readable state");
+}
+
+async function checkOperatorStateResetBypass() {
+  operatorResetStorage = createStorage({ databaseUrl, appStateId: operatorResetStateId });
+  await operatorResetStorage.ready();
+  const initialState = makeValidState();
+  initialState.resources.push(makeIncrementalResource("check-operator-extra", "Operator-only reset extra"));
+  const bootstrap = await operatorResetStorage.writeAppState(initialState, {
+    baseRevision: 0,
+    requirePrecondition: true,
+  });
+  assert(bootstrap.revision === 1 && bootstrap.state.resources.length === 2, "operator reset check bootstrap failed");
+
+  const resetState = structuredClone(bootstrap.state);
+  resetState.resources = resetState.resources.filter((resource) => resource.id !== "check-operator-extra");
+  const reset = await operatorResetStorage.writeAppState(resetState, {
+    baseRevision: 1,
+    requirePrecondition: true,
+  });
+  assert(
+    reset.revision === 2
+      && reset.state.resources.length === 1
+      && reset.state.resources[0]?.id === "check-resource",
+    "trusted operator storage reset could not intentionally replace Resource membership"
   );
 }
 
@@ -869,15 +1340,13 @@ async function readState() {
 }
 
 async function cleanupCheckRows() {
-  const stateIds = [appStateId, resourceAppStateId, tokenStateId, legacyTokenStateId];
-  await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [stateIds]);
-  await pool.query("DELETE FROM app_state WHERE id = ANY($1)", [stateIds]);
+  await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [checkStateIds]);
+  await pool.query("DELETE FROM app_state WHERE id = ANY($1)", [checkStateIds]);
 }
 
 async function assertCleanupComplete() {
-  const stateIds = [appStateId, resourceAppStateId, tokenStateId, legacyTokenStateId];
-  const remainingState = await pool.query("SELECT count(*)::int AS count FROM app_state WHERE id = ANY($1)", [stateIds]);
-  const remainingPrivate = await pool.query("SELECT count(*)::int AS count FROM app_private_data WHERE id = ANY($1)", [stateIds]);
+  const remainingState = await pool.query("SELECT count(*)::int AS count FROM app_state WHERE id = ANY($1)", [checkStateIds]);
+  const remainingPrivate = await pool.query("SELECT count(*)::int AS count FROM app_private_data WHERE id = ANY($1)", [checkStateIds]);
   assert(Number(remainingState.rows[0]?.count) === 0 && Number(remainingPrivate.rows[0]?.count) === 0, "PostgreSQL check rows were not cleaned up");
 }
 

@@ -23,6 +23,33 @@ function resourceOpener(page, resourceId = FIXTURE_IDS.resource) {
   return page.locator(`#viewRoot [data-open-resource="${resourceId}"]`).first();
 }
 
+async function waitForSettledShellGeometry(shell) {
+  await shell.evaluate(async (element) => {
+    const waitForTwoFrames = () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+
+    // Visibility becomes true during the entrance animation. Wait for every
+    // active shell animation/transition, then cross a paint boundary before
+    // measuring so the assertion describes the final layout geometry.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const activeAnimations = element.getAnimations().filter(
+        (animation) => animation.playState === "pending" || animation.playState === "running",
+      );
+      if (activeAnimations.length === 0) {
+        await waitForTwoFrames();
+        if (!element.getAnimations().some(
+          (animation) => animation.playState === "pending" || animation.playState === "running",
+        )) return;
+      } else {
+        await Promise.all(activeAnimations.map((animation) => animation.finished.catch(() => {})));
+      }
+    }
+
+    await waitForTwoFrames();
+  });
+}
+
 async function expectResourcePath(page, resourceId) {
   await expect.poll(() => new URL(page.url()).pathname).toBe(RESOURCE_PATH(resourceId));
 }
@@ -85,6 +112,116 @@ test("Side peek keeps the background Resource database controls readable", async
   expect(geometry.logicWidth).toBeGreaterThanOrEqual(240);
   expect(geometry.logicHeight).toBeLessThanOrEqual(geometry.logicLineHeight * 1.5);
   expect(geometry.openLabelHeight).toBeLessThanOrEqual(geometry.openLabelLineHeight * 1.5);
+});
+
+test("768px fine-pointer windows keep desktop Center and Side peek geometry", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 964 });
+  await openFixtureResource(page, "library");
+
+  const center = resourceShell(page, "center");
+  await expect(center).toBeVisible();
+  await waitForSettledShellGeometry(center);
+  const centerGeometry = await center.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const toolbar = element.querySelector("[data-resource-mobile-toolbar]");
+    return {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      mobileToolbarVisible: toolbar ? getComputedStyle(toolbar).display !== "none" : false,
+      scrollbarWidth: getComputedStyle(element.querySelector(".resource-note-scroll")).scrollbarWidth,
+    };
+  });
+  expect(centerGeometry.left).toBeGreaterThanOrEqual(51);
+  expect(centerGeometry.left).toBeLessThanOrEqual(55);
+  // Window chrome/DPR rounding shifts the measured 80px reference by a few px.
+  expect(centerGeometry.top).toBeGreaterThanOrEqual(76);
+  expect(centerGeometry.top).toBeLessThanOrEqual(85);
+  expect(centerGeometry.width).toBeGreaterThanOrEqual(660);
+  expect(centerGeometry.width).toBeLessThanOrEqual(664);
+  expect(centerGeometry.height).toBeGreaterThanOrEqual(830);
+  expect(centerGeometry.height).toBeLessThanOrEqual(834);
+  expect(centerGeometry.mobileToolbarVisible).toBe(false);
+  expect(centerGeometry.scrollbarWidth).toBe("thin");
+
+  for (const height of [964, 720]) {
+    await page.setViewportSize({ width: 840, height });
+    await waitForSettledShellGeometry(center);
+    const beforeBoundary = await center.boundingBox();
+    await page.setViewportSize({ width: 841, height });
+    await waitForSettledShellGeometry(center);
+    const afterBoundary = await center.boundingBox();
+    expect(Math.abs((afterBoundary?.x || 0) - (beforeBoundary?.x || 0))).toBeLessThanOrEqual(3);
+    expect(Math.abs((afterBoundary?.y || 0) - (beforeBoundary?.y || 0))).toBeLessThanOrEqual(3);
+    expect(Math.abs((afterBoundary?.width || 0) - (beforeBoundary?.width || 0))).toBeLessThanOrEqual(6);
+    expect(Math.abs((afterBoundary?.height || 0) - (beforeBoundary?.height || 0))).toBeLessThanOrEqual(4);
+    expect((afterBoundary?.y || 0) + (afterBoundary?.height || 0)).toBeLessThanOrEqual(height);
+  }
+  await page.setViewportSize({ width: 768, height: 964 });
+
+  await page.locator(`[data-resource-close="${FIXTURE_IDS.resource}"]`).click();
+  await selectResourceMode(page, "list");
+  await resourceOpener(page).click();
+
+  const side = resourceShell(page, "side");
+  await expect(side).toBeVisible();
+  await expect(side).toHaveAttribute("aria-modal", "false");
+  await expect(side.locator(`[data-resource-side-resize="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+  await waitForSettledShellGeometry(side);
+  const sideGeometry = await side.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const toolbar = element.querySelector("[data-resource-mobile-toolbar]");
+    return {
+      left: Math.round(rect.left),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      mobileToolbarVisible: toolbar ? getComputedStyle(toolbar).display !== "none" : false,
+    };
+  });
+  expect(sideGeometry.left).toBeGreaterThanOrEqual(343);
+  expect(sideGeometry.left).toBeLessThanOrEqual(351);
+  expect(sideGeometry.width).toBeGreaterThanOrEqual(417);
+  expect(sideGeometry.width).toBeLessThanOrEqual(425);
+  expect(sideGeometry.height).toBe(964);
+  expect(sideGeometry.mobileToolbarVisible).toBe(false);
+  await expect(page.locator('[data-resource-view="list"]')).toBeVisible();
+
+  for (const width of [768, 601]) {
+    await page.setViewportSize({ width, height: 964 });
+    await waitForSettledShellGeometry(side);
+    const overflow = await side.evaluate((element) => {
+      const shellRect = element.getBoundingClientRect();
+      return [...element.querySelectorAll(".resource-page-toolbar button")]
+        .filter((button) => button.getClientRects().length > 0)
+        .map((button) => {
+          const rect = button.getBoundingClientRect();
+          return {
+            label: button.getAttribute("aria-label") || button.textContent?.trim() || "button",
+            left: Math.round(rect.left),
+            right: Math.round(rect.right),
+            shellLeft: Math.round(shellRect.left),
+            shellRight: Math.round(shellRect.right),
+          };
+        })
+        .filter((entry) => entry.left < entry.shellLeft || entry.right > entry.shellRight);
+    });
+    expect(overflow).toEqual([]);
+    if (width === 601) {
+      await expect(side.locator(`[data-resource-side-resize="${FIXTURE_IDS.resource}"]`)).toBeHidden();
+      await expect(side.getByRole("status")).toHaveCount(1);
+    }
+  }
+
+  await page.setViewportSize({ width: 590, height: 964 });
+  await expect(side).toHaveAttribute("aria-modal", "true");
+  await expect(side.locator(`[data-resource-side-resize="${FIXTURE_IDS.resource}"]`)).toBeHidden();
+  await expect(side.locator(`[data-resource-mobile-toolbar="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+  await expect.poll(() => side.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+
+  await page.setViewportSize({ width: 768, height: 964 });
+  await expect(side).toHaveAttribute("aria-modal", "false");
+  await expect(side.locator(`[data-resource-side-resize="${FIXTURE_IDS.resource}"]`)).toBeVisible();
 });
 
 test("each Resource view can set Open pages in to Full page", async ({ page, request }) => {
@@ -302,6 +439,26 @@ test.describe("mobile Resource shell", () => {
     await expect(side).toBeVisible();
     await expect(side).toHaveAttribute("aria-modal", "true");
     await expect(side).toHaveAttribute("data-resource-keyboard", /open|closed/);
+    await expect(side.getByRole("status")).toHaveCount(1);
+    await expect.poll(() => side.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    const focusableSelector = "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
+    await side.evaluate((shell, selector) => {
+      const focusable = [...shell.querySelectorAll(selector)].filter((element) => (
+        !element.hidden
+        && !element.closest("[hidden], [inert]")
+        && element.getClientRects().length > 0
+      ));
+      focusable.at(-1)?.focus();
+    }, focusableSelector);
+    await page.keyboard.press("Tab");
+    expect(await side.evaluate((shell, selector) => {
+      const focusable = [...shell.querySelectorAll(selector)].filter((element) => (
+        !element.hidden
+        && !element.closest("[hidden], [inert]")
+        && element.getClientRects().length > 0
+      ));
+      return document.activeElement === focusable[0];
+    }, focusableSelector)).toBe(true);
     const title = side.locator(`[data-resource-title="${FIXTURE_IDS.resource}"]`);
     await expect(title).toBeVisible();
     expect(await title.evaluate((element) => {

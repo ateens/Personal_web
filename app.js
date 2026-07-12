@@ -4,6 +4,9 @@ const BASE_DOCUMENT_TITLE = "SYGMA Personal Web";
 const RESOURCE_SEARCH_SCOPES = new Set(["database", "fullText"]);
 const RESOURCE_OPEN_PAGE_MODES = new Set(["center", "side", "full"]);
 const RESOURCE_HISTORY_STATE_KEY = "sygmaResourcePage";
+const VIEW_HISTORY_STATE_KEY = "sygmaView";
+const RESOURCE_COMPACT_PAGE_MEDIA_QUERY = "(max-width: 600px), (hover: none) and (pointer: coarse)";
+const RESOURCE_DOCKED_FULL_MEDIA_QUERY = "(min-width: 768px) and (pointer: fine)";
 const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
   library: "center",
   list: "side",
@@ -11,6 +14,13 @@ const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
 };
 const RESOURCE_SEARCH_SAVE_DELAY_MS = 320;
 const RESOURCE_TITLE_SAVE_DELAY_MS = 360;
+const MAX_RESOURCE_TITLE_LENGTH = 20_000;
+const MAX_RESOURCE_COMMENT_BODY_LENGTH = 20_000;
+const MAX_RESOURCE_COMMENT_THREADS = 1_000;
+const MAX_RESOURCE_COMMENT_REPLIES = 500;
+const MAX_RESOURCE_SAVE_ERROR_MESSAGE_LENGTH = 240;
+const MAX_RESOURCE_SAVE_ERROR_PATH_LENGTH = 160;
+const MAX_RESOURCE_SAVE_ERROR_CODE_LENGTH = 64;
 const DEFAULT_CALENDAR_SOURCES = {
   tasks: true,
   projects: true,
@@ -61,7 +71,7 @@ const VIEW_FILTER_OPTIONS = {
   projects: [["all", "전체"], ["active", "진행"], ["planned", "계획"], ["closed", "완료/중단"]],
   goals: [["all", "전체"], ["active", "진행"], ["focus", "집중"], ["completed", "완료"], ["paused", "중단"]],
   boxes: [["all", "전체"], ["pinned", "고정"], ["normal", "일반"], ["archived", "아카이브"]],
-  resources: [["all", "전체"], ["active", "활성"], ["important", "중요"], ["pinned", "고정"], ["readLater", "나중에 보기"], ["linked", "연결됨"], ["archived", "아카이브"]],
+  resources: [["all", "전체"], ["active", "활성"], ["important", "중요"], ["pinned", "고정"], ["readLater", "나중에 보기"], ["linked", "연결됨"], ["archived", "아카이브"], ["trash", "휴지통"]],
   habits: [["all", "전체"], ["active", "활성"], ["paused", "중단"], ["archived", "보관"], ["daily", "매일"], ["weekly", "주간"]],
   journal: [["all", "전체"], ["high", "만족 높음"], ["low", "점검 필요"], ["dated", "날짜 있음"]],
   calendar: [["all", "전체"], ["task", "Tasks"], ["project", "Projects"], ["google", "Google"]],
@@ -99,8 +109,23 @@ const BLOCK_TYPES = {
   divider: ["구분선", "—"],
   code: ["코드", "</>"],
 };
+const URL_BLOCK_TYPES = Object.freeze({
+  bookmark: ["북마크", "↗"],
+  embed: ["임베드", "◇"],
+});
+const URL_PASTE_CHOICE_ACTIONS = Object.freeze([
+  { action: "link", label: "링크", hint: "URL을 편집 가능한 링크 텍스트로 유지", icon: "↗" },
+  { action: "bookmark", label: "북마크", hint: "안전한 정적 북마크 미리보기", icon: "▤" },
+  { action: "embed", label: "임베드", hint: "외부 코드를 실행하지 않는 정적 임베드 미리보기", icon: "◇" },
+  { action: "cancel", label: "취소", hint: "붙여넣지 않고 편집기로 돌아가기", icon: "×" },
+]);
 const BLOCK_TYPE_ENTRIES = Object.entries(BLOCK_TYPES);
 const SELECTED_BLOCK_MENU_ACTIONS = [
+  ["copy-link", ["블록 링크 복사", "⌁", "선택한 첫 블록의 링크 복사"]],
+  ["comment", ["댓글", "☵", "선택한 첫 블록 전체에 댓글 추가"]],
+  ["move-up", ["위로 이동", "↑", "선택한 블록을 한 단계 위로 이동"]],
+  ["move-down", ["아래로 이동", "↓", "선택한 블록을 한 단계 아래로 이동"]],
+  ["move-to", ["다른 페이지로 이동", "→", "선택한 블록을 다른 Resource로 이동"]],
   ["copy", ["복사", "C", "선택한 블록을 클립보드에 복사"]],
   ["duplicate", ["복제", "⧉", "선택한 블록을 바로 아래에 복사"]],
   ["delete", ["삭제", "⌫", "선택한 블록 삭제"]],
@@ -176,6 +201,14 @@ const MENTION_PAGE_COLLECTIONS = [
   { type: "tasks", label: "Task", field: "title" },
   { type: "habits", label: "Habit", field: "title" },
 ];
+const MENTION_PAGE_COLLECTION_BY_TYPE = new Map(MENTION_PAGE_COLLECTIONS.map((collection) => [collection.type, collection]));
+const MENTION_TARGET_VIEW_BY_TYPE = Object.freeze({
+  projects: "projects",
+  goals: "goals",
+  boxes: "boxes",
+  tasks: "tasks",
+  habits: "habits",
+});
 const MENTION_SLASH_ENTRIES = [
   ["mention:open", ["Mention", "@"]],
   ["mention:date:today", ["Date", "T"]],
@@ -225,7 +258,8 @@ const PAGE_COMMAND_TRIGGERS = {
 };
 const BLOCK_CLIPBOARD_MIME = "application/x-sygma-blocks";
 const INLINE_FORMAT_MARK_TYPES = ["bold", "italic", "underline", "strike", "code", "comment", "link"];
-const INLINE_MARK_TYPES = ["bold", "italic", "underline", "strike", "code", "comment", "mention", "equation", "link"];
+const INLINE_COLOR_MARK_TYPES = Object.freeze({ text: "textColor", background: "backgroundColor" });
+const INLINE_MARK_TYPES = ["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link"];
 const INLINE_MARK_LABELS = {
   bold: "B",
   italic: "I",
@@ -241,6 +275,8 @@ const INLINE_MARK_CLASS_NAMES = {
   underline: "inline-mark-underline",
   strike: "inline-mark-strike",
   code: "inline-mark-code",
+  textColor: "inline-mark-text-color",
+  backgroundColor: "inline-mark-background-color",
   comment: "inline-mark-comment",
   mention: "inline-mark-mention",
   equation: "inline-mark-equation",
@@ -271,6 +307,10 @@ const MARKDOWN_SHORTCUTS = [
 ];
 const CONTINUED_BLOCK_TYPES = new Set(["bullet", "numbered", "todo"]);
 const MAX_BLOCK_INDENT = 6;
+const INLINE_TOOLBAR_VIEWPORT_MARGIN = 12;
+const INLINE_TOOLBAR_SELECTION_GAP = 8;
+const INLINE_TOOLBAR_ESTIMATED_WIDTH = 294;
+const INLINE_TOOLBAR_ESTIMATED_HEIGHT = 34;
 const BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE = 2;
 const BLOCK_BODY_DRAG_ACTIVATION_DISTANCE = 2;
 const BLOCK_DRAG_HANDLE_HIT_PADDING_LEFT = 12;
@@ -475,22 +515,31 @@ const RESOURCE_TYPE_CAPTURE_OPTIONS = [
 ];
 let localStateHadStoredState = false;
 const LOCAL_RESOURCE_DATABASE_NAME = "sygma-resource-local-v1";
-const LOCAL_RESOURCE_DATABASE_VERSION = 1;
+const LOCAL_RESOURCE_DATABASE_VERSION = 2;
 const LOCAL_RESOURCE_SNAPSHOT_STORE = "snapshots";
 const LOCAL_RESOURCE_OPERATION_STORE = "operations";
+const LOCAL_RESOURCE_METADATA_STORE = "resource-metadata";
 const LOCAL_RESOURCE_SCHEMA_VERSION = 1;
+const LOCAL_RESOURCE_METADATA_SCHEMA_VERSION = 1;
+const LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID = "__sygma_provisional_workspace_v1__";
 const LOCAL_RESOURCE_WRITE_DELAY_MS = 60;
 const dirtyResourceIds = new Set();
+let pendingResourceOperationGroups = [];
 let localWorkspaceOperationRequired = false;
+let localWorkspaceOperationScope = "";
 let localResourceWriteTimer = 0;
+let localResourceDraftGeneration = 0;
+let localResourceWriteChain = Promise.resolve(false);
+let localResourceMetadataWriteChain = Promise.resolve(false);
 let localResourceDatabasePromise = null;
 let localResourcePersistence = {
   available: "indexedDB" in globalThis,
   ready: false,
-  workspaceId: "",
+  workspaceId: LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID,
   snapshot: null,
   operations: [],
   pending: false,
+  error: "",
   conflictRemoteState: null,
   conflictResourceId: "",
 };
@@ -501,12 +550,17 @@ let remoteStateSaveTimer = 0;
 let remoteStateSavePending = false;
 let remoteStateSaveInFlight = false;
 let remoteStateSaveBlocked = false;
+let databaseInitializationPromise = null;
+let databaseInitializationRequested = false;
 let localStateChangedBeforeDatabaseReady = false;
+let lastRemoteSaveFailureKind = "";
+let remoteStateRetryDelayMs = 3000;
 let resourceSearchSaveTimer = 0;
 let resourceSearchSavePending = false;
 const resourceTitleSaveTimers = new Map();
 const REMOTE_STATE_SAVE_DELAY_MS = 450;
 const REMOTE_STATE_RETRY_DELAY_MS = 3000;
+const REMOTE_STATE_RETRY_MAX_DELAY_MS = 30_000;
 const GOOGLE_CALENDAR_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
 let state = loadState();
@@ -533,12 +587,14 @@ let databaseBackendStatus = {
   conflict: null,
 };
 let els = {};
+let appAnnouncementTimer = 0;
 let navCloseTimer = 0;
 let navShortcutHoldTimer = 0;
 let scheduleMonthHoverTimer = 0;
 let habitResizeTimer = 0;
 let projectCalendarResizeTimer = 0;
 let blockIconHoverFrame = 0;
+let inlineToolbarPositionFrame = 0;
 let pendingBlockIconHoverPoint = null;
 let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
@@ -559,6 +615,7 @@ let ui = {
   linkPopover: null,
   commentPopover: null,
   equationPopover: null,
+  urlPasteChoice: null,
   mention: null,
   pageCommand: null,
   emojiCommand: null,
@@ -577,10 +634,17 @@ let ui = {
   resourceRouteContextUrl: "/",
   resourceRouteReturnFocus: null,
   resourceRouteReturnFocusId: "",
+  resourceRouteTemporaryExpansion: {
+    resourceId: "",
+    hash: "",
+    toggleIds: new Set(),
+  },
   resourcePageMenuId: "",
+  resourceMoveMenuId: "",
   resourceUrlEditorId: "",
   resourceCommentsId: "",
   resourceCommentFocusId: "",
+  resourceCommentReadAt: {},
   resourceTrashUndoId: "",
   resourceIconPickerId: "",
   resourceCoverEditorId: "",
@@ -651,18 +715,23 @@ function init() {
   prepareInitialResourceRoute();
   app.innerHTML = renderShell();
   els = {
+    skipLink: document.querySelector("[data-skip-link]"),
     navTrack: app.querySelector("#navTrack"),
     sidebar: app.querySelector("[data-sidebar]"),
     navToggle: app.querySelector("[data-action='toggle-nav']"),
     navScrim: app.querySelector("[data-nav-scrim]"),
     topbar: app.querySelector("[data-capture-zone]"),
+    main: app.querySelector(".main"),
+    fab: app.querySelector(".fab"),
     viewRoot: app.querySelector("#viewRoot"),
     detailRoot: app.querySelector("#detailRoot"),
     overlayRoot: app.querySelector("#overlayRoot"),
+    appAnnouncements: app.querySelector("#appAnnouncements"),
   };
 
   decorateButtons(app);
   app.addEventListener("click", handleClick);
+  toast.addEventListener("click", handleToastClick);
   app.addEventListener("submit", handleSubmit);
   app.addEventListener("input", handleInput);
   app.addEventListener("change", handleChange);
@@ -729,11 +798,21 @@ function init() {
   document.addEventListener("dragend", clearNavDrag);
   document.addEventListener("visibilitychange", handleScheduleVisibilityChange);
   window.addEventListener("scroll", updateTopbarStickiness, { passive: true });
+  window.addEventListener("scroll", scheduleInlineToolbarPositionSync, { passive: true });
   window.addEventListener("resize", updateTopbarStickiness);
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("resize", handleResourceLayoutResize);
+  window.addEventListener("resize", clampUrlPasteChoiceToViewport);
+  window.addEventListener("resize", clampSelectedBlockMoveMenuToViewport);
+  window.addEventListener("resize", scheduleInlineToolbarPositionSync);
+  window.matchMedia?.(RESOURCE_COMPACT_PAGE_MEDIA_QUERY).addEventListener?.("change", handleResourceLayoutResize);
+  window.matchMedia?.(RESOURCE_DOCKED_FULL_MEDIA_QUERY).addEventListener?.("change", handleResourceLayoutResize);
   window.visualViewport?.addEventListener("resize", syncResourceVisualViewport);
   window.visualViewport?.addEventListener("scroll", syncResourceVisualViewport);
+  window.visualViewport?.addEventListener("resize", clampSelectedBlockMoveMenuToViewport);
+  window.visualViewport?.addEventListener("scroll", clampSelectedBlockMoveMenuToViewport);
+  window.visualViewport?.addEventListener("resize", scheduleInlineToolbarPositionSync);
+  window.visualViewport?.addEventListener("scroll", scheduleInlineToolbarPositionSync);
   window.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   window.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
   window.addEventListener(pointerUpEvent, finishResourceResize, true);
@@ -900,6 +979,11 @@ function renderTopbar() {
 }
 
 function setView(view, options = {}) {
+  if (options.resourceFullExit !== false && resourceFullPageOpen()) {
+    navigateFromFullPage(view, options);
+    return;
+  }
+  if (options.history !== false && !resourceRouteFromLocation()) replaceViewHistoryState(view);
   if (ui.view === view) {
     if (ui.navOpen && !ui.navDocked) closeNav(options.navTarget || null);
     if (view === "calendar") requestCalendarGoogleRefresh({ staleMs: GOOGLE_CALENDAR_WAKE_REFRESH_MS });
@@ -1134,6 +1218,7 @@ function patchResourceView() {
 
   const scrollState = captureResourceViewScrollState(currentView);
   const previousChipMeta = captureViewControlChipMeta("resources");
+  patchResourceViewUnit(currentView, nextView, ":scope > .view-header");
   patchResourceViewControls(currentControls, nextControls);
   patchResourceVault(currentVault, nextVault);
   patchResourceSearchChrome({ syncValue: true });
@@ -1149,8 +1234,8 @@ function patchResourceViewControls(currentControls, nextControls) {
   if (!currentTopline || !nextTopline) return;
 
   patchResourceViewUnit(currentTopline, nextTopline, ":scope > .view-control-actions");
-  patchResourceViewUnit(currentTopline, nextTopline, ":scope > .view-mode-group");
-  patchResourceViewUnit(currentTopline, nextTopline, ":scope > .resource-open-pages-in-control");
+  patchResourceOptionalToplineUnit(currentTopline, nextTopline, ":scope > .view-mode-group");
+  patchResourceOptionalToplineUnit(currentTopline, nextTopline, ":scope > .resource-open-pages-in-control");
 
   const currentCount = currentTopline.querySelector(":scope > .view-control-count");
   const nextCount = nextTopline.querySelector(":scope > .view-control-count");
@@ -1160,6 +1245,23 @@ function patchResourceViewControls(currentControls, nextControls) {
 
   patchResourceViewUnit(currentControls, nextControls, ":scope > .view-control-chip-strip");
   patchResourceViewUnit(currentControls, nextControls, ":scope > .view-control-panel-stack");
+}
+
+function patchResourceOptionalToplineUnit(currentTopline, nextTopline, selector) {
+  const current = currentTopline.querySelector(selector);
+  const next = nextTopline.querySelector(selector);
+  if (current && !next) {
+    current.remove();
+    return true;
+  }
+  if (!current && next) {
+    const count = currentTopline.querySelector(":scope > .view-control-count");
+    if (count) count.before(next);
+    else currentTopline.append(next);
+    decorateButtons(next);
+    return true;
+  }
+  return patchResourceViewUnit(currentTopline, nextTopline, selector);
 }
 
 function patchResourceViewUnit(currentRoot, nextRoot, selector) {
@@ -1172,7 +1274,10 @@ function patchResourceViewUnit(currentRoot, nextRoot, selector) {
 }
 
 function patchResourceVault(currentVault, nextVault) {
+  currentVault.className = nextVault.className;
   currentVault.dataset.resourceView = nextVault.dataset.resourceView || "library";
+  if (nextVault.hasAttribute("data-resource-trash-view")) currentVault.setAttribute("data-resource-trash-view", "");
+  else currentVault.removeAttribute("data-resource-trash-view");
   const currentSidebar = currentVault.querySelector(":scope > .resource-vault-sidebar");
   const currentMain = currentVault.querySelector(":scope > .resource-vault-main");
   const nextSidebar = nextVault.querySelector(":scope > .resource-vault-sidebar");
@@ -1582,14 +1687,20 @@ function renderBoxes() {
 
 function renderResources() {
   const control = viewControl("resources");
+  const trashMode = resourceTrashMode(control);
   const resources = controlledItems("resources", state.resources, "resources");
   const resourceBuckets = resourceDisplayBuckets(resources);
+  const allBuckets = resourceDisplayBuckets(state.resources);
+  const availableTotal = trashMode ? allBuckets.trashed.length : allBuckets.active.length + allBuckets.archived.length;
   return `
     <section class="view">
-      ${renderViewHeader("Resources", "자료와 노트", `${resourceBuckets.active.length}개 활성 / ${resourceBuckets.archived.length}개 보관`, `
-        <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
+      ${renderViewHeader("Resources", trashMode ? "휴지통" : "자료와 노트", trashMode
+        ? `${allBuckets.trashed.length}개 보관 · 자동 삭제 없음`
+        : `${allBuckets.active.length}개 활성 / ${allBuckets.archived.length}개 보관`, `
+        <button class="button secondary" type="button" data-resource-trash-shortcut aria-pressed="${trashMode ? "true" : "false"}">${trashMode ? "자료 보기" : `휴지통 ${allBuckets.trashed.length}`}</button>
+        ${trashMode ? "" : `<button class="button secondary" type="button" data-action="new-resource">새 자료</button>`}
       `)}
-      ${renderViewControls("resources", { count: resources.length, total: state.resources.length, placeholder: "제목, 본문, 속성, 연결 검색" })}
+      ${renderViewControls("resources", { count: resources.length, total: availableTotal, placeholder: "제목, 본문, 속성, 연결 검색" })}
       ${renderResourceVault(resources, resourceBuckets, control)}
     </section>
   `;
@@ -1830,7 +1941,7 @@ function renderDatabase() {
               <span>Google Calendar ID</span>
               <input class="input" data-setting="googleCalendarId" value="${esc(state.settings.googleCalendarId)}">
             </label>
-            <button class="button danger" type="button" data-action="reset-demo-data">최소 데이터 재생성</button>
+            <button class="button secondary" type="button" data-action="reset-demo-data">통계 예제 데이터 보충</button>
           </div>
         </div>
       </div>
@@ -1908,7 +2019,8 @@ function renderViewControls(view, meta = {}) {
   const control = viewControl(view);
   const filterOptions = VIEW_FILTER_OPTIONS[view] || VIEW_FILTER_OPTIONS.today;
   const sortOptions = VIEW_SORT_OPTIONS[view] || VIEW_SORT_OPTIONS.today;
-  const modeOptions = VIEW_MODE_OPTIONS[view] || [];
+  const resourceTrashView = view === "resources" && resourceTrashMode(control);
+  const modeOptions = resourceTrashView ? [] : VIEW_MODE_OPTIONS[view] || [];
   const count = meta.count ?? 0;
   const total = meta.total ?? count;
   const defaultControl = defaultViewControl(view);
@@ -1928,13 +2040,13 @@ function renderViewControls(view, meta = {}) {
       <div class="view-control-topline">
         ${showSearch ? renderResourceSearchControl(view, control, meta) : ""}
         <div class="view-control-actions" aria-label="필터와 정렬">
-          ${showSearch ? `<span class="view-control-filter-logic" data-resource-filter-logic>활성/보관 범위 · 추가 조건 AND</span>` : ""}
+          ${showSearch ? `<span class="view-control-filter-logic" data-resource-filter-logic>활성/보관/휴지통 범위 · 추가 조건 AND</span>` : ""}
           ${renderViewControlTrigger(view, "filter", "필터", selectedFilterLabel(filterOptions, filters), filterOpen, filterChanged)}
           ${renderViewControlTrigger(view, "sort", "정렬", selectedControlLabel(sortOptions, control.sort), sortOpen, sortChanged)}
           ${canReset ? `<button class="view-control-reset" type="button" data-view-control-reset="${view}">초기화</button>` : ""}
         </div>
         ${modeOptions.length ? renderViewModeButtons(view, modeOptions, control.mode) : ""}
-        ${showSearch ? renderResourceOpenPagesInControl(control.mode) : ""}
+        ${showSearch && !resourceTrashView ? renderResourceOpenPagesInControl(control.mode) : ""}
         <span class="view-control-count">${esc(count)} / ${esc(total)}</span>
       </div>
       ${renderActiveViewControlChips(view, control, defaultControl, filterOptions, sortOptions)}
@@ -2048,7 +2160,7 @@ function renderViewControlPanel(view, field, options, selectedValue, open) {
   const title = field === "filter" ? "필터 선택" : "정렬 기준";
   const copy = field === "filter"
     ? view === "resources"
-      ? "활성/보관 범위를 선택하고 추가 조건은 AND로 결합합니다."
+      ? "활성/보관/휴지통 범위를 선택하고 추가 조건은 AND로 결합합니다."
       : "여러 기준을 동시에 선택할 수 있습니다."
     : "목록의 표시 순서를 선택합니다.";
   let html = "";
@@ -2138,8 +2250,11 @@ function updateViewControl(view, field, value, options = {}) {
 function updateResourceSearchFromInput(input, event = null, options = {}) {
   if (!input) return false;
   const control = viewControl("resources");
-  control.search = input.value || "";
+  const nextSearch = input.value || "";
+  const changed = control.search !== nextSearch;
+  control.search = nextSearch;
   const composing = !options.force && (ui.resourceSearchComposing || event?.isComposing === true);
+  if (changed) stageWorkspaceControlDraftLocally();
   if (composing) return true;
   patchResourceSearchResults();
   scheduleResourceSearchSave();
@@ -2152,6 +2267,7 @@ function setResourceSearchScope(value) {
   if (normalizeResourceSearchScope(control.searchScope) === scope) return;
   control.searchScope = scope;
   patchResourceSearchResults();
+  stageWorkspaceControlDraftLocally();
   scheduleResourceSearchSave();
 }
 
@@ -2166,6 +2282,7 @@ function clearResourceSearch(options = {}) {
   if (input) input.value = "";
   ui.resourceSearchComposing = false;
   patchResourceSearchResults();
+  stageWorkspaceControlDraftLocally();
   scheduleResourceSearchSave();
   if (options.focus && input) {
     input.focus();
@@ -2203,7 +2320,11 @@ function patchResourceSearchResults() {
   if (!nextVault) return false;
   patchResourceVault(currentVault, nextVault);
   const count = els.viewRoot.querySelector("[data-view-controls='resources'] .view-control-count");
-  if (count) count.textContent = `${resources.length} / ${state.resources.length}`;
+  if (count) {
+    const allBuckets = resourceDisplayBuckets(state.resources);
+    const total = resourceTrashMode(control) ? allBuckets.trashed.length : allBuckets.active.length + allBuckets.archived.length;
+    count.textContent = `${resources.length} / ${total}`;
+  }
   patchResourceSearchChrome();
   restoreResourceViewScrollState(scrollState, currentView);
   return true;
@@ -2238,12 +2359,20 @@ function scheduleResourceSearchSave() {
   resourceSearchSaveTimer = window.setTimeout(commitResourceSearchSave, RESOURCE_SEARCH_SAVE_DELAY_MS);
 }
 
+function stageWorkspaceControlDraftLocally() {
+  localWorkspaceOperationRequired = true;
+  if (localWorkspaceOperationScope !== "workspace") localWorkspaceOperationScope = "resource-controls";
+  state.version = APP_STATE_VERSION;
+  state.updatedAt = new Date().toISOString();
+  scheduleLocalResourceDraftWrite({ immediate: true, ensureOperation: true });
+}
+
 function commitResourceSearchSave(options = {}) {
   window.clearTimeout(resourceSearchSaveTimer);
   resourceSearchSaveTimer = 0;
   if (!resourceSearchSavePending) return false;
   resourceSearchSavePending = false;
-  if (options.save !== false) saveState();
+  if (options.save !== false) saveState({ localScope: "resource-controls" });
   return true;
 }
 
@@ -2254,6 +2383,7 @@ function ensureResourceTitleDraft(resourceId) {
     ui.resourceTitleDrafts[resourceId] = {
       initial: resource.title || "",
       value: resource.title || "",
+      staged: false,
     };
   }
   return ui.resourceTitleDrafts[resourceId];
@@ -2267,17 +2397,59 @@ function updateResourceTitleFromInput(input, event = null, options = {}) {
     delete ui.resourceTitleDrafts[resourceId];
     return false;
   }
+  const nextValue = String(input.value || "").replace(/[\r\n]+/g, " ");
+  if (nextValue.length > MAX_RESOURCE_TITLE_LENGTH) {
+    const previousValue = ui.resourceTitleDrafts[resourceId]?.value ?? resource?.title ?? "";
+    input.value = previousValue;
+    markResourceInputLimitError(input, `Resource 제목은 최대 ${MAX_RESOURCE_TITLE_LENGTH}자입니다.`);
+    return false;
+  }
+  clearResourceInputLimitError(input);
   const draft = ensureResourceTitleDraft(resourceId);
   if (!resource || !draft) return false;
-  const nextValue = String(input.value || "").replace(/[\r\n]+/g, " ");
   if (input.value !== nextValue) input.value = nextValue;
+  const changed = draft.value !== nextValue;
   draft.value = nextValue;
   resource.title = draft.value;
   patchResourceTitleDisplays(resource, input);
   patchResourcePageSaveStatus();
+  if (changed) stageResourceTitleDraftLocally(resource, draft);
   const composing = !options.force && (event?.isComposing === true || ui.resourceTitleComposingIds.has(resourceId));
   if (!composing) scheduleResourceTitleSave(resourceId);
   return true;
+}
+
+function markResourceInputLimitError(input, message) {
+  if (!input) return false;
+  const safeMessage = String(message || "입력 한도를 확인해주세요.");
+  input.setAttribute("aria-invalid", "true");
+  input.setCustomValidity?.(safeMessage);
+  if (input.dataset.resourceLimitError !== safeMessage) showToast(safeMessage);
+  input.dataset.resourceLimitError = safeMessage;
+  return false;
+}
+
+function clearResourceInputLimitError(input) {
+  if (!input) return;
+  input.removeAttribute("aria-invalid");
+  input.setCustomValidity?.("");
+  delete input.dataset.resourceLimitError;
+}
+
+function stageResourceTitleDraftLocally(resource, draft) {
+  if (!resource || !draft) return;
+  if (!draft.staged) {
+    touchResource(resource);
+    draft.staged = true;
+  } else {
+    const previousUpdatedAt = stateTimestamp(resource.updatedAt);
+    resource.updatedAt = new Date(Math.max(Date.now(), previousUpdatedAt + 1)).toISOString();
+    dirtyResourceIds.add(resource.id);
+    resourceSearchTextCache.delete(resource.id);
+  }
+  state.version = APP_STATE_VERSION;
+  state.updatedAt = new Date().toISOString();
+  scheduleLocalResourceDraftWrite({ immediate: true });
 }
 
 function patchResourceTitleDisplays(resource, sourceInput = null) {
@@ -2323,12 +2495,21 @@ function commitResourceTitleDraft(resourceId, options = {}) {
   }
   resource.title = draft.value;
   delete ui.resourceTitleDrafts[resourceId];
-  if (draft.value === draft.initial) {
+  if (!draft.staged) {
     patchResourcePageSaveStatus();
     return false;
   }
-  touchResource(resource);
-  if (options.save !== false) saveState();
+  if (options.save !== false) {
+    if (dirtyResourceIds.has(resource.id)) {
+      saveState();
+    } else if (localResourceOperation(resource.id)) {
+      localStateChangedBeforeDatabaseReady = true;
+      if (databaseBackendStatus.connected && !remoteStateSaveInFlight) {
+        remoteStateSavePending = true;
+        queueRemoteStateSave();
+      }
+    }
+  }
   patchResourcePageSaveStatus();
   return true;
 }
@@ -2339,7 +2520,12 @@ function flushPendingResourceControlSaves() {
   for (const resourceId of Object.keys(ui.resourceTitleDrafts)) {
     titleChanged = commitResourceTitleDraft(resourceId, { save: false }) || titleChanged;
   }
-  if (searchChanged || titleChanged) saveState();
+  if (searchChanged || (titleChanged && dirtyResourceIds.size)) {
+    saveState({ localScope: searchChanged ? "resource-controls" : "" });
+  } else if (titleChanged && localResourcePersistence.operations.some((operation) => operation.entityType === "resource")) {
+    localStateChangedBeforeDatabaseReady = true;
+    if (databaseBackendStatus.connected && !remoteStateSaveInFlight) remoteStateSavePending = true;
+  }
   return searchChanged || titleChanged;
 }
 
@@ -2389,6 +2575,29 @@ function resourceHistoryState(historyState = window.history.state) {
   };
 }
 
+function viewHistoryState(historyState = window.history.state) {
+  if (!isPlainObject(historyState)) return null;
+  const entry = historyState[VIEW_HISTORY_STATE_KEY];
+  if (!isPlainObject(entry) || !NAV_KEY_SET.has(entry.view)) return null;
+  return {
+    view: entry.view,
+    focusOnPop: entry.focusOnPop === "nav" ? "nav" : "view",
+    restoreResourceOpener: entry.restoreResourceOpener !== false,
+  };
+}
+
+function replaceViewHistoryState(view, options = {}) {
+  if (!NAV_KEY_SET.has(view) || resourceRouteFromLocation()) return false;
+  const nextState = isPlainObject(window.history.state) ? { ...window.history.state } : {};
+  nextState[VIEW_HISTORY_STATE_KEY] = {
+    view,
+    focusOnPop: options.focusOnPop === "nav" ? "nav" : "view",
+    restoreResourceOpener: true,
+  };
+  window.history.replaceState(nextState, "", currentRelativeUrl());
+  return true;
+}
+
 function safeResourceContextUrl(value) {
   if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//") || /^\/resources\//.test(value)) return "/";
   return value;
@@ -2398,13 +2607,21 @@ function normalizeResourcePageMode(value) {
   return RESOURCE_OPEN_PAGE_MODES.has(value) ? value : "center";
 }
 
+function resourcePageUsesCompactShell() {
+  return window.matchMedia?.(RESOURCE_COMPACT_PAGE_MEDIA_QUERY).matches ?? window.innerWidth <= 600;
+}
+
 function currentRelativeUrl() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}` || "/";
 }
 
 function prepareInitialResourceRoute() {
   const route = resourceRouteFromLocation();
-  if (!route) return;
+  if (!route) {
+    const viewState = viewHistoryState();
+    if (viewState) ui.view = viewState.view;
+    return;
+  }
   ui.view = "resources";
   ui.pendingResourceRoute = route;
   ui.resourceRouteContextUrl = route.contextUrl;
@@ -2429,6 +2646,17 @@ function handleResourceRoutePopState(event) {
     return;
   }
   if (resourceAdvancedWindowModeEnabled()) return;
+  const viewState = viewHistoryState(event.state);
+  if (viewState) {
+    const restoreOpener = viewState.restoreResourceOpener && Boolean(ui.resourceNotes.length || ui.resourceRouteNotFound);
+    closeParityResourcePage({ render: true, restoreFocus: false });
+    setView(viewState.view, { history: false, resourceFullExit: false });
+    requestAnimationFrame(() => {
+      if (restoreOpener) restoreResourceRouteFocus();
+      else focusViewDestination(viewState.view, viewState.focusOnPop);
+    });
+    return;
+  }
   closeParityResourcePage({ render: true, restoreFocus: true });
 }
 
@@ -2441,6 +2669,7 @@ function applyResourceRoute(route, options = {}) {
   const previousView = ui.view;
   ui.view = "resources";
   ui.resourceRouteContextUrl = safeResourceContextUrl(route.contextUrl);
+  syncResourceRouteTemporaryExpansionScope(route.id);
   ui.resourceRouteNotFound = "";
   if (previousView !== "resources") {
     updateNav();
@@ -2461,8 +2690,144 @@ function applyResourceRoute(route, options = {}) {
   const previous = resourceNoteById(route.id);
   ui.resourceNotes = [createParityResourceNote(route.id, route.mode, previous)];
   renderDetail();
-  if (options.focus !== false) requestAnimationFrame(focusResourcePageShell);
+  if (options.focus !== false) requestAnimationFrame(() => focusResourceRouteDestination(route.id));
   return true;
+}
+
+function blockIdFromRouteHash(hash = window.location.hash) {
+  const prefix = "#block-";
+  const value = String(hash || "");
+  if (!value.startsWith(prefix)) return "";
+  try {
+    return decodeURIComponent(value.slice(prefix.length));
+  } catch {
+    return value.slice(prefix.length);
+  }
+}
+
+function focusResourceRouteDestination(resourceId) {
+  if (!window.location.hash) {
+    focusResourcePageShell();
+    return;
+  }
+  const blockId = blockIdFromRouteHash();
+  let block = blockId ? document.getElementById(blockAnchorId(blockId)) : null;
+  let resourceNote = block?.closest?.(`[data-resource-note="${cssEscape(resourceId)}"]`);
+  if (!block || !resourceNote) {
+    focusMissingResourceRouteBlock(resourceId);
+    return;
+  }
+  if (revealResourceRouteBlockAncestors(block, resourceNote, resourceId)) {
+    block = document.getElementById(blockAnchorId(blockId));
+    resourceNote = block?.closest?.(`[data-resource-note="${cssEscape(resourceId)}"]`);
+  }
+  if (!block || !resourceNote) {
+    focusMissingResourceRouteBlock(resourceId);
+    return;
+  }
+  const focusTarget = resourceRouteBlockFocusTarget(block);
+  if (!resourceRouteTargetIsVisible(focusTarget, resourceNote)) {
+    focusMissingResourceRouteBlock(resourceId);
+    return;
+  }
+  block.scrollIntoView({ block: "center", behavior: "auto" });
+  if (!focusTarget.matches("[contenteditable='true'], [tabindex], a[href], button, input, select, textarea")) {
+    focusTarget.setAttribute("tabindex", "-1");
+    focusTarget.dataset.routeTemporaryTabindex = "true";
+  }
+  focusTarget.focus({ preventScroll: true });
+  if (document.activeElement !== focusTarget || !resourceRouteTargetIsVisible(focusTarget, resourceNote)) {
+    focusMissingResourceRouteBlock(resourceId);
+    return;
+  }
+  block.classList.add("is-route-target");
+  announceAppStatus("링크된 블록으로 이동했습니다.");
+  window.setTimeout(() => block.classList.remove("is-route-target"), 1800);
+}
+
+function syncResourceRouteTemporaryExpansionScope(resourceId, hash = window.location.hash) {
+  const expansion = ui.resourceRouteTemporaryExpansion;
+  const normalizedResourceId = String(resourceId || "");
+  const normalizedHash = String(hash || "");
+  if (expansion.resourceId !== normalizedResourceId || expansion.hash !== normalizedHash) {
+    expansion.resourceId = normalizedResourceId;
+    expansion.hash = normalizedHash;
+    expansion.toggleIds.clear();
+  }
+  return expansion;
+}
+
+function resourceRouteToggleTemporarilyExpanded(ownerType, ownerId, blockId) {
+  if (ownerType !== "resources") return false;
+  const expansion = ui.resourceRouteTemporaryExpansion;
+  return Boolean(
+    expansion.resourceId === ownerId
+    && expansion.hash === window.location.hash
+    && expansion.toggleIds.has(blockId)
+  );
+}
+
+function clearResourceRouteTemporaryExpansionBranch(resourceId, blocks, blockId) {
+  const expansion = ui.resourceRouteTemporaryExpansion;
+  if (expansion.resourceId !== resourceId || expansion.hash !== window.location.hash) return false;
+  const index = blocks.findIndex((entry) => entry.id === blockId);
+  if (index < 0) return false;
+  const rootIndent = blockIndent(blocks[index]);
+  const branchIds = new Set([blockId]);
+  for (let cursor = index + 1; cursor < blocks.length; cursor += 1) {
+    const candidate = blocks[cursor];
+    if (blockIndent(candidate) <= rootIndent) break;
+    if (candidate.type === "toggle") branchIds.add(candidate.id);
+  }
+  let changed = false;
+  for (const id of branchIds) changed = expansion.toggleIds.delete(id) || changed;
+  return changed;
+}
+
+function revealResourceRouteBlockAncestors(block, resourceNote, resourceId) {
+  const expansion = syncResourceRouteTemporaryExpansionScope(resourceId);
+  const visited = new Set();
+  let current = block;
+  let changed = false;
+  while (current && resourceNote.contains(current) && !visited.has(current.dataset.blockId || "")) {
+    const currentId = current.dataset.blockId || "";
+    if (currentId) visited.add(currentId);
+    const parentToggleId = current.dataset.parentToggle || "";
+    if (!parentToggleId) break;
+    const parentToggle = resourceNote.querySelector(`[data-block-id="${cssEscape(parentToggleId)}"]`);
+    if (!parentToggle) break;
+    if (parentToggle.dataset.toggleCollapsed === "true") changed = !expansion.toggleIds.has(parentToggleId) || changed;
+    if (parentToggle.dataset.toggleCollapsed === "true") expansion.toggleIds.add(parentToggleId);
+    current = parentToggle;
+  }
+  if (changed) refreshBlockEditorsAfterMutation("resources", resourceId);
+  return changed;
+}
+
+function resourceRouteBlockFocusTarget(block) {
+  return block.querySelector("[data-url-block-preview], [data-block-content]") || block;
+}
+
+function resourceRouteTargetIsVisible(target, resourceNote) {
+  return Boolean(
+    target instanceof HTMLElement
+    && resourceNote?.contains(target)
+    && !target.closest("[hidden], [inert], [aria-hidden='true']")
+    && target.getClientRects().length
+  );
+}
+
+function focusMissingResourceRouteBlock(resourceId) {
+  const shell = els.detailRoot?.querySelector(`[data-resource-note="${cssEscape(resourceId)}"].resource-page-shell`)
+    || els.detailRoot?.querySelector(".resource-page-shell.is-parity-page");
+  if (shell instanceof HTMLElement) {
+    shell.focus({ preventScroll: true });
+    if (document.activeElement === shell) {
+      announceAppStatus("링크된 블록을 찾지 못해 Resource 페이지로 이동했습니다.");
+      return;
+    }
+  }
+  focusResourcePageShell();
 }
 
 function writeResourceRouteHistory(resourceId, mode, options = {}) {
@@ -2498,6 +2863,49 @@ function closeParityResourcePage(options = {}) {
   if (options.restoreFocus) requestAnimationFrame(restoreResourceRouteFocus);
 }
 
+function resourceFullPageOpen() {
+  const note = ui.resourceNotes[0];
+  return Boolean(
+    !resourceAdvancedWindowModeEnabled()
+    && note
+    && normalizeResourcePageMode(note.pageMode) === "full"
+    && itemById("resources", note.id),
+  );
+}
+
+function resourceFullPageKeepsDockedNav() {
+  return Boolean(
+    resourceFullPageOpen()
+    && ui.navDocked
+    && (window.matchMedia?.(RESOURCE_DOCKED_FULL_MEDIA_QUERY).matches ?? window.innerWidth >= 768),
+  );
+}
+
+function navigateFromFullPage(view, options = {}) {
+  if (!NAV_KEY_SET.has(view) || !resourceFullPageOpen()) return false;
+  const focusOnDestination = resourceFullPageKeepsDockedNav() ? "nav" : "view";
+  const note = ui.resourceNotes[0];
+  if (note?.id) commitResourceTitleDraft(note.id);
+  const routeState = resourceHistoryState();
+  const contextUrl = safeResourceContextUrl(routeState?.contextUrl || ui.resourceRouteContextUrl);
+  const nextState = clearResourceHistoryState();
+  nextState[VIEW_HISTORY_STATE_KEY] = { view, focusOnPop: focusOnDestination, restoreResourceOpener: false };
+  window.history.pushState(nextState, "", contextUrl);
+  closeParityResourcePage({ render: true, restoreFocus: false });
+  setView(view, { ...options, history: false, resourceFullExit: false });
+  requestAnimationFrame(() => focusViewDestination(view, focusOnDestination));
+  return true;
+}
+
+function focusViewDestination(view, preference = "view") {
+  const nav = app.querySelector(`[data-nav-key="${cssEscape(view)}"]`);
+  if (preference === "nav" && nav && !nav.closest("[inert]") && nav.getClientRects().length) {
+    nav.focus({ preventScroll: true });
+    return;
+  }
+  els.viewRoot?.focus?.({ preventScroll: true });
+}
+
 function rememberResourceRouteFocus(opener, resourceId) {
   ui.resourceRouteReturnFocus = opener instanceof HTMLElement ? opener : document.activeElement instanceof HTMLElement ? document.activeElement : null;
   ui.resourceRouteReturnFocusId = resourceId || "";
@@ -2527,7 +2935,9 @@ function resourcePageFocusableElements(shell) {
 
 function handleResourcePageFocusTrap(event) {
   if (event.key !== "Tab" || event.defaultPrevented || resourceAdvancedWindowModeEnabled()) return false;
-  const shell = els.detailRoot?.querySelector('[data-resource-shell="center"]');
+  const shell = els.detailRoot?.querySelector(
+    '[data-resource-shell="center"], [data-resource-page-mode="side"][aria-modal="true"]',
+  );
   if (!shell) return false;
   const focusable = resourcePageFocusableElements(shell);
   if (!focusable.length) {
@@ -2603,6 +3013,20 @@ function resetViewControlOptions(view) {
   renderView({ soft: true });
 }
 
+function setResourceTrashView(showTrash) {
+  const control = viewControl("resources");
+  control.filters = [showTrash ? "trash" : "active"];
+  control.panels = { filter: false, sort: false };
+  saveState();
+  renderView({ soft: true });
+  requestAnimationFrame(() => {
+    const target = showTrash
+      ? els.viewRoot?.querySelector("[data-resource-trash-heading]")
+      : els.viewRoot?.querySelector("[data-resource-trash-shortcut]");
+    target?.focus?.({ preventScroll: true });
+  });
+}
+
 function toggleViewFilterOption(view, value) {
   if (!optionValueAllowed(VIEW_FILTER_OPTIONS[view], value)) return;
   const control = viewControl(view);
@@ -2615,9 +3039,9 @@ function toggleViewFilterOption(view, value) {
 
 function nextFilterValues(view, current, value) {
   if (value === "all") return ["all"];
-  if (view === "resources" && (value === "active" || value === "archived")) {
+  if (view === "resources" && (value === "active" || value === "archived" || value === "trash")) {
     if (current.includes(value)) return orderedFilterValues(view, current);
-    const withoutScope = current.filter((entry) => entry !== "all" && entry !== "active" && entry !== "archived");
+    const withoutScope = current.filter((entry) => entry !== "all" && entry !== "active" && entry !== "archived" && entry !== "trash");
     withoutScope.unshift(value);
     return orderedFilterValues(view, withoutScope);
   }
@@ -2633,7 +3057,7 @@ function nextFilterValues(view, current, value) {
   }
   if (!removed) selected.push(value);
   if (!selected.length) return ["all"];
-  if (view === "resources" && !selected.some((entry) => entry === "active" || entry === "archived")) selected.unshift("active");
+  if (view === "resources" && !selected.some((entry) => entry === "active" || entry === "archived" || entry === "trash")) selected.unshift("active");
   return orderedFilterValues(view, selected);
 }
 
@@ -2747,6 +3171,7 @@ function renderResourceColumn(title, resources) {
 }
 
 function renderResourceVault(resources, buckets, control) {
+  if (resourceTrashMode(control)) return renderResourceTrashVault(resources, buckets);
   return `
     <div class="resource-vault" data-resource-view="${esc(control.mode || "library")}">
       <aside class="resource-vault-sidebar">
@@ -2760,6 +3185,64 @@ function renderResourceVault(resources, buckets, control) {
         ${control.mode === "map" ? renderResourceMap(resources) : control.mode === "list" ? renderResourceList(resources) : renderResourceLibrary(buckets)}
       </div>
     </div>
+  `;
+}
+
+function renderResourceTrashVault(resources, buckets) {
+  return `
+    <div class="resource-vault resource-trash-vault" data-resource-view="trash" data-resource-trash-view>
+      <aside class="resource-vault-sidebar">
+        <div class="resource-vault-title">
+          <span>Trash</span>
+          <strong>${resources.length}</strong>
+        </div>
+        <div class="resource-trash-policy" aria-label="휴지통 보존 정책">
+          <strong>기한 없이 보존</strong>
+          <span>자동 삭제하지 않습니다.</span>
+          <span>영구 삭제는 현재 지원하지 않습니다.</span>
+        </div>
+      </aside>
+      <div class="resource-vault-main">
+        <section class="resource-trash-view" aria-labelledby="resource-trash-heading">
+          <div class="resource-trash-heading" id="resource-trash-heading" data-resource-trash-heading tabindex="-1">
+            <div>
+              <span>복구 가능한 페이지</span>
+              <h2>휴지통</h2>
+            </div>
+            <strong>${buckets.trashed.length}개</strong>
+          </div>
+          ${resources.length ? `<div class="resource-trash-list">${resources.map(renderResourceTrashRow).join("")}</div>` : `
+            <div class="empty resource-trash-empty" data-resource-trash-empty>
+              <strong>휴지통이 비어 있습니다.</strong>
+              <span>삭제한 Resource는 관계와 본문을 유지한 채 여기에 보관됩니다.</span>
+            </div>
+          `}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderResourceTrashRow(resource) {
+  const title = resource.title || "제목 없음";
+  const parent = resource.parentId ? itemById("resources", resource.parentId) : null;
+  const childCount = Array.isArray(resource.childOrder) ? resource.childOrder.length : 0;
+  const relationSummary = [
+    parent ? `상위: ${parent.title || "제목 없음"}${parent.trashedAt ? " (휴지통)" : ""}` : "",
+    childCount ? `하위 ${childCount}개` : "",
+  ].filter(Boolean).join(" · ");
+  return `
+    <article class="resource-trash-row" data-resource-trash-row="${resource.id}">
+      <button class="resource-trash-open" type="button" data-open-resource="${resource.id}" aria-label="${esc(`${title} 복구 화면 열기`)}">
+        <span class="resource-trash-icon" aria-hidden="true">${esc(resource.icon || "≡")}</span>
+        <span class="resource-trash-copy">
+          <strong data-resource-title-display="${resource.id}">${esc(title)}</strong>
+          <small>${esc(`${formatDateTime(resource.trashedAt)}에 휴지통으로 이동`)}</small>
+          ${relationSummary ? `<em>${esc(relationSummary)}</em>` : ""}
+        </span>
+      </button>
+      <button class="button secondary resource-trash-restore" type="button" data-resource-restore="${resource.id}" data-restore-resource="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>복원</button>
+    </article>
   `;
 }
 
@@ -2923,14 +3406,21 @@ function controlledItems(type, items, view, context = {}) {
   const control = viewControl(view);
   const query = type === "resources" ? (control.search || "").trim().toLowerCase() : "";
   const searchScope = type === "resources" ? normalizeResourceSearchScope(control.searchScope) : "";
+  const includeTrashedResources = type === "resources" && resourceTrashMode(control);
   const result = [];
   for (const item of items) {
-    if (type === "resources" && item.trashedAt) continue;
+    if (type === "resources" && (includeTrashedResources ? !item.trashedAt : Boolean(item.trashedAt))) continue;
     if (!matchesControlledSearch(type, item, query, searchScope)) continue;
     if (!matchesControlledFilter(type, item, control, context)) continue;
     result.push(item);
   }
   sortControlledItems(type, result, control.sort, context);
+  if (includeTrashedResources && control.sort === "updated") {
+    result.sort((left, right) => {
+      const timeDifference = Date.parse(right.trashedAt || "") - Date.parse(left.trashedAt || "");
+      return timeDifference || String(left.id).localeCompare(String(right.id));
+    });
+  }
   return result;
 }
 
@@ -3007,16 +3497,21 @@ function projectFilterKey(project) {
 function matchesResourceFilter(resource, control) {
   const filters = selectedViewFilterValues(control);
   if (filters.includes("all")) return true;
-  const scopeFilters = filters.filter((filter) => filter === "active" || filter === "archived");
-  const conditionFilters = filters.filter((filter) => filter !== "active" && filter !== "archived");
+  const scopeFilters = filters.filter((filter) => filter === "active" || filter === "archived" || filter === "trash");
+  const conditionFilters = filters.filter((filter) => filter !== "active" && filter !== "archived" && filter !== "trash");
   const scopeMatches = !scopeFilters.length || scopeFilters.some((filter) => matchesResourceFilterValue(resource, filter));
   return scopeMatches && conditionFilters.every((filter) => matchesResourceFilterValue(resource, filter));
+}
+
+function resourceTrashMode(control = viewControl("resources")) {
+  return selectedViewFilterValues(control).includes("trash");
 }
 
 function matchesResourceFilterValue(resource, filter) {
   if (filter === "all") return true;
   if (filter === "active") return resource.importance !== "archived";
   if (filter === "archived") return resource.importance === "archived";
+  if (filter === "trash") return Boolean(resource.trashedAt);
   if (filter === "important") return resource.importance === "important";
   if (filter === "pinned") return Boolean(resource.pinned);
   if (filter === "readLater") return Boolean(resource.readLater);
@@ -3190,17 +3685,21 @@ function boxVisibilityBuckets(boxes = state.boxes, excludedId = "") {
 }
 
 function resourceDisplayBuckets(resources = state.resources, excludedId = "") {
-  const buckets = { active: [], archived: [], pinned: [], readLater: [], normal: [] };
+  const buckets = { active: [], archived: [], trashed: [], pinned: [], readLater: [], normal: [] };
   for (const resource of resources) {
     if (resource.id === excludedId) continue;
+    if (resource.trashedAt) {
+      buckets.trashed.push(resource);
+      continue;
+    }
     if (resource.importance === "archived") {
       buckets.archived.push(resource);
       continue;
     }
     buckets.active.push(resource);
     if (resource.pinned) buckets.pinned.push(resource);
-    if (resource.readLater) buckets.readLater.push(resource);
-    if (!resource.pinned && !resource.readLater) buckets.normal.push(resource);
+    else if (resource.readLater) buckets.readLater.push(resource);
+    else buckets.normal.push(resource);
   }
   return buckets;
 }
@@ -4688,6 +5187,7 @@ function renderDetail(options = {}) {
     syncResourceDocumentTitle();
     syncResourceSideWidth();
     syncResourceVisualViewport();
+    syncResourceFullPageChrome();
     return;
   }
   const resourceNotes = renderResourceNotes(options);
@@ -4697,6 +5197,37 @@ function renderDetail(options = {}) {
   syncResourceDocumentTitle();
   syncResourceSideWidth();
   syncResourceVisualViewport();
+  syncResourceFullPageChrome();
+}
+
+function setResourceChromeInert(element, inert) {
+  if (!element) return;
+  element.inert = inert;
+  if (inert) element.setAttribute("aria-hidden", "true");
+  else element.removeAttribute("aria-hidden");
+}
+
+function syncResourceFullPageChrome() {
+  const fullOpen = resourceFullPageOpen();
+  const keepDockedNav = resourceFullPageKeepsDockedNav();
+  if (els.skipLink) {
+    els.skipLink.setAttribute("href", fullOpen ? "#resource-page-surface" : "#viewRoot");
+    els.skipLink.textContent = fullOpen ? "Resource 본문으로 건너뛰기" : "본문으로 건너뛰기";
+  }
+  app.classList.toggle("has-resource-full-docked-nav", keepDockedNav);
+  setResourceChromeInert(els.main, fullOpen);
+  setResourceChromeInert(els.fab, fullOpen);
+  setResourceChromeInert(els.sidebar, fullOpen && !keepDockedNav);
+  setResourceChromeInert(els.navToggle, fullOpen);
+  if (els.navToggle) {
+    els.navToggle.tabIndex = fullOpen ? -1 : 0;
+    if (fullOpen) els.navToggle.setAttribute("aria-hidden", "true");
+    else els.navToggle.removeAttribute("aria-hidden");
+  }
+  if (fullOpen && !keepDockedNav) {
+    const shell = els.detailRoot?.querySelector('[data-resource-page-mode="full"]');
+    if (shell && !shell.contains(document.activeElement)) requestAnimationFrame(focusResourcePageShell);
+  }
 }
 
 function patchResourceDetail(options = {}) {
@@ -4748,6 +5279,7 @@ function patchResourceDetailShell(currentShell, nextShell) {
   syncElementAttributes(currentPage, nextPage);
 
   patchElementBySelector(currentPage, nextPage, ":scope > [data-resource-sync-conflict]", ":scope > [data-resource-accessible-title]");
+  patchElementBySelector(currentPage, nextPage, ":scope > [data-resource-save-error]", ":scope > [data-resource-accessible-title]");
   patchResourceTitleElements(currentPage, nextPage);
   patchElementBySelector(currentPage, nextPage, ":scope > .resource-note-subline");
   patchResourcePropertyDisclosure(currentPage, nextPage);
@@ -4868,6 +5400,7 @@ function restoreResourceNoteScrollPosition(scroll, note) {
 }
 
 function handleResourceNoteScroll(event) {
+  scheduleInlineToolbarPositionSync();
   const scroll = event.target.closest?.(".resource-note-scroll");
   const element = scroll?.closest?.("[data-resource-note]");
   const note = element ? resourceNoteById(element.dataset.resourceNote) : null;
@@ -4899,7 +5432,7 @@ function renderAdvancedResourceNote(resource, note, options = {}) {
   const noteClasses = resourceNoteModeClasses(note);
   const splitActive = normalizedResourceNoteMode(note.mode) === "split";
   return `
-    <section class="resource-note ${noteClasses} ${options.soft ? "is-soft-render" : ""}" data-resource-note="${resource.id}" style="${noteStyle}" aria-label="Resource 노트">
+    <section class="resource-note ${noteClasses} ${options.soft ? "is-soft-render" : ""}" data-resource-note="${resource.id}" style="${noteStyle}" aria-label="${esc(`${resource.title || "Untitled"} Resource 노트 (${resource.id})`)}">
       <header class="resource-note-chrome" data-resource-drag="${resource.id}">
         <div class="resource-note-grip" aria-hidden="true"></div>
         <div class="resource-note-mode">
@@ -4936,11 +5469,12 @@ function renderParityResourceNote(resource, note, options = {}) {
   const dialogAttributes = mode === "center"
     ? 'role="dialog" aria-modal="true"'
     : mode === "side"
-      ? `role="dialog" aria-modal="${window.innerWidth <= 840 ? "true" : "false"}"`
+      ? `role="dialog" aria-modal="${resourcePageUsesCompactShell() ? "true" : "false"}"`
       : 'role="region"';
   return `
     ${mode === "center" ? `<button class="resource-page-backdrop" type="button" data-resource-backdrop="${resource.id}" aria-label="Resource 페이지 닫기"></button>` : ""}
     <section class="resource-note resource-page-shell is-parity-page is-${mode} ${options.soft ? "is-soft-render" : ""}"
+      id="resource-page-surface" tabindex="-1"
       data-resource-note="${resource.id}"
       data-resource-shell="${mode}"
       data-resource-page-mode="${mode}"
@@ -4948,6 +5482,8 @@ function renderParityResourceNote(resource, note, options = {}) {
       data-resource-small-text="${pageSettings.smallText ? "true" : "false"}"
       data-resource-full-width="${pageSettings.fullWidth ? "true" : "false"}"
       data-resource-read-only="${resource.readOnly ? "true" : "false"}"
+      data-resource-locked="${resource.locked ? "true" : "false"}"
+      data-resource-content-read-only="${resourceContentReadOnly(resource) ? "true" : "false"}"
       ${dialogAttributes}
       aria-label="${esc(`${resource.title || "제목 없음"} Resource page`)}">
       ${renderResourcePageToolbar(resource, mode, navigation)}
@@ -4957,6 +5493,7 @@ function renderParityResourceNote(resource, note, options = {}) {
           <div class="resource-note-page">
             ${renderResourceMedia(resource)}
             ${renderResourceSyncConflict(resource)}
+            ${renderResourceSaveError(resource)}
             ${renderResourceTitleEditor(resource)}
             <div class="resource-note-subline">
               <span>Resource page</span>
@@ -4976,7 +5513,8 @@ function renderParityResourceNote(resource, note, options = {}) {
 
 function renderResourcePageToolbar(resource, mode, navigation) {
   const commentsOpen = ui.resourceCommentsId === resource.id;
-  const readOnly = resource.readOnly === true;
+  const unreadComments = resourceUnreadCommentCount(resource);
+  const readOnly = resourceContentReadOnly(resource);
   return `
     <header class="resource-page-toolbar">
       <div class="resource-page-toolbar-main">
@@ -4988,18 +5526,39 @@ function renderResourcePageToolbar(resource, mode, navigation) {
         </div>
       </div>
       <div class="resource-page-toolbar-actions">
-        <span class="resource-page-status" data-resource-save-status data-sync-state="${resourcePageSyncState()}" role="status">${esc(resourcePageSaveStatusLabel())}</span>
+        <span class="resource-page-status" data-resource-save-status="${resource.id}" data-sync-state="${resourcePageSyncState(resource.id)}" role="status">${esc(resourcePageSaveStatusLabel(resource.id))}</span>
+        ${resource.locked ? `<span class="resource-page-lock-status" data-resource-lock-status role="status" aria-label="페이지 잠김">Locked</span>` : ""}
         <nav class="resource-page-nav" aria-label="Resource 페이지 이동">
           <button type="button" data-resource-navigate="previous" aria-label="이전 Resource" ${navigation.previous ? "" : "disabled"}>‹</button>
           <button type="button" data-resource-navigate="next" aria-label="다음 Resource" ${navigation.next ? "" : "disabled"}>›</button>
         </nav>
         <button type="button" data-resource-copy-link="${resource.id}" aria-label="Resource 링크 복사" title="링크 복사">⌁</button>
-        <button type="button" data-resource-comments-toggle="${resource.id}" aria-label="댓글 패널 ${commentsOpen ? "닫기" : "열기"}" aria-expanded="${commentsOpen ? "true" : "false"}" title="댓글">☵</button>
+        <button class="resource-comments-button" type="button" data-resource-comments-toggle="${resource.id}" aria-label="댓글 패널 ${commentsOpen ? "닫기" : "열기"}${unreadComments ? `, 읽지 않은 댓글 ${unreadComments}개` : ""}" aria-expanded="${commentsOpen ? "true" : "false"}" title="댓글"><span aria-hidden="true">☵</span>${unreadComments ? `<span class="resource-comment-unread" data-resource-comment-unread>${unreadComments}</span>` : ""}</button>
         <button type="button" data-resource-create-child="${resource.id}" aria-label="하위 Resource 만들기" title="하위 Resource 만들기" ${readOnly ? 'disabled aria-disabled="true"' : ""}>＋</button>
         <span class="resource-page-menu-wrap">
-          <button type="button" data-resource-page-menu="${resource.id}" aria-label="페이지 메뉴" aria-haspopup="menu" aria-expanded="${ui.resourcePageMenuId === resource.id ? "true" : "false"}" title="페이지 메뉴" ${readOnly ? 'disabled aria-disabled="true"' : ""}>•••</button>
+          <button type="button" data-resource-page-menu="${resource.id}" aria-label="페이지 메뉴" aria-haspopup="menu" aria-expanded="${ui.resourcePageMenuId === resource.id ? "true" : "false"}" title="페이지 메뉴">•••</button>
           ${renderResourcePageMenu(resource)}
         </span>
+        ${mode === "full" ? "" : `<button type="button" data-resource-expand="${resource.id}" aria-label="전체 페이지로 열기" title="전체 페이지로 열기">↗</button>`}
+      </div>
+    </header>
+  `;
+}
+
+function renderTrashedResourceToolbar(resource, mode) {
+  return `
+    <header class="resource-page-toolbar resource-trash-toolbar">
+      <div class="resource-page-toolbar-main">
+        <button class="resource-note-icon" type="button" data-resource-close="${resource.id}" aria-label="닫기" title="닫기">×</button>
+        <div class="resource-page-breadcrumb" aria-label="현재 Resource">
+          <span>휴지통</span>
+          <span aria-hidden="true">/</span>
+          <strong data-resource-title-display="${resource.id}">${esc(resource.title || "제목 없음")}</strong>
+        </div>
+      </div>
+      <div class="resource-page-toolbar-actions">
+        <button type="button" data-resource-copy-link="${resource.id}" aria-label="Resource 링크 복사" title="링크 복사">⌁</button>
+        <button type="button" data-resource-restore="${resource.id}" data-restore-resource="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>복원</button>
         ${mode === "full" ? "" : `<button type="button" data-resource-expand="${resource.id}" aria-label="전체 페이지로 열기" title="전체 페이지로 열기">↗</button>`}
       </div>
     </header>
@@ -5011,13 +5570,13 @@ function renderResourceTitleEditor(resource) {
   const title = resource.title || "Untitled";
   return `
     <h1 class="visually-hidden" id="${esc(headingId)}" data-resource-accessible-title="${resource.id}">${esc(title)}</h1>
-    <textarea class="resource-note-title" data-resource-title="${resource.id}" rows="1" placeholder="Untitled" aria-label="자료 제목" ${resource.readOnly ? 'readonly aria-readonly="true"' : ""}>${esc(resource.title || "")}</textarea>
+    <textarea class="resource-note-title" data-resource-title="${resource.id}" rows="1" maxlength="${MAX_RESOURCE_TITLE_LENGTH}" placeholder="Untitled" aria-label="자료 제목" ${resourceContentReadOnly(resource) ? 'readonly aria-readonly="true"' : ""}>${esc(resource.title || "")}</textarea>
   `;
 }
 
 function renderResourceMedia(resource) {
   const cover = normalizeResourceCover(resource.cover);
-  const editable = !resource.readOnly;
+  const editable = !resourceContentReadOnly(resource);
   return `
     <section class="resource-page-media ${cover.url ? "has-cover" : ""} ${resource.icon ? "has-icon" : ""}" data-resource-media="${resource.id}">
       <div class="resource-cover-area" data-resource-cover-area="${resource.id}">
@@ -5061,18 +5620,21 @@ function renderResourceCoverEditor(resource) {
 
 function renderResourceSideResizeHandle(resource) {
   const width = normalizedResourceSideWidth(state.settings?.resourceSideWidth, window.innerWidth);
-  return `<button class="resource-side-resize" type="button" data-resource-side-resize="${resource.id}" role="separator" aria-orientation="vertical" aria-label="Side peek 너비 조절" aria-valuemin="360" aria-valuemax="${resourceSideWidthMaximum(window.innerWidth)}" aria-valuenow="${width}"></button>`;
+  const maximum = resourceSideWidthMaximum(window.innerWidth);
+  const resizable = maximum > 360;
+  return `<button class="resource-side-resize" type="button" data-resource-side-resize="${resource.id}" role="separator" aria-orientation="vertical" aria-label="Side peek 너비 조절" aria-valuemin="360" aria-valuemax="${maximum}" aria-valuenow="${width}" ${resizable ? "" : 'hidden disabled aria-disabled="true"'}></button>`;
 }
 
 function renderResourceMobileToolbar(resource, note) {
-  const readOnly = resource.readOnly === true;
+  const readOnly = resourceContentReadOnly(resource);
+  const unreadComments = resourceUnreadCommentCount(resource);
   return `
     <nav class="resource-mobile-toolbar" data-resource-mobile-toolbar="${resource.id}" aria-label="모바일 Resource 편집 도구">
       <button type="button" data-resource-mobile-action="undo" aria-label="실행 취소" ${readOnly ? 'disabled aria-disabled="true"' : ""}>↶</button>
       <button type="button" data-resource-mobile-action="redo" aria-label="다시 실행" ${readOnly ? 'disabled aria-disabled="true"' : ""}>↷</button>
       <button type="button" data-resource-mobile-action="add" data-resource-mobile-owner="${resource.id}" aria-label="본문 끝에 블록 추가" ${readOnly ? 'disabled aria-disabled="true"' : ""}>＋</button>
       <button type="button" data-resource-mobile-action="properties" data-resource-mobile-owner="${resource.id}" aria-label="속성 ${note.showProps ? "닫기" : "열기"}">◇</button>
-      <button type="button" data-resource-mobile-action="comments" data-resource-mobile-owner="${resource.id}" aria-label="댓글 열기">☵</button>
+      <button class="resource-comments-button" type="button" data-resource-mobile-action="comments" data-resource-mobile-owner="${resource.id}" aria-label="댓글 열기${unreadComments ? `, 읽지 않은 댓글 ${unreadComments}개` : ""}"><span aria-hidden="true">☵</span>${unreadComments ? `<span class="resource-comment-unread" data-resource-comment-unread>${unreadComments}</span>` : ""}</button>
     </nav>
   `;
 }
@@ -5092,16 +5654,43 @@ function renderResourcePropertyDisclosure(resource, note) {
 }
 
 function renderResourcePageMenu(resource) {
-  if (ui.resourcePageMenuId !== resource.id || resource.readOnly) return "";
+  if (ui.resourcePageMenuId !== resource.id || resource.trashedAt) return "";
   const settings = normalizeResourcePageSettings(resource.pageSettings);
+  const contentReadOnly = resourceContentReadOnly(resource);
+  const contentDisabled = contentReadOnly ? 'disabled aria-disabled="true"' : "";
+  const lockDisabled = resource.readOnly ? 'disabled aria-disabled="true"' : "";
+  const currentParent = resource.parentId ? itemById("resources", resource.parentId) : null;
+  const moveDisabled = contentReadOnly || (currentParent && !resourceMutationAllowed(currentParent))
+    ? 'disabled aria-disabled="true"'
+    : "";
   return `
     <div class="resource-page-menu" role="menu" data-resource-page-menu-panel="${resource.id}" aria-label="페이지 설정">
-      <button type="button" role="menuitemradio" aria-checked="${settings.font === "default" ? "true" : "false"}" data-resource-page-font="default" data-resource-page-owner="${resource.id}">Default font</button>
-      <button type="button" role="menuitemradio" aria-checked="${settings.font === "serif" ? "true" : "false"}" data-resource-page-font="serif" data-resource-page-owner="${resource.id}">Serif font</button>
-      <button type="button" role="menuitemradio" aria-checked="${settings.font === "mono" ? "true" : "false"}" data-resource-page-font="mono" data-resource-page-owner="${resource.id}">Mono font</button>
-      <button type="button" role="menuitemcheckbox" aria-checked="${settings.smallText ? "true" : "false"}" data-resource-page-option="smallText" data-resource-page-owner="${resource.id}">Small text</button>
-      <button type="button" role="menuitemcheckbox" aria-checked="${settings.fullWidth ? "true" : "false"}" data-resource-page-option="fullWidth" data-resource-page-owner="${resource.id}">Full width</button>
-      <button type="button" role="menuitem" data-resource-move-to-trash="${resource.id}">Move to trash</button>
+      <button type="button" role="menuitemradio" tabindex="-1" aria-checked="${settings.font === "default" ? "true" : "false"}" data-resource-page-font="default" data-resource-page-owner="${resource.id}" ${contentDisabled}>Default font</button>
+      <button type="button" role="menuitemradio" tabindex="-1" aria-checked="${settings.font === "serif" ? "true" : "false"}" data-resource-page-font="serif" data-resource-page-owner="${resource.id}" ${contentDisabled}>Serif font</button>
+      <button type="button" role="menuitemradio" tabindex="-1" aria-checked="${settings.font === "mono" ? "true" : "false"}" data-resource-page-font="mono" data-resource-page-owner="${resource.id}" ${contentDisabled}>Mono font</button>
+      <button type="button" role="menuitemcheckbox" tabindex="-1" aria-checked="${settings.smallText ? "true" : "false"}" data-resource-page-option="smallText" data-resource-page-owner="${resource.id}" ${contentDisabled}>Small text</button>
+      <button type="button" role="menuitemcheckbox" tabindex="-1" aria-checked="${settings.fullWidth ? "true" : "false"}" data-resource-page-option="fullWidth" data-resource-page-owner="${resource.id}" ${contentDisabled}>Full width</button>
+      <button type="button" role="menuitem" tabindex="-1" data-resource-copy-link="${resource.id}">Copy link</button>
+      <button type="button" role="menuitem" tabindex="-1" data-resource-duplicate="${resource.id}" ${contentDisabled}>Duplicate</button>
+      <button type="button" role="menuitemcheckbox" tabindex="-1" aria-checked="${resource.locked ? "true" : "false"}" data-resource-page-lock="${resource.id}" ${lockDisabled}>${resource.locked ? "Unlock page" : "Lock page"}</button>
+      <button type="button" role="menuitem" tabindex="-1" data-resource-move-menu="${resource.id}" aria-haspopup="menu" aria-expanded="${ui.resourceMoveMenuId === resource.id ? "true" : "false"}" ${moveDisabled}>Move to</button>
+      ${ui.resourceMoveMenuId === resource.id ? renderResourceMoveMenu(resource) : ""}
+      <button type="button" role="menuitem" tabindex="-1" data-resource-export-markdown="${resource.id}">Export Markdown</button>
+      <button type="button" role="menuitem" tabindex="-1" data-resource-move-to-trash="${resource.id}" ${contentDisabled}>Move to trash</button>
+    </div>
+  `;
+}
+
+function renderResourceMoveMenu(resource) {
+  const excluded = resourceDescendantIds(resource.id);
+  excluded.add(resource.id);
+  const candidates = state.resources
+    .filter((candidate) => !candidate.trashedAt && !resourceContentReadOnly(candidate) && !excluded.has(candidate.id))
+    .sort((left, right) => (left.title || "").localeCompare(right.title || "") || left.id.localeCompare(right.id));
+  return `
+    <div class="resource-page-move-menu" role="menu" aria-label="Resource 이동 위치" data-resource-move-menu-panel="${resource.id}">
+      <button type="button" role="menuitemradio" tabindex="-1" aria-checked="${resource.parentId ? "false" : "true"}" data-resource-move-parent="" data-resource-move-owner="${resource.id}">Workspace root</button>
+      ${candidates.map((candidate) => `<button type="button" role="menuitemradio" tabindex="-1" aria-checked="${resource.parentId === candidate.id ? "true" : "false"}" data-resource-move-parent="${candidate.id}" data-resource-move-owner="${resource.id}">${esc(candidate.title || "제목 없음")}</button>`).join("")}
     </div>
   `;
 }
@@ -5111,14 +5700,15 @@ function renderTrashedResourceNote(resource, note, options = {}) {
   const dialogAttributes = mode === "center"
     ? 'role="dialog" aria-modal="true"'
     : mode === "side"
-      ? 'role="dialog" aria-modal="false"'
+      ? `role="dialog" aria-modal="${resourcePageUsesCompactShell() ? "true" : "false"}"`
       : 'role="region"';
   return `
     ${mode === "center" ? `<button class="resource-page-backdrop" type="button" data-resource-backdrop="${resource.id}" aria-label="Resource 페이지 닫기"></button>` : ""}
     <section class="resource-note resource-page-shell is-parity-page is-${mode} ${options.soft ? "is-soft-render" : ""}"
+      id="resource-page-surface" tabindex="-1"
       data-resource-note="${resource.id}" data-resource-shell="${mode}" data-resource-page-mode="${mode}"
       data-resource-trashed="${resource.id}" ${dialogAttributes} aria-label="휴지통의 ${esc(resource.title || "제목 없음")}">
-      ${renderResourcePageToolbar(resource, mode, { previous: null, next: null })}
+      ${renderTrashedResourceToolbar(resource, mode)}
       <div class="resource-page-content">
         <div class="resource-note-scroll">
           <div class="resource-note-page resource-trash-recovery">
@@ -5126,7 +5716,7 @@ function renderTrashedResourceNote(resource, note, options = {}) {
             <h1>${esc(resource.title || "제목 없음")}</h1>
             <p>이 Resource는 휴지통에 있습니다. 본문과 속성은 그대로 보존됩니다.</p>
             <div class="resource-trash-actions">
-              <button class="button" type="button" data-resource-restore="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Restore page</button>
+              <button class="button" type="button" data-resource-restore="${resource.id}" data-restore-resource="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Restore page</button>
               ${ui.resourceTrashUndoId === resource.id ? `<button class="button secondary" type="button" data-resource-trash-undo="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Undo</button>` : ""}
             </div>
           </div>
@@ -5137,17 +5727,19 @@ function renderTrashedResourceNote(resource, note, options = {}) {
 }
 
 function renderResourceHierarchy(resource) {
+  const currentParent = resource.parentId ? itemById("resources", resource.parentId) : null;
+  const parentMoveDisabled = resourceContentReadOnly(resource) || Boolean(currentParent && !resourceMutationAllowed(currentParent));
   const children = resourceChildren(resource.id);
   const backlinks = resourceBacklinks(resource.id);
   const excluded = resourceDescendantIds(resource.id);
   excluded.add(resource.id);
   const parentOptions = state.resources
-    .filter((candidate) => !candidate.trashedAt && !excluded.has(candidate.id))
-    .map((candidate) => `<option value="${candidate.id}" ${resource.parentId === candidate.id ? "selected" : ""}>${esc(candidate.title || "제목 없음")}</option>`)
+    .filter((candidate) => (candidate.id === resource.parentId || resourceMutationAllowed(candidate)) && !excluded.has(candidate.id))
+    .map((candidate) => `<option value="${candidate.id}" ${resource.parentId === candidate.id ? "selected" : ""}>${esc(`${candidate.title || "제목 없음"}${candidate.trashedAt ? " (휴지통)" : ""}`)}</option>`)
     .join("");
   return `
     <section class="resource-page-relations" aria-label="페이지 관계">
-      <label class="resource-parent-field"><span>Parent page</span><select class="select" data-resource-parent="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}><option value="">없음</option>${parentOptions}</select></label>
+      <label class="resource-parent-field"><span>Parent page</span><select class="select" data-resource-parent="${resource.id}" ${parentMoveDisabled ? 'disabled aria-disabled="true"' : ""}><option value="">없음</option>${parentOptions}</select></label>
       <div class="resource-relation-group" data-resource-children="${resource.id}">
         <span>Sub-pages</span>
         <div>${children.length ? children.map((child) => `<button type="button" data-open-resource="${child.id}">${esc(child.title || "제목 없음")}</button>`).join("") : `<small>없음</small>`}</div>
@@ -5194,7 +5786,10 @@ function resourceBacklinks(resourceId) {
 
 function renderResourceCommentsPane(resource) {
   if (ui.resourceCommentsId !== resource.id) return "";
-  const threads = normalizeResourceCommentThreads(resource.commentThreads).filter((thread) => !thread.deletedAt);
+  const readOnly = resourceContentReadOnly(resource);
+  const allThreads = normalizeResourceCommentThreads(resource.commentThreads);
+  const threadLimitReached = allThreads.length >= MAX_RESOURCE_COMMENT_THREADS;
+  const threads = allThreads.filter((thread) => !thread.deletedAt);
   const pageThreads = threads.filter((thread) => thread.scope === "page");
   const inlineThreads = threads.filter((thread) => thread.scope === "inline");
   return `
@@ -5204,12 +5799,13 @@ function renderResourceCommentsPane(resource) {
         <button type="button" data-resource-comments-toggle="${resource.id}" aria-label="댓글 패널 닫기">×</button>
       </header>
       <section class="resource-comments-composer" aria-label="새 페이지 토론">
-        <textarea rows="3" data-page-discussion-composer="${resource.id}" aria-label="새 페이지 댓글" placeholder="페이지에 댓글 추가" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}></textarea>
-        <button type="button" data-page-discussion-submit="${resource.id}" ${resource.readOnly ? 'disabled aria-disabled="true"' : ""}>Add comment</button>
+        <textarea rows="3" maxlength="${MAX_RESOURCE_COMMENT_BODY_LENGTH}" data-page-discussion-composer="${resource.id}" aria-label="새 페이지 댓글" placeholder="페이지에 댓글 추가" ${readOnly || threadLimitReached ? 'disabled aria-disabled="true"' : ""}></textarea>
+        <button type="button" data-page-discussion-submit="${resource.id}" ${readOnly || threadLimitReached ? 'disabled aria-disabled="true"' : ""}>Add comment</button>
+        ${threadLimitReached ? `<p class="resource-comment-limit" data-comment-thread-limit role="status">댓글 스레드는 Resource당 최대 ${MAX_RESOURCE_COMMENT_THREADS}개입니다.</p>` : ""}
       </section>
       <div class="resource-comment-list">
-        ${pageThreads.length ? `<h2>Page discussions</h2>${pageThreads.map((thread) => renderResourceCommentThread(thread, resource.readOnly)).join("")}` : ""}
-        ${inlineThreads.length ? `<h2>Inline threads</h2>${inlineThreads.map((thread) => renderResourceCommentThread(thread, resource.readOnly)).join("")}` : ""}
+        ${pageThreads.length ? `<h2>Page discussions</h2>${pageThreads.map((thread) => renderResourceCommentThread(thread, readOnly)).join("")}` : ""}
+        ${inlineThreads.length ? `<h2>Inline threads</h2>${inlineThreads.map((thread) => renderResourceCommentThread(thread, readOnly)).join("")}` : ""}
         ${threads.length ? "" : `<p class="resource-comments-empty">아직 댓글이 없습니다.</p>`}
       </div>
     </aside>
@@ -5218,19 +5814,26 @@ function renderResourceCommentsPane(resource) {
 
 function renderResourceCommentThread(thread, readOnly = false) {
   const resolved = Boolean(thread.resolvedAt);
-  const anchorLabel = thread.scope === "inline" ? `Block ${thread.anchor?.blockId || ""}` : "Page";
+  const replyLimitReached = (Array.isArray(thread.replies) ? thread.replies.length : 0) >= MAX_RESOURCE_COMMENT_REPLIES;
+  const anchorLabel = thread.scope === "inline"
+    ? `Block ${thread.anchor?.blockId || ""}`
+    : thread.anchorLostAt
+      ? `Anchor lost${thread.formerAnchor?.blockId ? ` · Block ${thread.formerAnchor.blockId}` : ""}`
+      : "Page";
   return `
     <article class="resource-comment-thread ${resolved ? "is-resolved" : ""}" data-comment-thread="${thread.id}" data-comment-scope="${thread.scope}" data-comment-status="${resolved ? "resolved" : "open"}" ${ui.resourceCommentFocusId === thread.id ? 'data-comment-focused="true"' : ""}>
       <div class="resource-comment-meta"><span>${esc(anchorLabel)}</span><time datetime="${esc(thread.createdAt)}">${esc(formatDateTime(thread.createdAt))}</time></div>
       <p>${esc(thread.body)}</p>
       ${(thread.replies || []).filter((reply) => !reply.deletedAt).map((reply) => `<div class="resource-comment-reply"><p>${esc(reply.body)}</p><time datetime="${esc(reply.createdAt)}">${esc(formatDateTime(reply.createdAt))}</time></div>`).join("")}
       <div class="resource-comment-reply-box">
-        <textarea rows="2" data-comment-reply-input="${thread.id}" aria-label="댓글 답글" placeholder="Reply" ${readOnly ? 'disabled aria-disabled="true"' : ""}></textarea>
-        <button type="button" data-comment-reply-submit="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Reply</button>
+        <textarea rows="2" maxlength="${MAX_RESOURCE_COMMENT_BODY_LENGTH}" data-comment-reply-input="${thread.id}" aria-label="댓글 답글" placeholder="Reply" ${readOnly || replyLimitReached ? 'disabled aria-disabled="true"' : ""}></textarea>
+        <button type="button" data-comment-reply-submit="${thread.id}" ${readOnly || replyLimitReached ? 'disabled aria-disabled="true"' : ""}>Reply</button>
       </div>
+      ${replyLimitReached ? `<p class="resource-comment-limit" data-comment-reply-limit role="status">답글은 스레드당 최대 ${MAX_RESOURCE_COMMENT_REPLIES}개입니다.</p>` : ""}
       ${resolved
         ? `<button type="button" data-comment-reopen="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Reopen</button>`
         : `<button type="button" data-comment-resolve="${thread.id}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Resolve</button>`}
+      <button type="button" data-comment-delete="${thread.id}" aria-label="댓글 삭제" ${readOnly ? 'disabled aria-disabled="true"' : ""}>Delete</button>
     </article>
   `;
 }
@@ -5255,6 +5858,40 @@ function renderResourceSyncConflict(resource) {
       </div>
     </section>
   `;
+}
+
+function renderResourceSaveError(resource) {
+  const operation = failedLocalResourceOperation(resource.id);
+  if (!operation) return "";
+  const issue = resourceSaveErrorIssue(operation);
+  const code = sanitizeResourceSaveErrorCode(operation.lastError?.issue?.code || operation.lastError?.code || "");
+  return `
+    <section class="resource-save-error" data-resource-save-error="${resource.id}" role="alert" aria-live="assertive">
+      <strong>Resource를 저장하지 못했습니다.</strong>
+      <p data-resource-save-error-issue>${esc(issue)}</p>
+      ${code ? `<small data-resource-save-error-code>${esc(code)}</small>` : ""}
+      <div>
+        <button type="button" data-resource-save-retry="${resource.id}">Retry now</button>
+      </div>
+    </section>
+  `;
+}
+
+function failedLocalResourceOperation(resourceId = "") {
+  return localResourcePersistence.operations.find((operation) => (
+    operation.entityType === "resource"
+    && operation.status === "failed"
+    && (!resourceId || operation.entityId === resourceId)
+  )) || null;
+}
+
+function resourceSaveErrorIssue(operation) {
+  return sanitizeResourceSaveErrorText(
+    operation?.lastError?.issue?.message
+    || operation?.lastError?.message
+    || "입력 내용을 확인한 뒤 다시 저장해주세요.",
+    MAX_RESOURCE_SAVE_ERROR_MESSAGE_LENGTH,
+  );
 }
 
 function renderResourceRouteNotFound(resourceId) {
@@ -5295,37 +5932,42 @@ function resourcePageNavigation(resourceId) {
   };
 }
 
-function resourcePageSaveStatusLabel() {
+function resourcePageSaveStatusLabel(resourceId = "") {
+  const operation = resourceId ? localResourceOperation(resourceId) : null;
   if (databaseBackendStatus.loading) return "저장 상태 확인 중";
   if (databaseBackendStatus.conflict) return "Conflict · 저장 충돌 · 자동 저장 중지";
+  if (operation?.status === "failed" || (!resourceId && failedLocalResourceOperation())) return "Error · 저장하지 못함 · 확인 필요";
   if (navigator.onLine === false && (localResourcePersistence.pending || remoteStateSavePending)) return "Offline · 로컬 draft 저장됨";
-  if (Object.keys(ui.resourceTitleDrafts).length) return "편집 중 · 저장 대기";
-  if (localResourcePersistence.operations.some((operation) => operation.status === "retrying")) return "Retrying · 원격 저장 재시도 중";
+  if (resourceId ? Boolean(ui.resourceTitleDrafts[resourceId]) : Object.keys(ui.resourceTitleDrafts).length) return "편집 중 · 저장 대기";
+  if (operation?.status === "retrying" || (!resourceId && localResourcePersistence.operations.some((entry) => entry.status === "retrying"))) return "Retrying · 원격 저장 재시도 중";
   if (databaseBackendStatus.saving || remoteStateSaveInFlight) return "Saving… · 저장 중";
-  if (remoteStateSavePending || localResourcePersistence.pending) return databaseBackendStatus.connected ? "Saving… · 저장 대기" : "Offline · 변경 대기";
+  if (remoteStateSavePending || (resourceId ? Boolean(operation) : localResourcePersistence.pending)) return databaseBackendStatus.connected ? "Saving… · 저장 대기" : "Offline · 변경 대기";
   if (databaseBackendStatus.connected) return databaseBackendStatus.lastSyncedAt ? `Saved · ${formatDateTime(databaseBackendStatus.lastSyncedAt)}` : "Saved · 저장됨";
   return databaseBackendStatus.configured ? "Offline · 연결 끊김" : "Offline · DATABASE_URL 필요";
 }
 
-function resourcePageSyncState() {
+function resourcePageSyncState(resourceId = "") {
+  const operation = resourceId ? localResourceOperation(resourceId) : null;
   if (databaseBackendStatus.conflict) return "conflict";
+  if (operation?.status === "failed" || (!resourceId && failedLocalResourceOperation())) return "error";
   if (navigator.onLine === false || (!databaseBackendStatus.connected && !databaseBackendStatus.loading)) return "offline";
-  if (localResourcePersistence.operations.some((operation) => operation.status === "retrying")) return "retrying";
-  if (databaseBackendStatus.saving || remoteStateSaveInFlight || remoteStateSavePending || localResourcePersistence.pending || Object.keys(ui.resourceTitleDrafts).length) return "saving";
+  if (operation?.status === "retrying" || (!resourceId && localResourcePersistence.operations.some((entry) => entry.status === "retrying"))) return "retrying";
+  const titlePending = resourceId ? Boolean(ui.resourceTitleDrafts[resourceId]) : Object.keys(ui.resourceTitleDrafts).length > 0;
+  if (databaseBackendStatus.saving || remoteStateSaveInFlight || remoteStateSavePending || (resourceId ? Boolean(operation) : localResourcePersistence.pending) || titlePending) return "saving";
   if (databaseBackendStatus.connected) return "saved";
   return databaseBackendStatus.loading ? "loading" : "offline";
 }
 
 function patchResourcePageSaveStatus() {
-  const label = resourcePageSaveStatusLabel();
   els.detailRoot?.querySelectorAll("[data-resource-save-status]").forEach((element) => {
-    element.textContent = label;
-    element.dataset.syncState = resourcePageSyncState();
+    const resourceId = element.dataset.resourceSaveStatus || "";
+    element.textContent = resourcePageSaveStatusLabel(resourceId);
+    element.dataset.syncState = resourcePageSyncState(resourceId);
   });
 }
 
 function resourceAdvancedWindowModeEnabled() {
-  return state.settings?.advancedWindowMode === true;
+  return state.settings?.notionParityMode === false && state.settings?.advancedWindowMode === true;
 }
 
 function normalizedResourceNoteMode(mode) {
@@ -5402,7 +6044,7 @@ function renderDetailFields(type, item) {
     `;
   }
   if (type === "resources") {
-    const fieldOptions = { disabled: item.readOnly === true };
+    const fieldOptions = { disabled: resourceContentReadOnly(item) };
     return `
       <div class="field-grid">
         ${selectField("분류", "type", item.type, { quick_note: "간단 메모", note: "노트", scrap: "스크랩", thought: "생각", reflection: "회고" }, fieldOptions)}
@@ -5504,6 +6146,7 @@ function renderBlocks(blocksList, ownerType, ownerId) {
       openListType = listType;
     }
     const indent = blockIndent(block);
+    const routeTemporarilyExpanded = resourceRouteToggleTemporarilyExpanded(ownerType, ownerId, block.id);
     while (toggleStack.length && indent <= toggleStack[toggleStack.length - 1].indent) {
       toggleStack.pop();
     }
@@ -5515,9 +6158,10 @@ function renderBlocks(blocksList, ownerType, ownerId) {
       listMarker,
       listItem: Boolean(listType),
       hasToggleChildren: blockHasToggleChildren(blocksList, index),
+      routeTemporarilyExpanded,
     });
     if (block.type === "toggle") {
-      toggleStack.push({ id: block.id, indent, collapsed: block.collapsed === true });
+      toggleStack.push({ id: block.id, indent, collapsed: block.collapsed === true && !routeTemporarilyExpanded });
     }
   }
   if (openListType) html += "</div>";
@@ -5550,8 +6194,12 @@ function numberedListMarkerForBlock(block, indent, counters) {
   return `${nextNumber}.`;
 }
 
+function blockAnchorId(blockId) {
+  return `block-${encodeURIComponent(String(blockId || ""))}`;
+}
+
 function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
-  const readOnly = ownerType === "resources" && itemById("resources", ownerId)?.readOnly === true;
+  const readOnly = ownerType === "resources" && resourceContentReadOnly(ownerId);
   const isSelected =
     ui.blockSelection.ownerType === ownerType &&
     ui.blockSelection.ownerId === ownerId &&
@@ -5568,27 +6216,95 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor);
   if (block.type === "divider") {
     return `
-      <div class="block ${isSelected ? "is-selected" : ""}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
+      <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
         ${readOnly ? "" : renderBlockDragHandle(block.id)}
         ${readOnly ? "" : `<button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>`}
         <div class="block-divider" role="separator"></div>
       </div>
     `;
   }
-  const toggleCollapsed = block.type === "toggle" && block.collapsed === true;
+  if (isUrlPreviewBlockType(block.type)) {
+    return renderUrlPreviewBlock(block, {
+      readOnly,
+      isSelected,
+      indent,
+      colorAttr,
+      backgroundColorAttr,
+      parentToggleAttr,
+      hiddenAttr,
+      blockStyle,
+    });
+  }
+  const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
+  const routeTemporarilyExpandedAttr = meta.routeTemporarilyExpanded ? ` data-route-temporarily-expanded="true"` : "";
   return `
-    <div class="block ${isSelected ? "is-selected" : ""}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${parentToggleAttr}${hiddenAttr}${blockStyle}>
+    <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${routeTemporarilyExpandedAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
       ${readOnly ? "" : renderBlockDragHandle(block.id)}
       ${readOnly ? "" : `<button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>`}
       ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}" ${readOnly ? "disabled" : ""}></button>` : ""}
-      ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}">▸</button>` : ""}
+      ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}" ${readOnly ? 'disabled aria-disabled="true"' : ""}>▸</button>` : ""}
       ${renderEditableBlockContent(block, listMarkerAttr, ownerType, ownerId)}
     </div>
   `;
 }
 
+function isUrlPreviewBlockType(type = "") {
+  return Object.prototype.hasOwnProperty.call(URL_BLOCK_TYPES, type);
+}
+
+function isSupportedEditorBlockType(type = "") {
+  return Boolean(BLOCK_TYPES[type]) || isUrlPreviewBlockType(type);
+}
+
+function renderUrlPreviewBlock(block, meta = {}) {
+  const safeUrl = normalizeStandaloneHttpsUrl(block.url || block.text || "");
+  const preview = urlPreviewParts(safeUrl);
+  const label = block.type === "embed" ? "정적 임베드 미리보기" : "북마크 미리보기";
+  const description = block.type === "embed"
+    ? "외부 콘텐츠는 자동 실행하지 않습니다. 원본은 새 탭에서만 열립니다."
+    : "원격 메타데이터를 가져오지 않는 안전한 북마크입니다.";
+  return `
+    <div class="block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="false" data-indent="${meta.indent}"${meta.colorAttr || ""}${meta.backgroundColorAttr || ""}${meta.parentToggleAttr || ""}${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
+      ${meta.readOnly ? "" : renderBlockDragHandle(block.id)}
+      ${meta.readOnly ? "" : `<button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>`}
+      <div
+        class="block-content block-url-preview-content"
+        data-block-content="${block.id}"
+        data-url-block-preview="${block.type}"
+        tabindex="0"
+        role="group"
+        aria-label="${label}: ${esc(preview.host || safeUrl)}"
+      >
+        <span class="block-url-preview-icon" aria-hidden="true">${block.type === "embed" ? "◇" : "↗"}</span>
+        <span class="block-url-preview-copy">
+          <strong>${esc(preview.host || "안전하지 않은 URL")}</strong>
+          <span title="${esc(safeUrl)}">${esc(preview.display || "지원하지 않는 URL")}</span>
+          <small>${description}</small>
+        </span>
+        ${safeUrl ? `<a class="block-url-preview-open" data-url-block-open href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow" aria-label="${esc(label)} 원본을 새 탭에서 열기">열기</a>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function urlPreviewParts(value = "") {
+  const safeUrl = normalizeStandaloneHttpsUrl(value);
+  if (!safeUrl) return { host: "", display: "" };
+  try {
+    const parsed = new URL(safeUrl);
+    const suffix = `${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}${parsed.hash}`;
+    const display = `${parsed.hostname}${suffix}`;
+    return {
+      host: parsed.hostname,
+      display: display.length > 140 ? `${display.slice(0, 137)}…` : display,
+    };
+  } catch (_) {
+    return { host: "", display: "" };
+  }
+}
+
 function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", ownerId = "") {
-  const readOnly = ownerType === "resources" && itemById("resources", ownerId)?.readOnly === true;
+  const readOnly = ownerType === "resources" && resourceContentReadOnly(ownerId);
   const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${readOnly ? "false" : "true"}" spellcheck="${readOnly ? "false" : "true"}" role="textbox" aria-multiline="true" ${readOnly ? 'aria-readonly="true"' : ""} aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
   if (block.type === "heading1") return `<h1 class="block-semantic-wrap">${editable}</h1>`;
   if (block.type === "heading2") return `<h2 class="block-semantic-wrap">${editable}</h2>`;
@@ -5628,7 +6344,7 @@ function blockStyleForBlock(indent, color = "", backgroundColor = "") {
   return ` style="${style.join(";")}"`;
 }
 
-function ensureEditableBlocks(item) {
+function ensureEditableBlocks(item, options = {}) {
   if (!item.blocks) item.blocks = [];
   let changed = false;
   for (const block of item.blocks) {
@@ -5638,14 +6354,34 @@ function ensureEditableBlocks(item) {
     item.blocks.push({ id: id(), type: "paragraph", text: "", checked: false, indent: 0, collapsed: false });
     changed = true;
   }
-  if (changed) saveState();
+  if (changed && options.save !== false) saveState();
   return item.blocks;
 }
 
 function normalizeEditableBlock(block) {
   if (!isPlainObject(block)) return false;
   let changed = false;
-  if (!BLOCK_TYPES[block.type]) {
+  if (isUrlPreviewBlockType(block.type)) {
+    const safeUrl = normalizeStandaloneHttpsUrl(block.url || block.text || "");
+    if (!safeUrl) {
+      block.type = "paragraph";
+      delete block.url;
+      changed = true;
+    } else {
+      if (block.url !== safeUrl) {
+        block.url = safeUrl;
+        changed = true;
+      }
+      if (block.text !== safeUrl) {
+        block.text = safeUrl;
+        changed = true;
+      }
+      if (Array.isArray(block.marks) && block.marks.length) {
+        block.marks = [];
+        changed = true;
+      }
+    }
+  } else if (!BLOCK_TYPES[block.type]) {
     block.type = "paragraph";
     changed = true;
   }
@@ -5752,10 +6488,17 @@ function renderInlineSegment(text, activeMarks) {
       const href = normalizeInlineHref(mark.href || "");
       if (!href) continue;
       html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.link}" data-inline-mark="link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${html}</a>`;
+    } else if (type === "textColor" || type === "backgroundColor") {
+      const color = normalizeBlockColorValue(mark.color);
+      if (!color) continue;
+      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES[type]}" data-inline-mark="${type}" data-inline-color="${color}">${html}</span>`;
     } else if (type === "comment") {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.comment}" data-inline-mark="comment" data-inline-comment-id="${esc(mark.commentId || "")}" data-comment-body="${esc(mark.body || "")}" title="${esc(mark.body || "")}">${html}</span>`;
     } else if (type === "mention") {
-      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.mention}" data-inline-mark="mention" data-mention-type="${esc(mark.mentionType || "")}" data-mention-label="${esc(mark.label || "")}" data-mention-date="${esc(mark.dateKey || "")}" data-mention-target-type="${esc(mark.targetType || "")}" data-mention-target-id="${esc(mark.targetId || "")}">${html}</span>`;
+      const targetState = pageMentionTargetState(mark);
+      const targetStateLabel = pageMentionTargetStateLabel(mark, targetState);
+      const interactive = mark.mentionType === "page" && Boolean(mark.targetType && mark.targetId);
+      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.mention}" data-inline-mark="mention" data-mention-type="${esc(mark.mentionType || "")}" data-mention-label="${esc(mark.label || "")}" data-mention-date="${esc(mark.dateKey || "")}" data-mention-target-type="${esc(mark.targetType || "")}" data-mention-target-id="${esc(mark.targetId || "")}"${targetState ? ` data-mention-target-state="${targetState}"` : ""}${interactive ? ' role="link" tabindex="0" contenteditable="false"' : ""}${targetStateLabel ? ` aria-label="${esc(`${mark.label || text}, ${targetStateLabel}`)}" title="${esc(targetStateLabel)}"` : ""}>${html}</span>`;
     } else if (type === "equation") {
       const formula = mark.formula || text;
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-formula="${esc(formula)}" data-equation-display="${esc(renderEquationDisplay(formula))}" title="${esc(formula)}"><span class="inline-equation-source">${html}</span></span>`;
@@ -5764,6 +6507,122 @@ function renderInlineSegment(text, activeMarks) {
     }
   }
   return html;
+}
+
+function pageMentionTargetState(mark) {
+  if (mark?.mentionType !== "page" || !mark?.targetType || !mark?.targetId) return "";
+  if (!MENTION_PAGE_COLLECTION_BY_TYPE.has(mark.targetType)) return "missing";
+  const target = itemById(mark.targetType, mark.targetId);
+  if (!target) return "missing";
+  return mark.targetType === "resources" && target.trashedAt ? "trashed" : "active";
+}
+
+function pageMentionTargetTypeLabel(targetType = "") {
+  if (targetType === "resources") return "Resource";
+  return MENTION_PAGE_COLLECTION_BY_TYPE.get(targetType)?.label || "Page";
+}
+
+function pageMentionTargetStateLabel(mark, targetState = pageMentionTargetState(mark)) {
+  const typeLabel = pageMentionTargetTypeLabel(mark?.targetType);
+  if (targetState === "trashed") return `휴지통의 ${typeLabel}`;
+  if (targetState === "missing") return `찾을 수 없는 ${typeLabel}`;
+  if (targetState === "active") return `${typeLabel} 열기`;
+  return "";
+}
+
+function syncRenderedPageMentionTargetState(targetType, targetId) {
+  const mark = { mentionType: "page", targetType, targetId };
+  const targetState = pageMentionTargetState(mark);
+  const targetStateLabel = pageMentionTargetStateLabel(mark, targetState);
+  document.querySelectorAll(`[data-inline-mark="mention"][data-mention-type="page"][data-mention-target-type="${cssEscape(targetType)}"][data-mention-target-id="${cssEscape(targetId)}"]`).forEach((mention) => {
+    mention.dataset.mentionTargetState = targetState;
+    mention.setAttribute("role", "link");
+    mention.setAttribute("contenteditable", "false");
+    mention.tabIndex = 0;
+    if (targetStateLabel) {
+      mention.setAttribute("aria-label", `${mention.dataset.mentionLabel || mention.textContent || pageMentionTargetTypeLabel(targetType)}, ${targetStateLabel}`);
+      mention.title = targetStateLabel;
+    } else {
+      mention.removeAttribute("aria-label");
+      mention.removeAttribute("title");
+    }
+  });
+}
+
+function syncRenderedResourceMentionTargetState(resourceId) {
+  syncRenderedPageMentionTargetState("resources", resourceId);
+}
+
+function activatePageMentionTarget(mention) {
+  if (!(mention instanceof Element)) return false;
+  const targetType = String(mention.dataset.mentionTargetType || "");
+  const targetId = String(mention.dataset.mentionTargetId || "");
+  const typeLabel = pageMentionTargetTypeLabel(targetType);
+  if (!MENTION_PAGE_COLLECTION_BY_TYPE.has(targetType) || !targetId) {
+    showToast("지원하지 않는 페이지 멘션입니다.");
+    return false;
+  }
+  const target = itemById(targetType, targetId);
+  if (!target) {
+    showToast(`연결된 ${typeLabel}을(를) 찾을 수 없습니다.`);
+    return false;
+  }
+  if (targetType === "resources") {
+    openResourceNote(targetId);
+    return true;
+  }
+  return navigateToMentionTargetView(targetType, targetId);
+}
+
+function navigateToMentionTargetView(targetType, targetId) {
+  const view = MENTION_TARGET_VIEW_BY_TYPE[targetType];
+  if (!view || !itemById(targetType, targetId)) return false;
+  let resourceHistoryHandled = false;
+  const route = resourceRouteFromLocation();
+  if (route && !resourceAdvancedWindowModeEnabled()) {
+    const note = ui.resourceNotes[0];
+    if (note?.id) commitResourceTitleDraft(note.id);
+    const routeState = resourceHistoryState();
+    const contextUrl = safeResourceContextUrl(routeState?.contextUrl || ui.resourceRouteContextUrl);
+    const nextState = clearResourceHistoryState();
+    nextState[VIEW_HISTORY_STATE_KEY] = { view, focusOnPop: "view", restoreResourceOpener: false };
+    window.history.pushState(nextState, "", contextUrl);
+    closeParityResourcePage({ render: true, restoreFocus: false });
+    resourceHistoryHandled = true;
+  } else if (ui.resourceNotes.length) {
+    for (const note of ui.resourceNotes) commitResourceTitleDraft(note.id);
+    ui.resourceNotes = [];
+    renderDetail();
+  }
+
+  const viewChanged = ui.view !== view;
+  setView(view, { history: !resourceHistoryHandled, resourceFullExit: false });
+  if (targetType === "projects") ui.expandedProjectId = targetId;
+  if (targetType === "habits") ui.expandedHabitId = targetId;
+  if (!viewChanged || targetType === "projects" || targetType === "habits") renderView({ soft: true });
+  requestAnimationFrame(() => requestAnimationFrame(() => focusMentionTargetInView(targetType, targetId)));
+  return true;
+}
+
+function focusMentionTargetInView(targetType, targetId) {
+  const escapedId = cssEscape(targetId);
+  const selector = targetType === "projects"
+    ? `[data-project-toggle="${escapedId}"]`
+    : targetType === "habits"
+      ? `[data-habit-toggle="${escapedId}"]`
+      : targetType === "tasks"
+        ? `[data-task-id="${escapedId}"]`
+        : `[data-select-type="${cssEscape(targetType)}"][data-select-id="${escapedId}"]`;
+  const destination = els.viewRoot?.querySelector(selector);
+  if (!destination) {
+    els.viewRoot?.focus?.({ preventScroll: true });
+    showToast(`연결된 ${pageMentionTargetTypeLabel(targetType)}이(가) 현재 필터에 표시되지 않습니다.`);
+    return false;
+  }
+  if (!destination.matches("button, a[href], input, select, textarea, [contenteditable='true'], [tabindex]")) destination.tabIndex = -1;
+  destination.scrollIntoView({ block: "center", inline: "nearest" });
+  destination.focus({ preventScroll: true });
+  return true;
 }
 
 function normalizeInlineMarks(text = "", marks = []) {
@@ -5802,6 +6661,10 @@ function normalizeInlineMarks(text = "", marks = []) {
       const formula = normalizeEquationFormula(mark.formula || mark.equation || String(text).slice(start, end));
       if (!formula) continue;
       normalized.push({ type: mark.type, start, end, formula });
+    } else if (mark.type === "textColor" || mark.type === "backgroundColor") {
+      const color = normalizeBlockColorValue(mark.color || mark.value || "");
+      if (!color) continue;
+      normalized.push({ type: mark.type, start, end, color });
     } else {
       normalized.push({ type: mark.type, start, end });
     }
@@ -5849,6 +6712,9 @@ function inlineMarkPayloadEqual(left, right) {
   }
   if (left?.type === "equation" || right?.type === "equation") {
     return (left?.formula || "") === (right?.formula || "");
+  }
+  if (["textColor", "backgroundColor"].includes(left?.type) || ["textColor", "backgroundColor"].includes(right?.type)) {
+    return normalizeBlockColorValue(left?.color) === normalizeBlockColorValue(right?.color);
   }
   return true;
 }
@@ -6003,6 +6869,7 @@ function renderOverlays() {
     ${ui.linkPopover ? renderLinkPopover() : ""}
     ${ui.commentPopover ? renderCommentPopover() : ""}
     ${ui.equationPopover ? renderEquationPopover() : ""}
+    ${ui.urlPasteChoice ? renderUrlPasteChoice() : ""}
     ${ui.slash ? renderSlashMenu() : ""}
     ${ui.mention ? renderMentionMenu() : ""}
     ${ui.pageCommand ? renderPageCommandMenu() : ""}
@@ -6018,6 +6885,44 @@ function renderOverlays() {
   `;
   decorateButtons(els.overlayRoot);
   syncEditorCommandMenuAria();
+  syncInlineToolbarPosition();
+}
+
+function renderUrlPasteChoice() {
+  const choice = ui.urlPasteChoice;
+  if (!choice) return "";
+  const selectedIndex = Math.max(0, Math.min(URL_PASTE_CHOICE_ACTIONS.length - 1, choice.selectedIndex || 0));
+  const items = URL_PASTE_CHOICE_ACTIONS.map((item, index) => `
+    <button
+      class="url-paste-choice-item ${index === selectedIndex ? "is-active" : ""} ${item.action === "cancel" ? "is-cancel" : ""}"
+      id="url-paste-choice-item-${index}"
+      type="button"
+      role="menuitem"
+      data-url-paste-choice-action="${item.action}"
+      data-url-paste-choice-index="${index}"
+      tabindex="${index === selectedIndex ? "0" : "-1"}"
+    >
+      <span class="url-paste-choice-icon" aria-hidden="true">${item.icon}</span>
+      <span class="url-paste-choice-copy"><strong>${item.label}</strong><span>${item.hint}</span></span>
+    </button>
+  `).join("");
+  return `
+    <section
+      class="url-paste-choice"
+      id="url-paste-choice-menu"
+      data-url-paste-choice-menu
+      role="menu"
+      aria-label="URL 붙여넣기 방식 선택"
+      aria-activedescendant="url-paste-choice-item-${selectedIndex}"
+      style="left:${Math.round(choice.x || 8)}px;top:${Math.round(choice.y || 8)}px"
+    >
+      <div class="url-paste-choice-head">
+        <strong>URL 붙여넣기</strong>
+        <span title="${esc(choice.url)}">${esc(choice.url)}</span>
+      </div>
+      <div class="url-paste-choice-items">${items}</div>
+    </section>
+  `;
 }
 
 function editorCommandMenuId(kind, blockId) {
@@ -6149,13 +7054,16 @@ async function handleResourceConnectionRestored() {
     return;
   }
   if (localResourcePersistence.operations.length) {
-    await markLocalResourceOperations("retrying", { incrementAttempts: false });
-    remoteStateSavePending = true;
+    await markLocalResourceOperations("retrying", {
+      incrementAttempts: false,
+      excludeStatuses: ["failed", "conflict"],
+    });
+    remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
   }
-  if (databaseBackendStatus.connected) {
+  if (databaseBackendStatus.connected && remoteStateSavePending) {
     queueRemoteStateSave({ immediate: true });
   } else {
-    initializeDatabaseState();
+    if (!databaseBackendStatus.connected) initializeDatabaseState();
   }
   patchResourcePageSaveStatus();
 }
@@ -6385,7 +7293,7 @@ function blockDragGhostLabel(block) {
 }
 
 function blockTypeLabel(block) {
-  return BLOCK_TYPES[block?.type]?.[0] || "블록";
+  return BLOCK_TYPES[block?.type]?.[0] || URL_BLOCK_TYPES[block?.type]?.[0] || "블록";
 }
 
 function renderTodayDragCard(task) {
@@ -6421,6 +7329,7 @@ function renderTodayFloatingDrop() {
 
 function renderSlashMenu() {
   const { x, y, ownerType, ownerId, blockId, query = "", selectedIndex = 0, mode = "block" } = ui.slash;
+  if (mode === "selection-move") return renderSelectedBlocksMoveMenu();
   const entries = slashMenuEntries(query, mode);
   const safeSelectedIndex = entries.length ? Math.max(0, Math.min(selectedIndex, entries.length - 1)) : 0;
   const isSearchable = slashMenuAcceptsSearchInput();
@@ -6437,8 +7346,10 @@ function renderSlashMenu() {
 }
 
 function renderSelectedBlocksMenuActions() {
+  const selection = selectedBlocksMenuSelection();
+  const moveToDisabled = selection?.ownerType !== "resources" || !resourceMutationAllowed(selection?.ownerId);
   const items = SELECTED_BLOCK_MENU_ACTIONS.map(([action, [label, icon, hint]]) => `
-    <button class="menu-item selected-block-action ${action === "delete" ? "is-danger" : ""}" type="button" role="menuitem" data-selected-block-action="${action}">
+    <button class="menu-item selected-block-action ${action === "delete" ? "is-danger" : ""}" type="button" role="menuitem" data-selected-block-action="${action}" ${action === "move-to" ? `aria-haspopup="menu" aria-expanded="false" ${moveToDisabled ? 'disabled aria-disabled="true"' : ""}` : ""}>
       <span class="menu-icon">${icon}</span>
       <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(hint)}</span></span>
     </button>
@@ -6446,6 +7357,82 @@ function renderSelectedBlocksMenuActions() {
   return `
     <div class="slash-menu-section" role="group" aria-label="블록 작업">
       ${items}
+    </div>
+    ${renderSelectedBlocksColorActions()}
+  `;
+}
+
+function renderSelectedBlocksMoveMenu() {
+  const moveMenu = ui.slash;
+  const destinations = selectedBlockMoveDestinations(moveMenu?.selection, moveMenu?.query || "");
+  const selectedIndex = destinations.length
+    ? Math.max(0, Math.min(moveMenu?.selectedIndex || 0, destinations.length - 1))
+    : 0;
+  const menuId = editorCommandMenuId("slash", moveMenu?.blockId);
+  const activeId = destinations.length ? editorCommandMenuItemId("slash", moveMenu?.blockId, selectedIndex) : "";
+  const items = destinations.map((resource, index) => `
+    <button
+      class="menu-item selected-block-move-destination ${index === selectedIndex ? "is-active" : ""}"
+      id="${esc(editorCommandMenuItemId("slash", moveMenu?.blockId, index))}"
+      type="button"
+      role="menuitem"
+      data-selected-block-move-target="${esc(resource.id)}"
+      data-selected-block-move-index="${index}"
+      tabindex="${index === selectedIndex ? "0" : "-1"}"
+      ${index === selectedIndex ? 'aria-current="true"' : ""}
+    >
+      <span class="menu-icon" aria-hidden="true">${esc(resource.icon || "▤")}</span>
+      <span class="menu-text"><strong>${esc(resource.title || "제목 없음")}</strong><span>Resource · ${esc(resource.type || "note")}</span></span>
+    </button>
+  `).join("");
+  return `
+    <div
+      class="slash-menu is-selection-menu is-selection-move-menu"
+      id="${esc(menuId)}"
+      style="left:${Math.round(moveMenu?.x || 12)}px;top:${Math.round(moveMenu?.y || 12)}px"
+      role="menu"
+      aria-label="블록을 이동할 Resource 선택"
+    >
+      <div class="selected-block-move-head">
+        <button type="button" data-selected-block-move-back aria-label="블록 작업 메뉴로 돌아가기">← 뒤로</button>
+        <strong>다른 페이지로 이동</strong>
+        <button type="button" data-selected-block-move-cancel>취소</button>
+      </div>
+      <div class="slash-menu-search-row selected-block-move-search-row">
+        <input
+          class="slash-menu-search"
+          data-selected-block-move-query
+          value="${esc(moveMenu?.query || "")}"
+          placeholder="Resource 검색"
+          aria-label="이동할 Resource 검색"
+          aria-controls="${esc(menuId)}"
+          ${activeId ? `aria-activedescendant="${esc(activeId)}"` : ""}
+          autocomplete="off"
+        >
+        <span class="slash-menu-count" aria-label="${destinations.length}개 대상">${destinations.length}</span>
+      </div>
+      <div class="selected-block-move-results" data-selected-block-move-results>
+        ${items || '<p class="slash-menu-empty" role="status">이동할 수 있는 Resource가 없습니다.</p>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderSelectedBlocksColorActions() {
+  const colorButtons = (mode) => BLOCK_COLOR_KEYS.map((key) => {
+    const option = BLOCK_COLOR_OPTIONS[key];
+    const action = `color:${mode}:${key}`;
+    const label = `${option.label} ${mode === "text" ? "글자" : "배경"}`;
+    const style = mode === "text"
+      ? `color:${option.text};background:#fff`
+      : `color:#37352f;background:${option.background}`;
+    return `<button class="selected-block-color" type="button" role="menuitem" data-selected-block-action="${action}" aria-label="${esc(label)}" title="${esc(label)}"><span style="${style}" aria-hidden="true">A</span></button>`;
+  }).join("");
+  return `
+    <div class="slash-menu-section selected-block-color-section" role="group" aria-label="블록 색상">
+      <div class="selected-block-color-heading"><span>색상</span><button type="button" role="menuitem" data-selected-block-action="color:default">기본값</button></div>
+      <div class="selected-block-color-row" role="group" aria-label="글자 색상">${colorButtons("text")}</div>
+      <div class="selected-block-color-row" role="group" aria-label="배경 색상">${colorButtons("background")}</div>
     </div>
   `;
 }
@@ -6463,13 +7450,45 @@ function renderInlineFormatToolbar() {
   const toolbar = ui.inlineToolbar;
   if (!toolbar) return "";
   const buttons = INLINE_FORMAT_MARK_TYPES.map((type) => `
-    <button class="inline-format-button ${toolbar.activeTypes?.includes(type) ? "is-active" : ""}" type="button" data-inline-mark-toggle="${type}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${esc(INLINE_MARK_DESCRIPTIONS[type])}" title="${esc(INLINE_MARK_DESCRIPTIONS[type])}">
+    <button class="inline-format-button ${toolbar.activeTypes?.includes(type) ? "is-active" : ""}" type="button" data-inline-mark-toggle="${type}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${esc(INLINE_MARK_DESCRIPTIONS[type])}" aria-pressed="${toolbar.activeTypes?.includes(type) ? "true" : "false"}" title="${esc(INLINE_MARK_DESCRIPTIONS[type])}">
       ${esc(INLINE_MARK_LABELS[type])}
     </button>
   `).join("");
+  const colorMenuId = `inline-color-menu-${encodeURIComponent(String(toolbar.blockId || "current"))}`;
+  const colorSummary = [
+    toolbar.activeTextColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeTextColor]?.label || toolbar.activeTextColor} 글자` : "",
+    toolbar.activeBackgroundColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeBackgroundColor]?.label || toolbar.activeBackgroundColor} 배경` : "",
+  ].filter(Boolean).join(", ");
   return `
-    <div class="inline-format-toolbar" style="left:${Math.round(toolbar.x)}px;top:${Math.round(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
+    <div class="inline-format-toolbar" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.round(toolbar.x)}px;top:${Math.round(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
+      <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" title="수식">∑</button>
+      <button class="inline-format-button ${colorSummary ? "is-active" : ""}" id="${esc(`${colorMenuId}-trigger`)}" type="button" data-inline-color-menu-toggle aria-label="${esc(colorSummary ? `색상, ${colorSummary}` : "색상")}" aria-haspopup="menu" aria-expanded="${toolbar.colorMenuOpen ? "true" : "false"}" ${toolbar.colorMenuOpen ? `aria-controls="${esc(colorMenuId)}"` : ""} title="색상">A</button>
+      ${toolbar.colorMenuOpen ? renderInlineColorMenu(toolbar, colorMenuId) : ""}
+    </div>
+  `;
+}
+
+function renderInlineColorMenu(toolbar, menuId) {
+  const renderChoices = (mode) => {
+    const activeColor = mode === "text" ? toolbar.activeTextColor : toolbar.activeBackgroundColor;
+    const modeLabel = mode === "text" ? "글자" : "배경";
+    const defaultChoice = `<button class="inline-color-choice" type="button" role="menuitemradio" tabindex="-1" data-inline-color-choice="${mode}:default" aria-checked="${activeColor ? "false" : "true"}" aria-label="기본 ${modeLabel} 색상"><span class="inline-color-swatch is-default" data-inline-color-mode="${mode}" aria-hidden="true">A</span></button>`;
+    const choices = BLOCK_COLOR_KEYS.map((color) => {
+      const option = BLOCK_COLOR_OPTIONS[color];
+      return `<button class="inline-color-choice" type="button" role="menuitemradio" tabindex="-1" data-inline-color-choice="${mode}:${color}" aria-checked="${activeColor === color ? "true" : "false"}" aria-label="${esc(`${option.label} ${modeLabel} 색상`)}"><span class="inline-color-swatch" data-inline-color-mode="${mode}" data-inline-color-key="${color}" aria-hidden="true">A</span></button>`;
+    }).join("");
+    return `
+      <div class="inline-color-group" role="group" aria-label="${modeLabel} 색상">
+        <span class="inline-color-group-label" role="presentation">${modeLabel}</span>
+        <div class="inline-color-grid" role="presentation">${defaultChoice}${choices}</div>
+      </div>
+    `;
+  };
+  return `
+    <div class="inline-color-menu" id="${esc(menuId)}" role="menu" aria-labelledby="${esc(`${menuId}-trigger`)}" data-inline-color-menu>
+      ${renderChoices("text")}
+      ${renderChoices("background")}
     </div>
   `;
 }
@@ -6489,13 +7508,21 @@ function renderLinkPopover() {
 function renderCommentPopover() {
   const popover = ui.commentPopover;
   if (!popover) return "";
+  const owner = popover.ownerType === "resources" ? itemById("resources", popover.ownerId) : null;
+  const existingThread = owner?.commentThreads?.some((thread) => thread.id === popover.commentId);
+  const threadLimitReached = Boolean(
+    owner
+    && !existingThread
+    && normalizeResourceCommentThreads(owner.commentThreads).length >= MAX_RESOURCE_COMMENT_THREADS
+  );
   return `
     <form class="inline-comment-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-comment-popover>
-      <textarea class="inline-comment-input" data-inline-comment-input rows="2" placeholder="댓글 추가" aria-label="댓글">${esc(popover.body || "")}</textarea>
+      <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_RESOURCE_COMMENT_BODY_LENGTH}" placeholder="댓글 추가" aria-label="댓글" ${threadLimitReached ? 'disabled aria-disabled="true"' : ""}>${esc(popover.body || "")}</textarea>
       <div class="inline-comment-actions">
-        <button class="inline-comment-action" type="submit" data-inline-comment-apply>저장</button>
+        <button class="inline-comment-action" type="submit" data-inline-comment-apply ${threadLimitReached ? 'disabled aria-disabled="true"' : ""}>저장</button>
         <button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>
       </div>
+      ${threadLimitReached ? `<p class="resource-comment-limit" data-comment-thread-limit role="status">댓글 스레드는 Resource당 최대 ${MAX_RESOURCE_COMMENT_THREADS}개입니다.</p>` : ""}
     </form>
   `;
 }
@@ -6959,7 +7986,7 @@ function normalizeResourceExternalUrl(value = "") {
 
 function renderResourceUrlField(resource) {
   const safeUrl = normalizeResourceExternalUrl(resource.url);
-  const readOnly = resource.readOnly === true;
+  const readOnly = resourceContentReadOnly(resource);
   const editing = !readOnly && ui.resourceUrlEditorId === resource.id;
   return `
     <div class="field resource-url-field">
@@ -7019,6 +8046,13 @@ function renderRelationOptions(items, value, nameField) {
 }
 
 function handleClick(event) {
+  const urlPasteChoiceAction = event.target.closest("[data-url-paste-choice-action]");
+  if (urlPasteChoiceAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    applyUrlPasteChoice(urlPasteChoiceAction.dataset.urlPasteChoiceAction);
+    return;
+  }
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
 
   if (ui.suppressBlockClickUntil > Date.now() && event.target.closest(".block, .block-editor, .resource-note")) {
@@ -7094,11 +8128,11 @@ function handleClick(event) {
     return;
   }
 
-  const clickedPageMention = event.target.closest("[data-inline-mark='mention'][data-mention-type='page']");
-  if (clickedPageMention?.dataset.mentionTargetType === "resources" && clickedPageMention.dataset.mentionTargetId) {
+  const clickedPageMention = event.target.closest("[data-inline-mark='mention'][data-mention-type='page'][data-mention-target-type][data-mention-target-id]");
+  if (clickedPageMention) {
     event.preventDefault();
     event.stopPropagation();
-    openResourceNote(clickedPageMention.dataset.mentionTargetId);
+    activatePageMentionTarget(clickedPageMention);
     return;
   }
 
@@ -7139,20 +8173,54 @@ function handleClick(event) {
   const clickedBlockContent = event.target.closest("[data-block-content]");
   if (clickedBlockContent) {
     activateBlockContent(clickedBlockContent);
+    if (clickedBlockContent.matches("[data-url-block-preview]")) {
+      if (!event.target.closest("a[href]")) clickedBlockContent.focus({ preventScroll: true });
+      return;
+    }
     if (!hasInlineSelectionInside(clickedBlockContent)) {
       focusBlockContentAtClientPoint(clickedBlockContent, event.clientX, event.clientY);
     }
+  }
+
+  const inlineColorMenuToggle = event.target.closest("[data-inline-color-menu-toggle]");
+  if (inlineColorMenuToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleInlineColorMenu();
+    return;
+  }
+
+  const inlineColorChoice = event.target.closest("[data-inline-color-choice]");
+  if (inlineColorChoice) {
+    event.preventDefault();
+    event.stopPropagation();
+    applyInlineColorChoice(inlineColorChoice.dataset.inlineColorChoice);
+    return;
+  }
+
+  const inlineEquationButton = event.target.closest("[data-inline-equation-open]");
+  if (inlineEquationButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const range = inlineToolbarRangeFromControl(inlineEquationButton);
+    const item = itemById(inlineEquationButton.dataset.ownerType, inlineEquationButton.dataset.ownerId);
+    const block = item?.blocks?.find((entry) => entry.id === inlineEquationButton.dataset.blockId);
+    openEquationPopover(
+      inlineEquationButton.dataset.ownerType,
+      inlineEquationButton.dataset.ownerId,
+      inlineEquationButton.dataset.blockId,
+      range,
+      inlineEquationButton.getBoundingClientRect(),
+      block?.text?.slice(range.start, range.end) || "",
+    );
+    return;
   }
 
   const inlineMarkButton = event.target.closest("[data-inline-mark-toggle]");
   if (inlineMarkButton) {
     event.preventDefault();
     event.stopPropagation();
-    const range = {
-      start: Number.parseInt(inlineMarkButton.dataset.selectionStart, 10) || 0,
-      end: Number.parseInt(inlineMarkButton.dataset.selectionEnd, 10) || 0,
-      collapsed: false,
-    };
+    const range = inlineToolbarRangeFromControl(inlineMarkButton);
     if (inlineMarkButton.dataset.inlineMarkToggle === "link") {
       openLinkPopover(
         inlineMarkButton.dataset.ownerType,
@@ -7252,6 +8320,13 @@ function handleClick(event) {
     return;
   }
 
+  const resourceTrashShortcut = event.target.closest("[data-resource-trash-shortcut]");
+  if (resourceTrashShortcut) {
+    event.preventDefault();
+    setResourceTrashView(!resourceTrashMode());
+    return;
+  }
+
   const viewMode = event.target.closest("[data-view-control-mode]");
   if (viewMode) {
     event.preventDefault();
@@ -7339,6 +8414,7 @@ function handleClick(event) {
   if (resourceCopyLink) {
     event.preventDefault();
     event.stopPropagation();
+    if (resourceCopyLink.closest("[data-resource-page-menu-panel]")) closeResourcePageMenu({ focus: true });
     copyResourcePageLink(resourceCopyLink.dataset.resourceCopyLink);
     return;
   }
@@ -7463,6 +8539,44 @@ function handleClick(event) {
     return;
   }
 
+  const resourcePageLock = event.target.closest("[data-resource-page-lock]");
+  if (resourcePageLock) {
+    event.preventDefault();
+    setResourcePageLocked(resourcePageLock.dataset.resourcePageLock, resourcePageLock.getAttribute("aria-checked") !== "true");
+    return;
+  }
+
+  const resourceDuplicate = event.target.closest("[data-resource-duplicate]");
+  if (resourceDuplicate) {
+    event.preventDefault();
+    duplicateResourcePage(resourceDuplicate.dataset.resourceDuplicate);
+    return;
+  }
+
+  const resourceMoveMenu = event.target.closest("[data-resource-move-menu]");
+  if (resourceMoveMenu) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleResourceMoveMenu(resourceMoveMenu.dataset.resourceMoveMenu);
+    return;
+  }
+
+  const resourceMoveParent = event.target.closest("[data-resource-move-parent][data-resource-move-owner]");
+  if (resourceMoveParent) {
+    event.preventDefault();
+    event.stopPropagation();
+    moveResourceFromPageMenu(resourceMoveParent.dataset.resourceMoveOwner, resourceMoveParent.dataset.resourceMoveParent || "");
+    return;
+  }
+
+  const resourceExportMarkdown = event.target.closest("[data-resource-export-markdown]");
+  if (resourceExportMarkdown) {
+    event.preventDefault();
+    closeResourcePageMenu({ focus: true });
+    downloadResourcePageMarkdown(resourceExportMarkdown.dataset.resourceExportMarkdown);
+    return;
+  }
+
   const moveResourceToTrash = event.target.closest("[data-resource-move-to-trash]");
   if (moveResourceToTrash) {
     event.preventDefault();
@@ -7470,10 +8584,13 @@ function handleClick(event) {
     return;
   }
 
-  const restoreResource = event.target.closest("[data-resource-restore], [data-resource-trash-undo]");
+  const restoreResource = event.target.closest("[data-resource-restore], [data-restore-resource], [data-resource-trash-undo]");
   if (restoreResource) {
     event.preventDefault();
-    restoreResourcePage(restoreResource.dataset.resourceRestore || restoreResource.dataset.resourceTrashUndo);
+    restoreResourcePage(
+      restoreResource.dataset.resourceRestore || restoreResource.dataset.restoreResource || restoreResource.dataset.resourceTrashUndo,
+      { focusTrashView: Boolean(restoreResource.closest("[data-resource-trash-view]")) },
+    );
     return;
   }
 
@@ -7515,6 +8632,13 @@ function handleClick(event) {
     return;
   }
 
+  const commentDelete = event.target.closest("[data-comment-delete]");
+  if (commentDelete) {
+    event.preventDefault();
+    deleteResourceCommentThread(commentDelete.dataset.commentDelete);
+    return;
+  }
+
   const resourceUrlAction = event.target.closest("[data-resource-url-action]");
   if (resourceUrlAction && resourceUrlAction.tagName !== "A") {
     event.preventDefault();
@@ -7529,6 +8653,13 @@ function handleClick(event) {
       conflictResolution.dataset.conflictResource,
       conflictResolution.dataset.conflictResolution,
     );
+    return;
+  }
+
+  const resourceSaveRetry = event.target.closest("[data-resource-save-retry]");
+  if (resourceSaveRetry) {
+    event.preventDefault();
+    retryFailedResourceSave(resourceSaveRetry.dataset.resourceSaveRetry);
     return;
   }
 
@@ -7802,6 +8933,30 @@ function handleClick(event) {
     return;
   }
 
+  const selectedBlockMoveBack = event.target.closest("[data-selected-block-move-back]");
+  if (selectedBlockMoveBack) {
+    event.preventDefault();
+    event.stopPropagation();
+    returnSelectedBlockMoveMenuToActions();
+    return;
+  }
+
+  const selectedBlockMoveCancel = event.target.closest("[data-selected-block-move-cancel]");
+  if (selectedBlockMoveCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSelectedBlockMoveMenu({ restoreSelection: true, focus: true });
+    return;
+  }
+
+  const selectedBlockMoveTarget = event.target.closest("[data-selected-block-move-target]");
+  if (selectedBlockMoveTarget) {
+    event.preventDefault();
+    event.stopPropagation();
+    moveSelectedBlocksToResource(selectedBlockMoveTarget.dataset.selectedBlockMoveTarget);
+    return;
+  }
+
   const selectedBlockAction = event.target.closest("[data-selected-block-action]");
   if (selectedBlockAction) {
     event.preventDefault();
@@ -7900,7 +9055,7 @@ function handleAction(action) {
 }
 
 function handleSelectedBlocksMenuOutsideClick(event) {
-  if (ui.slash?.mode !== "selection") return false;
+  if (!selectedBlocksMenuModeActive()) return false;
   if (!(event.target instanceof Element) || event.target.closest(".slash-menu")) return false;
   event.preventDefault();
   event.stopPropagation();
@@ -7917,7 +9072,7 @@ function handleSelectedBlocksMenuOutsideClick(event) {
 }
 
 function handleSelectedBlocksMenuOutsidePointerDown(event) {
-  if (ui.slash?.mode !== "selection") return false;
+  if (!selectedBlocksMenuModeActive()) return false;
   if (!(event.target instanceof Element) || event.target.closest(".slash-menu")) return false;
   const blockTool = event.target.closest("[data-block-drag], [data-block-add], [data-block-toggle], [data-block-check]");
   const clickedBlockContent = event.target.closest("[data-block-content]");
@@ -7985,6 +9140,12 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const selectedBlockMoveQuery = event.target.closest("[data-selected-block-move-query]");
+  if (selectedBlockMoveQuery) {
+    updateSelectedBlockMoveQuery(selectedBlockMoveQuery.value || "");
+    return;
+  }
+
   const slashQuery = event.target.closest("[data-slash-query]");
   if (slashQuery) {
     updateSlashQuery(slashQuery.value || "");
@@ -8066,7 +9227,8 @@ function handleChange(event) {
       resourceParent.value = resource?.parentId || "";
       return;
     }
-    setResourceParent(resourceParent.dataset.resourceParent, resourceParent.value);
+    const moved = setResourceParent(resourceParent.dataset.resourceParent, resourceParent.value);
+    if (!moved && resourceParent.isConnected) resourceParent.value = resource?.parentId || "";
     return;
   }
 
@@ -8547,10 +9709,12 @@ function openResourceNote(resourceId, options = {}) {
   ui.emojiCommand = null;
   ui.equationPopover = null;
   if (options.route !== false) {
-    writeResourceRouteHistory(resourceId, pageMode, { replace: options.replace === true || Boolean(existingRoute) });
+    writeResourceRouteHistory(resourceId, pageMode, {
+      replace: options.replace === true || (options.replace !== false && Boolean(existingRoute)),
+    });
   }
   renderDetail();
-  if (pageMode === "center" || pageMode === "full") requestAnimationFrame(focusResourcePageShell);
+  if (pageMode !== "side" || resourcePageUsesCompactShell()) requestAnimationFrame(focusResourcePageShell);
 }
 
 function createParityResourceNote(resourceId, pageMode, previous = null) {
@@ -8705,6 +9869,7 @@ function setResourceNoteFloatingFallback(note, index = 0) {
   note.x = Math.max(24, Math.round(window.innerWidth * 0.06) + index * 28);
   note.y = 56 + index * 28;
   delete note.splitSlot;
+  clampFloatingResourceNoteToViewport(note);
 }
 
 function restoreResourceNoteAfterSplit(note, index = 0) {
@@ -8718,6 +9883,8 @@ function restoreResourceNoteAfterSplit(note, index = 0) {
   note.mode = previousMode;
   if (previousMode === "floating" && (!Number.isFinite(note.x) || !Number.isFinite(note.y))) {
     setResourceNoteFloatingFallback(note, index);
+  } else if (previousMode === "floating") {
+    clampFloatingResourceNoteToViewport(note);
   }
 }
 
@@ -8742,6 +9909,7 @@ function setResourceNoteModeState(note, mode) {
   if (isDockedResourceMode(normalizedMode) && Number.isFinite(note.width)) {
     note.width = resolvedDockedResourceNoteWidth(note);
   }
+  if (normalizedMode === "floating") clampFloatingResourceNoteToViewport(note);
 }
 
 function placeResourceNoteInSplit(note) {
@@ -8864,7 +10032,8 @@ function toggleResourceProps(resourceId) {
 }
 
 function toggleResourcePageMenu(resourceId) {
-  if (!resourceMutationAllowed(resourceId)) return;
+  const resource = itemById("resources", resourceId);
+  if (!resource || resource.trashedAt) return;
   if (ui.resourcePageMenuId === resourceId) {
     closeResourcePageMenu({ focus: true });
     return;
@@ -8878,14 +10047,15 @@ function toggleResourcePageMenu(resourceId) {
     return;
   }
   trigger.setAttribute("aria-expanded", "true");
-  wrap.insertAdjacentHTML("beforeend", renderResourcePageMenu(itemById("resources", resourceId)));
-  requestAnimationFrame(() => wrap.querySelector("[role^='menuitem']")?.focus());
+  wrap.insertAdjacentHTML("beforeend", renderResourcePageMenu(resource));
+  requestAnimationFrame(() => wrap.querySelector("[role^='menuitem']:not([disabled])")?.focus());
 }
 
 function closeResourcePageMenu(options = {}) {
   const resourceId = ui.resourcePageMenuId;
   if (!resourceId) return false;
   ui.resourcePageMenuId = "";
+  ui.resourceMoveMenuId = "";
   document.querySelector(`[data-resource-page-menu-panel="${cssEscape(resourceId)}"]`)?.remove();
   const trigger = document.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`);
   trigger?.setAttribute("aria-expanded", "false");
@@ -8893,6 +10063,237 @@ function closeResourcePageMenu(options = {}) {
     requestAnimationFrame(() => trigger?.focus());
   }
   return true;
+}
+
+function closeResourcePageMenuForTab(event) {
+  const resourceId = ui.resourcePageMenuId;
+  const trigger = resourceId
+    ? document.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`)
+    : null;
+  const shell = trigger?.closest("[data-resource-note]");
+  if (!trigger || !shell) return false;
+  const focusable = resourcePageFocusableElements(shell)
+    .filter((element) => !element.closest(".resource-page-menu"));
+  const triggerIndex = focusable.indexOf(trigger);
+  const destination = triggerIndex >= 0
+    ? focusable[triggerIndex + (event.shiftKey ? -1 : 1)]
+    : null;
+  event.preventDefault();
+  event.stopPropagation();
+  closeResourcePageMenu({ focus: false });
+  requestAnimationFrame(() => (destination || trigger)?.focus?.({ preventScroll: true }));
+  return true;
+}
+
+function closeResourceMoveMenu(options = {}) {
+  const resourceId = ui.resourceMoveMenuId;
+  if (!resourceId) return false;
+  ui.resourceMoveMenuId = "";
+  renderDetail({ soft: true });
+  if (options.focus !== false) {
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-resource-move-menu="${cssEscape(resourceId)}"]`)?.focus?.({ preventScroll: true });
+    });
+  }
+  return true;
+}
+
+function toggleResourceMoveMenu(resourceId) {
+  const resource = itemById("resources", resourceId);
+  const currentParent = resource?.parentId ? itemById("resources", resource.parentId) : null;
+  if (!resource || resource.trashedAt || resourceContentReadOnly(resource) || resourceContentReadOnly(currentParent)) return false;
+  if (ui.resourceMoveMenuId === resourceId) return closeResourceMoveMenu({ focus: true });
+  ui.resourceMoveMenuId = resourceId;
+  renderDetail({ soft: true });
+  requestAnimationFrame(() => {
+    const target = document.querySelector(`[data-resource-move-menu-panel="${cssEscape(resourceId)}"] [role^="menuitem"]`);
+    target?.focus?.({ preventScroll: true });
+  });
+  return true;
+}
+
+function moveResourceFromPageMenu(resourceId, parentId) {
+  const triggerSelector = `[data-resource-page-menu="${cssEscape(resourceId)}"]`;
+  closeResourcePageMenu({ focus: false });
+  const moved = setResourceParent(resourceId, parentId);
+  if (!moved) renderDetail({ soft: true });
+  requestAnimationFrame(() => document.querySelector(triggerSelector)?.focus?.({ preventScroll: true }));
+  return moved;
+}
+
+function duplicateResourcePage(resourceId) {
+  const source = itemById("resources", resourceId);
+  const parent = source?.parentId ? itemById("resources", source.parentId) : null;
+  if (!source || source.trashedAt || resourceContentReadOnly(source) || resourceContentReadOnly(parent)) return null;
+  const sourceNote = resourceNoteById(resourceId);
+  const duplicate = createResource(`${source.title || "Untitled"} copy`, {
+    deferCreate: true,
+    initial: {
+      type: source.type,
+      importance: source.importance,
+      pinned: Boolean(source.pinned),
+      readLater: Boolean(source.readLater),
+      url: source.url || "",
+      boxId: source.boxId || "",
+      goalId: source.goalId || "",
+      projectId: source.projectId || "",
+      parentId: source.parentId || "",
+      childOrder: [],
+      pageSettings: cloneForLocalPersistence(source.pageSettings),
+      icon: source.icon || "",
+      cover: cloneForLocalPersistence(source.cover),
+      readOnly: false,
+      locked: false,
+      trashedAt: "",
+      commentThreads: [],
+      blocks: duplicateResourceBlocks(source.blocks),
+    },
+  });
+  if (!duplicate) return null;
+  touchResource(duplicate);
+  if (parent) {
+    parent.childOrder = Array.isArray(parent.childOrder) ? parent.childOrder : [];
+    const sourceIndex = parent.childOrder.indexOf(source.id);
+    const insertionIndex = sourceIndex >= 0 ? sourceIndex + 1 : parent.childOrder.length;
+    parent.childOrder.splice(insertionIndex, 0, duplicate.id);
+    touchResource(parent);
+  }
+  queueResourceOperationGroup([duplicate.id, parent?.id]);
+  closeResourcePageMenu({ focus: false });
+  saveState();
+  renderView({ soft: true });
+  openResourceNote(duplicate.id, {
+    pageMode: sourceNote?.pageMode,
+    replace: false,
+    rememberFocus: false,
+  });
+  showToast("Resource를 복제했습니다.");
+  return duplicate;
+}
+
+function duplicateResourceBlocks(blocks = []) {
+  return (Array.isArray(blocks) ? blocks : []).map((block) => {
+    const duplicate = cloneForLocalPersistence(block);
+    duplicate.id = id();
+    duplicate.marks = normalizeInlineMarks(block.text || "", block.marks)
+      .filter((mark) => mark.type !== "comment")
+      .map((mark) => ({ ...mark }));
+    return duplicate;
+  });
+}
+
+function downloadResourcePageMarkdown(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resource) return false;
+  const markdown = resourcePageMarkdown(resource);
+  const baseName = String(resource.title || "Untitled")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 96) || "Untitled";
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${baseName}.md`;
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  showToast("Markdown으로 내보냈습니다.");
+  return true;
+}
+
+function resourcePageMarkdown(resource) {
+  const title = resource.title || "Untitled";
+  const lines = [
+    "---",
+    `title: ${JSON.stringify(title)}`,
+    `createdAt: ${JSON.stringify(resource.createdAt || "")}`,
+    `updatedAt: ${JSON.stringify(resource.updatedAt || "")}`,
+    `type: ${JSON.stringify(resource.type || "")}`,
+    `importance: ${JSON.stringify(resource.importance || "")}`,
+    "---",
+    "",
+    `# ${markdownEscapeText(title)}`,
+    "",
+  ];
+  for (const block of Array.isArray(resource.blocks) ? resource.blocks : []) {
+    lines.push(resourceBlockMarkdown(block), "");
+  }
+  return `${lines.join("\n").replace(/\n{3,}$/g, "\n\n")}\n`;
+}
+
+function resourceBlockMarkdown(block) {
+  const text = resourceInlineMarkdown(block);
+  const indent = "  ".repeat(normalizedBlockIndent(block?.indent));
+  if (isUrlPreviewBlockType(block?.type)) {
+    const safeUrl = normalizeStandaloneHttpsUrl(block.url || block.text || "");
+    const label = block.type === "embed" ? "Embed" : "Bookmark";
+    return safeUrl ? `${indent}[${label}](${safeUrl})` : `${indent}${markdownEscapeText(block.text || "")}`;
+  }
+  if (block?.type === "heading1") return `${indent}# ${text}`;
+  if (block?.type === "heading2") return `${indent}## ${text}`;
+  if (block?.type === "heading3") return `${indent}### ${text}`;
+  if (block?.type === "bullet") return `${indent}- ${text}`;
+  if (block?.type === "numbered") return `${indent}1. ${text}`;
+  if (block?.type === "todo") return `${indent}- [${block.checked ? "x" : " "}] ${text}`;
+  if (block?.type === "toggle") return `${indent}- ▸ ${text}`;
+  if (block?.type === "quote") return `${indent}> ${text}`;
+  if (block?.type === "callout") return `${indent}> [!NOTE] ${text}`;
+  if (block?.type === "divider") return `${indent}---`;
+  if (block?.type === "code") {
+    const raw = String(block.text || "");
+    const longestBacktickRun = Math.max(0, ...(raw.match(/`+/g) || []).map((run) => run.length));
+    const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+    return `${indent}${fence}\n${raw}\n${indent}${fence}`;
+  }
+  return `${indent}${text}`;
+}
+
+function resourceInlineMarkdown(block) {
+  const text = String(block?.text || "");
+  if (!text) return "";
+  const marks = normalizeInlineMarks(text, block?.marks);
+  if (!marks.length) return markdownEscapeText(text);
+  const points = new Set([0, text.length]);
+  for (const mark of marks) {
+    points.add(mark.start);
+    points.add(mark.end);
+  }
+  const sorted = [...points].sort((left, right) => left - right);
+  let markdown = "";
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const start = sorted[index];
+    const end = sorted[index + 1];
+    if (end <= start) continue;
+    const active = marks.filter((mark) => mark.start <= start && mark.end >= end);
+    markdown += resourceInlineMarkdownSegment(text.slice(start, end), active);
+  }
+  return markdown;
+}
+
+function resourceInlineMarkdownSegment(text, marks) {
+  let markdown = markdownEscapeText(text);
+  const ordered = [...marks].sort((left, right) => INLINE_MARK_TYPES.indexOf(left.type) - INLINE_MARK_TYPES.indexOf(right.type));
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const mark = ordered[index];
+    if (mark.type === "bold") markdown = `**${markdown}**`;
+    else if (mark.type === "italic") markdown = `*${markdown}*`;
+    else if (mark.type === "underline") markdown = `<u>${markdown}</u>`;
+    else if (mark.type === "strike") markdown = `~~${markdown}~~`;
+    else if (mark.type === "code") markdown = `\`${markdown.replace(/`/g, "\\`")}\``;
+    else if (mark.type === "link" && normalizeInlineHref(mark.href || "")) markdown = `[${markdown}](${normalizeInlineHref(mark.href || "")})`;
+    else if (mark.type === "mention" && mark.mentionType === "page" && mark.targetType === "resources" && mark.targetId) {
+      markdown = `[${markdown}](${resourceDeepLink(mark.targetId)})`;
+    } else if (mark.type === "equation") markdown = `$${String(mark.formula || text).replace(/\$/g, "\\$")}$`;
+  }
+  return markdown;
+}
+
+function markdownEscapeText(value) {
+  return String(value || "").replace(/([\\`*_[\]<>])/g, "\\$1");
 }
 
 function setResourcePageSetting(resourceId, key, value) {
@@ -8918,6 +10319,25 @@ function toggleResourcePageSetting(resourceId, key) {
   saveState();
   patchResourcePageSettings(resource);
   closeResourcePageMenu({ focus: true });
+}
+
+function setResourcePageLocked(resourceId, locked) {
+  const resource = itemById("resources", resourceId);
+  const nextLocked = Boolean(locked);
+  if (!resource || resource.readOnly || resource.trashedAt || resource.locked === nextLocked) return false;
+  resource.locked = nextLocked;
+  touchResource(resource, { allowLocked: true });
+  ui.resourcePageMenuId = "";
+  ui.resourceMoveMenuId = "";
+  ui.resourceIconPickerId = "";
+  ui.resourceCoverEditorId = "";
+  ui.resourceUrlEditorId = "";
+  saveState();
+  renderView({ soft: true });
+  renderDetail();
+  showToast(nextLocked ? "페이지를 잠갔습니다." : "페이지 잠금을 해제했습니다.");
+  requestAnimationFrame(() => document.querySelector(`[data-resource-page-menu="${cssEscape(resourceId)}"]`)?.focus());
+  return true;
 }
 
 function patchResourcePageSettings(resource) {
@@ -9030,82 +10450,160 @@ function handleResourceMediaError(event) {
 
 function moveResourcePageToTrash(resourceId) {
   const resource = itemById("resources", resourceId);
-  if (!resourceMutationAllowed(resource)) return;
+  if (!resourceMutationAllowed(resource)) return false;
   resource.trashedAt = new Date().toISOString();
   touchResource(resource);
   ui.resourcePageMenuId = "";
+  ui.resourceMoveMenuId = "";
   ui.resourceCommentsId = "";
   ui.resourceTrashUndoId = resourceId;
   saveState();
+  showToast("휴지통으로 이동했습니다.", {
+    actionLabel: "실행 취소",
+    onAction: () => restoreResourcePage(resourceId, { preserveFocus: true }),
+  });
   renderView({ soft: true });
   renderDetail({ soft: true });
+  syncRenderedResourceMentionTargetState(resourceId);
+  requestAnimationFrame(focusResourcePageShell);
+  return true;
 }
 
-function restoreResourcePage(resourceId) {
+function restoreResourcePage(resourceId, options = {}) {
   const resource = itemById("resources", resourceId);
-  if (!resourceMutationAllowed(resource, { allowTrashed: true }) || !resource.trashedAt) return;
+  if (!resourceMutationAllowed(resource, { allowTrashed: true, allowLocked: true }) || !resource.trashedAt) return false;
+  const trashRows = options.focusTrashView
+    ? [...(els.viewRoot?.querySelectorAll("[data-resource-trash-row]") || [])]
+    : [];
+  const restoredIndex = trashRows.findIndex((row) => row.dataset.resourceTrashRow === resourceId);
+  const adjacentTrashId = restoredIndex >= 0
+    ? trashRows[restoredIndex + 1]?.dataset.resourceTrashRow || trashRows[restoredIndex - 1]?.dataset.resourceTrashRow || ""
+    : "";
   resource.trashedAt = "";
-  touchResource(resource);
+  touchResource(resource, { allowLocked: true });
   if (ui.resourceTrashUndoId === resourceId) ui.resourceTrashUndoId = "";
   saveState();
   renderView({ soft: true });
   renderDetail({ soft: true });
+  syncRenderedResourceMentionTargetState(resourceId);
+  if (!options.preserveFocus) {
+    requestAnimationFrame(() => {
+      if (options.focusTrashView) {
+        const adjacentRow = adjacentTrashId
+          ? els.viewRoot?.querySelector(`[data-resource-trash-row="${cssEscape(adjacentTrashId)}"]`)
+          : null;
+        const adjacent = adjacentRow?.querySelector("[data-resource-restore]:not([disabled])")
+          || adjacentRow?.querySelector("[data-open-resource]:not([disabled])");
+        (adjacent || els.viewRoot?.querySelector("[data-resource-trash-heading]"))?.focus?.({ preventScroll: true });
+        return;
+      }
+      focusResourcePageShell();
+    });
+  }
+  showToast("Resource를 복원했습니다.");
+  return true;
 }
 
-function createResourceSubPage(parentId) {
+function createResourceSubPage(parentId, options = {}) {
   const parent = itemById("resources", parentId);
-  if (!resourceMutationAllowed(parent)) return;
-  const child = createResource("Untitled", {
+  if (!resourceMutationAllowed(parent)) return null;
+  const title = String(options.title || "").trim() || "Untitled";
+  const child = createResource(title, {
     deferCreate: true,
     initial: {
+      ...(options.initial || {}),
       parentId,
-      boxId: parent.boxId || "",
-      goalId: parent.goalId || "",
-      projectId: parent.projectId || "",
+      boxId: options.initial?.boxId ?? parent.boxId ?? "",
+      goalId: options.initial?.goalId ?? parent.goalId ?? "",
+      projectId: options.initial?.projectId ?? parent.projectId ?? "",
     },
   });
+  if (!child) return null;
   parent.childOrder = Array.isArray(parent.childOrder) ? parent.childOrder : [];
   if (!parent.childOrder.includes(child.id)) parent.childOrder.push(child.id);
-  touchResource(parent);
   touchResource(child);
+  touchResource(parent);
+  queueResourceOperationGroup([child.id, parent.id]);
+  if (options.deferCommit) return child;
   saveState();
   renderView({ soft: true });
   renderDetail({ soft: true });
   showToast("하위 Resource를 만들었습니다.");
+  return child;
 }
 
 function setResourceParent(resourceId, requestedParentId) {
   const resource = itemById("resources", resourceId);
-  if (!resourceMutationAllowed(resource)) return;
+  if (!resourceMutationAllowed(resource)) return false;
   const parentId = String(requestedParentId || "");
   const nextParent = parentId ? itemById("resources", parentId) : null;
   if (parentId && (!nextParent || nextParent.trashedAt || parentId === resourceId || resourceDescendantIds(resourceId).has(parentId))) {
     renderDetail({ soft: true });
-    return;
+    return false;
   }
-  if (resource.parentId === parentId) return;
+  if (resource.parentId === parentId) return false;
   const previousParent = resource.parentId ? itemById("resources", resource.parentId) : null;
-  if ((previousParent && !resourceMutationAllowed(previousParent)) || (nextParent && !resourceMutationAllowed(nextParent))) return;
+  if ((previousParent && !resourceMutationAllowed(previousParent)) || (nextParent && !resourceMutationAllowed(nextParent))) return false;
   if (previousParent) {
     previousParent.childOrder = (previousParent.childOrder || []).filter((childId) => childId !== resourceId);
     touchResource(previousParent);
   }
   resource.parentId = parentId;
+  touchResource(resource);
   if (nextParent) {
     nextParent.childOrder = Array.isArray(nextParent.childOrder) ? nextParent.childOrder : [];
     if (!nextParent.childOrder.includes(resourceId)) nextParent.childOrder.push(resourceId);
     touchResource(nextParent);
   }
-  touchResource(resource);
+  queueResourceOperationGroup([previousParent?.id, resource.id, nextParent?.id]);
   saveState();
   renderView({ soft: true });
   renderDetail({ soft: true });
+  return true;
+}
+
+function resourceUnreadCommentCount(resource) {
+  if (!resource) return 0;
+  const readAt = Math.max(
+    stateTimestamp(state.settings?.resourceCommentReadAt?.[resource.id]),
+    stateTimestamp(ui.resourceCommentReadAt?.[resource.id]),
+  );
+  return normalizeResourceCommentThreads(resource.commentThreads).filter((thread) => (
+    !thread.deletedAt && stateTimestamp(thread.updatedAt || thread.createdAt) > readAt
+  )).length;
+}
+
+function updateResourceCommentReadAt(resourceId, timestamp = new Date().toISOString()) {
+  const readAt = normalizedIsoTimestamp(timestamp);
+  if (!resourceId || !readAt) return false;
+  ui.resourceCommentReadAt = normalizeResourceCommentReadAt(ui.resourceCommentReadAt);
+  if (stateTimestamp(ui.resourceCommentReadAt[resourceId]) >= stateTimestamp(readAt)) return false;
+  ui.resourceCommentReadAt[resourceId] = readAt;
+  queueLocalResourceCommentReadAtWrite(resourceId, readAt);
+  return true;
+}
+
+function markResourceCommentsRead(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resource) return false;
+  const latestCommentAt = normalizeResourceCommentThreads(resource.commentThreads).reduce(
+    (latest, thread) => thread.deletedAt ? latest : Math.max(latest, stateTimestamp(thread.updatedAt || thread.createdAt)),
+    0,
+  );
+  if (!latestCommentAt) return false;
+  const currentReadAt = Math.max(
+    stateTimestamp(state.settings?.resourceCommentReadAt?.[resourceId]),
+    stateTimestamp(ui.resourceCommentReadAt?.[resourceId]),
+  );
+  if (currentReadAt >= latestCommentAt) return false;
+  return updateResourceCommentReadAt(resourceId, new Date(Math.max(Date.now(), latestCommentAt)).toISOString());
 }
 
 function toggleResourceComments(resourceId) {
   if (!itemById("resources", resourceId)) return;
   ui.resourceCommentsId = ui.resourceCommentsId === resourceId ? "" : resourceId;
   if (!ui.resourceCommentsId) ui.resourceCommentFocusId = "";
+  else markResourceCommentsRead(resourceId);
   ui.resourcePageMenuId = "";
   renderDetail({ soft: true });
 }
@@ -9125,16 +10623,35 @@ function newResourceCommentThread(scope, body, anchor = null) {
   };
 }
 
+function resourceCommentThreadLimitReached(resource) {
+  return normalizeResourceCommentThreads(resource?.commentThreads).length >= MAX_RESOURCE_COMMENT_THREADS;
+}
+
+function rejectResourceCommentInput(input, message) {
+  markResourceInputLimitError(input, message);
+  input?.focus?.({ preventScroll: true });
+  return false;
+}
+
 function submitPageDiscussion(resourceId) {
   const resource = itemById("resources", resourceId);
   const composer = document.querySelector(`[data-page-discussion-composer="${cssEscape(resourceId)}"]`);
   const body = String(composer?.value || "").trim();
   if (!resourceMutationAllowed(resource) || !body) return;
+  if (body.length > MAX_RESOURCE_COMMENT_BODY_LENGTH) {
+    return rejectResourceCommentInput(composer, `댓글은 최대 ${MAX_RESOURCE_COMMENT_BODY_LENGTH}자입니다.`);
+  }
+  if (resourceCommentThreadLimitReached(resource)) {
+    return rejectResourceCommentInput(composer, `댓글 스레드는 Resource당 최대 ${MAX_RESOURCE_COMMENT_THREADS}개입니다.`);
+  }
+  clearResourceInputLimitError(composer);
+  const history = beginEditorHistory("resources", resource.id);
   resource.commentThreads = normalizeResourceCommentThreads(resource.commentThreads);
   const thread = newResourceCommentThread("page", body, null);
   resource.commentThreads.push(thread);
-  touchResource(resource);
+  updateResourceCommentReadAt(resource.id, thread.updatedAt);
   ui.resourceCommentFocusId = thread.id;
+  commitEditorHistory(history);
   saveState();
   renderDetail({ soft: true });
 }
@@ -9152,13 +10669,22 @@ function submitResourceCommentReply(threadId) {
   const input = document.querySelector(`[data-comment-reply-input="${cssEscape(threadId)}"]`);
   const body = String(input?.value || "").trim();
   if (!pair || !resourceMutationAllowed(pair.resource) || !body) return;
+  if (body.length > MAX_RESOURCE_COMMENT_BODY_LENGTH) {
+    return rejectResourceCommentInput(input, `댓글은 최대 ${MAX_RESOURCE_COMMENT_BODY_LENGTH}자입니다.`);
+  }
+  if ((Array.isArray(pair.thread.replies) ? pair.thread.replies.length : 0) >= MAX_RESOURCE_COMMENT_REPLIES) {
+    return rejectResourceCommentInput(input, `답글은 스레드당 최대 ${MAX_RESOURCE_COMMENT_REPLIES}개입니다.`);
+  }
+  clearResourceInputLimitError(input);
+  const history = beginEditorHistory("resources", pair.resource.id);
   const now = new Date().toISOString();
   pair.thread.replies = Array.isArray(pair.thread.replies) ? pair.thread.replies : [];
   pair.thread.replies.push({ id: id(), body, createdAt: now, updatedAt: now, deletedAt: "" });
   pair.thread.updatedAt = now;
-  touchResource(pair.resource);
+  updateResourceCommentReadAt(pair.resource.id, now);
   ui.resourceCommentsId = pair.resource.id;
   ui.resourceCommentFocusId = threadId;
+  commitEditorHistory(history);
   saveState();
   renderDetail({ soft: true });
 }
@@ -9166,14 +10692,41 @@ function submitResourceCommentReply(threadId) {
 function setResourceCommentResolved(threadId, resolved) {
   const pair = resourceAndCommentThread(threadId);
   if (!pair || !resourceMutationAllowed(pair.resource)) return;
+  const history = beginEditorHistory("resources", pair.resource.id);
   const now = new Date().toISOString();
   pair.thread.resolvedAt = resolved ? now : "";
   pair.thread.updatedAt = now;
-  touchResource(pair.resource);
+  updateResourceCommentReadAt(pair.resource.id, now);
   ui.resourceCommentsId = pair.resource.id;
   ui.resourceCommentFocusId = threadId;
+  commitEditorHistory(history);
   saveState();
   renderDetail({ soft: true });
+}
+
+function deleteResourceCommentThread(threadId) {
+  const pair = resourceAndCommentThread(threadId);
+  if (!pair || !resourceMutationAllowed(pair.resource) || pair.thread.deletedAt) return false;
+  const history = beginEditorHistory("resources", pair.resource.id);
+  const now = new Date().toISOString();
+  if (pair.thread.scope === "inline" && pair.thread.anchor?.blockId) {
+    const block = pair.resource.blocks?.find((entry) => entry.id === pair.thread.anchor.blockId);
+    if (block) {
+      block.marks = normalizeInlineMarks(block.text || "", block.marks).filter((mark) => (
+        !(mark.type === "comment" && mark.commentId === pair.thread.id)
+      ));
+    }
+  }
+  pair.thread.deletedAt = now;
+  pair.thread.updatedAt = now;
+  ui.resourceCommentsId = pair.resource.id;
+  ui.resourceCommentFocusId = "";
+  commitEditorHistory(history);
+  saveState();
+  renderEditorMutation("resources", pair.resource.id, { forceView: true });
+  renderDetail({ soft: true });
+  showToast("댓글을 삭제했습니다.");
+  return true;
 }
 
 function updateResourceUrl(resourceId, value) {
@@ -9237,6 +10790,7 @@ function beginResourceDrag(resourceId, event) {
   delete note.splitSlot;
   note.x = rect.left;
   note.y = rect.top;
+  clampFloatingResourceNoteToViewport(note);
   try {
     element.setPointerCapture?.(event.pointerId);
   } catch (_) {}
@@ -9262,8 +10816,9 @@ function handleResourcePointerMove(event) {
     }
   } else {
     note.mode = "floating";
-    note.x = Math.min(window.innerWidth - 360, Math.max(24, nextX));
-    note.y = Math.min(window.innerHeight - 180, Math.max(24, nextY));
+    note.x = nextX;
+    note.y = nextY;
+    clampFloatingResourceNoteToViewport(note);
   }
   syncResourceNoteElements();
 }
@@ -9286,9 +10841,14 @@ function resourceNoteResizeBounds(note) {
   const compact = window.matchMedia?.("(max-width: 840px)").matches;
   const docked = isDockedResourceMode(note?.mode);
   const minDockWidth = Math.min(360, Math.max(280, window.innerWidth - 24));
-  const minWidth = docked ? minDockWidth : compact ? Math.max(300, Math.min(window.innerWidth - 24, 520)) : 620;
-  const minHeight = compact ? Math.max(320, Math.min(window.innerHeight - 24, 420)) : 440;
-  let maxWidth = Math.max(minWidth, window.innerWidth - 40);
+  const viewportInsets = resourceFloatingViewportInsets();
+  const availableWidth = Math.max(1, window.innerWidth - viewportInsets.x * 2);
+  const availableHeight = Math.max(1, window.innerHeight - viewportInsets.y * 2);
+  const minWidth = docked ? minDockWidth : Math.min(compact ? 300 : 620, availableWidth);
+  const minHeight = docked
+    ? compact ? Math.max(320, Math.min(window.innerHeight - 24, 420)) : 440
+    : Math.min(compact ? 320 : 440, availableHeight);
+  let maxWidth = docked ? Math.max(minWidth, window.innerWidth - 40) : availableWidth;
   if (docked) {
     const side = resourceNoteDockSide(note);
     const other = dockedResourceNote(side === "left" ? "right" : "left");
@@ -9296,8 +10856,42 @@ function resourceNoteResizeBounds(note) {
     const mainReserve = other && window.innerWidth >= 1180 ? 320 : 0;
     maxWidth = Math.max(minWidth, window.innerWidth - otherWidth - mainReserve);
   }
-  const maxHeight = Math.max(minHeight, window.innerHeight - 40);
+  const maxHeight = docked ? Math.max(minHeight, window.innerHeight - 40) : availableHeight;
   return { minWidth, minHeight, maxWidth, maxHeight };
+}
+
+function resourceFloatingViewportInsets(viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
+  const preferred = viewportWidth <= 840 ? 12 : 20;
+  return {
+    x: Math.max(0, Math.min(preferred, Math.floor(Math.max(0, viewportWidth - 1) / 2))),
+    y: Math.max(0, Math.min(preferred, Math.floor(Math.max(0, viewportHeight - 1) / 2))),
+  };
+}
+
+function clampFloatingResourceNoteToViewport(note) {
+  if (!note || normalizedResourceNoteMode(note.mode) !== "floating") return false;
+  const bounds = resourceNoteResizeBounds(note);
+  const insets = resourceFloatingViewportInsets();
+  const element = document.querySelector(`[data-resource-note="${cssEscape(note.id)}"]`);
+  const renderedRect = element?.classList.contains("is-floating") ? element.getBoundingClientRect() : null;
+  const preferredWidth = Number.isFinite(note.width)
+    ? note.width
+    : renderedRect?.width || Math.min(960, bounds.maxWidth);
+  const preferredHeight = Number.isFinite(note.height)
+    ? note.height
+    : renderedRect?.height || Math.min(840, Math.round(window.innerHeight * 0.86));
+  const width = clampResourceNoteSize(preferredWidth, bounds.minWidth, bounds.maxWidth);
+  const height = clampResourceNoteSize(preferredHeight, bounds.minHeight, bounds.maxHeight);
+  const maximumX = Math.max(insets.x, window.innerWidth - insets.x - width);
+  const maximumY = Math.max(insets.y, window.innerHeight - insets.y - height);
+  const x = clampResourceNoteSize(Number.isFinite(note.x) ? note.x : insets.x, insets.x, maximumX);
+  const y = clampResourceNoteSize(Number.isFinite(note.y) ? note.y : insets.y, insets.y, maximumY);
+  const changed = note.width !== width || note.height !== height || note.x !== x || note.y !== y;
+  note.width = width;
+  note.height = height;
+  note.x = x;
+  note.y = y;
+  return changed;
 }
 
 function clampResourceNoteSize(value, min, max) {
@@ -9382,10 +10976,27 @@ function handleResourceLayoutResize() {
   for (const note of ui.resourceNotes) {
     if (isDockedResourceMode(note.mode) && Number.isFinite(note.width)) {
       note.width = dockedResourceNoteWidthPreference(note);
+    } else if (normalizedResourceNoteMode(note.mode) === "floating") {
+      clampFloatingResourceNoteToViewport(note);
     }
   }
   syncResourceNoteElements();
+  syncParityResourceShellModality();
   syncResourceSideWidth();
+  syncResourceFullPageChrome();
+}
+
+function syncParityResourceShellModality() {
+  const shell = els.detailRoot?.querySelector(
+    '.resource-page-shell.is-parity-page[data-resource-page-mode="side"]',
+  );
+  if (!shell) return;
+  const wasModal = shell.getAttribute("aria-modal") === "true";
+  const isModal = resourcePageUsesCompactShell();
+  shell.setAttribute("aria-modal", String(isModal));
+  if (isModal && !wasModal && !shell.contains(document.activeElement)) {
+    requestAnimationFrame(focusResourcePageShell);
+  }
 }
 
 function beginResourceResize(resourceId, event) {
@@ -9437,8 +11048,7 @@ function handleResourceResizePointerMove(event) {
     note.width = clampResourceNoteSize(resize.startWidth + (event.clientX - resize.startX), bounds.minWidth, bounds.maxWidth);
     note.height = clampResourceNoteSize(resize.startHeight + (event.clientY - resize.startY), bounds.minHeight, bounds.maxHeight);
     if (note.mode === "floating") {
-      note.x = Math.min(Math.max(20, note.x || 20), Math.max(20, window.innerWidth - note.width - 20));
-      note.y = Math.min(Math.max(20, note.y || 20), Math.max(20, window.innerHeight - note.height - 20));
+      clampFloatingResourceNoteToViewport(note);
     }
   }
   syncResourceNoteElements();
@@ -9465,6 +11075,9 @@ function resourceSideWidthMaximum(viewportWidth = window.innerWidth) {
 }
 
 function defaultResourceSideWidth(viewportWidth = window.innerWidth) {
+  if (viewportWidth <= 840 && !resourcePageUsesCompactShell()) {
+    return Math.min(520, Math.max(360, Math.round(viewportWidth * 0.551)));
+  }
   if (viewportWidth <= 900) return Math.min(500, Math.max(440, Math.round(viewportWidth * 0.54)));
   if (viewportWidth <= 1024) return Math.min(520, Math.max(440, Math.round(viewportWidth * 0.5)));
   if (viewportWidth <= 1280) return Math.min(580, Math.max(440, Math.round(viewportWidth * 0.44)));
@@ -9479,10 +11092,16 @@ function normalizedResourceSideWidth(value, viewportWidth = window.innerWidth) {
 
 function syncResourceSideWidth() {
   const width = normalizedResourceSideWidth(state.settings?.resourceSideWidth, window.innerWidth);
+  const maximum = resourceSideWidthMaximum(window.innerWidth);
   app.style.setProperty("--resource-parity-side-width", `${width}px`);
   const handle = document.querySelector("[data-resource-side-resize]");
   if (handle) {
-    handle.setAttribute("aria-valuemax", String(resourceSideWidthMaximum(window.innerWidth)));
+    const resizable = maximum > 360;
+    handle.hidden = !resizable;
+    handle.disabled = !resizable;
+    if (resizable) handle.removeAttribute("aria-disabled");
+    else handle.setAttribute("aria-disabled", "true");
+    handle.setAttribute("aria-valuemax", String(maximum));
     handle.setAttribute("aria-valuenow", String(width));
   }
 }
@@ -9501,7 +11120,7 @@ function syncResourceVisualViewport() {
 }
 
 function beginResourceSideResize(handle, event) {
-  if (window.innerWidth <= 840) return;
+  if (resourcePageUsesCompactShell()) return;
   const shell = handle.closest('[data-resource-page-mode="side"]');
   if (!shell) return;
   ui.resourceSideResize = {
@@ -10146,6 +11765,7 @@ function orderedSelectedBlockIds(editor) {
 }
 
 function restoreBlockSelection(ownerType, ownerId, ids) {
+  const previousSelectionKey = blockSelectionAnnouncementKey(ui.blockSelection);
   const expandedIds = expandedBlockSelectionIds(ownerType, ownerId, ids);
   ui.blockSelection = { ownerType, ownerId, ids: expandedIds };
   if (expandedIds.length) {
@@ -10168,6 +11788,27 @@ function restoreBlockSelection(ownerType, ownerId, ids) {
     block.classList.toggle("is-selected", expandedIds.includes(block.dataset.blockId));
   });
   document.activeElement?.blur();
+  if (expandedIds.length && previousSelectionKey !== blockSelectionAnnouncementKey(ui.blockSelection)) {
+    announceBlockSelection(expandedIds.length);
+  }
+}
+
+function blockSelectionAnnouncementKey(selection = {}) {
+  return `${selection.ownerType || ""}:${selection.ownerId || ""}:${(selection.ids || []).join(",")}`;
+}
+
+function announceAppStatus(message) {
+  const target = els.appAnnouncements || document.querySelector("#appAnnouncements");
+  if (!target) return;
+  window.clearTimeout(appAnnouncementTimer);
+  target.textContent = "";
+  appAnnouncementTimer = window.setTimeout(() => {
+    target.textContent = message;
+  }, 20);
+}
+
+function announceBlockSelection(count) {
+  announceAppStatus(count > 0 ? `${count}개 블록 선택됨` : "블록 선택 해제됨");
 }
 
 function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
@@ -10315,6 +11956,7 @@ function finishEditorMarqueeDrag(event) {
   removeEditorMarqueeElement();
   ui.editorMarquee = null;
   if (wasActive) {
+    announceBlockSelection(ui.blockSelection.ids.length);
     ui.suppressBlockClickUntil = Date.now() + 700;
     event.preventDefault();
     event.stopPropagation();
@@ -10646,6 +12288,7 @@ function selectAllBlocks(ownerType, ownerId) {
   selection?.removeAllRanges();
   deactivateActiveBlockContent();
   document.activeElement?.blur();
+  if (ids.length) announceBlockSelection(ids.length);
 }
 
 function focusSelectedBlockForEditing(position = "end") {
@@ -10712,6 +12355,7 @@ function clearBlockSelection() {
   selectedBlocks.forEach((block) => block.classList.remove("is-selected"));
   ui.blockSelection = { ownerType: "", ownerId: "", ids: [] };
   ui.selectedBlockDragHover = null;
+  announceBlockSelection(0);
 }
 
 function clearInlineEditingOverlaysForBlockSelection() {
@@ -10805,23 +12449,50 @@ function beginEditorHistory(ownerType, ownerId, focus = null) {
     ownerType,
     ownerId,
     beforeBlocks: cloneEditorBlocks(item.blocks),
+    beforeCommentThreads: ownerType === "resources" ? cloneEditorCommentThreads(item.commentThreads || []) : null,
     beforeFocus: normalizeEditorHistoryFocus(focus),
   };
 }
 
+function beginMultiResourceEditorHistory(resourceIds, focus = null) {
+  const orderedIds = [...new Set((resourceIds || []).map((resourceId) => String(resourceId || "").trim()).filter(Boolean))];
+  if (orderedIds.length < 2 || orderedIds.some((resourceId) => !resourceMutationAllowed(resourceId))) return null;
+  const resources = orderedIds.map((resourceId) => {
+    const resource = itemById("resources", resourceId);
+    return {
+      ownerType: "resources",
+      ownerId: resourceId,
+      beforeBlocks: cloneEditorBlocks(resource?.blocks || []),
+      beforeCommentThreads: cloneEditorCommentThreads(resource?.commentThreads || []),
+    };
+  });
+  return {
+    kind: "multi-resource",
+    resources,
+    beforeFocus: normalizeMultiResourceHistoryFocus(focus),
+  };
+}
+
 function commitEditorHistory(token, focus = null) {
-  if (!token || !token.ownerType || !token.ownerId) return;
-  if (!editorOwnerMutationAllowed(token.ownerType, token.ownerId)) return;
+  if (!token || !token.ownerType || !token.ownerId) return false;
+  if (!editorOwnerMutationAllowed(token.ownerType, token.ownerId)) return false;
   const item = itemById(token.ownerType, token.ownerId);
-  if (!item?.blocks) return;
+  if (!item?.blocks) return false;
+  reconcileEditorCommentAnchors(token.ownerType, token.ownerId);
   const afterBlocks = cloneEditorBlocks(item.blocks);
-  if (JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks)) return;
+  const afterCommentThreads = token.ownerType === "resources" ? cloneEditorCommentThreads(item.commentThreads || []) : null;
+  if (
+    JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks) &&
+    JSON.stringify(token.beforeCommentThreads) === JSON.stringify(afterCommentThreads)
+  ) return false;
   touchResourceForOwner(token.ownerType, token.ownerId);
   ui.editorHistory.undo.push({
     ownerType: token.ownerType,
     ownerId: token.ownerId,
     beforeBlocks: token.beforeBlocks,
     afterBlocks,
+    beforeCommentThreads: token.beforeCommentThreads,
+    afterCommentThreads,
     beforeFocus: token.beforeFocus,
     afterFocus: normalizeEditorHistoryFocus(focus),
   });
@@ -10829,6 +12500,42 @@ function commitEditorHistory(token, focus = null) {
   ui.editorHistory.redo = [];
   ui.nativeTextUndoDepth = 0;
   ui.nativeTextRedoDepth = 0;
+  return true;
+}
+
+function commitMultiResourceEditorHistory(token, focus = null) {
+  if (token?.kind !== "multi-resource" || !Array.isArray(token.resources) || token.resources.length < 2) return false;
+  if (!editorHistoryEntryMutationAllowed(token)) return false;
+  for (const snapshot of token.resources) reconcileEditorCommentAnchors(snapshot.ownerType, snapshot.ownerId);
+  const resources = token.resources.map((snapshot) => {
+    const resource = itemById("resources", snapshot.ownerId);
+    return {
+      ownerType: "resources",
+      ownerId: snapshot.ownerId,
+      beforeBlocks: snapshot.beforeBlocks,
+      afterBlocks: cloneEditorBlocks(resource?.blocks || []),
+      beforeCommentThreads: snapshot.beforeCommentThreads,
+      afterCommentThreads: cloneEditorCommentThreads(resource?.commentThreads || []),
+    };
+  });
+  if (resources.every((snapshot) => (
+    JSON.stringify(snapshot.beforeBlocks) === JSON.stringify(snapshot.afterBlocks) &&
+    JSON.stringify(snapshot.beforeCommentThreads) === JSON.stringify(snapshot.afterCommentThreads)
+  ))) return false;
+  for (const snapshot of resources) touchResourceForOwner(snapshot.ownerType, snapshot.ownerId);
+  ui.editorHistory.undo.push({
+    kind: "multi-resource",
+    ownerType: "resources",
+    ownerId: resources[0].ownerId,
+    resources,
+    beforeFocus: token.beforeFocus,
+    afterFocus: normalizeMultiResourceHistoryFocus(focus),
+  });
+  if (ui.editorHistory.undo.length > ui.editorHistory.limit) ui.editorHistory.undo.shift();
+  ui.editorHistory.redo = [];
+  ui.nativeTextUndoDepth = 0;
+  ui.nativeTextRedoDepth = 0;
+  return true;
 }
 
 function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
@@ -10837,14 +12544,16 @@ function refreshLatestEditorHistoryAfter(ownerType, ownerId, focus = null) {
   if (!latest || latest.ownerType !== ownerType || latest.ownerId !== ownerId) return;
   const item = itemById(ownerType, ownerId);
   if (!item?.blocks) return;
+  reconcileEditorCommentAnchors(ownerType, ownerId);
   latest.afterBlocks = cloneEditorBlocks(item.blocks);
+  if (ownerType === "resources") latest.afterCommentThreads = cloneEditorCommentThreads(item.commentThreads || []);
   latest.afterFocus = normalizeEditorHistoryFocus(focus);
   ui.editorHistory.redo = [];
 }
 
 function undoEditorHistory() {
   const pending = ui.editorHistory.undo[ui.editorHistory.undo.length - 1];
-  if (pending && !editorOwnerMutationAllowed(pending.ownerType, pending.ownerId)) return false;
+  if (pending && !editorHistoryEntryMutationAllowed(pending)) return false;
   const entry = ui.editorHistory.undo.pop();
   if (!entry) return false;
   ui.nativeTextUndoDepth = 0;
@@ -10856,7 +12565,7 @@ function undoEditorHistory() {
 
 function redoEditorHistory() {
   const pending = ui.editorHistory.redo[ui.editorHistory.redo.length - 1];
-  if (pending && !editorOwnerMutationAllowed(pending.ownerType, pending.ownerId)) return false;
+  if (pending && !editorHistoryEntryMutationAllowed(pending)) return false;
   const entry = ui.editorHistory.redo.pop();
   if (!entry) return false;
   ui.nativeTextUndoDepth = 0;
@@ -10867,12 +12576,22 @@ function redoEditorHistory() {
 }
 
 function restoreEditorHistoryEntry(entry, direction) {
-  if (!editorOwnerMutationAllowed(entry?.ownerType, entry?.ownerId)) return;
+  if (entry?.kind === "multi-resource") {
+    restoreMultiResourceEditorHistoryEntry(entry, direction);
+    return;
+  }
+  if (!editorHistoryEntryMutationAllowed(entry)) return;
   const item = itemById(entry.ownerType, entry.ownerId);
   if (!item) return;
   ui.pendingMarkdownTextTarget = null;
   item.blocks = cloneEditorBlocks(direction === "before" ? entry.beforeBlocks : entry.afterBlocks);
-  ensureEditableBlocks(item);
+  if (entry.ownerType === "resources") {
+    item.commentThreads = cloneEditorCommentThreads(
+      direction === "before" ? entry.beforeCommentThreads : entry.afterCommentThreads,
+    );
+  }
+  ensureEditableBlocks(item, { save: false });
+  reconcileEditorCommentAnchors(entry.ownerType, entry.ownerId);
   touchResourceForOwner(entry.ownerType, entry.ownerId);
   clearBlockSelection();
   saveState();
@@ -10881,8 +12600,111 @@ function restoreEditorHistoryEntry(entry, direction) {
   restoreEditorHistoryFocus(focus);
 }
 
+function editorHistoryEntryMutationAllowed(entry) {
+  if (entry?.kind === "multi-resource") {
+    return Array.isArray(entry.resources) && entry.resources.length > 1 && entry.resources.every((snapshot) => (
+      snapshot?.ownerType === "resources" && editorOwnerMutationAllowed(snapshot.ownerType, snapshot.ownerId)
+    ));
+  }
+  return Boolean(entry?.ownerType && entry?.ownerId && editorOwnerMutationAllowed(entry.ownerType, entry.ownerId));
+}
+
+function restoreMultiResourceEditorHistoryEntry(entry, direction) {
+  if (!editorHistoryEntryMutationAllowed(entry)) return false;
+  ui.pendingMarkdownTextTarget = null;
+  const orderedResourceIds = [];
+  for (const snapshot of entry.resources) {
+    const resource = itemById("resources", snapshot.ownerId);
+    if (!resource) return false;
+    resource.blocks = cloneEditorBlocks(direction === "before" ? snapshot.beforeBlocks : snapshot.afterBlocks);
+    resource.commentThreads = cloneEditorCommentThreads(
+      direction === "before" ? snapshot.beforeCommentThreads : snapshot.afterCommentThreads,
+    );
+    ensureEditableBlocks(resource, { save: false });
+    reconcileResourceCommentAnchors(resource);
+    orderedResourceIds.push(resource.id);
+  }
+  for (const resourceId of orderedResourceIds) touchResource(resourceId);
+  // A cross-page move is persisted as two conditional Resource writes. Undo must
+  // remove the moved IDs from the target before restoring them to the source;
+  // redo/forward keeps the original source-removal then target-addition order.
+  const persistenceResourceIds = direction === "before"
+    ? [...orderedResourceIds].reverse()
+    : orderedResourceIds;
+  queueResourceOperationGroup(persistenceResourceIds);
+  clearBlockSelection();
+  saveState();
+  renderDetail({ soft: true });
+  renderView({ soft: true });
+  const focus = direction === "before" ? entry.beforeFocus : entry.afterFocus;
+  restoreMultiResourceHistoryFocus(focus);
+  return true;
+}
+
 function cloneEditorBlocks(blocksList = []) {
   return JSON.parse(JSON.stringify(blocksList || []));
+}
+
+function cloneEditorCommentThreads(commentThreads = []) {
+  return JSON.parse(JSON.stringify(commentThreads || []));
+}
+
+function reconcileEditorCommentAnchors(ownerType, ownerId, options = {}) {
+  if (ownerType !== "resources") return false;
+  const resource = itemById("resources", ownerId);
+  return reconcileResourceCommentAnchors(resource, options);
+}
+
+function reconcileResourceCommentAnchors(resource, options = {}) {
+  if (!isPlainObject(resource) || !Array.isArray(resource.blocks)) return false;
+  const before = JSON.stringify({ blocks: resource.blocks.map((block) => block?.marks), commentThreads: resource.commentThreads });
+  const threads = normalizeResourceCommentThreads(resource.commentThreads);
+  const threadsById = new Map(threads.map((thread) => [thread.id, thread]));
+  const locationsByThreadId = new Map();
+
+  for (const block of resource.blocks) {
+    if (!isPlainObject(block)) continue;
+    const normalizedMarks = normalizeInlineMarks(block.text || "", block.marks);
+    block.marks = normalizedMarks.filter((mark) => {
+      if (mark.type !== "comment") return true;
+      const thread = threadsById.get(mark.commentId);
+      if (!thread || thread.deletedAt || thread.scope !== "inline") return false;
+      const locations = locationsByThreadId.get(thread.id) || [];
+      locations.push({ block, mark });
+      locationsByThreadId.set(thread.id, locations);
+      return true;
+    });
+  }
+
+  const lostAt = normalizedIsoTimestamp(options.at) || new Date().toISOString();
+  for (const thread of threads) {
+    if (thread.scope !== "inline") continue;
+    const locations = locationsByThreadId.get(thread.id) || [];
+    const chosen = locations.find(({ block, mark }) => (
+      block.id === thread.anchor?.blockId && mark.start === thread.anchor?.start && mark.end === thread.anchor?.end
+    )) || locations.find(({ block }) => block.id === thread.anchor?.blockId) || locations[0] || null;
+    if (!chosen) {
+      const formerAnchor = normalizeFormerCommentAnchor(thread.anchor) || normalizeFormerCommentAnchor(thread.formerAnchor);
+      thread.scope = "page";
+      thread.anchor = null;
+      thread.anchorLostAt = normalizedIsoTimestamp(thread.anchorLostAt) || lostAt;
+      if (formerAnchor) thread.formerAnchor = formerAnchor;
+      continue;
+    }
+    thread.anchor = {
+      blockId: chosen.block.id,
+      start: chosen.mark.start,
+      end: chosen.mark.end,
+    };
+    delete thread.anchorLostAt;
+    delete thread.formerAnchor;
+    for (const location of locations) {
+      if (location === chosen) continue;
+      location.block.marks = location.block.marks.filter((mark) => mark !== location.mark);
+    }
+  }
+  resource.commentThreads = threads;
+  return before !== JSON.stringify({ blocks: resource.blocks.map((block) => block?.marks), commentThreads: resource.commentThreads });
 }
 
 function normalizeEditorHistoryFocus(focus = null) {
@@ -10895,6 +12717,15 @@ function normalizeEditorHistoryFocus(focus = null) {
   };
 }
 
+function normalizeMultiResourceHistoryFocus(focus = null) {
+  if (!focus?.ownerType || !focus?.ownerId || !focus?.blockId) return null;
+  return {
+    ownerType: focus.ownerType,
+    ownerId: focus.ownerId,
+    ...normalizeEditorHistoryFocus(focus),
+  };
+}
+
 function restoreEditorHistoryFocus(focus = null) {
   if (!focus?.blockId) return;
   if (Number.isInteger(focus.start)) {
@@ -10902,6 +12733,13 @@ function restoreEditorHistoryFocus(focus = null) {
   } else {
     focusBlockContentAfterRender(focus.blockId, { position: focus.position || "end" });
   }
+}
+
+function restoreMultiResourceHistoryFocus(focus = null) {
+  if (!focus?.blockId) return;
+  const note = focus.ownerType === "resources" ? resourceNoteById(focus.ownerId) : null;
+  if (!note && focus.ownerType === "resources") return;
+  restoreEditorHistoryFocus(focus);
 }
 
 function deleteSelectedBlocks() {
@@ -11040,19 +12878,112 @@ function duplicateSelectedBlocks() {
 
 function duplicateEditorBlock(block) {
   const clone = cloneEditorBlocks([block])[0] || {};
-  const type = BLOCK_TYPES[clone.type] ? clone.type : "paragraph";
+  let type = isSupportedEditorBlockType(clone.type) ? clone.type : "paragraph";
   const text = typeof clone.text === "string" ? clone.text : "";
-  return {
+  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(clone.url || text) : "";
+  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const duplicate = {
     id: id(),
     type,
-    text,
-    marks: normalizeInlineMarks(text, clone.marks),
+    text: safeUrl || text,
+    marks: safeUrl ? [] : normalizeInlineMarks(text, clone.marks).filter((mark) => mark.type !== "comment"),
     checked: type === "todo" && clone.checked === true,
     indent: normalizedBlockIndent(clone.indent),
     collapsed: type === "toggle" && clone.collapsed === true,
     color: normalizeBlockColorValue(clone.color),
     backgroundColor: normalizeBlockColorValue(clone.backgroundColor),
   };
+  if (safeUrl) duplicate.url = safeUrl;
+  return duplicate;
+}
+
+function moveSelectedBlocksToResource(targetResourceId) {
+  const selection = selectedBlocksMenuSelection();
+  if (!selection?.ids?.length || selection.ownerType !== "resources") return false;
+  const source = itemById("resources", selection.ownerId);
+  const target = itemById("resources", targetResourceId);
+  if (!resourceMutationAllowed(source) || !resourceMutationAllowed(target) || source.id === target?.id) {
+    showToast("이동할 수 없는 Resource입니다.");
+    return false;
+  }
+  const selectedIds = selectedBlockSubtreeIds(source.blocks || [], selection.ids);
+  const movingBlocks = (source.blocks || []).filter((block) => selectedIds.has(block.id));
+  if (!movingBlocks.length) {
+    closeSelectedBlockMoveMenu({ restoreSelection: true, focus: true });
+    return false;
+  }
+  const targetBlockIds = new Set((target.blocks || []).map((block) => block.id));
+  const collidedBlockId = movingBlocks.find((block) => targetBlockIds.has(block.id))?.id || "";
+  const movingThreads = (source.commentThreads || []).filter((thread) => (
+    thread?.scope === "inline" && selectedIds.has(thread.anchor?.blockId)
+  ));
+  const targetThreadIds = new Set((target.commentThreads || []).map((thread) => thread.id));
+  const collidedThreadId = movingThreads.find((thread) => targetThreadIds.has(thread.id))?.id || "";
+  if (collidedBlockId || collidedThreadId) {
+    showToast("대상 페이지에 같은 블록 또는 댓글 ID가 있어 이동하지 않았습니다.");
+    return false;
+  }
+
+  const fallbackFocus = deletedSelectionFocusTarget(source.blocks, selectedIds);
+  const history = beginMultiResourceEditorHistory(
+    [source.id, target.id],
+    { ownerType: "resources", ownerId: source.id, blockId: movingBlocks[0].id, position: "end" },
+  );
+  if (!history) return false;
+
+  normalizeCrossPageMovedBlockIndents(source.blocks, selectedIds);
+  source.blocks = source.blocks.filter((block) => !selectedIds.has(block.id));
+  target.blocks ||= [];
+  target.blocks.push(...movingBlocks);
+  if (movingThreads.length) {
+    const movingThreadIds = new Set(movingThreads.map((thread) => thread.id));
+    source.commentThreads = (source.commentThreads || []).filter((thread) => !movingThreadIds.has(thread.id));
+    target.commentThreads ||= [];
+    target.commentThreads.push(...movingThreads);
+  }
+  ensureEditableBlocks(source, { save: false });
+  ensureEditableBlocks(target, { save: false });
+  if (!fallbackFocus.blockId || !source.blocks.some((block) => block.id === fallbackFocus.blockId)) {
+    fallbackFocus.blockId = source.blocks.find((block) => block.type !== "divider")?.id || source.blocks[0]?.id || "";
+    fallbackFocus.position = "start";
+  }
+  const committed = commitMultiResourceEditorHistory(history, {
+    ownerType: "resources",
+    ownerId: source.id,
+    blockId: fallbackFocus.blockId,
+    position: fallbackFocus.position || "start",
+  });
+  if (!committed) {
+    for (const snapshot of history.resources) {
+      const resource = itemById("resources", snapshot.ownerId);
+      resource.blocks = cloneEditorBlocks(snapshot.beforeBlocks);
+      resource.commentThreads = cloneEditorCommentThreads(snapshot.beforeCommentThreads);
+    }
+    showToast("블록 이동을 완료하지 못했습니다.");
+    return false;
+  }
+  queueResourceOperationGroup([source.id, target.id]);
+  ui.slash = null;
+  clearBlockSelection();
+  saveState();
+  renderEditorMutation("resources", source.id, { forceView: true });
+  renderOverlays();
+  if (fallbackFocus.blockId) focusBlockContentAfterRender(fallbackFocus.blockId, { position: fallbackFocus.position || "start" });
+  showToast(`${movingBlocks.length}개 블록을 “${target.title || "제목 없음"}”로 이동했습니다.`);
+  return true;
+}
+
+function normalizeCrossPageMovedBlockIndents(blocksList, selectedIds) {
+  const rootIndexes = selectedBlockRootIndexes(blocksList, selectedIds);
+  for (const rootIndex of rootIndexes) {
+    const rootIndent = blockIndent(blocksList[rootIndex]);
+    const endIndex = blockSubtreeEndIndex(blocksList, rootIndex);
+    for (let index = rootIndex; index <= endIndex; index += 1) {
+      const block = blocksList[index];
+      if (!selectedIds.has(block.id)) continue;
+      block.indent = normalizedBlockIndent(blockIndent(block) - rootIndent);
+    }
+  }
 }
 
 function selectedBlockSubtreeIds(blocksList, ids) {
@@ -11152,16 +13083,16 @@ function handleDocumentPaste(event) {
     event.preventDefault();
     return;
   }
+  if (!customBlocks.length && openUrlPasteChoice(event, text)) {
+    event.preventDefault();
+    return;
+  }
   if (!ui.blockSelection.ids.length && pasteEventBlockContent(event) && !shouldPastePlainTextAsBlocks(event, text)) return;
   if (customBlocks.length && pasteBlocksFromClipboard(event, customBlocks)) {
     event.preventDefault();
     return;
   }
   if (htmlBlocks.length && pasteBlocksFromClipboard(event, htmlBlocks)) {
-    event.preventDefault();
-    return;
-  }
-  if (applyPastedUrlToInlineSelection(event, text)) {
     event.preventDefault();
     return;
   }
@@ -11233,41 +13164,304 @@ function pasteTextIntoCodeBlock(event, text = "") {
   return true;
 }
 
-function applyPastedUrlToInlineSelection(event, text) {
-  if (ui.blockSelection.ids.length) return false;
-  const href = normalizeInlinePasteHref(text);
-  if (!href) return false;
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
-  const range = selection.getRangeAt(0);
-  const startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
-  const endElement = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
-  const blockContent = startElement?.closest("[data-block-content]");
-  if (!blockContent || blockContent !== endElement?.closest("[data-block-content]")) return false;
-  if (event.target instanceof Element && !event.target.closest("[data-block-content]") && !blockContent.contains(event.target)) return false;
-  const editor = blockContent.closest(".block-editor");
-  if (!editorOwnerMutationAllowed(editor?.dataset.ownerType, editor?.dataset.ownerId)) return false;
-  const item = itemById(editor?.dataset.ownerType, editor?.dataset.ownerId);
-  const block = item?.blocks.find((entry) => entry.id === blockContent.dataset.blockContent);
-  const offsets = selectionOffsetsInside(blockContent);
-  if (!block || !offsets || offsets.collapsed || offsets.end <= offsets.start) return false;
-  if (block.type === "code") return false;
-  const history = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start: offsets.start, end: offsets.end });
-  const marks = removeInlineMarkRange(normalizeInlineMarks(block.text || blockContent.textContent || "", block.marks), "link", offsets.start, offsets.end);
-  marks.push({ type: "link", start: offsets.start, end: offsets.end, href });
-  block.marks = normalizeInlineMarks(block.text || blockContent.textContent || "", marks);
-  commitEditorHistory(history, { blockId: block.id, start: offsets.start, end: offsets.end });
-  saveState();
-  renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
-  focusBlockContentAfterRender(block.id, { range: { start: offsets.start, end: offsets.end } });
+function normalizeStandaloneHttpsUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw || raw.length > 4096 || !/^https:\/\//i.test(raw) || /[\u0000-\u0020\u007f<>"'`]/.test(raw)) return "";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password) return "";
+    return parsed.href;
+  } catch (_) {
+    return "";
+  }
+}
+
+function openUrlPasteChoice(event, text = "") {
+  const url = normalizeStandaloneHttpsUrl(text);
+  if (!url) return false;
+  const target = urlPasteChoiceTarget(event);
+  if (!target || !editorOwnerMutationAllowed(target.ownerType, target.ownerId)) return false;
+  const anchor = urlPasteChoiceAnchorRect(target.blockContent);
+  ui.inlineToolbar = null;
+  ui.linkPopover = null;
+  ui.commentPopover = null;
+  ui.equationPopover = null;
+  ui.slash = null;
+  ui.mention = null;
+  ui.pageCommand = null;
+  ui.emojiCommand = null;
+  ui.urlPasteChoice = {
+    ...target,
+    url,
+    selectedIndex: 0,
+    x: anchor.left,
+    y: anchor.bottom + 8,
+  };
+  renderOverlays();
+  requestAnimationFrame(() => {
+    clampUrlPasteChoiceToViewport();
+    focusUrlPasteChoiceItem();
+  });
   return true;
 }
 
-function normalizeInlinePasteHref(text = "") {
-  const raw = String(text || "").trim();
-  if (!raw || /[\s<>]/.test(raw)) return "";
-  const href = normalizeInlineHref(raw);
-  return /^(https?:|mailto:|tel:)/i.test(href) ? href : "";
+function urlPasteChoiceTarget(event) {
+  if (ui.blockSelection.ids.length) {
+    if (ui.blockSelection.ids.length !== 1) return null;
+    const ownerType = ui.blockSelection.ownerType;
+    const ownerId = ui.blockSelection.ownerId;
+    const blockId = ui.blockSelection.ids[0];
+    const item = itemById(ownerType, ownerId);
+    const block = item?.blocks?.find((entry) => entry.id === blockId);
+    if (!block || !urlPasteChoiceSupportsBlock(block)) return null;
+    const blockContent = document.querySelector(`.block-editor[data-owner-type="${cssEscape(ownerType)}"][data-owner-id="${cssEscape(ownerId)}"] [data-block-content="${cssEscape(blockId)}"]`);
+    return {
+      ownerType,
+      ownerId,
+      blockId,
+      blockContent,
+      mode: "block-selection",
+      start: 0,
+      end: (block.text || "").length,
+    };
+  }
+  const blockContent = pasteEventBlockContent(event);
+  const editor = blockContent?.closest(".block-editor");
+  if (!blockContent || !editor) return null;
+  const ownerType = editor.dataset.ownerType;
+  const ownerId = editor.dataset.ownerId;
+  const blockId = blockContent.dataset.blockContent;
+  const item = itemById(ownerType, ownerId);
+  const block = item?.blocks?.find((entry) => entry.id === blockId);
+  if (!block || !urlPasteChoiceSupportsBlock(block)) return null;
+  const text = block.text || "";
+  const offsets = selectionOffsetsInside(blockContent) || { start: text.length, end: text.length, collapsed: true };
+  const start = Math.max(0, Math.min(text.length, Number.parseInt(offsets.start, 10) || 0));
+  const end = Math.max(start, Math.min(text.length, Number.parseInt(offsets.end, 10) || start));
+  if (text !== "" && end <= start) return null;
+  return {
+    ownerType,
+    ownerId,
+    blockId,
+    blockContent,
+    mode: text === "" ? "empty" : "text-selection",
+    start,
+    end,
+  };
+}
+
+function urlPasteChoiceSupportsBlock(block) {
+  return Boolean(block && BLOCK_TYPES[block.type] && !["code", "divider"].includes(block.type));
+}
+
+function urlPasteChoiceAnchorRect(blockContent) {
+  const selection = window.getSelection();
+  if (blockContent && selection?.rangeCount && !selection.isCollapsed) {
+    const range = selection.getRangeAt(0);
+    if (blockContent.contains(range.commonAncestorContainer)) {
+      const rect = range.getBoundingClientRect();
+      if (rect.width || rect.height) return rect;
+    }
+  }
+  return blockContent?.getBoundingClientRect?.() || { left: 8, top: 8, right: 8, bottom: 8, width: 0, height: 0 };
+}
+
+function clampUrlPasteChoiceToViewport() {
+  const choice = ui.urlPasteChoice;
+  const menu = document.querySelector("[data-url-paste-choice-menu]");
+  if (!choice || !menu) return;
+  const inset = 8;
+  const viewportWidth = Math.max(1, Math.min(window.innerWidth, window.visualViewport?.width || window.innerWidth));
+  const viewportHeight = Math.max(1, Math.min(window.innerHeight, window.visualViewport?.height || window.innerHeight));
+  menu.style.maxHeight = `${Math.max(1, viewportHeight - inset * 2)}px`;
+  const rect = menu.getBoundingClientRect();
+  const maxX = Math.max(inset, viewportWidth - rect.width - inset);
+  const maxY = Math.max(inset, viewportHeight - rect.height - inset);
+  const x = Math.max(inset, Math.min(maxX, choice.x || inset));
+  const y = Math.max(inset, Math.min(maxY, choice.y || inset));
+  choice.x = x;
+  choice.y = y;
+  menu.style.left = `${Math.round(x)}px`;
+  menu.style.top = `${Math.round(y)}px`;
+}
+
+function focusUrlPasteChoiceItem() {
+  if (!ui.urlPasteChoice) return;
+  const index = Math.max(0, Math.min(URL_PASTE_CHOICE_ACTIONS.length - 1, ui.urlPasteChoice.selectedIndex || 0));
+  document.querySelector(`[data-url-paste-choice-index="${index}"]`)?.focus?.({ preventScroll: true });
+}
+
+function moveUrlPasteChoiceSelection(nextIndex) {
+  if (!ui.urlPasteChoice) return false;
+  const count = URL_PASTE_CHOICE_ACTIONS.length;
+  ui.urlPasteChoice.selectedIndex = ((nextIndex % count) + count) % count;
+  renderOverlays();
+  requestAnimationFrame(() => {
+    clampUrlPasteChoiceToViewport();
+    focusUrlPasteChoiceItem();
+  });
+  return true;
+}
+
+function handleUrlPasteChoiceKeydown(event) {
+  if (!ui.urlPasteChoice) return false;
+  const currentIndex = Math.max(0, Math.min(URL_PASTE_CHOICE_ACTIONS.length - 1, ui.urlPasteChoice.selectedIndex || 0));
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeUrlPasteChoice({ restoreFocus: true });
+    return true;
+  }
+  if (["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End", "Tab"].includes(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? URL_PASTE_CHOICE_ACTIONS.length - 1
+        : currentIndex + ((event.key === "ArrowDown" || event.key === "ArrowRight" || (event.key === "Tab" && !event.shiftKey)) ? 1 : -1);
+    moveUrlPasteChoiceSelection(nextIndex);
+    return true;
+  }
+  if ((event.key === "Enter" || event.key === " ") && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    const action = event.target instanceof Element
+      ? event.target.closest("[data-url-paste-choice-action]")?.dataset.urlPasteChoiceAction
+      : "";
+    applyUrlPasteChoice(action || URL_PASTE_CHOICE_ACTIONS[currentIndex].action);
+    return true;
+  }
+  return false;
+}
+
+function closeUrlPasteChoice(options = {}) {
+  const choice = ui.urlPasteChoice;
+  if (!choice) return false;
+  ui.urlPasteChoice = null;
+  renderOverlays();
+  if (options.restoreFocus) requestAnimationFrame(() => restoreUrlPasteChoiceTarget(choice));
+  return true;
+}
+
+function restoreUrlPasteChoiceTarget(choice) {
+  if (!choice?.blockId) return;
+  if (choice.mode === "block-selection") {
+    restoreBlockSelection(choice.ownerType, choice.ownerId, [choice.blockId]);
+    return;
+  }
+  focusBlockContentAfterRender(choice.blockId, { range: { start: choice.start, end: choice.end } });
+}
+
+function applyUrlPasteChoice(action = "") {
+  const choice = ui.urlPasteChoice;
+  if (!choice) return false;
+  if (action === "cancel") return closeUrlPasteChoice({ restoreFocus: true });
+  if (!["link", "bookmark", "embed"].includes(action)) return false;
+  const url = normalizeStandaloneHttpsUrl(choice.url);
+  const item = itemById(choice.ownerType, choice.ownerId);
+  const block = item?.blocks?.find((entry) => entry.id === choice.blockId);
+  if (!url || !block || !urlPasteChoiceSupportsBlock(block) || !editorOwnerMutationAllowed(choice.ownerType, choice.ownerId)) {
+    closeUrlPasteChoice({ restoreFocus: false });
+    return false;
+  }
+  const beforeFocus = { blockId: block.id, start: choice.start, end: choice.end };
+  const history = beginEditorHistory(choice.ownerType, choice.ownerId, beforeFocus);
+  const focus = action === "link"
+    ? applyUrlPasteAsLink(block, choice, url)
+    : applyUrlPasteAsPreviewBlock(item, block, choice, url, action);
+  if (!focus) {
+    closeUrlPasteChoice({ restoreFocus: true });
+    return false;
+  }
+  ui.urlPasteChoice = null;
+  clearBlockSelection();
+  commitEditorHistory(history, focus);
+  saveState();
+  renderEditorMutation(choice.ownerType, choice.ownerId, { forceView: true });
+  renderOverlays();
+  if (action === "link") {
+    focusBlockContentAfterRender(focus.blockId, { range: { start: focus.start, end: focus.end } });
+  } else {
+    focusUrlPreviewBlockAfterRender(focus.blockId);
+  }
+  return true;
+}
+
+function applyUrlPasteAsLink(block, choice, url) {
+  const text = block.text || "";
+  const start = Math.max(0, Math.min(text.length, Number.parseInt(choice.start, 10) || 0));
+  const end = Math.max(start, Math.min(text.length, Number.parseInt(choice.end, 10) || start));
+  delete block.url;
+  if (end > start) {
+    const marks = removeInlineMarkRange(normalizeInlineMarks(text, block.marks), "link", start, end);
+    marks.push({ type: "link", start, end, href: url });
+    block.marks = normalizeInlineMarks(text, marks);
+    return { blockId: block.id, start, end };
+  }
+  block.text = url;
+  block.marks = [{ type: "link", start: 0, end: url.length, href: url }];
+  return { blockId: block.id, start: 0, end: url.length };
+}
+
+function applyUrlPasteAsPreviewBlock(item, block, choice, url, type) {
+  const blockIndex = item.blocks.indexOf(block);
+  if (blockIndex < 0 || !isUrlPreviewBlockType(type)) return null;
+  const text = block.text || "";
+  const start = Math.max(0, Math.min(text.length, Number.parseInt(choice.start, 10) || 0));
+  const end = Math.max(start, Math.min(text.length, Number.parseInt(choice.end, 10) || start));
+  if (start === 0 && end === text.length) {
+    block.type = type;
+    block.text = url;
+    block.url = url;
+    block.marks = [];
+    block.checked = false;
+    block.collapsed = false;
+    return { blockId: block.id, position: "end" };
+  }
+  const splitMarks = splitInlineMarksAtSelection(block.marks || [], text, start, end);
+  const replacement = [];
+  if (start > 0) {
+    const before = { ...block, text: text.slice(0, start), marks: splitMarks.before };
+    delete before.url;
+    replacement.push(before);
+  }
+  const previewBlock = {
+    id: start > 0 ? id() : block.id,
+    type,
+    text: url,
+    url,
+    marks: [],
+    checked: false,
+    indent: blockIndent(block),
+    collapsed: false,
+  };
+  if (normalizeBlockColorValue(block.color)) previewBlock.color = normalizeBlockColorValue(block.color);
+  if (normalizeBlockColorValue(block.backgroundColor)) previewBlock.backgroundColor = normalizeBlockColorValue(block.backgroundColor);
+  replacement.push(previewBlock);
+  if (end < text.length) {
+    replacement.push({
+      id: id(),
+      type: "paragraph",
+      text: text.slice(end),
+      marks: splitMarks.after,
+      checked: false,
+      indent: blockIndent(block),
+      collapsed: false,
+    });
+  }
+  item.blocks.splice(blockIndex, 1, ...replacement);
+  return { blockId: previewBlock.id, position: "end" };
+}
+
+function focusUrlPreviewBlockAfterRender(blockId) {
+  const focus = () => {
+    const target = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-url-block-preview]`);
+    target?.focus?.({ preventScroll: true });
+    target?.scrollIntoView?.({ block: "nearest" });
+  };
+  focus();
+  requestAnimationFrame(focus);
 }
 
 function shouldPastePlainTextAsBlocks(event, text) {
@@ -11300,16 +13494,21 @@ function selectedBlocksForClipboard() {
 }
 
 function clipboardBlockFromBlock(block) {
-  return {
-    type: BLOCK_TYPES[block.type] ? block.type : "paragraph",
-    text: block.text || "",
-    marks: normalizeInlineMarks(block.text || "", block.marks),
+  let type = isSupportedEditorBlockType(block.type) ? block.type : "paragraph";
+  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || block.text || "") : "";
+  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const clipboardBlock = {
+    type,
+    text: safeUrl || block.text || "",
+    marks: safeUrl ? [] : normalizeInlineMarks(block.text || "", block.marks).filter((mark) => mark.type !== "comment"),
     checked: block.checked === true,
     indent: blockIndent(block),
     collapsed: block.type === "toggle" && block.collapsed === true,
     color: normalizeBlockColorValue(block.color),
     backgroundColor: normalizeBlockColorValue(block.backgroundColor),
   };
+  if (safeUrl) clipboardBlock.url = safeUrl;
+  return clipboardBlock;
 }
 
 function writeBlocksToClipboard(clipboardData, blocks) {
@@ -11372,11 +13571,14 @@ function clipboardBlocksHtml(blocks) {
     const prefix = clipboardBlockTextPrefix(block, clipboardNumberedPrefixForBlock(block, numberedCounters));
     const colorAttr = block.color ? ` data-block-color="${esc(block.color)}"` : "";
     const backgroundColorAttr = block.backgroundColor ? ` data-block-background="${esc(block.backgroundColor)}"` : "";
+    const urlAttr = isUrlPreviewBlockType(block.type) && normalizeStandaloneHttpsUrl(block.url || block.text || "")
+      ? ` data-block-url="${esc(normalizeStandaloneHttpsUrl(block.url || block.text || ""))}"`
+      : "";
     if (block.type === "code") {
       html += `<pre data-block-type="${blockType}" data-block-indent="${blockIndent}"${colorAttr}${backgroundColorAttr}><code>${esc(block.text || "")}</code></pre>`;
     } else {
       const checkedAttr = block.type === "todo" ? ` data-block-checked="${block.checked ? "true" : "false"}"` : "";
-      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${colorAttr}${backgroundColorAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
+      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
     }
   }
   return html;
@@ -11422,22 +13624,26 @@ function readHtmlClipboardBlocks(clipboardData) {
 function clipboardBlockFromHtmlElement(element) {
   if (!(element instanceof Element)) return null;
   const rawType = element.matches("pre") ? "code" : element.dataset.blockType;
-  const type = BLOCK_TYPES[rawType] ? rawType : "";
+  let type = isSupportedEditorBlockType(rawType) ? rawType : "";
   if (!type) return null;
   const checked = element.dataset.blockChecked === "true";
   const inline = htmlClipboardInlineData(element);
   const text = normalizeHtmlClipboardText(element.innerText || element.textContent || "");
   const stripped = stripClipboardBlockInlinePrefix(type, inline, checked);
-  return {
+  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(element.dataset.blockUrl || stripped.text) : "";
+  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const block = {
     type,
-    text: type === "code" ? text : stripped.text,
-    marks: type === "code" ? [] : stripped.marks,
+    text: safeUrl || (type === "code" ? text : stripped.text),
+    marks: type === "code" || safeUrl ? [] : stripped.marks,
     checked,
     indent: normalizedBlockIndent(element.dataset.blockIndent),
     collapsed: false,
     color: normalizeBlockColorValue(element.dataset.blockColor),
     backgroundColor: normalizeBlockColorValue(element.dataset.blockBackground),
   };
+  if (safeUrl) block.url = safeUrl;
+  return block;
 }
 
 function htmlClipboardStructuredBlocks(root) {
@@ -11683,17 +13889,22 @@ function normalizeClipboardBlocks(blocks) {
   const normalized = [];
   for (const block of blocks) {
     if (!block || typeof block !== "object") continue;
-    const type = BLOCK_TYPES[block.type] ? block.type : "paragraph";
-    normalized.push({
+    let type = isSupportedEditorBlockType(block.type) ? block.type : "paragraph";
+    const rawText = typeof block.text === "string" ? block.text : "";
+    const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || rawText) : "";
+    if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+    const normalizedBlock = {
       type,
-      text: typeof block.text === "string" ? block.text : "",
-      marks: normalizeInlineMarks(typeof block.text === "string" ? block.text : "", block.marks),
+      text: safeUrl || rawText,
+      marks: safeUrl ? [] : normalizeInlineMarks(rawText, block.marks).filter((mark) => mark.type !== "comment"),
       checked: block.checked === true,
       indent: normalizedBlockIndent(block.indent),
       collapsed: type === "toggle" && block.collapsed === true,
       color: normalizeBlockColorValue(block.color),
       backgroundColor: normalizeBlockColorValue(block.backgroundColor),
-    });
+    };
+    if (safeUrl) normalizedBlock.url = safeUrl;
+    normalized.push(normalizedBlock);
   }
   return normalized;
 }
@@ -11877,7 +14088,7 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
   const minIndent = minimumClipboardIndent(normalizedBlocks);
   const pasted = [];
   for (const block of normalizedBlocks) {
-    pasted.push({
+    const pastedBlock = {
       id: id(),
       type: block.type,
       text: block.text,
@@ -11885,7 +14096,9 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
       checked: block.type === "todo" && block.checked === true,
       indent: normalizedBlockIndent(baseIndent + block.indent - minIndent),
       collapsed: block.type === "toggle" && block.collapsed === true,
-    });
+    };
+    if (isUrlPreviewBlockType(block.type)) pastedBlock.url = normalizeStandaloneHttpsUrl(block.url || block.text || "");
+    pasted.push(pastedBlock);
   }
   if (!pasted.length) return false;
   let focusTarget = { blockId: pasted[pasted.length - 1].id };
@@ -12386,7 +14599,7 @@ function resourceNoteIconHoverBlockFromPoint(clientX, clientY) {
 function handlePointerDown(event) {
   if (handleSelectedBlocksMenuOutsidePointerDown(event)) return;
 
-  if (event.target.closest("[data-inline-mark-toggle], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], [data-mention-index], [data-page-command-index], [data-emoji-index]")) {
+  if (event.target.closest("[data-inline-mark-toggle], [data-inline-equation-open], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], [data-mention-index], [data-page-command-index], [data-emoji-index]")) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -13034,9 +15247,9 @@ function dragActionTargets(type, itemId) {
         count: resourceBuckets.archived.length,
       },
       {
-        action: "delete",
-        title: "삭제",
-        meta: "완전히 제거",
+        action: "trash",
+        title: "휴지통",
+        meta: "복원할 수 있도록 이동",
         tone: "delete",
       },
     ];
@@ -13099,6 +15312,9 @@ function commitDragAction(type, itemId, action) {
     renderView({ soft: true, animateCards: true });
     renderDetail();
     return true;
+  }
+  if (type === "resources" && action === "trash") {
+    return moveResourcePageToTrash(itemId);
   }
   if (action === "delete") {
     const removed = deleteEntity(type, itemId);
@@ -13299,13 +15515,37 @@ function stopSchedulerMonthHover() {
 }
 
 function handleKeydown(event) {
+  if (handleUrlPasteChoiceKeydown(event)) return;
+  if (handleInlineColorMenuKeydown(event)) return;
   if (handleSlashMenuDocumentKeydown(event)) return;
   if (handleResourceSearchKeydown(event)) return;
   const resourceSideResize = event.target.closest("[data-resource-side-resize]");
   if (resourceSideResize && resizeResourceSideByKeyboard(event, resourceSideResize)) return;
   const resourcePageMenuItem = event.target.closest(".resource-page-menu [role^='menuitem']");
+  if (resourcePageMenuItem && event.key === "Tab" && closeResourcePageMenuForTab(event)) return;
+  const resourceMoveMenuPanel = resourcePageMenuItem?.closest("[data-resource-move-menu-panel]");
+  if (resourceMoveMenuPanel && (event.key === "Escape" || event.key === "ArrowLeft")) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeResourceMoveMenu({ focus: true });
+    return;
+  }
+  const resourceMoveMenuTrigger = resourcePageMenuItem?.closest("[data-resource-move-menu]");
+  if (resourceMoveMenuTrigger && event.key === "ArrowRight") {
+    event.preventDefault();
+    event.stopPropagation();
+    const resourceId = resourceMoveMenuTrigger.dataset.resourceMoveMenu;
+    if (ui.resourceMoveMenuId === resourceId) {
+      document.querySelector(`[data-resource-move-menu-panel="${cssEscape(resourceId)}"] [role^="menuitem"]`)?.focus?.({ preventScroll: true });
+    } else {
+      toggleResourceMoveMenu(resourceId);
+    }
+    return;
+  }
   if (resourcePageMenuItem && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-    const items = [...resourcePageMenuItem.closest("[role='menu']").querySelectorAll("[role^='menuitem']:not([disabled])")];
+    const menu = resourcePageMenuItem.closest("[role='menu']");
+    const items = [...(menu?.children || [])]
+      .filter((item) => item.matches("[role^='menuitem']:not([disabled])"));
     const currentIndex = items.indexOf(resourcePageMenuItem);
     const nextIndex = event.key === "Home"
       ? 0
@@ -13339,6 +15579,20 @@ function handleKeydown(event) {
     event.preventDefault();
     event.stopPropagation();
     openResourceNote(resourceOpen.dataset.openResource, { opener: resourceOpen });
+    return;
+  }
+  const pageMention = event.target.closest("[data-inline-mark='mention'][data-mention-type='page'][data-mention-target-type][data-mention-target-id]");
+  if (
+    pageMention &&
+    !event.isComposing &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    (event.key === "Enter" || event.key === " ")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    activatePageMentionTarget(pageMention);
     return;
   }
   if (ui.blockDrag && event.key === "Escape") {
@@ -13728,11 +15982,13 @@ function toggleDockedNav() {
     els.sidebar?.style.setProperty("--nav-close-top", "50%");
     els.sidebar?.style.setProperty("--nav-close-bottom", "50%");
     updateNav();
+    syncResourceFullPageChrome();
     return;
   }
   app.classList.add("is-undocking-nav");
   ui.navOpen = false;
   updateNav();
+  syncResourceFullPageChrome();
 }
 
 function handleDocumentKeyup(event) {
@@ -13842,6 +16098,7 @@ function isPrintableBlockReplacementKey(event) {
 }
 
 function handleDocumentKeydown(event) {
+  if (handleUrlPasteChoiceKeydown(event)) return;
   if (event.key === "Shift" || event.shiftKey) ui.shiftKeyDown = true;
   if (handleSlashMenuDocumentKeydown(event)) return;
   if (handleResourcePageFocusTrap(event)) return;
@@ -13911,6 +16168,12 @@ function handleDocumentKeydown(event) {
     event.preventDefault();
     ui.commentPopover = null;
     renderOverlays();
+    return;
+  }
+  if (ui.resourceMoveMenuId && event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeResourceMoveMenu({ focus: true });
     return;
   }
   if (ui.resourcePageMenuId && event.key === "Escape") {
@@ -14282,21 +16545,118 @@ function inlineToolbarFromSelection() {
   if (!offsets || offsets.collapsed || offsets.end <= offsets.start) return null;
   const rect = range.getBoundingClientRect();
   const fallbackRect = blockContent.getBoundingClientRect();
-  const x = Math.max(12, Math.min((rect.left || fallbackRect.left) + (rect.width || fallbackRect.width) / 2 - 112, window.innerWidth - 236));
-  const y = Math.max(12, (rect.top || fallbackRect.top) - 44);
   const block = itemById(editor.dataset.ownerType, editor.dataset.ownerId)?.blocks?.find((entry) => entry.id === blockContent.dataset.blockContent);
   if (!block || block.type === "code") return null;
   const marks = normalizeInlineMarks(block?.text || blockContent.textContent || "", block?.marks || inlineMarksFromContent(blockContent));
+  const existingToolbarElement = els.overlayRoot?.querySelector("[data-inline-toolbar]");
+  const existingToolbarRect = existingToolbarElement?.getBoundingClientRect();
+  const position = inlineToolbarPositionForRect(
+    inlineSelectionRect(rect, fallbackRect),
+    existingToolbarRect?.width || INLINE_TOOLBAR_ESTIMATED_WIDTH,
+    existingToolbarRect?.height || INLINE_TOOLBAR_ESTIMATED_HEIGHT,
+  );
+  const sameSelection = ui.inlineToolbar?.ownerType === editor.dataset.ownerType &&
+    ui.inlineToolbar?.ownerId === editor.dataset.ownerId &&
+    ui.inlineToolbar?.blockId === blockContent.dataset.blockContent &&
+    ui.inlineToolbar?.start === offsets.start &&
+    ui.inlineToolbar?.end === offsets.end;
   return {
     ownerType: editor.dataset.ownerType,
     ownerId: editor.dataset.ownerId,
     blockId: blockContent.dataset.blockContent,
     start: offsets.start,
     end: offsets.end,
-    x,
-    y,
+    ...position,
+    colorMenuOpen: sameSelection && ui.inlineToolbar?.colorMenuOpen === true,
     activeTypes: INLINE_FORMAT_MARK_TYPES.filter((type) => inlineRangeFullyMarked(marks, type, offsets.start, offsets.end)),
+    activeTextColor: inlineColorForRange(marks, INLINE_COLOR_MARK_TYPES.text, offsets.start, offsets.end),
+    activeBackgroundColor: inlineColorForRange(marks, INLINE_COLOR_MARK_TYPES.background, offsets.start, offsets.end),
   };
+}
+
+function inlineSelectionRect(rect, fallbackRect) {
+  if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && (rect.width || rect.height)) return rect;
+  return fallbackRect;
+}
+
+function inlineToolbarViewportBounds() {
+  const viewport = window.visualViewport;
+  const left = Number.isFinite(viewport?.offsetLeft) ? viewport.offsetLeft : 0;
+  const top = Number.isFinite(viewport?.offsetTop) ? viewport.offsetTop : 0;
+  const width = Number.isFinite(viewport?.width) ? viewport.width : window.innerWidth;
+  const height = Number.isFinite(viewport?.height) ? viewport.height : window.innerHeight;
+  return { left, top, right: left + width, bottom: top + height };
+}
+
+function inlineToolbarPositionForRect(anchorRect, width = INLINE_TOOLBAR_ESTIMATED_WIDTH, height = INLINE_TOOLBAR_ESTIMATED_HEIGHT) {
+  const viewport = inlineToolbarViewportBounds();
+  const margin = INLINE_TOOLBAR_VIEWPORT_MARGIN;
+  const safeWidth = Math.max(1, Math.min(width, Math.max(1, viewport.right - viewport.left - margin * 2)));
+  const safeHeight = Math.max(1, Math.min(height, Math.max(1, viewport.bottom - viewport.top - margin * 2)));
+  const anchorLeft = Number.isFinite(anchorRect?.left) ? anchorRect.left : viewport.left + (viewport.right - viewport.left) / 2;
+  const anchorTop = Number.isFinite(anchorRect?.top) ? anchorRect.top : viewport.top + (viewport.bottom - viewport.top) / 2;
+  const anchorWidth = Number.isFinite(anchorRect?.width) ? anchorRect.width : 0;
+  const anchorBottom = Number.isFinite(anchorRect?.bottom) ? anchorRect.bottom : anchorTop + (Number.isFinite(anchorRect?.height) ? anchorRect.height : 0);
+  const minX = viewport.left + margin;
+  const maxX = Math.max(minX, viewport.right - margin - safeWidth);
+  const x = Math.max(minX, Math.min(anchorLeft + anchorWidth / 2 - safeWidth / 2, maxX));
+  const availableAbove = anchorTop - (viewport.top + margin);
+  const availableBelow = (viewport.bottom - margin) - anchorBottom;
+  const requiredSpace = safeHeight + INLINE_TOOLBAR_SELECTION_GAP;
+  const placement = availableAbove >= requiredSpace || availableAbove >= availableBelow ? "above" : "below";
+  const rawY = placement === "above"
+    ? anchorTop - INLINE_TOOLBAR_SELECTION_GAP - safeHeight
+    : anchorBottom + INLINE_TOOLBAR_SELECTION_GAP;
+  const minY = viewport.top + margin;
+  const maxY = Math.max(minY, viewport.bottom - margin - safeHeight);
+  const y = Math.max(minY, Math.min(rawY, maxY));
+  return { x, y, placement };
+}
+
+function inlineToolbarAnchorRect(toolbar = ui.inlineToolbar) {
+  if (!toolbar) return null;
+  const editor = document.querySelector(`.block-editor[data-owner-type="${cssEscape(toolbar.ownerType)}"][data-owner-id="${cssEscape(toolbar.ownerId)}"]`);
+  const blockContent = editor?.querySelector(`[data-block-content="${cssEscape(toolbar.blockId)}"]`);
+  if (!blockContent) return null;
+  const textLength = (blockContent.textContent || "").length;
+  const start = Math.max(0, Math.min(textLength, toolbar.start));
+  const end = Math.max(start, Math.min(textLength, toolbar.end));
+  try {
+    const range = document.createRange();
+    const startPoint = textPointAtOffset(blockContent, start);
+    const endPoint = textPointAtOffset(blockContent, end);
+    range.setStart(startPoint.node, startPoint.offset);
+    range.setEnd(endPoint.node, endPoint.offset);
+    return inlineSelectionRect(range.getBoundingClientRect(), blockContent.getBoundingClientRect());
+  } catch (_) {
+    return blockContent.getBoundingClientRect();
+  }
+}
+
+function syncInlineToolbarPosition() {
+  if (!ui.inlineToolbar) return;
+  const element = els.overlayRoot?.querySelector("[data-inline-toolbar]");
+  if (!element) return;
+  const elementRect = element.getBoundingClientRect();
+  const position = inlineToolbarPositionForRect(
+    inlineToolbarAnchorRect(ui.inlineToolbar),
+    elementRect.width || INLINE_TOOLBAR_ESTIMATED_WIDTH,
+    elementRect.height || INLINE_TOOLBAR_ESTIMATED_HEIGHT,
+  );
+  ui.inlineToolbar.x = position.x;
+  ui.inlineToolbar.y = position.y;
+  ui.inlineToolbar.placement = position.placement;
+  element.style.left = `${Math.round(position.x)}px`;
+  element.style.top = `${Math.round(position.y)}px`;
+  element.dataset.placement = position.placement;
+}
+
+function scheduleInlineToolbarPositionSync() {
+  if (!ui.inlineToolbar || inlineToolbarPositionFrame) return;
+  inlineToolbarPositionFrame = window.requestAnimationFrame(() => {
+    inlineToolbarPositionFrame = 0;
+    syncInlineToolbarPosition();
+  });
 }
 
 function hasInlineSelectionInside(element) {
@@ -14317,12 +16677,26 @@ function inlineToolbarEqual(left, right) {
     left.end === right.end &&
     Math.round(left.x) === Math.round(right.x) &&
     Math.round(left.y) === Math.round(right.y) &&
+    left.placement === right.placement &&
+    left.colorMenuOpen === right.colorMenuOpen &&
+    left.activeTextColor === right.activeTextColor &&
+    left.activeBackgroundColor === right.activeBackgroundColor &&
     (left.activeTypes || []).join(",") === (right.activeTypes || []).join(",")
   );
 }
 
 function handleDocumentClick(event) {
+  const skipLink = event.target.closest?.("[data-skip-link]");
+  if (skipLink && resourceFullPageOpen()) {
+    event.preventDefault();
+    els.detailRoot?.querySelector("#resource-page-surface")?.focus?.({ preventScroll: true });
+    return;
+  }
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
+
+  if (ui.urlPasteChoice && !event.target.closest("[data-url-paste-choice-menu]")) {
+    closeUrlPasteChoice({ restoreFocus: false });
+  }
 
   if (ui.resourcePageMenuId && !event.target.closest(".resource-page-menu-wrap")) {
     closeResourcePageMenu({ focus: false });
@@ -14756,6 +17130,10 @@ function createResource(title = "새 자료", options = {}) {
     ],
     ...(options.initial || {}),
   };
+  if (typeof resource.title !== "string" || resource.title.length > MAX_RESOURCE_TITLE_LENGTH) {
+    showToast(`Resource 제목은 최대 ${MAX_RESOURCE_TITLE_LENGTH}자입니다.`);
+    return null;
+  }
   normalizeResourceRecord(resource, createdAt);
   state.resources.push(resource);
   if (!options.deferCreate) {
@@ -15148,6 +17526,7 @@ function convertCapture(captureId, targetType) {
   if (targetType === "resources") created = createResource(capture.title, createOptions);
   if (targetType === "goals") created = createGoal(capture.title, createOptions);
   if (targetType === "boxes") created = createBox(capture.title, createOptions);
+  if (!created) return;
   capture.status = "processed";
   capture.convertedTo = targetType;
   capture.convertedId = created?.id || "";
@@ -15830,6 +18209,7 @@ function animateSchedulerDrop(done) {
 }
 
 function deleteEntity(type, itemId) {
+  if (type === "resources") return null;
   const collection = getCollection(type);
   const index = collection.findIndex((entry) => entry.id === itemId);
   if (index < 0) return null;
@@ -15962,11 +18342,18 @@ function itemById(type, itemId) {
   return collectionIdMap(type).get(itemId) || null;
 }
 
+function resourceContentReadOnly(resourceOrId) {
+  const resource = typeof resourceOrId === "string"
+    ? itemById("resources", resourceOrId)
+    : resourceOrId;
+  return Boolean(resource && (resource.readOnly === true || resource.locked === true));
+}
+
 function resourceMutationAllowed(resourceOrId, options = {}) {
   const resource = typeof resourceOrId === "string"
     ? itemById("resources", resourceOrId)
     : resourceOrId;
-  if (!resource || resource.readOnly === true) return false;
+  if (!resource || resource.readOnly === true || (resource.locked === true && options.allowLocked !== true)) return false;
   return options.allowTrashed === true || !resource.trashedAt;
 }
 
@@ -16362,8 +18749,22 @@ function toggleBlockCollapsed(ownerType, ownerId, blockId, button) {
   if (!block || block.type !== "toggle") return;
   const focusRange = editableControlFocusRange(blockId);
   const focusTarget = focusRange ? { blockId, start: focusRange.start, end: focusRange.end } : { blockId, position: "end" };
-  const history = beginEditorHistory(ownerType, ownerId, focusTarget);
   const blockElement = button?.closest(".block[data-block-id]");
+  if (block.collapsed === true && resourceRouteToggleTemporarilyExpanded(ownerType, ownerId, blockId)) {
+    const collapseAnimationMs = animateToggleDescendantCollapse(blockElement);
+    clearResourceRouteTemporaryExpansionBranch(ownerId, item.blocks, blockId);
+    if (blockElement) blockElement.dataset.toggleCollapsed = "true";
+    button?.setAttribute("aria-expanded", "false");
+    button?.setAttribute("aria-label", "토글 펼치기");
+    const renderAfterTemporaryCollapse = () => {
+      renderEditorMutation(ownerType, ownerId);
+      focusBlockContentAfterRender(blockId, focusRange ? { range: focusRange } : {});
+    };
+    if (collapseAnimationMs) window.setTimeout(renderAfterTemporaryCollapse, collapseAnimationMs);
+    else renderAfterTemporaryCollapse();
+    return true;
+  }
+  const history = beginEditorHistory(ownerType, ownerId, focusTarget);
   block.collapsed = !block.collapsed;
   const isCollapsed = block.collapsed === true;
   const collapseAnimationMs = isCollapsed ? animateToggleDescendantCollapse(blockElement) : 0;
@@ -16855,6 +19256,9 @@ function inlineMarkTypesForNode(node, root) {
     } else if (current.dataset?.inlineMark === "equation") {
       const formula = normalizeEquationFormula(current.dataset.equationFormula || current.textContent || "");
       if (formula) payloadMarks.push({ type: "equation", formula });
+    } else if (["textColor", "backgroundColor"].includes(current.dataset?.inlineMark)) {
+      const color = normalizeBlockColorValue(current.dataset.inlineColor || "");
+      if (color) payloadMarks.push({ type: current.dataset.inlineMark, color });
     } else if (current.dataset?.inlineMark && INLINE_MARK_TYPES.includes(current.dataset.inlineMark)) {
       types.add(current.dataset.inlineMark);
     }
@@ -17847,6 +20251,27 @@ function applySelectedBlocksMenuAction(action) {
     ids: menuSelection.ids.slice(),
   };
   if (isBlockColorAction(action)) return applySelectedBlocksColorAction(action);
+  if (action === "copy-link") {
+    const [blockId] = menuSelection.ids;
+    ui.slash = null;
+    renderOverlays();
+    const copied = copyBlockLink(menuSelection.ownerType, menuSelection.ownerId, blockId);
+    requestAnimationFrame(() => restoreBlockSelection(menuSelection.ownerType, menuSelection.ownerId, menuSelection.ids));
+    return copied;
+  }
+  if (action === "comment") {
+    ui.slash = null;
+    renderOverlays();
+    return openSelectedBlockComment(menuSelection);
+  }
+  if (action === "move-up" || action === "move-down") {
+    ui.slash = null;
+    renderOverlays();
+    return moveSelectedBlocksByKeyboard(action === "move-up" ? -1 : 1);
+  }
+  if (action === "move-to") {
+    return openSelectedBlockMoveMenu(menuSelection);
+  }
   if (action === "copy") {
     ui.slash = null;
     const copied = copySelectedBlocksToSystemClipboard();
@@ -17866,6 +20291,57 @@ function applySelectedBlocksMenuAction(action) {
   }
   renderOverlays();
   return false;
+}
+
+function copyBlockLink(ownerType, ownerId, blockId) {
+  if (ownerType !== "resources" || !ownerId || !blockId) {
+    showToast("Resource 블록만 링크를 복사할 수 있습니다.");
+    return false;
+  }
+  const url = new URL(resourceDeepLink(ownerId), window.location.origin);
+  url.hash = blockAnchorId(blockId);
+  const write = async () => {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url.href);
+      return true;
+    }
+    const input = document.createElement("textarea");
+    input.value = url.href;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    if (!copied) throw new Error("Clipboard write failed");
+    return true;
+  };
+  write()
+    .then(() => showToast("블록 링크를 복사했습니다."))
+    .catch(() => showToast("블록 링크를 복사하지 못했습니다."));
+  return true;
+}
+
+function openSelectedBlockComment(selection) {
+  if (!selection?.ids?.length) return false;
+  const blockId = selection.ids[0];
+  const item = itemById(selection.ownerType, selection.ownerId);
+  const block = item?.blocks?.find((entry) => entry.id === blockId);
+  if (!block?.text || block.type === "code") {
+    showToast("텍스트가 있는 블록에 댓글을 추가할 수 있습니다.");
+    restoreBlockSelection(selection.ownerType, selection.ownerId, selection.ids);
+    return false;
+  }
+  const blockElement = document.querySelector(`.block-editor[data-owner-type="${cssEscape(selection.ownerType)}"][data-owner-id="${cssEscape(selection.ownerId)}"] [data-block-id="${cssEscape(blockId)}"]`);
+  clearBlockSelection();
+  return openCommentPopover(
+    selection.ownerType,
+    selection.ownerId,
+    blockId,
+    { start: 0, end: block.text.length, collapsed: false },
+    blockElement?.getBoundingClientRect?.() || null,
+  );
 }
 
 function applySlashBlockAction(ownerType, ownerId, blockId, action, slashRange = null) {
@@ -17987,20 +20463,33 @@ function openEquationPopoverForCommand(ownerType, ownerId, blockId, slashRange =
 function applyPageCommandAction(ownerType, ownerId, blockId, entry, range = null) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!entry) return false;
+  const owner = itemById(ownerType, ownerId);
+  const ownerBlock = owner?.blocks?.find((block) => block.id === blockId);
+  if (!ownerBlock || ownerBlock.type === "code" || ownerBlock.type === "divider") return false;
   let mentionEntry = entry;
   if (entry.commandType === "create-subpage" || entry.commandType === "create-page") {
     const title = String(entry.title || entry.insertText || "").trim() || "Untitled";
-    const resource = createResource(title, {
-      deferCreate: true,
-      initial: {
-        pinned: false,
-        readLater: false,
-        importance: "normal",
-        blocks: [
-          { id: id(), type: "paragraph", text: "", marks: [], checked: false, indent: 0, collapsed: false },
-        ],
-      },
-    });
+    if (entry.commandType === "create-subpage" && ownerType !== "resources") {
+      showToast("하위 페이지는 Resource 페이지 안에서 만들 수 있습니다.");
+      return false;
+    }
+    const initial = {
+      pinned: false,
+      readLater: false,
+      importance: "normal",
+      blocks: [
+        { id: id(), type: "paragraph", text: "", marks: [], checked: false, indent: 0, collapsed: false },
+      ],
+    };
+    const resource = entry.commandType === "create-subpage"
+      ? createResourceSubPage(ownerId, { title, initial, deferCommit: true })
+      : createResource(title, { deferCreate: true, initial });
+    if (!resource) return false;
+    if (entry.commandType === "create-page") {
+      touchResource(resource);
+      if (ownerType === "resources") queueResourceOperationGroup([resource.id, ownerId]);
+      else localWorkspaceOperationRequired = true;
+    }
     mentionEntry = {
       kind: "insert",
       mentionType: "page",
@@ -18171,6 +20660,110 @@ function applyBlockType(block, type) {
   block.collapsed = type === "toggle" ? block.collapsed === true : false;
   if (type !== "todo") block.checked = false;
   if (["code", "divider"].includes(type)) block.marks = [];
+}
+
+function inlineToolbarRangeFromControl(control) {
+  const start = Number.parseInt(control?.dataset?.selectionStart, 10) || 0;
+  const end = Math.max(start, Number.parseInt(control?.dataset?.selectionEnd, 10) || 0);
+  return { start, end, collapsed: end <= start };
+}
+
+function toggleInlineColorMenu(forceOpen = null, options = {}) {
+  const toolbar = ui.inlineToolbar;
+  if (!toolbar || !editorOwnerMutationAllowed(toolbar.ownerType, toolbar.ownerId)) return false;
+  const open = typeof forceOpen === "boolean" ? forceOpen : !toolbar.colorMenuOpen;
+  toolbar.colorMenuOpen = open;
+  renderOverlays();
+  requestAnimationFrame(() => {
+    if (open) {
+      const menu = document.querySelector("[data-inline-color-menu]");
+      const target = menu?.querySelector('[role="menuitemradio"][aria-checked="true"]') || menu?.querySelector('[role="menuitemradio"]');
+      if (target) {
+        target.tabIndex = 0;
+        target.focus({ preventScroll: true });
+      }
+    } else if (options.focusTrigger) {
+      document.querySelector("[data-inline-color-menu-toggle]")?.focus({ preventScroll: true });
+    }
+  });
+  return true;
+}
+
+function handleInlineColorMenuKeydown(event) {
+  const item = event.target.closest?.('[data-inline-color-menu] [role="menuitemradio"]');
+  if (!item) return false;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleInlineColorMenu(false, { focusTrigger: true });
+    return true;
+  }
+  if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return false;
+  const menu = item.closest("[data-inline-color-menu]");
+  const items = [...(menu?.querySelectorAll('[role="menuitemradio"]') || [])];
+  if (!items.length) return false;
+  const currentIndex = Math.max(0, items.indexOf(item));
+  const forward = event.key === "ArrowDown" || event.key === "ArrowRight";
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? items.length - 1
+      : (currentIndex + (forward ? 1 : -1) + items.length) % items.length;
+  event.preventDefault();
+  event.stopPropagation();
+  items.forEach((entry) => { entry.tabIndex = -1; });
+  items[nextIndex].tabIndex = 0;
+  items[nextIndex].focus({ preventScroll: true });
+  return true;
+}
+
+function applyInlineColorChoice(choice = "") {
+  const toolbar = ui.inlineToolbar;
+  if (!toolbar) return false;
+  const [mode, rawColor] = String(choice).split(":", 2);
+  if (!Object.prototype.hasOwnProperty.call(INLINE_COLOR_MARK_TYPES, mode)) return false;
+  const color = rawColor === "default" ? "" : normalizeBlockColorValue(rawColor);
+  if (rawColor !== "default" && !color) return false;
+  return applyInlineColor(
+    toolbar.ownerType,
+    toolbar.ownerId,
+    toolbar.blockId,
+    mode,
+    color,
+    { start: toolbar.start, end: toolbar.end, collapsed: toolbar.end <= toolbar.start },
+  );
+}
+
+function applyInlineColor(ownerType, ownerId, blockId, mode, color = "", rangeInfo = null) {
+  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  const markType = INLINE_COLOR_MARK_TYPES[mode];
+  if (!markType) return false;
+  const normalizedColor = color ? normalizeBlockColorValue(color) : "";
+  if (color && !normalizedColor) return false;
+  const item = itemById(ownerType, ownerId);
+  const block = item?.blocks?.find((entry) => entry.id === blockId);
+  if (!block || !block.text || block.type === "code" || block.type === "divider") return false;
+  const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
+  if (!range || range.collapsed || range.end <= range.start) return false;
+  const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), markType, range.start, range.end);
+  if (normalizedColor) marks.push({ type: markType, start: range.start, end: range.end, color: normalizedColor });
+  const history = beginEditorHistory(ownerType, ownerId, { blockId, start: range.start, end: range.end });
+  block.marks = normalizeInlineMarks(block.text, marks);
+  commitEditorHistory(history, { blockId, start: range.start, end: range.end });
+  saveState();
+  renderEditorMutation(ownerType, ownerId);
+  ui.inlineToolbar = null;
+  renderOverlays();
+  focusBlockContentAfterRender(blockId, { range: { start: range.start, end: range.end } });
+  return true;
+}
+
+function inlineColorForRange(marks, markType, start, end) {
+  for (const color of BLOCK_COLOR_KEYS) {
+    const matching = marks.filter((mark) => mark.type === markType && mark.color === color);
+    if (inlineRangeFullyMarked(matching, markType, start, end)) return color;
+  }
+  return "";
 }
 
 function toggleSelectedBlocksInlineMark(markType) {
@@ -18411,6 +21004,17 @@ function applyInlineComment(value) {
   const body = String(value || "").trim();
   if (!body) return removeInlineComment();
   const item = itemById(popover.ownerType, popover.ownerId);
+  const input = document.querySelector("[data-inline-comment-input]");
+  if (body.length > MAX_RESOURCE_COMMENT_BODY_LENGTH) {
+    return rejectResourceCommentInput(input, `댓글은 최대 ${MAX_RESOURCE_COMMENT_BODY_LENGTH}자입니다.`);
+  }
+  const existingThread = popover.ownerType === "resources"
+    ? item?.commentThreads?.some((thread) => thread.id === popover.commentId)
+    : false;
+  if (popover.ownerType === "resources" && !existingThread && resourceCommentThreadLimitReached(item)) {
+    return rejectResourceCommentInput(input, `댓글 스레드는 Resource당 최대 ${MAX_RESOURCE_COMMENT_THREADS}개입니다.`);
+  }
+  clearResourceInputLimitError(input);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
   const commentId = popover.commentId || id();
@@ -18432,9 +21036,12 @@ function applyInlineComment(value) {
     } else {
       thread.body = body;
       thread.anchor = { blockId: popover.blockId, start: popover.start, end: popover.end };
+      thread.scope = "inline";
+      delete thread.anchorLostAt;
+      delete thread.formerAnchor;
       thread.updatedAt = new Date().toISOString();
     }
-    touchResource(item);
+    updateResourceCommentReadAt(item.id, thread.updatedAt);
   }
   commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
   saveState();
@@ -19011,8 +21618,10 @@ function rectSnapshot(rect) {
   };
 }
 
-function openSelectedBlocksMenu() {
-  const selection = ui.blockSelection;
+function openSelectedBlocksMenu(options = {}) {
+  const selection = options.selection?.ids?.length
+    ? { ownerType: options.selection.ownerType, ownerId: options.selection.ownerId, ids: options.selection.ids.slice() }
+    : ui.blockSelection;
   if (!selection.ids.length) return false;
   if (!editorOwnerMutationAllowed(selection.ownerType, selection.ownerId)) return false;
   const menuSelection = { ownerType: selection.ownerType, ownerId: selection.ownerId, ids: selection.ids.slice() };
@@ -19042,8 +21651,121 @@ function openSelectedBlocksMenu() {
   ui.commentPopover = null;
   window.getSelection()?.removeAllRanges();
   renderOverlays();
-  requestAnimationFrame(focusSlashQueryInput);
+  requestAnimationFrame(() => {
+    if (options.focusAction) {
+      document.querySelector(`[data-selected-block-action="${cssEscape(options.focusAction)}"]`)?.focus?.({ preventScroll: true });
+    } else {
+      focusSlashQueryInput();
+    }
+  });
   return true;
+}
+
+function selectedBlockMoveDestinations(selection = selectedBlocksMenuSelection(), query = "") {
+  if (selection?.ownerType !== "resources" || !resourceMutationAllowed(selection.ownerId)) return [];
+  const normalizedQuery = normalizeSlashSearch(query);
+  return state.resources
+    .filter((resource) => (
+      resource.id !== selection.ownerId &&
+      resourceMutationAllowed(resource) &&
+      (!normalizedQuery || normalizeSlashSearch(`${resource.title || ""} ${resource.type || ""}`).includes(normalizedQuery))
+    ))
+    .sort((left, right) => (
+      String(left.title || "").localeCompare(String(right.title || ""), "ko-KR", { sensitivity: "base" }) ||
+      String(left.id || "").localeCompare(String(right.id || ""))
+    ));
+}
+
+function openSelectedBlockMoveMenu(selection = selectedBlocksMenuSelection()) {
+  if (!selection?.ids?.length || selection.ownerType !== "resources" || !resourceMutationAllowed(selection.ownerId)) return false;
+  const editor = document.querySelector(`.block-editor[data-owner-type="resources"][data-owner-id="${cssEscape(selection.ownerId)}"]`);
+  const targetBlock = editor?.querySelector(`[data-block-id="${cssEscape(selection.ids[0])}"]`);
+  if (!targetBlock) return false;
+  const position = selectedBlockMoveMenuPosition(targetBlock.getBoundingClientRect());
+  ui.slash = {
+    mode: "selection-move",
+    ownerType: selection.ownerType,
+    ownerId: selection.ownerId,
+    blockId: selection.ids[0],
+    selection: { ownerType: selection.ownerType, ownerId: selection.ownerId, ids: selection.ids.slice() },
+    query: "",
+    selectedIndex: 0,
+    x: position.x,
+    y: position.y,
+  };
+  renderOverlays();
+  requestAnimationFrame(focusSelectedBlockMoveQuery);
+  return true;
+}
+
+function selectedBlockMoveMenuPosition(anchorRect = null) {
+  const viewport = inlineToolbarViewportBounds();
+  const margin = 12;
+  const width = Math.min(420, Math.max(1, viewport.right - viewport.left - margin * 2));
+  const height = Math.min(420, Math.max(1, viewport.bottom - viewport.top - margin * 2));
+  const left = Number.isFinite(anchorRect?.left) ? anchorRect.left : viewport.left + margin;
+  const top = Number.isFinite(anchorRect?.bottom) ? anchorRect.bottom + 6 : viewport.top + margin;
+  return {
+    x: Math.round(Math.max(viewport.left + margin, Math.min(left, viewport.right - margin - width))),
+    y: Math.round(Math.max(viewport.top + margin, Math.min(top, viewport.bottom - margin - height))),
+  };
+}
+
+function clampSelectedBlockMoveMenuToViewport() {
+  if (ui.slash?.mode !== "selection-move") return;
+  const editor = document.querySelector(`.block-editor[data-owner-type="${cssEscape(ui.slash.ownerType)}"][data-owner-id="${cssEscape(ui.slash.ownerId)}"]`);
+  const block = editor?.querySelector(`[data-block-id="${cssEscape(ui.slash.blockId)}"]`);
+  const position = selectedBlockMoveMenuPosition(block?.getBoundingClientRect?.() || null);
+  ui.slash.x = position.x;
+  ui.slash.y = position.y;
+  const menu = document.querySelector(".is-selection-move-menu");
+  if (menu) {
+    menu.style.left = `${position.x}px`;
+    menu.style.top = `${position.y}px`;
+  }
+}
+
+function focusSelectedBlockMoveQuery() {
+  const input = document.querySelector("[data-selected-block-move-query]");
+  input?.focus?.({ preventScroll: true });
+  if (input) input.setSelectionRange?.(input.value.length, input.value.length);
+  return input;
+}
+
+function updateSelectedBlockMoveQuery(query = "") {
+  if (ui.slash?.mode !== "selection-move") return false;
+  ui.slash.query = String(query || "");
+  ui.slash.selectedIndex = 0;
+  renderOverlays();
+  requestAnimationFrame(focusSelectedBlockMoveQuery);
+  return true;
+}
+
+function returnSelectedBlockMoveMenuToActions() {
+  const selection = selectedBlocksMenuSelection();
+  if (!selection?.ids?.length) return false;
+  ui.blockSelection = { ownerType: selection.ownerType, ownerId: selection.ownerId, ids: selection.ids.slice() };
+  return openSelectedBlocksMenu({ selection, focusAction: "move-to" });
+}
+
+function closeSelectedBlockMoveMenu(options = {}) {
+  if (ui.slash?.mode !== "selection-move") return false;
+  const selection = selectedBlocksMenuSelection();
+  ui.slash = null;
+  renderOverlays();
+  if (options.restoreSelection && selection?.ids?.length) {
+    restoreBlockSelection(selection.ownerType, selection.ownerId, selection.ids);
+    if (options.focus) requestAnimationFrame(() => focusSelectedBlockMenuReturnTarget(selection));
+  }
+  return true;
+}
+
+function focusSelectedBlockMenuReturnTarget(selection) {
+  if (!selection?.ids?.length) return false;
+  const editor = document.querySelector(`.block-editor[data-owner-type="${cssEscape(selection.ownerType)}"][data-owner-id="${cssEscape(selection.ownerId)}"]`);
+  const handle = editor?.querySelector(`[data-block-id="${cssEscape(selection.ids[0])}"] [data-block-drag]`);
+  handle?.focus?.({ preventScroll: true });
+  return Boolean(handle);
 }
 
 function closeSlashMenu() {
@@ -19166,7 +21888,11 @@ function focusSlashQueryInput() {
 }
 
 function isSelectedBlocksMenuOpen() {
-  return ui.slash?.mode === "selection" || Boolean(document.querySelector(".slash-menu.is-selection-menu"));
+  return selectedBlocksMenuModeActive() || Boolean(document.querySelector(".slash-menu.is-selection-menu"));
+}
+
+function selectedBlocksMenuModeActive() {
+  return ui.slash?.mode === "selection" || ui.slash?.mode === "selection-move";
 }
 
 function slashMenuAcceptsSearchInput() {
@@ -19174,7 +21900,7 @@ function slashMenuAcceptsSearchInput() {
 }
 
 function selectedBlocksMenuSelection() {
-  if (ui.slash?.mode === "selection" && ui.slash.selection?.ids?.length) {
+  if (selectedBlocksMenuModeActive() && ui.slash.selection?.ids?.length) {
     return {
       ownerType: ui.slash.selection.ownerType || ui.slash.ownerType,
       ownerId: ui.slash.selection.ownerId || ui.slash.ownerId,
@@ -19186,6 +21912,7 @@ function selectedBlocksMenuSelection() {
 
 function handleSlashMenuDocumentKeydown(event) {
   if (!ui.slash) return false;
+  if (ui.slash.mode === "selection-move") return handleSelectedBlockMoveMenuKeydown(event);
   const targetIsSlashInput = event.target instanceof Element && event.target.closest("[data-slash-query]");
   const acceptsSearchInput = slashMenuAcceptsSearchInput();
   if (!targetIsSlashInput && !acceptsSearchInput) return false;
@@ -19221,6 +21948,50 @@ function handleSlashMenuDocumentKeydown(event) {
     closeSlashMenu();
     if (menuSelection?.ids.length) restoreBlockSelection(menuSelection.ownerType, menuSelection.ownerId, menuSelection.ids);
     if (slash?.mode === "insert") focusBlockContentAfterRender(slash.blockId);
+    return true;
+  }
+  return false;
+}
+
+function handleSelectedBlockMoveMenuKeydown(event) {
+  const moveMenu = ui.slash;
+  if (moveMenu?.mode !== "selection-move") return false;
+  const destinations = selectedBlockMoveDestinations(selectedBlocksMenuSelection(), moveMenu.query || "");
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSelectedBlockMoveMenu({ restoreSelection: true, focus: true });
+    return true;
+  }
+  if (event.key === "ArrowLeft" && !(event.target instanceof HTMLInputElement)) {
+    event.preventDefault();
+    event.stopPropagation();
+    returnSelectedBlockMoveMenuToActions();
+    return true;
+  }
+  if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!destinations.length) return true;
+    if (event.key === "Home") moveMenu.selectedIndex = 0;
+    else if (event.key === "End") moveMenu.selectedIndex = destinations.length - 1;
+    else {
+      const offset = event.key === "ArrowDown" ? 1 : -1;
+      moveMenu.selectedIndex = ((moveMenu.selectedIndex || 0) + offset + destinations.length) % destinations.length;
+    }
+    renderOverlays();
+    requestAnimationFrame(() => {
+      focusSelectedBlockMoveQuery();
+      document.querySelector(".selected-block-move-destination.is-active")?.scrollIntoView?.({ block: "nearest" });
+    });
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!destinations.length) return true;
+    const selectedIndex = Math.max(0, Math.min(moveMenu.selectedIndex || 0, destinations.length - 1));
+    moveSelectedBlocksToResource(destinations[selectedIndex].id);
     return true;
   }
   return false;
@@ -19338,9 +22109,69 @@ async function apiJson(path, options = {}) {
     error.status = response.status;
     error.code = typeof payload.code === "string" ? payload.code : "";
     error.revision = responseRevision;
+    error.details = isPlainObject(payload.details) ? payload.details : null;
+    error.retryAfterMs = parseRetryAfterMilliseconds(response.headers.get("Retry-After"));
     throw error;
   }
   return payload;
+}
+
+function classifyRemoteSaveError(error) {
+  const status = Number(error?.status);
+  if (!Number.isInteger(status) || status === 408 || status === 425 || status === 429 || status >= 500) return "transient";
+  if ([409, 412, 428].includes(status)) return "conflict";
+  if (status >= 400 && status < 500) return "terminal";
+  return "transient";
+}
+
+function sanitizeResourceSaveErrorText(value, maximumLength = MAX_RESOURCE_SAVE_ERROR_MESSAGE_LENGTH) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maximumLength);
+}
+
+function sanitizeResourceSaveErrorCode(value) {
+  return String(value || "")
+    .replace(/[^a-z0-9_.:-]/gi, "")
+    .slice(0, MAX_RESOURCE_SAVE_ERROR_CODE_LENGTH);
+}
+
+function sanitizedResourceSaveError(error) {
+  const firstIssue = Array.isArray(error?.details?.issues) && isPlainObject(error.details.issues[0])
+    ? error.details.issues[0]
+    : null;
+  const issue = firstIssue
+    ? {
+        path: sanitizeResourceSaveErrorText(firstIssue.path, MAX_RESOURCE_SAVE_ERROR_PATH_LENGTH),
+        code: sanitizeResourceSaveErrorCode(firstIssue.code),
+        message: sanitizeResourceSaveErrorText(firstIssue.message),
+      }
+    : null;
+  return {
+    status: Number.isInteger(error?.status) ? error.status : 0,
+    code: sanitizeResourceSaveErrorCode(error?.code),
+    message: sanitizeResourceSaveErrorText(error?.message || "Resource 저장에 실패했습니다."),
+    ...(issue?.path || issue?.code || issue?.message ? { issue } : {}),
+    failedAt: new Date().toISOString(),
+  };
+}
+
+function parseRetryAfterMilliseconds(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(REMOTE_STATE_RETRY_MAX_DELAY_MS, Math.ceil(seconds * 1000));
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) return 0;
+  return Math.min(REMOTE_STATE_RETRY_MAX_DELAY_MS, Math.max(0, timestamp - Date.now()));
+}
+
+function transientRemoteSaveRetryDelay(error, attempts = 1) {
+  if (Number(error?.retryAfterMs) > 0) return Math.min(REMOTE_STATE_RETRY_MAX_DELAY_MS, Number(error.retryAfterMs));
+  const exponent = Math.max(0, Math.min(4, Number(attempts || 1) - 1));
+  return Math.min(REMOTE_STATE_RETRY_MAX_DELAY_MS, REMOTE_STATE_RETRY_DELAY_MS * (2 ** exponent));
 }
 
 function cloneForLocalPersistence(value) {
@@ -19376,6 +22207,12 @@ function openLocalResourceDatabase() {
         const operations = database.createObjectStore(LOCAL_RESOURCE_OPERATION_STORE, { keyPath: "id" });
         operations.createIndex("workspaceId", "workspaceId", { unique: false });
       }
+      if (!database.objectStoreNames.contains(LOCAL_RESOURCE_METADATA_STORE)) {
+        const metadata = database.createObjectStore(LOCAL_RESOURCE_METADATA_STORE, {
+          keyPath: ["workspaceId", "resourceId"],
+        });
+        metadata.createIndex("workspaceId", "workspaceId", { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("IndexedDB is unavailable."));
@@ -19404,8 +22241,150 @@ async function readLocalResourcePersistence(workspaceId = "") {
     snapshot,
     operations: operations
       .filter((entry) => entry.workspaceId === selectedWorkspaceId)
-      .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")) || String(left.id || "").localeCompare(String(right.id || ""))),
+      .sort(compareLocalResourceOperations),
   };
+}
+
+async function readLocalResourceMetadataRecords(workspaceId) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
+  if (!normalizedWorkspaceId || !localResourcePersistence.available) return [];
+  const database = await openLocalResourceDatabase();
+  if (!database) return [];
+  const transaction = database.transaction(LOCAL_RESOURCE_METADATA_STORE, "readonly");
+  const records = await indexedDbRequest(transaction.objectStore(LOCAL_RESOURCE_METADATA_STORE).getAll());
+  await indexedDbTransactionComplete(transaction);
+  return records.filter((record) => record.workspaceId === normalizedWorkspaceId);
+}
+
+function resourceCommentReadAtFromMetadata(records = []) {
+  const cursors = {};
+  for (const record of records) {
+    const resourceId = String(record?.resourceId || "").trim();
+    const readAt = normalizedIsoTimestamp(record?.resourceCommentReadAt);
+    if (!resourceId || !readAt) continue;
+    if (stateTimestamp(cursors[resourceId]) < stateTimestamp(readAt)) cursors[resourceId] = readAt;
+  }
+  return cursors;
+}
+
+function mergeResourceCommentReadAtMaps(...sources) {
+  const merged = {};
+  for (const source of sources) {
+    for (const [resourceId, readAt] of Object.entries(normalizeResourceCommentReadAt(source))) {
+      if (stateTimestamp(merged[resourceId]) < stateTimestamp(readAt)) merged[resourceId] = readAt;
+    }
+  }
+  return merged;
+}
+
+function serializeLocalResourceMetadataWrite(task) {
+  localResourceMetadataWriteChain = localResourceMetadataWriteChain
+    .catch(() => false)
+    .then(task)
+    .catch((error) => {
+      localResourcePersistence.error = error?.message || "로컬 Resource 메타데이터 저장에 실패했습니다.";
+      return false;
+    });
+  return localResourceMetadataWriteChain;
+}
+
+function queueLocalResourceCommentReadAtWrites(workspaceId, cursors) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
+  const normalizedCursors = normalizeResourceCommentReadAt(cursors);
+  if (!normalizedWorkspaceId || !Object.keys(normalizedCursors).length || !localResourcePersistence.available) {
+    return Promise.resolve(false);
+  }
+  return serializeLocalResourceMetadataWrite(async () => {
+    const existingRecords = await readLocalResourceMetadataRecords(normalizedWorkspaceId);
+    const existing = resourceCommentReadAtFromMetadata(existingRecords);
+    const database = await openLocalResourceDatabase();
+    if (!database) return false;
+    const transaction = database.transaction(LOCAL_RESOURCE_METADATA_STORE, "readwrite");
+    const store = transaction.objectStore(LOCAL_RESOURCE_METADATA_STORE);
+    let changed = false;
+    for (const [resourceId, readAt] of Object.entries(normalizedCursors)) {
+      if (stateTimestamp(existing[resourceId]) >= stateTimestamp(readAt)) continue;
+      store.put({
+        workspaceId: normalizedWorkspaceId,
+        resourceId,
+        schemaVersion: LOCAL_RESOURCE_METADATA_SCHEMA_VERSION,
+        resourceCommentReadAt: readAt,
+        updatedAt: new Date().toISOString(),
+      });
+      changed = true;
+    }
+    await indexedDbTransactionComplete(transaction);
+    return changed;
+  });
+}
+
+function queueLocalResourceCommentReadAtWrite(resourceId, timestamp) {
+  const workspaceId = String(
+    localResourcePersistence.workspaceId || LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID,
+  ).trim();
+  const readAt = normalizedIsoTimestamp(timestamp);
+  if (!resourceId || !readAt) return Promise.resolve(false);
+  return queueLocalResourceCommentReadAtWrites(workspaceId, { [resourceId]: readAt });
+}
+
+async function loadLocalResourceCommentReadAt(workspaceId, legacyCursors = {}) {
+  const records = await readLocalResourceMetadataRecords(workspaceId);
+  const stored = resourceCommentReadAtFromMetadata(records);
+  const merged = mergeResourceCommentReadAtMaps(stored, legacyCursors);
+  ui.resourceCommentReadAt = merged;
+  const migrated = {};
+  for (const [resourceId, readAt] of Object.entries(merged)) {
+    if (stateTimestamp(stored[resourceId]) < stateTimestamp(readAt)) migrated[resourceId] = readAt;
+  }
+  if (Object.keys(migrated).length) await queueLocalResourceCommentReadAtWrites(workspaceId, migrated);
+  return merged;
+}
+
+async function mergeLocalResourceCommentReadAt(legacyCursors = {}) {
+  const merged = mergeResourceCommentReadAtMaps(ui.resourceCommentReadAt, legacyCursors);
+  const additions = {};
+  for (const [resourceId, readAt] of Object.entries(merged)) {
+    if (stateTimestamp(ui.resourceCommentReadAt?.[resourceId]) < stateTimestamp(readAt)) additions[resourceId] = readAt;
+  }
+  ui.resourceCommentReadAt = merged;
+  if (Object.keys(additions).length) {
+    await queueLocalResourceCommentReadAtWrites(localResourcePersistence.workspaceId, additions);
+  }
+  return merged;
+}
+
+async function migrateProvisionalLocalResourceMetadata(workspaceId) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
+  if (!normalizedWorkspaceId || normalizedWorkspaceId === LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID) return false;
+  return serializeLocalResourceMetadataWrite(async () => {
+    const [provisionalRecords, targetRecords] = await Promise.all([
+      readLocalResourceMetadataRecords(LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID),
+      readLocalResourceMetadataRecords(normalizedWorkspaceId),
+    ]);
+    if (!provisionalRecords.length) return false;
+    const merged = mergeResourceCommentReadAtMaps(
+      resourceCommentReadAtFromMetadata(targetRecords),
+      resourceCommentReadAtFromMetadata(provisionalRecords),
+    );
+    const database = await openLocalResourceDatabase();
+    if (!database) return false;
+    const transaction = database.transaction(LOCAL_RESOURCE_METADATA_STORE, "readwrite");
+    const store = transaction.objectStore(LOCAL_RESOURCE_METADATA_STORE);
+    for (const record of provisionalRecords) {
+      store.delete([LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID, record.resourceId]);
+    }
+    for (const [resourceId, readAt] of Object.entries(merged)) {
+      store.put({
+        workspaceId: normalizedWorkspaceId,
+        resourceId,
+        schemaVersion: LOCAL_RESOURCE_METADATA_SCHEMA_VERSION,
+        resourceCommentReadAt: readAt,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    await indexedDbTransactionComplete(transaction);
+    return true;
+  });
 }
 
 async function initializeLocalResourcePersistence() {
@@ -19414,16 +22393,26 @@ async function initializeLocalResourcePersistence() {
     return;
   }
   try {
+    let draftWasStagedBeforeReady = Boolean(
+      dirtyResourceIds.size || localWorkspaceOperationRequired || localResourceWriteTimer
+    );
     const local = await readLocalResourcePersistence();
+    draftWasStagedBeforeReady ||= Boolean(
+      dirtyResourceIds.size || localWorkspaceOperationRequired || localResourceWriteTimer
+    );
     localResourcePersistence = {
       ...localResourcePersistence,
       ready: true,
-      workspaceId: local.snapshot?.workspaceId || "",
+      workspaceId: local.snapshot?.workspaceId || LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID,
       snapshot: local.snapshot,
       operations: local.operations,
-      pending: local.operations.length > 0,
+      pending: local.operations.length > 0 || draftWasStagedBeforeReady,
     };
-    if (local.snapshot?.state && isPlainObject(local.snapshot.state)) {
+    await loadLocalResourceCommentReadAt(localResourcePersistence.workspaceId, {
+      ...(state.settings?.resourceCommentReadAt || {}),
+      ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
+    });
+    if (!draftWasStagedBeforeReady && local.snapshot?.state && isPlainObject(local.snapshot.state)) {
       const localState = normalizeState(cloneForLocalPersistence(local.snapshot.state));
       localState.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, localState.revision);
       state = localState;
@@ -19432,6 +22421,7 @@ async function initializeLocalResourcePersistence() {
       localStateChangedBeforeDatabaseReady = local.operations.length > 0;
       rerenderAfterStateReplace();
     }
+    if (draftWasStagedBeforeReady) await persistLocalResourceDraft();
   } catch (error) {
     localResourcePersistence.available = false;
     localResourcePersistence.ready = true;
@@ -19443,11 +22433,21 @@ async function initializeLocalResourcePersistence() {
 async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
   const normalizedWorkspaceId = String(workspaceId || "").trim();
   if (!normalizedWorkspaceId || !localResourcePersistence.available) return { snapshot: null, operations: [] };
-  const local = await readLocalResourcePersistence(normalizedWorkspaceId);
+  const migrateFromProvisional = localResourcePersistence.workspaceId === LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID
+    && normalizedWorkspaceId !== LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID;
+  if (migrateFromProvisional) await migrateProvisionalLocalResourceMetadata(normalizedWorkspaceId);
+  const migrated = migrateFromProvisional
+    ? await migrateProvisionalLocalResourceWorkspace(normalizedWorkspaceId, fallbackRevision)
+    : null;
+  const local = migrated || await readLocalResourcePersistence(normalizedWorkspaceId);
   localResourcePersistence.workspaceId = normalizedWorkspaceId;
   localResourcePersistence.snapshot = local.snapshot;
   localResourcePersistence.operations = local.operations;
   localResourcePersistence.pending = local.operations.length > 0;
+  await loadLocalResourceCommentReadAt(normalizedWorkspaceId, {
+    ...(state.settings?.resourceCommentReadAt || {}),
+    ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
+  });
   if (local.snapshot?.state && local.operations.length) {
     state = normalizeState(cloneForLocalPersistence(local.snapshot.state));
     state.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, fallbackRevision);
@@ -19457,32 +22457,199 @@ async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
   return local;
 }
 
-function activeDirtyResourceIds() {
-  return [...dirtyResourceIds].filter((resourceId) => itemById("resources", resourceId));
+function localResourceOperationKey(operation) {
+  return `${operation?.entityType || ""}:${operation?.entityType === "workspace" ? "workspace" : operation?.entityId || ""}`;
 }
 
-function scheduleLocalResourceDraftWrite() {
-  if (!localResourcePersistence.available) return;
+function localResourceOperationIsNewer(candidate, current) {
+  return String(candidate?.updatedAt || candidate?.createdAt || "") >= String(current?.updatedAt || current?.createdAt || "");
+}
+
+function mergeWorkspaceDraftStates(baseState, draftState) {
+  if (!isPlainObject(baseState)) return cloneForLocalPersistence(draftState);
+  if (!isPlainObject(draftState)) return cloneForLocalPersistence(baseState);
+  const merged = cloneForLocalPersistence(baseState);
+  for (const collection of [
+    "captures",
+    "boxes",
+    "goals",
+    "projects",
+    "tasks",
+    "resources",
+    "habits",
+    "habitInstances",
+    "journals",
+    "googleCalendars",
+    "googleEvents",
+    "links",
+  ]) {
+    const byId = new Map((Array.isArray(merged[collection]) ? merged[collection] : []).map((item) => [item.id, item]));
+    for (const item of Array.isArray(draftState[collection]) ? draftState[collection] : []) byId.set(item.id, cloneForLocalPersistence(item));
+    merged[collection] = [...byId.values()];
+  }
+  const baseSettings = isPlainObject(baseState.settings) ? baseState.settings : {};
+  const draftSettings = isPlainObject(draftState.settings) ? draftState.settings : {};
+  merged.settings = {
+    ...cloneForLocalPersistence(baseSettings),
+    ...cloneForLocalPersistence(draftSettings),
+    calendarSources: { ...(baseSettings.calendarSources || {}), ...(draftSettings.calendarSources || {}) },
+    visibleGoogleCalendars: { ...(baseSettings.visibleGoogleCalendars || {}), ...(draftSettings.visibleGoogleCalendars || {}) },
+    openPagesIn: { ...(baseSettings.openPagesIn || {}), ...(draftSettings.openPagesIn || {}) },
+    resourceCommentReadAt: { ...(baseSettings.resourceCommentReadAt || {}), ...(draftSettings.resourceCommentReadAt || {}) },
+    viewControls: { ...(baseSettings.viewControls || {}), ...(draftSettings.viewControls || {}) },
+  };
+  merged.createdAt = stateTimestamp(baseState.createdAt) <= stateTimestamp(draftState.createdAt)
+    ? baseState.createdAt
+    : draftState.createdAt;
+  merged.updatedAt = stateTimestamp(baseState.updatedAt) >= stateTimestamp(draftState.updatedAt)
+    ? baseState.updatedAt
+    : draftState.updatedAt;
+  return merged;
+}
+
+async function migrateProvisionalLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
+  if (dirtyResourceIds.size || localWorkspaceOperationRequired || localResourceWriteTimer) await persistLocalResourceDraft();
+  else await localResourceWriteChain;
+  const provisional = await readLocalResourcePersistence(LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID);
+  if (!provisional.snapshot && !provisional.operations.length) return null;
+  const target = await readLocalResourcePersistence(workspaceId);
+  const targetHasPendingOperations = target.operations.length > 0;
+  const baseRevision = targetHasPendingOperations
+    ? normalizedWorkspaceRevision(target.snapshot?.baseRevision, fallbackRevision)
+    : normalizedWorkspaceRevision(fallbackRevision, target.snapshot?.baseRevision);
+  const mergedState = targetHasPendingOperations
+    ? mergeWorkspaceDraftStates(target.snapshot?.state, provisional.snapshot?.state)
+    : cloneForLocalPersistence(provisional.snapshot?.state || target.snapshot?.state || state);
+  mergedState.revision = baseRevision;
+  const now = new Date().toISOString();
+  const rebasedProvisional = provisional.operations.map((operation) => {
+    const entityId = operation.entityType === "workspace" ? workspaceId : operation.entityId;
+    return {
+      ...cloneForLocalPersistence(operation),
+      id: operation.entityType === "workspace"
+        ? `workspace:${workspaceId}`
+        : `${operation.entityType}:${workspaceId}:${entityId}`,
+      workspaceId,
+      entityId,
+      baseRevision,
+      status: ["conflict", "failed"].includes(operation.status) ? operation.status : "pending",
+      updatedAt: now,
+    };
+  });
+  const byEntity = new Map();
+  for (const operation of [...target.operations, ...rebasedProvisional]) {
+    const key = localResourceOperationKey(operation);
+    const previous = byEntity.get(key);
+    if (!previous || localResourceOperationIsNewer(operation, previous)) byEntity.set(key, operation);
+  }
+  let operations = orderedLocalResourceOperations([...byEntity.values()]);
+  const workspaceOperationIndex = operations.findIndex((operation) => operation.entityType === "workspace");
+  if (workspaceOperationIndex >= 0) {
+    operations[workspaceOperationIndex] = {
+      ...operations[workspaceOperationIndex],
+      payload: { state: cloneForLocalPersistence(mergedState) },
+      scope: operations.some((operation) => operation.entityType === "workspace" && operation.scope !== "resource-controls")
+        ? "workspace"
+        : "resource-controls",
+    };
+  }
+  const snapshot = {
+    workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision,
+    savedAt: now,
+    state: mergedState,
+  };
+  const database = await openLocalResourceDatabase();
+  if (!database) return null;
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  const snapshotStore = transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE);
+  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  snapshotStore.put(snapshot);
+  snapshotStore.delete(LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID);
+  for (const operation of [...provisional.operations, ...target.operations]) operationStore.delete(operation.id);
+  for (const operation of operations) operationStore.put(operation);
+  await indexedDbTransactionComplete(transaction);
+  return {
+    snapshot,
+    operations,
+    migratedFromProvisional: true,
+    targetHadPendingOperations: targetHasPendingOperations,
+  };
+}
+
+function compareLocalResourceOperations(left, right) {
+  const leftOrder = Number.isSafeInteger(left?.queueOrder) && left.queueOrder >= 0 ? left.queueOrder : Number.MAX_SAFE_INTEGER;
+  const rightOrder = Number.isSafeInteger(right?.queueOrder) && right.queueOrder >= 0 ? right.queueOrder : Number.MAX_SAFE_INTEGER;
+  return leftOrder - rightOrder
+    || String(left?.createdAt || "").localeCompare(String(right?.createdAt || ""))
+    || String(left?.id || "").localeCompare(String(right?.id || ""));
+}
+
+function queueResourceOperationGroup(resourceIds) {
+  const orderedIds = [...new Set(resourceIds.map((resourceId) => String(resourceId || "").trim()).filter(Boolean))];
+  if (orderedIds.length > 1) pendingResourceOperationGroups.push(orderedIds);
+}
+
+function orderedLocalResourceOperations(operations, groups = []) {
+  let ordered = [...operations].sort(compareLocalResourceOperations);
+  for (const group of groups) {
+    const groupedOperations = group
+      .map((resourceId) => ordered.find((operation) => operation.entityType === "resource" && operation.entityId === resourceId))
+      .filter(Boolean);
+    if (groupedOperations.length < 2) continue;
+    const groupedOperationIds = new Set(groupedOperations.map((operation) => operation.id));
+    const insertionIndex = Math.min(...ordered.map((operation, index) => groupedOperationIds.has(operation.id) ? index : ordered.length));
+    ordered = ordered.filter((operation) => !groupedOperationIds.has(operation.id));
+    ordered.splice(insertionIndex, 0, ...groupedOperations);
+  }
+  return ordered.map((operation, queueOrder) => ({ ...operation, queueOrder }));
+}
+
+function scheduleLocalResourceDraftWrite(options = {}) {
+  if (!localResourcePersistence.available) return Promise.resolve(false);
+  localResourceDraftGeneration += 1;
   localResourcePersistence.pending = true;
   window.clearTimeout(localResourceWriteTimer);
-  localResourceWriteTimer = window.setTimeout(() => persistLocalResourceDraft(), LOCAL_RESOURCE_WRITE_DELAY_MS);
+  if (options.immediate === true) return persistLocalResourceDraft(options);
+  localResourceWriteTimer = window.setTimeout(() => persistLocalResourceDraft(options), LOCAL_RESOURCE_WRITE_DELAY_MS);
+  return Promise.resolve(true);
 }
 
-async function persistLocalResourceDraft(options = {}) {
+function persistLocalResourceDraft(options = {}) {
   window.clearTimeout(localResourceWriteTimer);
   localResourceWriteTimer = 0;
+  const requestedGeneration = localResourceDraftGeneration;
+  const write = () => persistLocalResourceDraftNow(options, requestedGeneration);
+  localResourceWriteChain = localResourceWriteChain.then(write, write).catch((error) => {
+    localResourcePersistence.pending = true;
+    localResourcePersistence.error = error?.message || "로컬 draft 저장에 실패했습니다.";
+    databaseBackendStatus.error ||= localResourcePersistence.error;
+    patchResourcePageSaveStatus();
+    renderServiceWorkerUpdateNoticeIfNeeded();
+    return false;
+  });
+  return localResourceWriteChain;
+}
+
+async function persistLocalResourceDraftNow(options = {}, requestedGeneration = localResourceDraftGeneration) {
   if (!localResourcePersistence.available || !localResourcePersistence.ready) return false;
   const workspaceId = String(localResourcePersistence.workspaceId || "").trim();
   if (!workspaceId) return false;
+  const draftState = cloneForLocalPersistence(state);
+  const resourceIds = [...dirtyResourceIds].filter((resourceId) => draftState.resources?.some((resource) => resource.id === resourceId));
+  const resourceOperationGroups = pendingResourceOperationGroups.map((group) => [...group]);
+  const workspaceOperationRequired = localWorkspaceOperationRequired;
+  const workspaceOperationScope = localWorkspaceOperationScope;
   const database = await openLocalResourceDatabase();
   if (!database) return false;
   const now = new Date().toISOString();
   const baseRevision = localResourcePersistence.snapshot?.baseRevision ?? currentWorkspaceRevision();
   const previousByEntity = new Map(localResourcePersistence.operations.map((operation) => [`${operation.entityType}:${operation.entityId}`, operation]));
-  const resourceIds = activeDirtyResourceIds();
-  const nextOperations = localResourcePersistence.operations.filter((operation) => operation.workspaceId === workspaceId);
+  const draftResourcesById = new Map((draftState.resources || []).map((resource) => [resource.id, resource]));
+  let nextOperations = localResourcePersistence.operations.filter((operation) => operation.workspaceId === workspaceId);
   for (const resourceId of resourceIds) {
-    const resource = itemById("resources", resourceId);
+    const resource = draftResourcesById.get(resourceId);
     if (!resource) continue;
     const previous = previousByEntity.get(`resource:${resourceId}`);
     const operation = {
@@ -19493,6 +22660,7 @@ async function persistLocalResourceDraft(options = {}) {
       baseRevision: previous?.baseRevision ?? baseRevision,
       status: previous?.status === "conflict" ? "conflict" : "pending",
       attempts: Number(previous?.attempts || 0),
+      ...(Number.isSafeInteger(previous?.queueOrder) ? { queueOrder: previous.queueOrder } : {}),
       createdAt: previous?.createdAt || now,
       updatedAt: now,
       payload: { resource: cloneForLocalPersistence(resource) },
@@ -19502,7 +22670,7 @@ async function persistLocalResourceDraft(options = {}) {
     if (index >= 0) nextOperations[index] = operation;
     else nextOperations.push(operation);
   }
-  if (localWorkspaceOperationRequired || (!resourceIds.length && options.ensureOperation === true)) {
+  if (workspaceOperationRequired || (!resourceIds.length && options.ensureOperation === true)) {
     const previous = previousByEntity.get(`workspace:${workspaceId}`);
     const operation = {
       id: previous?.id || `workspace:${workspaceId}`,
@@ -19512,31 +22680,39 @@ async function persistLocalResourceDraft(options = {}) {
       baseRevision: previous?.baseRevision ?? baseRevision,
       status: previous?.status === "conflict" ? "conflict" : "pending",
       attempts: Number(previous?.attempts || 0),
+      ...(Number.isSafeInteger(previous?.queueOrder) ? { queueOrder: previous.queueOrder } : {}),
       createdAt: previous?.createdAt || now,
       updatedAt: now,
-      payload: { state: cloneForLocalPersistence(state) },
+      payload: { state: cloneForLocalPersistence(draftState) },
+      scope: workspaceOperationScope || previous?.scope || "workspace",
     };
     const index = nextOperations.findIndex((entry) => entry.id === operation.id);
     if (index >= 0) nextOperations[index] = operation;
     else nextOperations.push(operation);
   }
+  nextOperations = orderedLocalResourceOperations(nextOperations, resourceOperationGroups);
   const snapshot = {
     workspaceId,
     schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
     baseRevision,
     savedAt: now,
-    state: cloneForLocalPersistence(state),
+    state: draftState,
   };
   const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
   transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
   const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
   for (const operation of nextOperations) operationStore.put(operation);
   await indexedDbTransactionComplete(transaction);
-  dirtyResourceIds.clear();
-  localWorkspaceOperationRequired = false;
+  if (requestedGeneration === localResourceDraftGeneration) {
+    dirtyResourceIds.clear();
+    pendingResourceOperationGroups = [];
+    localWorkspaceOperationRequired = false;
+    localWorkspaceOperationScope = "";
+  }
   localResourcePersistence.snapshot = snapshot;
   localResourcePersistence.operations = nextOperations;
   localResourcePersistence.pending = nextOperations.length > 0;
+  localResourcePersistence.error = "";
   patchResourcePageSaveStatus();
   renderServiceWorkerUpdateNoticeIfNeeded();
   return true;
@@ -19571,7 +22747,9 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
   localResourcePersistence.conflictRemoteState = null;
   localResourcePersistence.conflictResourceId = "";
   dirtyResourceIds.clear();
+  pendingResourceOperationGroups = [];
   localWorkspaceOperationRequired = false;
+  localWorkspaceOperationScope = "";
   patchResourcePageSaveStatus();
   renderServiceWorkerUpdateNoticeIfNeeded();
   return true;
@@ -19579,19 +22757,29 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
 
 async function markLocalResourceOperations(status, options = {}) {
   if (!localResourcePersistence.available || !localResourcePersistence.workspaceId || !localResourcePersistence.operations.length) return;
+  const operationIds = Array.isArray(options.operationIds) ? new Set(options.operationIds) : null;
+  const excludedStatuses = new Set(Array.isArray(options.excludeStatuses) ? options.excludeStatuses : []);
+  const matches = (operation) => (
+    (!operationIds || operationIds.has(operation.id))
+    && !excludedStatuses.has(operation.status)
+  );
+  if (!localResourcePersistence.operations.some(matches)) return;
   const database = await openLocalResourceDatabase();
   if (!database) return;
   const transaction = database.transaction(LOCAL_RESOURCE_OPERATION_STORE, "readwrite");
   const store = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
   const now = new Date().toISOString();
   localResourcePersistence.operations = localResourcePersistence.operations.map((operation) => {
+    if (!matches(operation)) return operation;
     const next = {
       ...operation,
       status,
       attempts: Number(operation.attempts || 0) + (options.incrementAttempts === false ? 0 : 1),
       updatedAt: now,
       ...(options.remoteRevision !== undefined ? { remoteRevision: options.remoteRevision } : {}),
+      ...(options.lastError ? { lastError: cloneForLocalPersistence(options.lastError) } : {}),
     };
+    if (options.clearLastError) delete next.lastError;
     store.put(next);
     return next;
   });
@@ -19601,17 +22789,149 @@ async function markLocalResourceOperations(status, options = {}) {
   renderServiceWorkerUpdateNoticeIfNeeded();
 }
 
+function markLocalResourceOperation(operation, status, options = {}) {
+  if (!operation?.id) return Promise.resolve();
+  return markLocalResourceOperations(status, { ...options, operationIds: [operation.id] });
+}
+
 function localResourceOperation(resourceId = "") {
   return localResourcePersistence.operations.find((operation) => (
     operation.entityType === "resource" && (!resourceId || operation.entityId === resourceId)
   )) || null;
 }
 
-async function initializeDatabaseState() {
+function localOperationCanAutoSave(operation) {
+  return Boolean(operation) && !["failed", "conflict"].includes(operation.status);
+}
+
+function hasAutomaticallySaveableLocalOperations() {
+  return localResourcePersistence.operations.some(localOperationCanAutoSave);
+}
+
+function localOperationWasSuperseded(operation) {
+  const current = localResourcePersistence.operations.find((entry) => entry.id === operation?.id);
+  return Boolean(current && current.updatedAt !== operation.updatedAt);
+}
+
+function mergeResourceControlDraftSettings(remoteState, localState) {
+  const merged = cloneForLocalPersistence(remoteState);
+  const localControl = localState?.settings?.viewControls?.resources;
+  if (!isPlainObject(localControl)) return merged;
+  merged.settings ||= {};
+  merged.settings.viewControls ||= {};
+  merged.settings.viewControls.resources = cloneForLocalPersistence(localControl);
+  return merged;
+}
+
+function sanitizeMigratedIncrementalResource(resource, remoteState) {
+  const sanitized = normalizeResourceRecord(cloneForLocalPersistence(resource));
+  const remoteIds = (collection) => new Set((remoteState?.[collection] || []).map((item) => item.id));
+  for (const [field, collection] of [["boxId", "boxes"], ["goalId", "goals"], ["projectId", "projects"]]) {
+    if (sanitized[field] && !remoteIds(collection).has(sanitized[field])) sanitized[field] = "";
+  }
+  const resourceIds = remoteIds("resources");
+  if (sanitized.parentId && !resourceIds.has(sanitized.parentId)) sanitized.parentId = "";
+  sanitized.childOrder = sanitized.childOrder.filter((childId) => resourceIds.has(childId));
+  return sanitized;
+}
+
+async function reconcileMigratedProvisionalWorkspace(local, remoteState, remoteRevision) {
+  if (!local?.migratedFromProvisional || !local.operations.length) return local;
+  const localBaseRevision = normalizedWorkspaceRevision(local.snapshot?.baseRevision, state.revision);
+  if (local.targetHadPendingOperations && localBaseRevision !== remoteRevision) return local;
+  const localState = local.snapshot?.state || state;
+  const hasFullWorkspaceOperation = local.operations.some((operation) => (
+    operation.entityType === "workspace" && operation.scope !== "resource-controls"
+  ));
+  const hasResourceControlOperation = local.operations.some((operation) => (
+    operation.entityType === "workspace" && operation.scope === "resource-controls"
+  ));
+  let mergedState = hasFullWorkspaceOperation
+    ? mergeWorkspaceDraftStates(remoteState, localState)
+    : cloneForLocalPersistence(remoteState);
+  if (!hasFullWorkspaceOperation && hasResourceControlOperation) {
+    mergedState = mergeResourceControlDraftSettings(mergedState, localState);
+  }
+  const resourceOperations = local.operations.filter((operation) => operation.entityType === "resource");
+  for (const operation of resourceOperations) {
+    const localResource = operation.payload?.resource
+      || localState?.resources?.find((resource) => resource.id === operation.entityId);
+    if (!localResource) continue;
+    const migratedResource = hasFullWorkspaceOperation
+      ? normalizeResourceRecord(cloneForLocalPersistence(localResource))
+      : sanitizeMigratedIncrementalResource(localResource, remoteState);
+    const index = mergedState.resources.findIndex((resource) => resource.id === migratedResource.id);
+    if (index >= 0) mergedState.resources[index] = migratedResource;
+    else mergedState.resources.push(migratedResource);
+  }
+  mergedState.version = APP_STATE_VERSION;
+  mergedState.revision = remoteRevision;
+  if (stateTimestamp(localState?.updatedAt) > stateTimestamp(mergedState.updatedAt)) {
+    mergedState.updatedAt = localState.updatedAt;
+  }
+  mergedState = normalizeState(mergedState);
+  mergedState.revision = remoteRevision;
+  const now = new Date().toISOString();
+  const resourcesById = new Map(mergedState.resources.map((resource) => [resource.id, resource]));
+  const operations = orderedLocalResourceOperations(local.operations.map((operation) => {
+    const next = {
+      ...cloneForLocalPersistence(operation),
+      workspaceId: localResourcePersistence.workspaceId,
+      baseRevision: remoteRevision,
+      status: ["conflict", "failed"].includes(operation.status) ? operation.status : "pending",
+      updatedAt: now,
+    };
+    if (next.entityType === "resource" && resourcesById.has(next.entityId)) {
+      next.payload = { resource: cloneForLocalPersistence(resourcesById.get(next.entityId)) };
+    } else if (next.entityType === "workspace") {
+      next.payload = { state: cloneForLocalPersistence(mergedState) };
+    }
+    return next;
+  }));
+  const snapshot = {
+    workspaceId: localResourcePersistence.workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision: remoteRevision,
+    savedAt: now,
+    state: cloneForLocalPersistence(mergedState),
+  };
+  const database = await openLocalResourceDatabase();
+  if (!database) return local;
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  for (const operation of localResourcePersistence.operations) operationStore.delete(operation.id);
+  for (const operation of operations) operationStore.put(operation);
+  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
+  await indexedDbTransactionComplete(transaction);
+  state = mergedState;
+  localResourcePersistence.snapshot = snapshot;
+  localResourcePersistence.operations = operations;
+  localResourcePersistence.pending = operations.length > 0;
+  rerenderAfterStateReplace();
+  return { ...local, snapshot, operations };
+}
+
+function initializeDatabaseState() {
+  if (databaseInitializationPromise) {
+    databaseInitializationRequested = true;
+    return databaseInitializationPromise;
+  }
+  databaseInitializationPromise = (async () => {
+    do {
+      databaseInitializationRequested = false;
+      await initializeDatabaseStateNow();
+    } while (databaseInitializationRequested);
+  })().finally(() => {
+    databaseInitializationPromise = null;
+  });
+  return databaseInitializationPromise;
+}
+
+async function initializeDatabaseStateNow() {
   try {
     const status = await apiJson("/api/state/status");
     const statusRevision = workspaceRevisionFromPayload(status, state.revision);
-    const local = await selectLocalResourceWorkspace(status.appStateId || localResourcePersistence.workspaceId, statusRevision);
+    let local = await selectLocalResourceWorkspace(status.appStateId || localResourcePersistence.workspaceId, statusRevision);
     databaseBackendStatus = {
       ...databaseBackendStatus,
       configured: Boolean(status.configured),
@@ -19623,6 +22943,8 @@ async function initializeDatabaseState() {
       conflict: null,
     };
     remoteStateSaveBlocked = false;
+    lastRemoteSaveFailureKind = "";
+    remoteStateRetryDelayMs = REMOTE_STATE_RETRY_DELAY_MS;
     if (!databaseBackendStatus.connected) {
       if (localResourcePersistence.pending) await persistLocalResourceDraft();
       renderDatabaseStatusIfVisible();
@@ -19636,6 +22958,8 @@ async function initializeDatabaseState() {
       const shouldCleanRemoteState = stateNeedsClientMigration(payload.state);
       const remoteState = normalizeState(payload.state);
       remoteState.revision = remoteRevision;
+      await mergeLocalResourceCommentReadAt(remoteState.settings?.resourceCommentReadAt);
+      local = await reconcileMigratedProvisionalWorkspace(local, remoteState, remoteRevision);
       if (local.operations.length) {
         const localBaseRevision = normalizedWorkspaceRevision(local.snapshot?.baseRevision, state.revision);
         if (localBaseRevision !== remoteRevision) {
@@ -19661,7 +22985,15 @@ async function initializeDatabaseState() {
           return;
         }
         state.revision = remoteRevision;
-        remoteStateSavePending = true;
+        remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
+        if (!remoteStateSavePending) {
+          const failed = failedLocalResourceOperation();
+          databaseBackendStatus.error = failed ? resourceSaveErrorIssue(failed) : databaseBackendStatus.error;
+          renderDatabaseStatusIfVisible();
+          renderDetail({ soft: true });
+          localStateChangedBeforeDatabaseReady = false;
+          return;
+        }
         await saveStateRemoteNow();
         localStateChangedBeforeDatabaseReady = false;
         return;
@@ -19759,6 +23091,17 @@ function normalizedIsoTimestamp(value) {
   return Number.isFinite(time) ? new Date(time).toISOString() : "";
 }
 
+function normalizeResourceCommentReadAt(value) {
+  if (!isPlainObject(value)) return {};
+  const normalized = {};
+  for (const [resourceId, timestamp] of Object.entries(value)) {
+    const id = String(resourceId || "").trim();
+    const readAt = normalizedIsoTimestamp(timestamp);
+    if (id && readAt) normalized[id] = readAt;
+  }
+  return normalized;
+}
+
 function normalizedResourceRevision(value) {
   const revision = Number.parseInt(value, 10);
   return Number.isFinite(revision) && revision >= 1 ? revision : 1;
@@ -19774,6 +23117,11 @@ function normalizeResourceRecords(resources, migrationAt = new Date().toISOStrin
 function normalizeResourceRecord(resource, migrationAt = new Date().toISOString()) {
   if (!isPlainObject(resource)) return resource;
   const fallbackTimestamp = normalizedIsoTimestamp(migrationAt) || new Date().toISOString();
+  resource.title = typeof resource.title === "string" ? resource.title : "";
+  resource.type = normalizeResourceMetadata(resource.type, "note");
+  resource.importance = normalizeResourceMetadata(resource.importance, "normal");
+  resource.pinned = resource.pinned === true;
+  resource.readLater = resource.readLater === true;
   const existingCreatedAt = normalizedIsoTimestamp(resource.createdAt);
   const existingUpdatedAt = normalizedIsoTimestamp(resource.updatedAt);
   const migratedTimestamp = !existingCreatedAt || !existingUpdatedAt;
@@ -19781,7 +23129,7 @@ function normalizeResourceRecord(resource, migrationAt = new Date().toISOString(
   resource.updatedAt = existingUpdatedAt || fallbackTimestamp;
   if (stateTimestamp(resource.updatedAt) < stateTimestamp(resource.createdAt)) resource.updatedAt = resource.createdAt;
   resource.revision = normalizedResourceRevision(resource.revision);
-  if (!String(resource.timestampSource || "").trim()) {
+  if (!/^[a-z][a-z0-9_-]{0,63}$/i.test(String(resource.timestampSource || ""))) {
     resource.timestampSource = migratedTimestamp ? "migration" : "existing";
   }
   resource.parentId = typeof resource.parentId === "string" ? resource.parentId : "";
@@ -19794,7 +23142,14 @@ function normalizeResourceRecord(resource, migrationAt = new Date().toISOString(
   resource.icon = normalizeResourceIcon(resource.icon);
   resource.cover = normalizeResourceCover(resource.cover);
   resource.readOnly = resource.readOnly === true;
+  resource.locked = resource.locked === true;
   return resource;
+}
+
+function normalizeResourceMetadata(value, fallback) {
+  const metadata = typeof value === "string" ? value.trim() : "";
+  if (!metadata || metadata.length > 128 || /[\u0000-\u001f\u007f]/.test(metadata)) return fallback;
+  return metadata;
 }
 
 function normalizeResourceIcon(value) {
@@ -19834,19 +23189,26 @@ function normalizeResourceCommentThreads(value) {
   for (const entry of value) {
     if (!isPlainObject(entry)) continue;
     const threadId = String(entry.id || "").trim();
-    const scope = entry.scope === "inline" ? "inline" : entry.scope === "page" ? "page" : "";
+    let scope = entry.scope === "inline" ? "inline" : entry.scope === "page" ? "page" : "";
     const body = String(entry.body || "").trim();
     if (!threadId || threadIds.has(threadId) || !scope || !body) continue;
     const createdAt = normalizedIsoTimestamp(entry.createdAt) || new Date().toISOString();
     const anchorSource = isPlainObject(entry.anchor) ? entry.anchor : {};
-    const anchor = scope === "inline"
+    let anchor = scope === "inline"
       ? {
           blockId: String(anchorSource.blockId || ""),
           start: Math.max(0, Number.parseInt(anchorSource.start, 10) || 0),
           end: Math.max(0, Number.parseInt(anchorSource.end, 10) || 0),
         }
       : null;
-    if (scope === "inline" && (!anchor.blockId || anchor.end <= anchor.start)) continue;
+    let formerAnchor = normalizeFormerCommentAnchor(entry.formerAnchor);
+    let anchorLostAt = normalizedIsoTimestamp(entry.anchorLostAt);
+    if (scope === "inline" && (!anchor.blockId || anchor.end <= anchor.start)) {
+      formerAnchor ||= normalizeFormerCommentAnchor(anchorSource);
+      anchorLostAt ||= normalizedIsoTimestamp(entry.updatedAt) || createdAt;
+      scope = "page";
+      anchor = null;
+    }
     const replies = [];
     const replyIds = new Set();
     for (const reply of Array.isArray(entry.replies) ? entry.replies : []) {
@@ -19864,7 +23226,7 @@ function normalizeResourceCommentThreads(value) {
       });
       replyIds.add(replyId);
     }
-    threads.push({
+    const normalizedThread = {
       id: threadId,
       scope,
       anchor,
@@ -19874,19 +23236,38 @@ function normalizeResourceCommentThreads(value) {
       resolvedAt: normalizedIsoTimestamp(entry.resolvedAt),
       deletedAt: normalizedIsoTimestamp(entry.deletedAt),
       replies,
-    });
+    };
+    if (scope === "page" && anchorLostAt) {
+      normalizedThread.anchorLostAt = anchorLostAt;
+      if (formerAnchor) normalizedThread.formerAnchor = formerAnchor;
+    }
+    threads.push(normalizedThread);
     threadIds.add(threadId);
   }
   return threads;
 }
 
+function normalizeFormerCommentAnchor(value) {
+  if (!isPlainObject(value)) return null;
+  const blockId = String(value.blockId || "").trim();
+  const start = Math.max(0, Number.parseInt(value.start, 10) || 0);
+  const end = Math.max(0, Number.parseInt(value.end, 10) || 0);
+  if (!blockId || end <= start) return null;
+  return { blockId, start, end };
+}
+
 function resourceNeedsMigration(resource) {
   if (!isPlainObject(resource)) return true;
   return (
+    typeof resource.title !== "string" ||
+    typeof resource.type !== "string" || !resource.type.trim() ||
+    typeof resource.importance !== "string" || !resource.importance.trim() ||
+    typeof resource.pinned !== "boolean" ||
+    typeof resource.readLater !== "boolean" ||
     !normalizedIsoTimestamp(resource.createdAt) ||
     !normalizedIsoTimestamp(resource.updatedAt) ||
     normalizedResourceRevision(resource.revision) !== resource.revision ||
-    !String(resource.timestampSource || "").trim() ||
+    !/^[a-z][a-z0-9_-]{0,63}$/i.test(String(resource.timestampSource || "")) ||
     typeof resource.parentId !== "string" ||
     !Array.isArray(resource.childOrder) ||
     !isPlainObject(resource.pageSettings) ||
@@ -19894,13 +23275,14 @@ function resourceNeedsMigration(resource) {
     !Array.isArray(resource.commentThreads) ||
     typeof resource.icon !== "string" ||
     !isPlainObject(resource.cover) ||
-    typeof resource.readOnly !== "boolean"
+    typeof resource.readOnly !== "boolean" ||
+    typeof resource.locked !== "boolean"
   );
 }
 
 function touchResource(resourceOrId, options = {}) {
   const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
-  if (!resourceMutationAllowed(resource, { allowTrashed: true })) return null;
+  if (!resourceMutationAllowed(resource, { allowTrashed: true, allowLocked: options.allowLocked === true })) return null;
   normalizeResourceRecord(resource, options.at || new Date().toISOString());
   const previousUpdatedAt = stateTimestamp(resource.updatedAt);
   const requestedAt = stateTimestamp(options.at || "") || Date.now();
@@ -19932,6 +23314,7 @@ function stateNeedsClientMigration(nextState) {
     Object.prototype.hasOwnProperty.call(settings, "notionSyncMode") ||
     typeof settings.notionParityMode !== "boolean" ||
     typeof settings.advancedWindowMode !== "boolean" ||
+    (settings.notionParityMode !== false && settings.advancedWindowMode === true) ||
     !isPlainObject(settings.openPagesIn) ||
     Object.keys(DEFAULT_RESOURCE_OPEN_PAGES_IN).some((view) => !RESOURCE_OPEN_PAGE_MODES.has(settings.openPagesIn?.[view])) ||
     !RESOURCE_SEARCH_SCOPES.has(settings.viewControls?.resources?.searchScope) ||
@@ -19960,8 +23343,14 @@ async function flushRemoteStateSave(options = {}) {
   try {
     const saved = await saveStateRemoteNow(options);
     if (!saved && databaseBackendStatus.connected) {
-      remoteStateSavePending = true;
-      retryLater = !options.keepalive && !remoteStateSaveBlocked;
+      remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
+      retryLater = Boolean(
+        remoteStateSavePending
+        && lastRemoteSaveFailureKind === "transient"
+        && !options.keepalive
+        && !options.singleAttempt
+        && !remoteStateSaveBlocked
+      );
     }
   } finally {
     remoteStateSaveInFlight = false;
@@ -19969,8 +23358,8 @@ async function flushRemoteStateSave(options = {}) {
     renderServiceWorkerUpdateNoticeIfNeeded();
     if (retryLater) {
       window.clearTimeout(remoteStateSaveTimer);
-      remoteStateSaveTimer = window.setTimeout(flushRemoteStateSave, REMOTE_STATE_RETRY_DELAY_MS);
-    } else if (remoteStateSavePending && !remoteStateSaveBlocked) {
+      remoteStateSaveTimer = window.setTimeout(flushRemoteStateSave, remoteStateRetryDelayMs);
+    } else if (remoteStateSavePending && !remoteStateSaveBlocked && !options.singleAttempt) {
       queueRemoteStateSave({ immediate: true });
     }
   }
@@ -19984,7 +23373,16 @@ function handleVisibilityStateSave() {
 }
 
 function handlePageHideStateSave() {
-  flushPendingResourceControlSaves();
+  const controlsChanged = flushPendingResourceControlSaves();
+  const localQueueWork = Boolean(
+    controlsChanged
+    || dirtyResourceIds.size
+    || localWorkspaceOperationRequired
+    || localResourcePersistence.operations.length
+    || localResourceWriteTimer
+  );
+  if (localQueueWork) persistLocalResourceDraft();
+  if (localQueueWork) return;
   if (!databaseBackendStatus.connected || remoteStateSaveBlocked || !remoteStateSavePending) return;
   if (sendRemoteStateBeacon()) {
     remoteStateSavePending = false;
@@ -20035,6 +23433,8 @@ async function saveStateRemoteNow(options = {}) {
       state.revision = savedRevision;
     }
     remoteStateSaveBlocked = false;
+    lastRemoteSaveFailureKind = "";
+    remoteStateRetryDelayMs = REMOTE_STATE_RETRY_DELAY_MS;
     databaseBackendStatus = {
       ...databaseBackendStatus,
       configured: true,
@@ -20050,13 +23450,22 @@ async function saveStateRemoteNow(options = {}) {
     if (renderStatus) renderDatabaseStatusIfVisible();
     return payload;
   } catch (error) {
-    const terminalConflict = error.status === 409 || error.status === 428;
-    if (terminalConflict) remoteStateSaveBlocked = true;
-    const operation = localResourcePersistence.operations.find((entry) => entry.entityType === "resource") || null;
+    const failureKind = classifyRemoteSaveError(error);
+    const terminalConflict = failureKind === "conflict";
+    const terminalFailure = failureKind === "terminal";
+    const operation = localResourcePersistence.operations.find((entry) => entry.entityType === "workspace")
+      || localResourcePersistence.operations.find((entry) => entry.entityType === "resource")
+      || null;
+    const lastError = terminalFailure ? sanitizedResourceSaveError(error) : null;
+    lastRemoteSaveFailureKind = failureKind;
+    remoteStateSaveBlocked = terminalConflict;
+    if (failureKind === "transient") {
+      remoteStateRetryDelayMs = transientRemoteSaveRetryDelay(error, Number(operation?.attempts || 0) + 1);
+    }
     databaseBackendStatus = {
       ...databaseBackendStatus,
       saving: false,
-      error: error.message || "PostgreSQL 저장에 실패했습니다.",
+      error: lastError?.issue?.message || lastError?.message || sanitizeResourceSaveErrorText(error.message || "PostgreSQL 저장에 실패했습니다."),
       conflict: terminalConflict
         ? {
             status: error.status,
@@ -20064,7 +23473,7 @@ async function saveStateRemoteNow(options = {}) {
             localRevision: baseRevision,
             remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
           }
-        : databaseBackendStatus.conflict,
+        : terminalFailure ? null : databaseBackendStatus.conflict,
     };
     if (terminalConflict) {
       localResourcePersistence.conflictResourceId = operation?.entityId || ui.resourceNotes[0]?.id || "";
@@ -20072,8 +23481,12 @@ async function saveStateRemoteNow(options = {}) {
         remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
       });
       await loadRemoteResourceConflictPreview();
+    } else if (terminalFailure && operation && !localOperationWasSuperseded(operation)) {
+      await markLocalResourceOperation(operation, "failed", { lastError });
     } else {
-      await markLocalResourceOperations(navigator.onLine === false ? "pending" : "retrying");
+      await markLocalResourceOperations(navigator.onLine === false ? "pending" : "retrying", {
+        excludeStatuses: ["failed", "conflict"],
+      });
     }
     if (renderStatus) renderDatabaseStatusIfVisible();
     renderDetail({ soft: true });
@@ -20090,11 +23503,12 @@ async function saveQueuedResourceOperations(options = {}) {
   let lastPayload = null;
   for (const queued of [...localResourcePersistence.operations]) {
     const operation = localResourcePersistence.operations.find((entry) => entry.id === queued.id);
-    if (!operation || operation.entityType !== "resource") continue;
+    if (!operation || operation.entityType !== "resource" || !localOperationCanAutoSave(operation)) continue;
+    if (options.manualRetryOperationId && operation.id !== options.manualRetryOperationId) continue;
     const resource = itemById("resources", operation.entityId);
     if (!resource) continue;
     const baseRevision = normalizedWorkspaceRevision(operation.baseRevision, currentWorkspaceRevision());
-    const outgoingResource = cloneForLocalPersistence(resource);
+    const outgoingResource = cloneForLocalPersistence(operation.payload?.resource || resource);
     try {
       const payload = await apiJson(`/api/resources/${encodeURIComponent(resource.id)}`, {
         method: "PUT",
@@ -20115,15 +23529,24 @@ async function saveQueuedResourceOperations(options = {}) {
         conflict: null,
       };
       remoteStateSaveBlocked = false;
+      lastRemoteSaveFailureKind = "";
+      remoteStateRetryDelayMs = REMOTE_STATE_RETRY_DELAY_MS;
       lastPayload = payload;
     } catch (error) {
-      const terminalConflict = error.status === 409 || error.status === 428;
-      if (terminalConflict) remoteStateSaveBlocked = true;
+      const failureKind = classifyRemoteSaveError(error);
+      const terminalConflict = failureKind === "conflict";
+      const terminalFailure = failureKind === "terminal";
+      const lastError = terminalFailure ? sanitizedResourceSaveError(error) : null;
+      lastRemoteSaveFailureKind = failureKind;
+      remoteStateSaveBlocked = terminalConflict;
+      if (failureKind === "transient") {
+        remoteStateRetryDelayMs = transientRemoteSaveRetryDelay(error, Number(operation.attempts || 0) + 1);
+      }
       const remoteRevision = normalizedWorkspaceRevision(error.revision, baseRevision);
       databaseBackendStatus = {
         ...databaseBackendStatus,
         saving: false,
-        error: error.message || "Resource 저장에 실패했습니다.",
+        error: lastError?.issue?.message || lastError?.message || sanitizeResourceSaveErrorText(error.message || "Resource 저장에 실패했습니다."),
         conflict: terminalConflict
           ? {
               status: error.status,
@@ -20131,21 +23554,23 @@ async function saveQueuedResourceOperations(options = {}) {
               localRevision: baseRevision,
               remoteRevision,
             }
-          : databaseBackendStatus.conflict,
+          : terminalFailure ? null : databaseBackendStatus.conflict,
       };
       if (terminalConflict) {
         localResourcePersistence.conflictResourceId = operation.entityId;
         await markLocalResourceOperations("conflict", { remoteRevision });
         await loadRemoteResourceConflictPreview();
+      } else if (terminalFailure && !localOperationWasSuperseded(operation)) {
+        await markLocalResourceOperation(operation, "failed", { lastError });
       } else {
-        await markLocalResourceOperations(navigator.onLine === false ? "pending" : "retrying");
+        await markLocalResourceOperation(operation, navigator.onLine === false ? "pending" : "retrying");
       }
       if (renderStatus) renderDatabaseStatusIfVisible();
       renderDetail({ soft: true });
       return null;
     }
   }
-  remoteStateSavePending = localResourcePersistence.operations.length > 0;
+  remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
   databaseBackendStatus.saving = false;
   clearLegacyLocalState();
   if (renderStatus) renderDatabaseStatusIfVisible();
@@ -20166,9 +23591,10 @@ async function commitLocalResourceOperationSuccess(operation, outgoingResource, 
   state.revision = savedRevision;
   const database = await openLocalResourceDatabase();
   if (!database) return;
+  const operationIndex = localResourcePersistence.operations.findIndex((entry) => entry.id === operation.id);
   let remaining = localResourcePersistence.operations.filter((entry) => entry.id !== operation.id);
   if (!unchangedDuringSave && currentResource) {
-    remaining.push({
+    remaining.splice(Math.min(Math.max(operationIndex, 0), remaining.length), 0, {
       ...operation,
       baseRevision: savedRevision,
       status: "pending",
@@ -20176,10 +23602,10 @@ async function commitLocalResourceOperationSuccess(operation, outgoingResource, 
       payload: { resource: cloneForLocalPersistence(currentResource) },
     });
   }
-  remaining = remaining.map((entry) => ({
+  remaining = orderedLocalResourceOperations(remaining).map((entry) => ({
     ...entry,
     baseRevision: savedRevision,
-    status: entry.status === "conflict" ? "conflict" : "pending",
+    status: ["conflict", "failed"].includes(entry.status) ? entry.status : "pending",
   }));
   const snapshot = {
     workspaceId: localResourcePersistence.workspaceId,
@@ -20218,6 +23644,30 @@ async function loadRemoteResourceConflictPreview() {
   }
 }
 
+async function retryFailedResourceSave(resourceId) {
+  const operation = failedLocalResourceOperation(resourceId);
+  if (!operation || remoteStateSaveInFlight || databaseBackendStatus.saving) return false;
+  if (!databaseBackendStatus.connected || navigator.onLine === false) {
+    showToast("온라인 연결 후 다시 시도해주세요.");
+    return false;
+  }
+  await markLocalResourceOperation(operation, "retrying", {
+    incrementAttempts: false,
+    clearLastError: true,
+  });
+  lastRemoteSaveFailureKind = "";
+  remoteStateRetryDelayMs = REMOTE_STATE_RETRY_DELAY_MS;
+  remoteStateSavePending = true;
+  renderDetail({ soft: true });
+  patchResourcePageSaveStatus();
+  await flushRemoteStateSave({
+    immediate: true,
+    singleAttempt: true,
+    manualRetryOperationId: operation.id,
+  });
+  return !failedLocalResourceOperation(resourceId);
+}
+
 async function resolveResourceSyncConflict(resourceId, resolution) {
   const remoteState = localResourcePersistence.conflictRemoteState;
   const remoteRevision = normalizedWorkspaceRevision(databaseBackendStatus.conflict?.remoteRevision, remoteState?.revision);
@@ -20244,16 +23694,30 @@ async function resolveResourceSyncConflict(resourceId, resolution) {
   }
   const database = await openLocalResourceDatabase();
   if (!database) return false;
-  operation.baseRevision = remoteRevision;
-  operation.status = "pending";
-  operation.remoteRevision = remoteRevision;
-  operation.updatedAt = new Date().toISOString();
-  const transaction = database.transaction(LOCAL_RESOURCE_OPERATION_STORE, "readwrite");
-  transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE).put(operation);
-  await indexedDbTransactionComplete(transaction);
+  const now = new Date().toISOString();
+  const rebasedOperations = orderedLocalResourceOperations(localResourcePersistence.operations).map((entry) => ({
+    ...entry,
+    baseRevision: remoteRevision,
+    status: "pending",
+    remoteRevision,
+    updatedAt: now,
+  }));
   state.revision = remoteRevision;
-  localResourcePersistence.snapshot.baseRevision = remoteRevision;
-  localResourcePersistence.operations = [operation];
+  const snapshot = {
+    ...(localResourcePersistence.snapshot || {}),
+    workspaceId: localResourcePersistence.workspaceId,
+    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+    baseRevision: remoteRevision,
+    savedAt: now,
+    state: cloneForLocalPersistence(state),
+  };
+  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+  for (const entry of rebasedOperations) operationStore.put(entry);
+  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
+  await indexedDbTransactionComplete(transaction);
+  localResourcePersistence.snapshot = snapshot;
+  localResourcePersistence.operations = rebasedOperations;
   localResourcePersistence.pending = true;
   localResourcePersistence.conflictRemoteState = null;
   localResourcePersistence.conflictResourceId = "";
@@ -20489,28 +23953,12 @@ function exportJson() {
 }
 
 function resetDemoData() {
-  clearResourceTransientState();
-  state = createSeedState();
-  googleBackendStatus = {
-    ...googleBackendStatus,
-    connected: false,
-  };
-  ui.resourceNotes = [];
-  ui.resourceDrag = null;
-  ui.resourceResize = null;
-  ui.blockDrag = null;
-  ui.pendingEditorMarquee = null;
-  ui.editorMarquee = null;
-  ui.expandedTodayTaskId = "";
-  ui.todayTaskPropsOpen = {};
-  ui.todayTaskActiveProperty = {};
-  ui.blockSelection = { ownerType: "", ownerId: "", ids: [] };
-  ui.activeBlockId = "";
+  ensureStatsDemoData(state, { force: true });
   saveState();
   renderView({ soft: true });
   renderDetail();
   renderOverlays();
-  showToast("통계 더미 데이터로 재생성했습니다.");
+  showToast("기존 데이터를 유지하고 통계 예제 데이터를 보충했습니다.");
 }
 
 function loadState() {
@@ -20542,12 +23990,13 @@ function normalizeState(next) {
   settings.calendarSources = normalizeCalendarSources(settings.calendarSources);
   settings.viewControls = normalizeViewControls(settings.viewControls);
   settings.notionParityMode = nextSettings.notionParityMode !== false;
-  settings.advancedWindowMode = nextSettings.advancedWindowMode === true;
+  settings.advancedWindowMode = settings.notionParityMode === false && nextSettings.advancedWindowMode === true;
   settings.openPagesIn = normalizeResourceOpenPagesIn(nextSettings.openPagesIn);
   settings.resourceSideWidth = Number.isFinite(Number(nextSettings.resourceSideWidth)) && Number(nextSettings.resourceSideWidth) > 0
     ? Math.round(Number(nextSettings.resourceSideWidth))
     : 0;
   settings.visibleGoogleCalendars = isPlainObject(settings.visibleGoogleCalendars) ? { ...settings.visibleGoogleCalendars } : {};
+  settings.resourceCommentReadAt = normalizeResourceCommentReadAt(nextSettings.resourceCommentReadAt);
   const resourceMigrationAt = new Date().toISOString();
   const resources = normalizeResourceRecords(
     objectArrayOrFallback(next.resources, fallbackCollection(fallbackState, "resources")),
@@ -20595,6 +24044,7 @@ function createDefaultSettings() {
     advancedWindowMode: false,
     openPagesIn: { ...DEFAULT_RESOURCE_OPEN_PAGES_IN },
     resourceSideWidth: 0,
+    resourceCommentReadAt: {},
     statsDemoDataSeeded: false,
   };
 }
@@ -20654,7 +24104,7 @@ function normalizeSavedFilterValues(view, saved, fallback = ["all"]) {
   if (
     view === "resources" &&
     !normalized.includes("all") &&
-    !normalized.some((value) => value === "active" || value === "archived")
+    !normalized.some((value) => value === "active" || value === "archived" || value === "trash")
   ) {
     normalized.unshift("active");
   }
@@ -20733,11 +24183,19 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function saveState() {
+function saveState(options = {}) {
+  for (const resourceId of dirtyResourceIds) reconcileEditorCommentAnchors("resources", resourceId);
   clearStateIndexes();
   state.version = APP_STATE_VERSION;
   state.updatedAt = new Date().toISOString();
-  if (!dirtyResourceIds.size) localWorkspaceOperationRequired = true;
+  if (!dirtyResourceIds.size) {
+    localWorkspaceOperationRequired = true;
+    if (options.localScope === "resource-controls" && localWorkspaceOperationScope !== "workspace") {
+      localWorkspaceOperationScope = "resource-controls";
+    } else {
+      localWorkspaceOperationScope = "workspace";
+    }
+  }
   scheduleLocalResourceDraftWrite();
   if (databaseBackendStatus.connected) {
     clearLegacyLocalState();
@@ -21792,9 +25250,58 @@ function cssEscape(value = "") {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
 }
 
-function showToast(message) {
-  toast.textContent = message;
+function handleToastClick(event) {
+  const action = event.target.closest("[data-toast-action]");
+  if (!action || typeof showToast.action !== "function") return;
+  const callback = showToast.action;
+  const returnFocus = showToast.actionReturnFocus;
+  dismissToast();
+  callback();
+  requestAnimationFrame(() => focusAfterToastAction(returnFocus));
+}
+
+function focusAfterToastAction(returnFocus) {
+  const connectedReturnFocus = returnFocus instanceof HTMLElement
+    && returnFocus !== document.body
+    && returnFocus.isConnected
+    && !returnFocus.matches(":disabled")
+    && !returnFocus.closest("[hidden], [inert], [aria-hidden='true']")
+    && returnFocus.getClientRects().length > 0;
+  if (connectedReturnFocus) {
+    returnFocus.focus({ preventScroll: true });
+    return;
+  }
+  if (els.detailRoot?.querySelector(".resource-page-shell.is-parity-page")) {
+    focusResourcePageShell();
+    return;
+  }
+  els.viewRoot?.focus?.({ preventScroll: true });
+}
+
+function dismissToast() {
+  clearTimeout(showToast.timer);
+  showToast.action = null;
+  showToast.actionReturnFocus = null;
+  toast.classList.remove("is-visible", "has-action");
+}
+
+function showToast(message, options = {}) {
+  const messageNode = document.createElement("span");
+  messageNode.textContent = message;
+  toast.replaceChildren(messageNode);
+  showToast.action = typeof options.onAction === "function" ? options.onAction : null;
+  showToast.actionReturnFocus = showToast.action && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  if (showToast.action && options.actionLabel) {
+    const action = document.createElement("button");
+    action.type = "button";
+    action.dataset.toastAction = "true";
+    action.textContent = options.actionLabel;
+    toast.appendChild(action);
+  }
+  toast.classList.toggle("has-action", Boolean(showToast.action));
   toast.classList.add("is-visible");
   clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
+  showToast.timer = setTimeout(dismissToast, showToast.action ? 5200 : 2400);
 }

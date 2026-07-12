@@ -40,7 +40,16 @@ test("read-only Resource keeps navigation, comments, Open, and Copy available wh
   await expect(note.locator('[data-block-check="fixture-read-only-todo"]')).toBeDisabled();
 
   await expect(note.locator(`[data-resource-create-child="${RESOURCE_ID}"]`)).toBeDisabled();
-  await expect(note.locator(`[data-resource-page-menu="${RESOURCE_ID}"]`)).toBeDisabled();
+  const pageMenuTrigger = note.locator(`[data-resource-page-menu="${RESOURCE_ID}"]`);
+  await expect(pageMenuTrigger).toBeEnabled();
+  await pageMenuTrigger.click();
+  const pageMenu = page.locator(`[data-resource-page-menu-panel="${RESOURCE_ID}"]`);
+  await expect(pageMenu).toBeVisible();
+  await expect(pageMenu.locator(`[data-resource-page-lock="${RESOURCE_ID}"]`)).toBeDisabled();
+  await expect(pageMenu.locator(`[data-resource-copy-link="${RESOURCE_ID}"]`)).toBeEnabled();
+  await expect(pageMenu.locator("[data-resource-page-font], [data-resource-page-option], [data-resource-duplicate], [data-resource-move-menu], [data-resource-move-to-trash]").first()).toBeDisabled();
+  await expect(pageMenu.locator(`[data-resource-export-markdown="${RESOURCE_ID}"]`)).toBeEnabled();
+  await page.keyboard.press("Escape");
   await expect(note.locator("[data-resource-icon-edit], [data-resource-cover-edit], [data-resource-cover-remove]")).toHaveCount(0);
   await expect(note.locator(`[data-resource-parent="${RESOURCE_ID}"]`)).toBeDisabled();
 
@@ -132,6 +141,9 @@ test("read-only mutation handlers reject forced DOM events and never write or ch
 
     clickInjected({ resourcePageFont: "serif", resourcePageOwner: resourceId });
     clickInjected({ resourcePageOption: "smallText", resourcePageOwner: resourceId });
+    clickInjected({ resourceDuplicate: resourceId });
+    clickInjected({ resourceMoveMenu: resourceId });
+    clickInjected({ resourceMoveParent: attemptedParentId, resourceMoveOwner: resourceId });
     clickInjected({ resourceMoveToTrash: resourceId });
     clickInjected({ resourceCreateChild: resourceId });
     clickInjected({ resourceIconChoice: "💡", resourceIconOwner: resourceId });

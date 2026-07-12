@@ -87,6 +87,32 @@ test("P0 Library Resource can be opened with Enter and Space", async ({ page }) 
   await expect(page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`)).toBeVisible();
 });
 
+test("P0 Library assigns a pinned and read-later Resource to exactly the pinned section", async ({ page, request }) => {
+  await openResources(page);
+  await page.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
+
+  const note = page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`);
+  await expect(note).toBeVisible();
+  await note.locator(`[data-resource-props="${FIXTURE_IDS.resource}"]`).click();
+  await note.locator('[data-field="readLater"]').check();
+  await expect.poll(async () => {
+    const snapshot = await fixtureSnapshot(request);
+    return snapshot.state.resources.find((resource) => resource.id === FIXTURE_IDS.resource)?.readLater;
+  }).toBe(true);
+
+  await note.locator(`[data-resource-close="${FIXTURE_IDS.resource}"]`).click();
+  const library = page.locator('[data-resource-view="library"]');
+  const section = (name) => library.locator(".resource-library-grid > .panel").filter({
+    has: page.locator("h2.panel-title", { hasText: name }),
+  });
+  const card = `[data-select-id="${FIXTURE_IDS.resource}"]`;
+
+  await expect(library.locator(card)).toHaveCount(1);
+  await expect(section("고정").locator(card)).toHaveCount(1);
+  await expect(section("나중에 보기").locator(card)).toHaveCount(0);
+  await expect(section("기타").locator(card)).toHaveCount(0);
+});
+
 test("P0 title editing patches the list without replacing the view or editor", async ({ page }) => {
   const note = await openMainResourceFromList(page);
   await page.evaluate(() => {

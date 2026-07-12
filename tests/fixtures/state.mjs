@@ -160,6 +160,7 @@ function resource(id, title, overrides = {}) {
     icon: "",
     cover: { url: "", position: 50 },
     readOnly: false,
+    locked: false,
     trashedAt: "",
     commentThreads: [],
     blocks: [block(`${id}-paragraph`, "paragraph", `${title} body`)],
