@@ -81,14 +81,34 @@ async function selectFixtureParagraphBlock(page) {
   await selectResourceBlock(page, "fixture-block-paragraph");
 }
 
-async function seedResourceBlocks(page, request, blocks) {
-  await page.evaluate(({ resourceId, blocks }) => {
-    const resource = itemById("resources", resourceId);
-    resource.blocks = blocks;
-    saveState();
-    renderDetail({ soft: true });
-  }, { resourceId: FIXTURE_IDS.resource, blocks });
-  await expect.poll(async () => (await resourceState(request)).resource.blocks.map((block) => block.id), { timeout: 15_000 }).toEqual(blocks.map((block) => block.id));
+async function seedFixtureResourceBlocks(request, blocks) {
+  const before = await fixtureSnapshot(request);
+  const resource = structuredClone(before.state.resources.find((entry) => entry.id === FIXTURE_IDS.resource));
+  resource.blocks = blocks;
+  resource.commentThreads = [];
+  resource.revision = Number(resource.revision || 0) + 1;
+  resource.updatedAt = new Date(Math.max(Date.now(), Date.parse(resource.updatedAt || "") + 1000)).toISOString();
+  const data = {
+    resource,
+    baseRevision: before.serverRevision,
+    e2eFixtureGeneration: before.resetGeneration,
+  };
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(data)).length;
+  const response = await request.put(`/api/resources/${encodeURIComponent(FIXTURE_IDS.resource)}`, {
+    headers: { "Content-Type": "application/json", "If-Match": `"state-${before.serverRevision}"` },
+    data,
+  });
+  expect(response.ok()).toBeTruthy();
+  const after = await fixtureSnapshot(request);
+  expect(after.state.resources.find((entry) => entry.id === FIXTURE_IDS.resource)?.blocks.map((block) => block.id)).toEqual(blocks.map((block) => block.id));
+  return { bodyBytes, serverRevision: after.serverRevision };
+}
+
+async function openSeededResource(page) {
+  await page.goto(`/resources/${encodeURIComponent(FIXTURE_IDS.resource)}`);
+  const note = page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`);
+  await expect(note).toBeVisible();
+  return note;
 }
 
 test.beforeEach(async ({ request }) => {
@@ -142,10 +162,12 @@ test("Resource structural projection enforces exact block, text, and body limits
     return resourcePasteProjectionValid(resource);
   })).toBe(false);
 
-  await seedResourceBlocks(page, request, [
+  await resetFixture(request);
+  await seedFixtureResourceBlocks(request, [
     { id: "stale-selected", type: "paragraph", text: "stale selection", marks: [], checked: false, indent: 0, collapsed: false },
     { id: "large-target", type: "paragraph", text: "L".repeat(200_000), marks: [], checked: false, indent: 0, collapsed: false },
   ]);
+  await openSeededResource(page);
   let target = page.locator('[data-block-content="large-target"]');
   await target.focus();
   expect(await appPasteBlocks(target, [{ type: "paragraph", text: "prior real edit" }])).toBe(true);
@@ -162,10 +184,10 @@ test("Resource structural projection enforces exact block, text, and body limits
   await expect(page.locator("text=prior real edit")).toHaveCount(0);
 
   await resetFixture(request);
-  await openEditor(page);
-  await seedResourceBlocks(page, request, [
+  await seedFixtureResourceBlocks(request, [
     { id: "boundary-target", type: "paragraph", text: "B".repeat(199_999), marks: [], checked: false, indent: 0, collapsed: false },
   ]);
+  await openSeededResource(page);
   target = page.locator('[data-block-content="boundary-target"]');
   await target.focus();
   const exactBoundary = `- ${"c".repeat(50_001)}`;
@@ -177,15 +199,18 @@ test("Resource structural projection enforces exact block, text, and body limits
   await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(250_000);
 
   await resetFixture(request);
-  await openEditor(page);
   const nearBodyLimit = Array.from({ length: 21 }, (_, index) => ({ id: `body-${index}`, type: "paragraph", text: "z".repeat(237_000), marks: [], checked: false, indent: 0, collapsed: false }));
-  await seedResourceBlocks(page, request, nearBodyLimit);
+  const seededBody = await seedFixtureResourceBlocks(request, nearBodyLimit);
+  await openSeededResource(page);
   target = page.locator('[data-block-content="body-0"]');
   await target.focus();
   const setupBodyBytes = await page.evaluate(() => {
     const resource = cloneForLocalPersistence(itemById("resources", "fixture-resource-main"));
     return utf8ByteLength(JSON.stringify({ resource, baseRevision: currentWorkspaceRevision(), ...e2eFixtureGenerationRequestFields() }));
   });
+  expect(seededBody.bodyBytes).toBeGreaterThan(4_900_000);
+  expect(seededBody.bodyBytes).toBeLessThan(5_000_000);
+  expect(setupBodyBytes).toBeGreaterThan(4_900_000);
   expect(setupBodyBytes).toBeLessThan(5_000_000);
   const bodyBefore = await captureNoop(page, request);
   const bodyPayload = JSON.stringify({ version: 1, blocks: [{ type: "paragraph", text: "p".repeat(237_000) }] });
