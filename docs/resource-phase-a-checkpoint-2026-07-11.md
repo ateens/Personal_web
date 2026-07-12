@@ -12,13 +12,13 @@ This checkpoint records the implemented/tested behavior and completed production
 
 | Phase | Status | Evidence | Open gate |
 |---|---|---|---|
-| Phase A — page/editor parity | No known functional P0 implementation gap in the defined single-workspace scope; fresh aggregate/manual/visual gates remain open | focused URL/toolbar/block-Move/comment/deep-link/read-cursor suites, historical 115-test checkpoint, historical 27 viewport captures, authenticated private 768×964 Side/Center/Full static references | fresh full E2E/release gates, regenerated/matched state-by-state diff, real mobile keyboard/screen-reader QA, named P1/P2 features |
+| Phase A — page/editor parity | No known functional P0 implementation gap in the defined single-workspace scope; post-fix aggregate/manual/visual gates remain open | focused URL/toolbar/block-Move/comment/deep-link/read-cursor suites, historical 115-test checkpoint, historical 27 viewport captures, authenticated private 768×964 Side/Center/Full static references | post-fix full 179/179 E2E/release gates, regenerated/matched state-by-state diff, real mobile keyboard/screen-reader QA, named P1/P2 features |
 | Phase B — persistence/offline | Core implemented/tested and production migration checkpoint created | IndexedDB snapshot/queue/replay/conflict, incremental Resource writes, SW update gate, v3→v4 production revision 1, current revision 2, manual predeploy backup | disaster-recovery coverage outside the application DB |
 | Phase C — deployment/access control | Production gate complete for the current single-workspace scope | Railway active deployment, exact-target one-way verifier, direct `401/401/200`, required state preconditions, anonymous Sites `401`, signed-in Sites status/Resources/Center peek `200` | per-user/RBAC/tenant scope remains P2; ID drift, token rotation, and external PITR are operational follow-ups |
 
 There is no remaining P0 production-access blocker. Sites rejects anonymous `/`, `/api/state/status`, and `/health` with `401`; the signed-in owner path returns `200`; direct Railway rejects missing and wrong bearer credentials with `401 AUTH_REQUIRED` and accepts only the matching Sites credential. Authenticated state reads reported revision 2, `ETag: "state-2"`, and `X-State-Concurrency: required`, while `/health` remained public `200` for Railway health checks.
 
-Authenticated Notion desktop-app inspection added direct static shell evidence at 768×964: Side peek used `pm=s`, Center peek used `pm=c`, and Full used its page route. This exposed a P0 in the prior breakpoint policy: at 768px with a fine pointer, this product collapsed Center and Side into the same compact full-screen shell and made Side modal/non-resizable. The local correction keeps Center as a centered modal and Side as a nonmodal resizable split while reserving the compact shell for compact/coarse input. A newer local correction also preserves an already-docked nav for desktop Full while using inert covered chrome on compact Full. Focused repeats cover the current tranche, but the 115-test complete run predates it; the fresh full run, unmatched visual matrix, and real-device/screen-reader gates still keep Phase A open.
+Authenticated Notion desktop-app inspection added direct static shell evidence at 768×964: Side peek used `pm=s`, Center peek used `pm=c`, and Full used its page route. This exposed a P0 in the prior breakpoint policy: at 768px with a fine pointer, this product collapsed Center and Side into the same compact full-screen shell and made Side modal/non-resizable. The local correction keeps Center as a centered modal and Side as a nonmodal resizable split while reserving the compact shell for compact/coarse input. A newer local correction also preserves an already-docked nav for desktop Full while using inert covered chrome on compact Full. Focused repeats cover the current tranche, and the latest Cloud postfix campaign ran all 179 tests at 175/179 before the final divider fix; the post-fix full 179/179 rerun, unmatched visual matrix, and real-device/screen-reader gates still keep Phase A open.
 
 ## Implemented in this checkpoint
 
@@ -103,12 +103,12 @@ The prior checkpoint's complete bundled-Chromium run reported **84 passed (3.3 m
 
 The later **115/115 bundled-Chromium run (3.8 minutes)** covered the Trash/guard, docked-Full, Lock/action, and hierarchy checkpoint, but it predates the newest URL/toolbar/block-Move/comment/deep-link/read-cursor work. It is historical and must not be presented as the current-worktree total.
 
-Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor set (deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The local metadata change also passed 13/13 offline/hierarchy regressions. Playwright discovery currently lists **179 tests in 30 spec files**, but discovery is not a pass result; the root task must rerun all 179 before release wording.
+Current scoped evidence includes URL chooser 7/7, inline toolbar 5/5, cross-page Move 6/6, comment history/anchor integrity 4/4 with a related 56/56 combined batch, and a 17-case deep-link/read-cursor set (deep link 3, read cursor 4, block menu 3, page lock 5, read-only 2). The local metadata change also passed 13/13 offline/hierarchy regressions. Playwright discovery currently lists **179 tests in 30 spec files**, but discovery is not a pass result; the latest Cloud postfix campaign ran all 179 tests at 175/179 before the final divider fix, so the root task must rerun a clean post-fix 179/179 campaign before release wording.
 
 | Spec | Tests | Main evidence |
 |---|---:|---|
 | historical bundled-Chromium E2E | 115 | pre-URL/toolbar/block-Move/comment/deep-link/read-cursor checkpoint; not current |
-| current discovered E2E suite | 179 | 30 spec files; discovery only, not a pass count; fresh complete pass pending |
+| current discovered E2E suite | 179 | 30 spec files; latest full Cloud postfix first run was 175/179 before the final divider fix; post-fix 179/179 rerun pending |
 | current deep-link/read-cursor focused set | 17 | exact block success/fallback, IndexedDB cursor migration/upgrade/reload, zero-write lock/read-only behavior and related regressions |
 | current offline/hierarchy regression set | 13 | offline 7 plus hierarchy persistence 6 after local metadata changes |
 | `resource-cross-page-block-move.spec.js` | 6 | searchable/clamped submenu, source→target ordering, multi-root/nested/all-block behavior, thread transfer, collision no-mutation, multi-Resource undo/redo |
@@ -127,7 +127,7 @@ The fixture server is memory-only and carries an explicit production-write guard
 
 - The last isolated PostgreSQL checkpoint covered atomic public Resource-omission rejection, incremental soft-trash/restore, dependency-safe hierarchy transitions, and the trusted operator reset exception. URL-block, inline-color, and lost-comment metadata validation changed afterward, so the final candidate needs a fresh PostgreSQL check.
 - The deep-link/read-cursor tranche passed `npm run check` and `git diff --check`. The root task must still rerun the combined source/build/PostgreSQL/backup/API-auth/diff gates after all concurrent edits settle.
-- The recorded build (`1,162,032 → 815,222` bytes, Brotli `142,042`, gzip `181,108`) predates the newest tranche and is historical only. Run `npm run check:build` and replace it with current measurements before release wording.
+- The recorded build (`1,162,032 → 815,222` bytes, Brotli `142,042`, gzip `181,108`) predates the newest tranche and is historical only. Latest verified Cloud build metrics are `1,318,622 -> 921,298` bytes, Brotli `160,042`, gzip `206,578`; rerun only if the release candidate changes again.
 
 ### Performance evidence
 
@@ -206,7 +206,7 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 
 ### P0
 
-- No known functional or production-access P0 implementation gap remains in the defined single-workspace scope. The 768px shell defects and Resource membership deletion risk are fixed locally, and the newest tranche has focused evidence; however, the 115-test full run predates it, so the current aggregate/release gate remains pending. Every new local change is still undeployed.
+- No known functional or production-access P0 implementation gap remains in the defined single-workspace scope. The 768px shell defects and Resource membership deletion risk are fixed locally, and the newest tranche has focused evidence; however, the latest full Cloud postfix run was 175/179 before the final divider fix, so the post-fix aggregate/release gate remains pending. Every new local change is still undeployed.
 
 ### P1
 
@@ -227,7 +227,7 @@ Restore requires stopped/drained writes, exact workspace confirmation, and the c
 
 ## Checkpoint conclusion
 
-The production access-control rollout is verified through Railway and owner-only/custom Sites. The newer Trash/guard, docked-Full, page actions, hierarchy queue, URL/toolbar/block-Move/comment/deep-link/read-cursor changes are local only. Their focused suites provide subsystem evidence, but the recorded 115-test run and build metrics predate the newest tranche; the root task must refresh the full E2E and all release gates. Phase A is still not declared complete because the matched visual state matrix and real mobile/screen-reader gates remain open; the project as a whole also remains incomplete because the listed P1/P2 capabilities remain. No exact visual parity claim is made; detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
+The production access-control rollout is verified through Railway and owner-only/custom Sites. The newer Trash/guard, docked-Full, page actions, hierarchy queue, URL/toolbar/block-Move/comment/deep-link/read-cursor changes are local only. Their focused suites provide subsystem evidence, but the recorded 115-test run and build metrics predate the newest tranche; the root task must run the post-fix 179/179 E2E campaign and all release gates. Phase A is still not declared complete because the matched visual state matrix and real mobile/screen-reader gates remain open; the project as a whole also remains incomplete because the listed P1/P2 capabilities remain. No exact visual parity claim is made; detailed current status is maintained in `resource-notion-parity-final-gap-audit-2026-07-11.md`.
 
 ## 2026-07-12 Codex Cloud evidence refresh
 
@@ -243,14 +243,14 @@ Fresh evidence on this cloud workspace:
 - `npm run check:api-auth`, `npm run check:postgres`, and `npm run check:backups` are blocked here by the absent `.env`/`DATABASE_URL` and therefore remain unverified in this environment.
 - `git diff --check` passed after this documentation update.
 
-The user's latest local real-Chrome result remains the only current full-run evidence: **173/174 passing (historical, before the current 179-test discovery) in 6.6 minutes**, with the only failure in `resource-page-command-mentions.spec.js` reportedly fixed in commit `2cc217d` but still awaiting a browser-capable rerun.
+The user's **173/174** local real-Chrome result remains historical pre-179 evidence. Current full-run evidence is the later Cloud postfix campaign: **175/179** passed before the final divider fix, followed by focused divider verification; a clean post-fix **179/179** campaign is still required.
 
 ## 2026-07-12 Codex Cloud browser and PostgreSQL evidence supersession for commit 29d28569
 
 This section supersedes the earlier Cloud statements that every browser and database gate was blocked. Those attempts remain above as historical diagnostics. Overall status remains **Partial**; this is not a Notion-identical, pixel-perfect, or release-ready claim.
 
 - An isolated loopback PostgreSQL 16.14 instance with ephemeral unprinted credentials passed check:postgres, check:api-auth, and check:backups, then was removed. This is disposable-database evidence, not production DB, PITR, dump, or deployed-service evidence.
-- check and check:build passed. Historical build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
+- check and check:build passed. Latest verified build metrics are 1,318,622 to 921,298 bytes, Brotli 160,042, gzip 206,578.
 - Node 22.23.1 plus temporary Sparticuz Chromium 149.0.7827.0, with graphics off and minimal launch arguments, passed an eight-context smoke 8/8 with zero disconnects, crashes, OOM events, or abnormal exits.
 - resource-page-command-mentions passed 2/2 in 29.1 seconds, proving the scoped selector fix only under this Cloud headless-shell route.
 - A fresh-browser-per-file campaign ran all then-discovered 174 tests in 29 files: 170 passed, 4 failed (historical pre-179 discovery), 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
@@ -268,7 +268,7 @@ This reconciliation was written after inspecting the current code/test tree and 
 - The latest full Cloud postfix first-run evidence is **175/179 passing**, split as shard A **63/65**, shard B **66/66**, and shard C **46/48**. This was not a clean full run.
 - Shard A first-run failures were a comment clipboard/mark-selection flake that passed rerun and a divider-continuation focus failure that repeated on rerun.
 - Shard C first-run and rerun failures were limited to `resource-performance.spec.js` and `resource-visual-state-evidence.spec.js`.
-- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. No full 179/179 run exists after that final divider fix.
+- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. A clean post-fix 179/179 rerun is still required after that final divider fix.
 - Focused fixes already verified outside the full run remain scoped evidence only: toolbar/history/comment/page-feature batch **45/45**; comment history twice **6/6** each; Trash focused **10/10**, full Trash **6/6 twice**, and delete guard **3/3**.
 
 ### Current build evidence

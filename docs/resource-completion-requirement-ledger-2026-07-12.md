@@ -8,14 +8,14 @@ Audit scope: current local worktree only. This file does not assert that the loc
 
 ## Status rules and overall result
 
-- `Implemented`: the requested local behavior has concrete source and focused automated/static evidence. It still may need a fresh full-suite run or deployment verification.
+- `Implemented`: the requested local behavior has concrete source and focused automated/static evidence. It still may need a post-fix full-suite rerun or deployment verification.
 - `Partial`: a working subset exists, but at least one explicitly requested behavior remains.
 - `Missing`: no current implementation or acceptance artifact was found for an explicitly requested behavior.
 - `Unverified`: implementation or an isolated artifact may exist, but the required live reference, real device, assistive technology, production, or matched-state evidence does not.
 
 Overall status: **Partial**. The current product has substantial P0 shell, persistence, editor-regression, accessibility, comment-lifecycle, standalone HTTPS URL-paste, inline-format-toolbar, cross-page block movement, exact block deep links, visual-evidence, and recovery work, but Phase A, Phase B, Phase C, and the project as a whole remain incomplete. The largest open gates are the broad slash/block catalog, columns, image/file/large-paste workflows, complete inline-link actions, page version history, remote bookmark metadata/real iframe policy, reply-level comment deletion, per-user/tenant authorization, entity-level incremental persistence, real mobile and screen-reader QA, and the matched authenticated Notion visual-state matrix.
 
-Evidence note: test names below identify executable coverage in the current tree. The focused visual-evidence artifact records its own four-test capture run; the standalone URL chooser spec passed 7/7 and its transport-focused batch passed 16/16; the inline-toolbar spec passed 5/5 and its related focused batch passed 50/50. Cross-page block Move passed 6/6. Comment history/anchor integrity passed 4/4 and its related combined batch passed 56/56. The deep-link/read-cursor focused set passed 17 cases (deep link 3, read cursor 4, block menu 3, lock 5, read-only 2), followed by 13/13 offline/hierarchy persistence regressions. Current Playwright discovery lists 179 tests in 30 spec files; discovery is not a pass result. These are scoped results, not a complete-suite total. Because the worktree changed after the previously recorded 115-test run, that historical number is not treated as a current full-suite result. A fresh 179-test run and release gates are still required.
+Evidence note: test names below identify executable coverage in the current tree. The focused visual-evidence artifact records its own four-test capture run; the standalone URL chooser spec passed 7/7 and its transport-focused batch passed 16/16; the inline-toolbar spec passed 5/5 and its related focused batch passed 50/50. Cross-page block Move passed 6/6. Comment history/anchor integrity passed 4/4 and its related combined batch passed 56/56. The deep-link/read-cursor focused set passed 17 cases (deep link 3, read cursor 4, block menu 3, lock 5, read-only 2), followed by 13/13 offline/hierarchy persistence regressions. Current Playwright discovery lists 179 tests in 30 spec files; discovery is not a pass result. These are scoped results, not a complete-suite total. Because the worktree changed after the previously recorded 115-test run, that historical number is not treated as a current full-suite result. The latest Cloud postfix campaign ran all 179 tests and passed 175/179 before the final divider fix; after that fix, a clean post-fix 179/179 rerun and release gates are still required.
 
 ## 0. Input files and current inspection range
 
@@ -40,7 +40,7 @@ Evidence note: test names below identify executable coverage in the current tree
 
 | ID | Status | Requirement and current evidence | Remaining gap and next action |
 |---|---|---|---|
-| 2.1 | Implemented | `docs/resource-notion-parity-gap-audit-2026-07-11.md` and `docs/resource-notion-parity-final-gap-audit-2026-07-11.md` contain P0/P1/P2 gap tables with source/test references. This ledger updates the completion interpretation against all 0–20 requirements. | Keep historical pass counts and deployment claims time-scoped; update the final audit after the fresh full run. |
+| 2.1 | Implemented | `docs/resource-notion-parity-gap-audit-2026-07-11.md` and `docs/resource-notion-parity-final-gap-audit-2026-07-11.md` contain P0/P1/P2 gap tables with source/test references. This ledger updates the completion interpretation against all 0–20 requirements. | Keep historical pass counts and deployment claims time-scoped; update the final audit after the post-fix 179/179 rerun. |
 | 2.2 | Partial | Functional Notion claims in the audits link official Notion Help pages and label pixel behavior as needing direct reference. | Some rows in the older audit call all known P0 complete despite open security/reference gates. Use this ledger's conservative statuses in the final report. |
 | 2.3 | Partial | Work has progressed in P0/P1/P2 groups and checkpoint documents exist. | The attachment asks for independently testable phase checkpoints/branches. The current worktree is dirty and newer changes are not isolated as a new checkpoint. Create a final checkpoint only after all tests and docs are synchronized. |
 
@@ -63,7 +63,7 @@ Evidence note: test names below identify executable coverage in the current tree
 | ID | Status | Requirement and current evidence | Remaining gap and next action |
 |---|---|---|---|
 | 4.1 | Implemented | Resource search uses control/results patching rather than replacing the input. `resource-p0.spec.js` covers DOM identity, focus, caret, IME composition, result update, Escape, and clear behavior. | Rerun the focused test after final app changes and keep a real Korean IME manual smoke in release QA. |
-| 4.1-A | Implemented | `patchResourceDetail`, `patchResourceDetailShell`, and owner-scoped editor patching preserve the active editor. `resource-dom-stability.spec.js` covers property, URL, relation, and comment mutations plus Advanced cross-window isolation. | Browser-native undo continuity for every page-level control is not unified; that is tracked in 7.8. |
+| 4.1-A | Implemented | `patchResourceDetail`, `patchResourceDetailShell`, and owner-scoped editor patching preserve the active editor. `resource-dom-stability.spec.js` covers property, URL, relation, and comment mutations plus Advanced cross-window isolation. | Browser-native draft undo is intentionally limited to native draft inputs; session app history coverage and remaining page-version gaps are tracked in 7.8. |
 | 4.1-B | Implemented | Title input is composition-aware, patches title displays, and debounces remote save instead of rebuilding the list. `resource-p0.spec.js` covers title/list/editor DOM identity. | Add an explicit list scroll/hover/open-animation preservation assertion if those are release-critical. |
 | 4.2 | Implemented | `normalizeResourceRecord` and `touchResource` add `createdAt`, `updatedAt`, `lastOpenedAt`, revision, and `timestampSource`; mutation/non-mutation tests cover revision/timestamp behavior and stable sorting. | Legacy migration timestamps remain migration-time facts, not historical edit times. Preserve `timestampSource` in exports and UI/debug evidence. |
 | 4.3 | Implemented | IndexedDB snapshot/operation stores, provisional first-offline workspace, immediate pagehide flush, serialized/generation-guarded writes, provisional→real workspace merge/migration, operation rebasing, queued replay, visible Saving/Saved/Offline/Conflict/Retrying states, and SW-update gating are in `app.js`. `resource-offline.spec.js` includes online durability, first-offline immediate pagehide recovery and one-time migration, offline deep-link reload, retry, conflict, and update cases. | Real OS/process crash, Safari eviction/quota behavior, long-lived offline sessions, and multi-device recovery are unverified. Add real-browser soak and storage-pressure QA. |
@@ -222,7 +222,7 @@ Required measurement output is **Partial**: the implementation matrix now record
 | ID | Status | Requirement and current evidence | Remaining gap and next action |
 |---|---|---|---|
 | 17.1 Phase A | Partial | Baseline fixture, regression tests, v4 migration, router/history, Center/Side/Full, focus/Escape, list patching, semantic blocks, selected-block actions/colors/cross-page Move/exact deep links, standalone URL choice/static previews, inline-toolbar equation/colors/placement, hierarchy, comment-aware history/anchor loss/delete/local unread, trash, responsive/axe coverage, and 19 settled product screenshots exist. | Full slash/block/media catalog, columns, image/file/large paste, complete inline-link actions, remote metadata/real iframe policy, page version history, reply-level deletion, regenerated/matched visual tuning, real device/SR QA, and final Phase A gate remain open. |
-| 17.2 Phase B | Partial | IndexedDB durable snapshots/queue, provisional first-offline pagehide recovery and one-time workspace migration/rebase, revision/conflict, Resource-level incremental writes, offline/reload/update tests, migration backups, and restore runbooks exist. | Entity-level Block/Comment persistence, payload telemetry, real crash/eviction/multi-device recovery, and a fresh complete Phase B gate remain open. |
+| 17.2 Phase B | Partial | IndexedDB durable snapshots/queue, provisional first-offline pagehide recovery and one-time workspace migration/rebase, revision/conflict, Resource-level incremental writes, offline/reload/update tests, migration backups, and restore runbooks exist. | Entity-level Block/Comment persistence, payload telemetry, real crash/eviction/multi-device recovery, and a post-fix complete Phase B gate remain open. |
 | 17.3 Phase C | Partial | The documented service is treated as a protected single-workspace deployment with bearer/proxy auth, validation, rate limits, audit, single-user comment read cursors, and backup/auth runbooks. | Multi-user scope is not supported: no user/tenant/role/Resource authorization, attributed collaboration identity, distributed rate limit, or current production load/security E2E. Confirm scope before any public/multi-user release. |
 | 17.4 Checkpoint discipline | Partial | Phase/checkpoint and runbook documents exist, and focused tests are organized by subsystem. | The newest changes share one dirty worktree and the historical full-run count is stale. Finish implementation, rerun all gates, then update checkpoint artifacts before commit/release. |
 
@@ -233,7 +233,7 @@ Required measurement output is **Partial**: the implementation matrix now record
 | Notion surface types fixed | Implemented | Four surfaces and view defaults are documented. | Preserve in final report. |
 | Missing source/runtime files acquired or scoped | Implemented | All named files exist. | Rerun source/build audit. |
 | Every P0 gap resolved | Partial | Local focus, shell, durability, validation, and keyboard defects are addressed. | User/tenant authorization scope and matched reference-dependent P0 claims remain unresolved/unverified; do not declare P0 globally complete. |
-| Center/Side/Full URL + Back/Forward | Implemented | Shell/history tests exist. | Fresh full-suite and deployed fallback verification. |
+| Center/Side/Full URL + Back/Forward | Implemented | Shell/history tests exist. | Post-fix full-suite rerun and deployed fallback verification. |
 | Timestamp/revision/durable draft | Implemented | Model, IndexedDB, and offline tests exist. | Real crash/eviction field QA remains non-blocking for local implementation but required for strong reliability claims. |
 | Search focus/caret/IME | Implemented | P0 focused test exists. | Real IME smoke. |
 | Keyboard-openable Library card | Implemented | Enter/Space test exists. | Keep axe/focus regression. |
@@ -241,7 +241,7 @@ Required measurement output is **Partial**: the implementation matrix now record
 | Core block/format/selection/drag/paste/undo regression | Partial | Existing feature subset plus selected-block actions/colors/cross-page Move, comment-aware history/anchor loss, exact deep-link behavior, standalone URL Link/Bookmark/Embed/Cancel, inline equation/18 colors/viewport flip, and settled earlier menu/drag states have broad focused tests. URL chooser 7/7, transport-focused 16/16, inline-toolbar 5/5, and its related focused batch 50/50 passed; cross-page Move adds six focused cases. | Image/file/large paste, remote metadata/real iframe, full block catalog, columns, complete inline-link actions, and page version history remain open. |
 | Mobile toolbar + soft keyboard verified | Unverified | Toolbar/geometry tests and a touch-emulated focused-editor capture exist in Chromium. | Real iOS/Android keyboard QA. |
 | Keyboard-only accessibility | Partial | Automated keyboard coverage and five axe/live-region tests exist. | Manual VoiceOver/TalkBack/NVDA matrix. |
-| Offline/conflict/reload | Implemented | Focused IndexedDB/queue/conflict/update tests exist. | Fresh full run plus real browser soak. |
+| Offline/conflict/reload | Implemented | Focused IndexedDB/queue/conflict/update tests exist. | Post-fix full run plus real browser soak. |
 | Matched screenshot comparison attached | Partial | A reproducible, settled 19-screenshot implementation matrix and contact sheet cover an earlier product-state checkpoint; toolbar, cross-page Move, deep-link, and comment read/anchor states postdate it, and private Notion references remain unmatched. | Regenerate affected product states, then capture the same states in authenticated Notion with the same content/theme/locale/zoom/viewport and produce measurements/diffs. |
 | Remaining gaps categorized by reason | Implemented | This ledger distinguishes missing implementation, scope deferral, private reference, and real-device/identity constraints. | Keep categories in the final ten-section handoff. |
 
@@ -288,9 +288,8 @@ Ambiguities that require an explicit product decision rather than silent inferen
 3. Whether dark mode is in product scope. The available dark Notion image does not make product dark mode implicitly required or validated.
 4. Whether the externally reachable service will remain a single-owner/single-workspace app. The current bearer gate is not evidence of per-user authorization.
 5. Whether user permanent delete is desired. The current explicit policy is soft trash with indefinite retention and operator-only replacement/restore.
-6. Whether page history must survive reload. The attachment requires that the policy be defined; the current unified-history design is not complete even though block/comment and multi-Resource Move transactions now share history snapshots.
-7. Whether custom database layouts remain excluded. Current documentation selects the recommended original/default layout scope.
-8. Whether Bookmark should fetch remote metadata and Embed should ever execute a sandboxed iframe. The current explicit implementation is privacy-preserving deterministic metadata and an inert preview only.
+6. Whether custom database layouts remain excluded. Current documentation selects the recommended original/default layout scope.
+7. Whether Bookmark should fetch remote metadata and Embed should ever execute a sandboxed iframe. The current explicit implementation is privacy-preserving deterministic metadata and an inert preview only.
 
 Until those decisions and the missing evidence gates are closed, this ledger must remain `Partial` and the final report must not use “Notion과 동일”, “pixel perfect”, or equivalent language.
 
@@ -308,7 +307,7 @@ This refresh reread the source specification and treated this ledger plus the cu
 | `npx playwright install chromium` | Failed due environment/network policy. | Browser installation attempted but every CDN attempt returned `403 Domain forbidden`; no system Chrome/Chromium executable was present. |
 | `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-a11y-axe.spec.js tests/e2e/resource-inline-toolbar.spec.js` | Blocked before browser launch. | Current Axe and inline-toolbar checks could not execute for the same missing-browser reason. |
 | `npx playwright test --list` | Passed; discovered 179 tests in 30 spec files. | Discovery confirms the current suite size, but is not a pass result. |
-| `npm run check:build` | Passed; historical build metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. | Current build gate is refreshed for this worktree. |
+| `npm run check:build` | Passed; latest verified build metrics `1,318,622 -> 921,298` bytes, Brotli `160,042`, gzip `206,578`. | Current build gate is refreshed for this worktree. |
 | `npm run check:api-auth` | Blocked by missing environment. | `.env` was absent and `DATABASE_URL is required`; no auth gate can be claimed in this cloud workspace. |
 | `npm run check:postgres` | Blocked by missing environment. | `.env` was absent and `DATABASE_URL is required`; isolated PostgreSQL validation remains unverified here. |
 | `npm run check:backups` | Blocked by missing environment. | `.env` was absent and the migration-backup check requires `DATABASE_URL`; backup validation remains unverified here. |
@@ -316,7 +315,7 @@ This refresh reread the source specification and treated this ledger plus the cu
 
 ### Current gate status after this refresh
 
-- The latest executable full-suite result remains the user's supplied local real-Chrome checkpoint: **173/174 passing (historical, before the current 179-test discovery) in 6.6 minutes**, with the only failure reportedly fixed in commit `2cc217d`. This cloud refresh could not confirm the fix because no runnable browser is available and browser download is blocked.
+- The user-supplied **173/174** local real-Chrome checkpoint is historical, before the current 179-test discovery. Current full-run evidence is the later Cloud postfix campaign at **175/179** before the final divider fix; after focused divider verification, a clean post-fix **179/179** campaign is still required.
 - The authoritative current suite count is **179 tests in 30 spec files** by Playwright discovery.
 - Visual-state matrix/contact-sheet regeneration and visual inspection were attempted only to the extent that the required Playwright browser dependency was checked; they remain **blocked** in this environment for the same missing-browser reason.
 - Preserve all explicit unverified gates: matched authenticated Notion state pairs, real iOS/Android touch keyboards, VoiceOver/TalkBack/NVDA, image/file/large paste, columns, broader block catalog, page version history and media history, tenant ACL, entity-level persistence, deployed fallback verification, and all requirements not proven by evidence.
@@ -342,14 +341,14 @@ This continuation first verified the checked-out commit as `f0167ad820002e3f9ca5
 | `PLAYWRIGHT_CHANNEL=chromium npx playwright test tests/e2e/resource-page-command-mentions.spec.js` | Blocked before browser launch; both tests failed with `Executable doesn't exist at /root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`. | The required focused mention test could not execute because no runnable browser exists. This is an environment blocker, not a reproduced product or test defect. |
 | `PLAYWRIGHT_CHANNEL=chromium npx playwright test --list` | Passed; discovered 179 tests in 30 spec files. | Discovery confirms the current full-suite size but is not a pass result. |
 | `npm run check` | Passed. | Static syntax checks, source audit, and Sites worker checks passed on this checkout. |
-| `npm run check:build` | Passed; historical build metrics `1,299,160 -> 908,347` bytes, Brotli `157,930`, gzip `203,507`. | The build gate passed without credentials. |
+| `npm run check:build` | Passed; latest verified build metrics `1,318,622 -> 921,298` bytes, Brotli `160,042`, gzip `206,578`. | The build gate passed without credentials. |
 | `npm run check:postgres` | Blocked; `.env` was absent and `DATABASE_URL is required`. | PostgreSQL persistence cannot be verified without a caller-provided ephemeral or real database URL. None was invented. |
 | `npm run check:api-auth` | Blocked; `.env` was absent and `DATABASE_URL is required`. | Database-backed API proxy auth cannot be verified without a caller-provided database URL. None was invented. |
 | `npm run check:backups` | Blocked; `.env` was absent and `Migration backup check requires DATABASE_URL`. | Migration-backup validation remains externally blocked in this cloud workspace. |
 
 ### Current gate status after this continuation
 
-- Focused `resource-page-command-mentions`, the full 179-test Playwright suite, Axe coverage, and visual-state generation remain blocked by the absence of a runnable browser in Codex Cloud after one bounded system-package attempt.
+- Earlier Cloud browser attempts were blocked by the absence of a runnable browser after one bounded system-package attempt; later Cloud postfix evidence supersedes that for the full 179-test campaign at 175/179 before the final divider fix, with a post-fix 179/179 rerun still required.
 - Non-browser gates that do not require secrets passed: `npm run check` and `npm run check:build`.
 - Secret-free server/persistence checks were inspected through the package scripts. The available PostgreSQL, API-auth, and backup checks explicitly require `DATABASE_URL`; they were run to confirm the blocker and no fake connection string or production credential was supplied.
 - No reproduced product or test defect was found in this continuation, so no product code was changed.
@@ -359,7 +358,7 @@ This continuation first verified the checked-out commit as `f0167ad820002e3f9ca5
 This section supersedes the earlier Cloud statements that every browser and database gate was blocked. Those attempts remain above as historical diagnostics. Overall status remains **Partial**; this is not a Notion-identical, pixel-perfect, or release-ready claim.
 
 - An isolated loopback PostgreSQL 16.14 instance with ephemeral unprinted credentials passed check:postgres, check:api-auth, and check:backups, then was removed. This is disposable-database evidence, not production DB, PITR, dump, or deployed-service evidence.
-- check and check:build passed. Historical build metrics remain 1,299,160 to 908,347 bytes, Brotli 157,930, gzip 203,507.
+- check and check:build passed. Latest verified build metrics are 1,318,622 to 921,298 bytes, Brotli 160,042, gzip 206,578.
 - Node 22.23.1 plus temporary Sparticuz Chromium 149.0.7827.0, with graphics off and minimal launch arguments, passed an eight-context smoke 8/8 with zero disconnects, crashes, OOM events, or abnormal exits.
 - resource-page-command-mentions passed 2/2 in 29.1 seconds, proving the scoped selector fix only under this Cloud headless-shell route.
 - A fresh-browser-per-file campaign ran all then-discovered 174 tests in 29 files: 170 passed, 4 failed (historical pre-179 discovery), 0 skipped, 0 infrastructure failures, in 24m21s. No Target-closed, SIGKILL, crash, disconnect, or OOM occurred.
@@ -377,7 +376,7 @@ This reconciliation was written after inspecting the current code/test tree and 
 - The latest full Cloud postfix first-run evidence is **175/179 passing**, split as shard A **63/65**, shard B **66/66**, and shard C **46/48**. This was not a clean full run.
 - Shard A first-run failures were a comment clipboard/mark-selection flake that passed rerun and a divider-continuation focus failure that repeated on rerun.
 - Shard C first-run and rerun failures were limited to `resource-performance.spec.js` and `resource-visual-state-evidence.spec.js`.
-- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. No full 179/179 run exists after that final divider fix.
+- After the postfix full run, divider focus was fixed and verified separately: focused divider **10/10**, full editor matrix **15/15 twice**, page features **19/19**, and DOM stability **4/4**. A clean post-fix 179/179 rerun is still required after that final divider fix.
 - Focused fixes already verified outside the full run remain scoped evidence only: toolbar/history/comment/page-feature batch **45/45**; comment history twice **6/6** each; Trash focused **10/10**, full Trash **6/6 twice**, and delete guard **3/3**.
 
 ### Current build evidence
