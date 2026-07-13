@@ -1589,8 +1589,10 @@ function renderProjectCalendarPanel() {
           </div>
         </div>
       </div>
-      <div class="project-calendar-body" data-project-calendar-body="${mode}">
-        ${mode === "month" ? renderProjectCalendarMonth(anchor, events) : renderProjectCalendarWeek(anchor, events)}
+      <div class="project-calendar-scroll">
+        <div class="project-calendar-body" data-project-calendar-body="${mode}">
+          ${mode === "month" ? renderProjectCalendarMonth(anchor, events) : renderProjectCalendarWeek(anchor, events)}
+        </div>
       </div>
     </div>
   `;
@@ -1600,70 +1602,103 @@ function renderProjectCalendarWeek(anchor, events) {
   const today = dateKey(new Date());
   const start = startOfWeek(anchor);
   const days = dateRange(start, 7);
-  const eventsByDate = calendarEventsByDate(events, days);
-  return `
-    <div class="project-calendar-week">
-      ${renderProjectCalendarDays(days, eventsByDate, { today, large: true })}
-    </div>
-  `;
+  const layout = projectCalendarSpanLayout(events, days);
+  const rowLayout = projectCalendarRowLayout(layout, days, 0, days.length, 7);
+  return renderProjectCalendarRangeRow(days, rowLayout, { today, large: true });
 }
 
 function renderProjectCalendarMonth(anchor, events) {
   const today = dateKey(new Date());
   const currentMonth = monthKey(anchor);
   const days = monthGridDays(anchor);
-  const eventsByDate = calendarEventsByDate(events, days);
+  const layout = projectCalendarSpanLayout(events, days);
+  let weekHtml = "";
+  for (let index = 0; index < days.length; index += 7) {
+    const weekDays = days.slice(index, index + 7);
+    const rowLayout = projectCalendarRowLayout(layout, days, index, weekDays.length, 4);
+    weekHtml += renderProjectCalendarRangeRow(weekDays, rowLayout, { today, currentMonth });
+  }
   return `
     <div class="project-calendar-weekdays">
       ${renderWeekdayLabels(startOfWeek(anchor))}
     </div>
     <div class="project-calendar-month">
-      ${renderProjectCalendarDays(days, eventsByDate, { today, currentMonth })}
+      ${weekHtml}
     </div>
   `;
 }
 
-function renderProjectCalendarDays(days, eventsByDate, options = {}) {
+function renderProjectCalendarRangeRow(days, rowLayout, options = {}) {
+  return `
+    <div class="${options.large ? "project-calendar-week" : "project-calendar-month-week"}">
+      ${renderProjectCalendarDays(days, options)}
+      ${renderProjectCalendarSpanLayer(rowLayout, options.large ? 7 : 4)}
+    </div>
+  `;
+}
+
+function renderProjectCalendarDays(days, options = {}) {
   let html = "";
-  for (const day of days) {
-    const key = dateKey(day);
-    html += renderProjectCalendarDay(day, eventsByDate.get(key) || [], {
+  for (let index = 0; index < days.length; index += 1) {
+    const day = days[index];
+    html += renderProjectCalendarDay(day, {
       today: options.today,
       large: options.large,
       outside: options.currentMonth ? monthKey(day) !== options.currentMonth : false,
+      column: index + 1,
     });
   }
   return html;
 }
 
-function renderProjectCalendarDay(day, dayEvents = [], options = {}) {
+function renderProjectCalendarDay(day, options = {}) {
   const key = dateKey(day);
-  const maxEvents = options.large ? 7 : 4;
-  const overflow = Math.max(0, dayEvents.length - maxEvents);
   return `
-    <div class="project-calendar-day ${options.large ? "is-large" : ""} ${options.outside ? "is-outside" : ""} ${key === options.today ? "is-today" : ""}">
+    <div class="project-calendar-day ${options.large ? "is-large" : ""} ${options.outside ? "is-outside" : ""} ${key === options.today ? "is-today" : ""}" style="grid-column: ${options.column};">
       <div class="project-calendar-date"><span>${options.large ? weekday(day) : ""}</span><strong>${options.large ? compactDateLabel(key) : key.slice(8)}</strong></div>
-      <div class="project-calendar-bars">
-        ${renderProjectCalendarPills(dayEvents, key, maxEvents)}
-        ${overflow > 0 ? `<span class="project-calendar-more">+${overflow}</span>` : ""}
-      </div>
     </div>
   `;
 }
 
-function renderProjectCalendarPills(events, date, limit) {
-  let html = "";
-  const count = Math.min(events.length, limit);
-  for (let index = 0; index < count; index += 1) {
-    html += renderProjectCalendarPill(events[index], date);
-  }
-  return html;
+function projectCalendarSpanLayout(events, days) {
+  return calendarSpanSegments(events, days, Number.MAX_SAFE_INTEGER).segments;
 }
 
-function renderProjectCalendarPill(event, date) {
-  const starts = event.startDate === date;
-  const ends = event.endDate === date;
-  return `<span class="project-calendar-pill ${starts ? "is-start" : ""} ${ends ? "is-end" : ""}" title="${esc(event.title)}">${esc(event.title)}</span>`;
+function projectCalendarRowLayout(layout, days, rowStartIndex, rowLength, limit) {
+  const rowEndIndex = rowStartIndex + rowLength - 1;
+  const segments = [];
+  const overflowIds = new Set();
+  for (const segment of layout) {
+    if (segment.endIndex < rowStartIndex || segment.startIndex > rowEndIndex) continue;
+    if (segment.lane >= limit) {
+      overflowIds.add(segment.event.id || `${segment.event.title || "project"}-${segment.start}-${segment.end}`);
+      continue;
+    }
+    const startIndex = Math.max(segment.startIndex, rowStartIndex);
+    const endIndex = Math.min(segment.endIndex, rowEndIndex);
+    segments.push({
+      ...segment,
+      segmentStart: dateKey(days[startIndex]),
+      segmentEnd: dateKey(days[endIndex]),
+      startIndex: startIndex - rowStartIndex,
+      endIndex: endIndex - rowStartIndex,
+      spanDays: endIndex - startIndex + 1,
+    });
+  }
+  return { segments, overflow: overflowIds.size };
+}
+
+function renderProjectCalendarSpanLayer(rowLayout, limit) {
+  const eventHtml = renderCalendarEvents(rowLayout.segments, { compact: true, limit: rowLayout.segments.length });
+  const overflowHtml = rowLayout.overflow
+    ? `<span class="calendar-span-more" style="grid-row: ${limit + 1};">+${rowLayout.overflow}</span>`
+    : "";
+  return `
+    <div class="calendar-span-layer project-calendar-span-layer" aria-label="연속 프로젝트 기간">
+      ${eventHtml}
+      ${overflowHtml}
+    </div>
+  `;
 }
 
 function renderGoals() {
@@ -4079,7 +4114,7 @@ function renderProjectItem(project, statsByProjectId = null) {
             <span>${stats.progress}%</span>
             <span>${stats.done}/${stats.total} 완료</span>
           </div>
-          <div class="project-progress-track"><span style="width:${stats.progress}%"></span></div>
+          <div class="project-progress-track" style="--project-progress:${stats.progress}%"><span></span></div>
         </div>
         <div class="project-task-count">
           <strong>${stats.total}</strong>
@@ -5012,36 +5047,6 @@ function calendarEventSourceClass(event) {
   if (event.source === "project") return "is-project";
   if (event.source === "task") return "is-task";
   return "is-local";
-}
-
-function calendarEventsByDate(events, days) {
-  const byDate = new Map();
-  let firstKey = "";
-  let lastKey = "";
-  for (const day of days) {
-    const key = dateKey(day);
-    if (!firstKey) firstKey = key;
-    lastKey = key;
-    byDate.set(key, []);
-  }
-  if (!firstKey) return byDate;
-  for (const event of events) {
-    const start = event.startDate || dateKey(new Date(event.start));
-    const end = event.endDate || start;
-    if (end < firstKey || start > lastKey) continue;
-    const endKey = end < lastKey ? end : lastKey;
-    let cursor = parseDateOnly(start > firstKey ? start : firstKey);
-    let key = dateKey(cursor);
-    while (key <= endKey) {
-      byDate.get(key)?.push(event);
-      cursor = addDays(cursor, 1);
-      key = dateKey(cursor);
-    }
-  }
-  for (const dayEvents of byDate.values()) {
-    dayEvents.sort(byCalendarEventTime);
-  }
-  return byDate;
 }
 
 function byCalendarEventTime(a, b) {
