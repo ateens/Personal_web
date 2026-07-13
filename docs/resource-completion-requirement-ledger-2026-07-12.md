@@ -404,3 +404,9 @@ This reconciliation was written after inspecting the current code/test tree and 
 ### Preserved open gaps
 
 The following remain real gaps or unverified gates: performance failure, visual-evidence failure, full slash/media/file/PDF/table/block catalog, image/file/large-paste flow, columns, complete inline-link actions, matched authenticated Notion comparisons, real-device and screen-reader QA, entity-level Block/Comment persistence, tenant ACL/RBAC, page version history, and deployment-only verification. Historical successful focused results do not close these gates.
+
+## 2026-07-13 single-user scope decision
+
+The user explicitly fixed the product scope to personal, single-user use. Phase C multi-user implementation is therefore out of scope: tenant/user separation, RBAC, collaborative identity, and multi-user session/CSRF design are not completion gates. Existing single-workspace authentication and operational security remain required and must not be removed. Phase A, Phase B, local regression, matched visual evidence, real-device accessibility evidence, and the other product gaps in this ledger remain unchanged unless separately superseded.
+
+The local stop checkpoint and its focused verification evidence are recorded in `docs/resource-local-stop-checkpoint-2026-07-13.md`.

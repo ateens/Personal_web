@@ -40,20 +40,66 @@ function resourceBlockContent(page, blockId) {
 }
 
 async function settle(page) {
-  const saveStatus = page.locator("[data-resource-save-status]").first();
-  if (await saveStatus.count()) {
-    await expect(saveStatus).not.toHaveAttribute("data-sync-state", /^(loading|saving)$/);
-  }
   await page.evaluate(async () => {
-    if (document.fonts?.ready) await document.fonts.ready;
-    for (const animation of document.getAnimations()) {
-      try {
-        animation.finish();
-      } catch {}
+    const deadline = performance.now() + 8_000;
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const isReady = () => {
+      const saveIsPending = [...document.querySelectorAll("[data-resource-save-status]")]
+        .some((element) => /^(loading|saving)$/.test(element.dataset.syncState || ""));
+      const animationIsActive = document.getAnimations()
+        .some((animation) => animation.playState === "running" || animation.playState === "pending");
+      return !saveIsPending && document.fonts?.status !== "loading" && !animationIsActive;
+    };
+    const geometrySignature = () => [...document.querySelectorAll("body *")]
+      .filter((element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden";
+      })
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        return [
+          element.tagName,
+          Math.round(rect.x * 100) / 100,
+          Math.round(rect.y * 100) / 100,
+          Math.round(rect.width * 100) / 100,
+          Math.round(rect.height * 100) / 100,
+          element.scrollLeft,
+          element.scrollTop,
+        ].join(":");
+      })
+      .join("|");
+
+    if (document.fonts?.ready) {
+      await Promise.race([
+        document.fonts.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Fonts did not settle within 8 seconds")), 8_000)),
+      ]);
     }
-    await new Promise((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
-    });
+
+    let previousGeometry = "";
+    let stableFrames = 0;
+    while (performance.now() < deadline) {
+      await nextFrame();
+      if (!isReady()) {
+        previousGeometry = "";
+        stableFrames = 0;
+        continue;
+      }
+      const currentGeometry = geometrySignature();
+      stableFrames = currentGeometry === previousGeometry ? stableFrames + 1 : 1;
+      previousGeometry = currentGeometry;
+      if (stableFrames >= 3) return;
+    }
+
+    const pendingSaveStates = [...document.querySelectorAll("[data-resource-save-status]")]
+      .map((element) => element.dataset.syncState || "")
+      .filter((state) => /^(loading|saving)$/.test(state));
+    const activeAnimations = document.getAnimations()
+      .filter((animation) => animation.playState === "running" || animation.playState === "pending")
+      .length;
+    throw new Error(
+      `Visual state did not settle within 8 seconds (fonts=${document.fonts?.status || "unsupported"}, saves=${pendingSaveStates.join(",") || "none"}, activeAnimations=${activeAnimations}, stableFrames=${stableFrames})`,
+    );
   });
 }
 
@@ -62,7 +108,6 @@ async function capture(page, fileName, locator = null) {
   const screenshotPath = path.join(EVIDENCE_DIR, fileName);
   const options = {
     path: screenshotPath,
-    animations: "disabled",
     caret: "hide",
   };
   if (locator) await locator.screenshot(options);
@@ -170,48 +215,65 @@ async function beginBlockDrag(page, sourceId, targetId) {
   await page.mouse.move(targetX, targetY, { steps: 8 });
 }
 
-test("settled library, Center, Side, toolbar, properties, and no-media hover evidence", async ({ page }) => {
+test("settled library database evidence", async ({ page }) => {
   await page.goto("/");
   await openResources(page);
   const library = page.locator('[data-resource-view="library"]');
   await expect(library).toBeVisible();
   await capture(page, "01-library-database-1440x1000.png");
+});
 
-  await page.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
-  let shell = resourceShell(page, "center");
-  await expect(shell).toBeVisible();
+test("settled Center Resource evidence", async ({ page }) => {
+  await openCenter(page);
   await capture(page, "02-center-settled-1440x1000.png");
+});
+
+test("settled Center Resource toolbar evidence", async ({ page }) => {
+  const shell = await openCenter(page);
   await capture(
     page,
     "03-center-toolbar-1440x1000.png",
     shell.locator(":scope > .resource-page-toolbar"),
   );
+});
 
+test("settled closed properties evidence", async ({ page }) => {
+  const shell = await openCenter(page);
   const propertiesToggle = shell.locator(`[data-resource-props="${FIXTURE_IDS.resource}"]`);
   await expect(propertiesToggle).toHaveAttribute("aria-expanded", "false");
   await capture(page, "04-properties-closed-1440x1000.png");
+});
+
+test("settled open properties evidence", async ({ page }) => {
+  const shell = await openCenter(page);
+  const propertiesToggle = shell.locator(`[data-resource-props="${FIXTURE_IDS.resource}"]`);
+  await expect(propertiesToggle).toHaveAttribute("aria-expanded", "false");
   await propertiesToggle.click();
   await expect(propertiesToggle).toHaveAttribute("aria-expanded", "true");
   await expect(shell.locator(`[data-resource-properties="${FIXTURE_IDS.resource}"]`)).toBeVisible();
   await capture(page, "05-properties-open-1440x1000.png");
   await propertiesToggle.click();
   await expect(propertiesToggle).toHaveAttribute("aria-expanded", "false");
+});
 
+test("settled no-icon no-cover hover evidence", async ({ page }) => {
+  const shell = await openCenter(page);
   const media = shell.locator(`[data-resource-media="${FIXTURE_IDS.resource}"]`);
   await expect(media).not.toHaveClass(/has-(cover|icon)/);
   await media.hover();
   await expect(media.locator(`[data-resource-cover-edit="${FIXTURE_IDS.resource}"]`)).toBeVisible();
   await expect(media.locator(`[data-resource-icon-edit="${FIXTURE_IDS.resource}"]`)).toBeVisible();
   await capture(page, "06-no-icon-no-cover-hover-1440x1000.png");
+});
 
-  shell = await openSide(page);
+test("settled Side Resource evidence", async ({ page }) => {
+  const shell = await openSide(page);
   await capture(page, "07-side-settled-1440x1000.png");
   await expect(shell).toBeVisible();
 });
 
-test("settled block hover, slash, selection, block-menu, and drag-guide evidence", async ({ page }) => {
+test("settled normal block hover evidence", async ({ page }) => {
   await openCenter(page);
-
   const normalBlock = resourceBlock(page, "fixture-block-heading-1");
   const normalHandle = normalBlock.locator('[data-block-drag="fixture-block-heading-1"]');
   await normalHandle.scrollIntoViewIfNeeded();
@@ -220,7 +282,10 @@ test("settled block hover, slash, selection, block-menu, and drag-guide evidence
   await expect(normalHandle).toBeVisible();
   await expect(normalBlock.locator('[data-block-add="fixture-block-heading-1"]')).toBeVisible();
   await capture(page, "08-normal-block-hover-1440x1000.png");
+});
 
+test("settled empty block hover evidence", async ({ page }) => {
+  await openCenter(page);
   const emptyContent = resourceBlockContent(page, "fixture-block-paragraph");
   await emptyContent.fill("");
   const emptyBlock = resourceBlock(page, "fixture-block-paragraph");
@@ -229,26 +294,44 @@ test("settled block hover, slash, selection, block-menu, and drag-guide evidence
   await expect(emptyBlock).toHaveClass(/is-icon-hover/);
   await expect(emptyContent).toHaveText("");
   await capture(page, "09-empty-block-hover-1440x1000.png");
+});
 
+test("settled default slash menu evidence", async ({ page }) => {
+  await openCenter(page);
   const slashContent = resourceBlockContent(page, "fixture-block-heading-2");
   await slashContent.scrollIntoViewIfNeeded();
   await slashContent.fill("/");
   const slashMenu = page.locator(".slash-menu");
   await expect(slashMenu).toBeVisible();
   await capture(page, "10-slash-default-1440x1000.png");
+});
 
+test("settled searched slash menu evidence", async ({ page }) => {
+  await openCenter(page);
+  const slashContent = resourceBlockContent(page, "fixture-block-heading-2");
+  await slashContent.scrollIntoViewIfNeeded();
   await slashContent.fill("/heading");
+  const slashMenu = page.locator(".slash-menu");
   await expect(slashMenu.locator('[data-block-type="heading1"]')).toBeVisible();
   await capture(page, "11-slash-search-heading-1440x1000.png");
+});
 
+test("settled keyboard-scrolled slash menu evidence", async ({ page }) => {
+  await openCenter(page);
+  const slashContent = resourceBlockContent(page, "fixture-block-heading-2");
+  await slashContent.scrollIntoViewIfNeeded();
   await slashContent.fill("/");
+  const slashMenu = page.locator(".slash-menu");
   await expect(slashMenu).toBeVisible();
   for (let index = 0; index < 13; index += 1) await slashContent.press("ArrowDown");
   await expect.poll(() => slashMenu.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await capture(page, "12-slash-scrolled-keyboard-1440x1000.png");
   await slashContent.press("Escape");
   await expect(slashMenu).toHaveCount(0);
+});
 
+test("settled selection toolbar evidence", async ({ page }) => {
+  await openCenter(page);
   const selectionContent = resourceBlockContent(page, "fixture-block-heading-3");
   await selectionContent.scrollIntoViewIfNeeded();
   await selectionContent.fill("Selection toolbar visual evidence");
@@ -257,7 +340,10 @@ test("settled block hover, slash, selection, block-menu, and drag-guide evidence
   await capture(page, "13-selection-toolbar-1440x1000.png");
   await page.keyboard.press("Escape");
   await expect(page.locator(".inline-format-toolbar")).toHaveCount(0);
+});
 
+test("settled selected block menu evidence", async ({ page }) => {
+  await openCenter(page);
   const menuContent = resourceBlockContent(page, "fixture-block-callout");
   await menuContent.scrollIntoViewIfNeeded();
   await menuContent.click();
@@ -270,7 +356,10 @@ test("settled block hover, slash, selection, block-menu, and drag-guide evidence
   await page.keyboard.press("Escape");
   await expect(blockMenu).toHaveCount(0);
   await page.keyboard.press("Escape");
+});
 
+test("settled block drag insertion guide evidence", async ({ page }) => {
+  await openCenter(page);
   await beginBlockDrag(page, "fixture-block-heading-1", "fixture-block-numbered");
   await expect(page.locator(".block-drag-ghost")).toBeVisible();
   await expect(page.locator(".is-block-drop-before, .is-block-drop-after")).toHaveCount(1);
@@ -280,7 +369,7 @@ test("settled block hover, slash, selection, block-menu, and drag-guide evidence
   await expect(page.locator(".block-drag-ghost")).toHaveCount(0);
 });
 
-test("settled long-page middle, bottom, and comments-pane evidence", async ({ page, request }) => {
+test("settled long-page middle evidence", async ({ page, request }) => {
   await seedLongResource(request);
   const shell = await openCenter(page);
   await expect(shell.locator(".block[data-block-id]")).toHaveCount(84);
@@ -293,7 +382,13 @@ test("settled long-page middle, bottom, and comments-pane evidence", async ({ pa
   expect(middlePosition.maximum).toBeGreaterThan(0);
   expect(middlePosition.current).toBeGreaterThan(0);
   await capture(page, "16-long-page-middle-1440x1000.png");
+});
 
+test("settled long-page bottom evidence", async ({ page, request }) => {
+  await seedLongResource(request);
+  const shell = await openCenter(page);
+  await expect(shell.locator(".block[data-block-id]")).toHaveCount(84);
+  const scroll = shell.locator(".resource-note-scroll");
   const bottomPosition = await scroll.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     return {
@@ -301,9 +396,25 @@ test("settled long-page middle, bottom, and comments-pane evidence", async ({ pa
       current: element.scrollTop,
     };
   });
+  expect(bottomPosition.maximum).toBeGreaterThan(0);
   expect(bottomPosition.current).toBe(bottomPosition.maximum);
   await capture(page, "17-long-page-bottom-1440x1000.png");
+});
 
+test("settled long-page comments pane evidence", async ({ page, request }) => {
+  await seedLongResource(request);
+  const shell = await openCenter(page);
+  await expect(shell.locator(".block[data-block-id]")).toHaveCount(84);
+  const scroll = shell.locator(".resource-note-scroll");
+  const bottomPosition = await scroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return {
+      maximum: element.scrollHeight - element.clientHeight,
+      current: element.scrollTop,
+    };
+  });
+  expect(bottomPosition.maximum).toBeGreaterThan(0);
+  expect(bottomPosition.current).toBe(bottomPosition.maximum);
   await shell.locator(`[data-resource-comments-toggle="${FIXTURE_IDS.resource}"]`).first().click();
   const comments = page.locator(`[data-resource-comments-pane="${FIXTURE_IDS.resource}"]`);
   await expect(comments).toBeVisible();

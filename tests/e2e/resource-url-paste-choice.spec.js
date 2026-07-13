@@ -206,7 +206,7 @@ test("Cancel button and Escape leave the empty target unchanged", async ({ page,
   await expect(targetContent(page)).toBeFocused();
 });
 
-test("HTTP, unsafe schemes, non-standalone text, and a collapsed non-empty caret use normal paste fallback", async ({ page }) => {
+test("HTTP, unsafe schemes, non-standalone text, and a collapsed non-empty caret use controlled safe plain fallback", async ({ page }) => {
   const originalText = await targetContent(page).textContent();
   for (const value of [
     "http://example.com/not-https",
@@ -216,12 +216,17 @@ test("HTTP, unsafe schemes, non-standalone text, and a collapsed non-empty caret
   ]) {
     await selectTargetText(page, 0, "Paragraph".length);
     const paste = await dispatchPaste(page, { "text/plain": value });
-    expect(paste.defaultPrevented).toBe(false);
+    expect(paste.defaultPrevented).toBe(true);
     await expect(choiceMenu(page)).toHaveCount(0);
+    await expect(targetContent(page)).toContainText(value);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
+    await expect(targetContent(page)).toHaveText(originalText);
   }
   await selectTargetText(page, originalText.length, originalText.length);
-  expect((await dispatchPaste(page, { "text/plain": "https://example.com/collapsed" })).defaultPrevented).toBe(false);
+  expect((await dispatchPaste(page, { "text/plain": "https://example.com/collapsed" })).defaultPrevented).toBe(true);
   await expect(choiceMenu(page)).toHaveCount(0);
+  await expect(targetContent(page)).toContainText("https://example.com/collapsed");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
   await expect(targetContent(page)).toHaveText(originalText);
   await expect(targetContent(page).locator('a[href^="javascript:" i], script, img, iframe')).toHaveCount(0);
   expect(await page.evaluate(() => window.__urlPasteXss || 0)).toBe(0);
