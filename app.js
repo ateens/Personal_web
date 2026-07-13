@@ -709,6 +709,10 @@ let ui = {
   expandedProjectId: "",
   editingProjectId: "",
   projectDeleteConfirmId: "",
+  editingGoalId: "",
+  goalDeleteConfirmId: "",
+  editingBoxId: "",
+  boxDeleteConfirmId: "",
   expandedTodayTaskId: "",
   projectCalendarMode: "week",
   projectCalendarAnchor: dateKey(new Date()),
@@ -1026,6 +1030,10 @@ function setView(view, options = {}) {
   ui.expandedProjectId = "";
   ui.editingProjectId = "";
   ui.projectDeleteConfirmId = "";
+  ui.editingGoalId = "";
+  ui.goalDeleteConfirmId = "";
+  ui.editingBoxId = "";
+  ui.boxDeleteConfirmId = "";
   ui.expandedTodayTaskId = "";
   ui.todayTaskPropsOpen = {};
   ui.todayTaskActiveProperty = {};
@@ -4193,7 +4201,15 @@ function renderProjectRelation(label, value) {
 
 function renderInlineEditPanel(type, item, title) {
   const nameField = type === "projects" || type === "goals" || type === "boxes" ? "name" : "title";
-  const nameLabel = type === "habits" ? "루틴명" : type === "projects" ? "프로젝트명" : "제목";
+  const nameLabel = type === "habits"
+    ? "루틴명"
+    : type === "projects"
+      ? "프로젝트명"
+      : type === "goals"
+        ? "목표명"
+        : type === "boxes"
+          ? "박스명"
+          : "제목";
   return `
     <section class="inline-edit-panel" data-inline-owner-type="${type}" data-inline-owner-id="${item.id}" aria-label="${esc(title)}">
       <div class="inline-edit-head">
@@ -4266,9 +4282,16 @@ function renderProjectTaskLine(task) {
 
 function renderGoalCard(goal, statsByGoalId = null) {
   const stats = statsByGoalId?.get(goal.id) || goalStats(goal);
+  const editing = ui.editingGoalId === goal.id;
   return `
-    <article class="card" data-select-type="goals" data-select-id="${goal.id}">
-      <h3 class="card-title">${esc(goal.name)}</h3>
+    <article class="card entity-card ${editing ? "is-editing" : ""}" data-select-type="goals" data-select-id="${goal.id}">
+      <div class="entity-card-head">
+        <h3 class="card-title">${esc(goal.name)}</h3>
+        <div class="entity-card-actions" aria-label="${esc(goal.name)} 관리">
+          <button class="project-action-button" type="button" data-goal-edit="${goal.id}" aria-label="목표 수정" aria-expanded="${editing ? "true" : "false"}">수정</button>
+          <button class="project-action-button is-danger" type="button" data-goal-delete="${goal.id}" aria-label="목표 삭제">삭제</button>
+        </div>
+      </div>
       <div class="card-meta">
         ${badge(STATUSES.goal[goal.status] || goal.status, "blue")}
         ${goal.boxId ? badge(nameOf("boxes", goal.boxId), "teal") : ""}
@@ -4282,15 +4305,23 @@ function renderGoalCard(goal, statsByGoalId = null) {
         ${renderEntityStat("지연", stats.overdueTasks, "할 일")}
       </div>
       <p class="entity-insight">${esc(goalInsight(goal, stats))}</p>
+      ${editing ? renderInlineEditPanel("goals", goal, "목표 수정") : ""}
     </article>
   `;
 }
 
 function renderBoxCard(box, statsByBoxId = null) {
   const stats = statsByBoxId?.get(box.id) || boxStats(box);
+  const editing = ui.editingBoxId === box.id;
   return `
-    <article class="card" data-select-type="boxes" data-select-id="${box.id}" data-delete-drag-type="boxes" data-delete-drag-id="${box.id}">
-      <h3 class="card-title">${esc(box.name)}</h3>
+    <article class="card entity-card ${editing ? "is-editing" : ""}" data-select-type="boxes" data-select-id="${box.id}" data-delete-drag-type="boxes" data-delete-drag-id="${box.id}">
+      <div class="entity-card-head">
+        <h3 class="card-title">${esc(box.name)}</h3>
+        <div class="entity-card-actions" aria-label="${esc(box.name)} 관리">
+          <button class="project-action-button" type="button" data-box-edit="${box.id}" aria-label="박스 수정" aria-expanded="${editing ? "true" : "false"}">수정</button>
+          <button class="project-action-button is-danger" type="button" data-box-delete="${box.id}" aria-label="박스 삭제">삭제</button>
+        </div>
+      </div>
       <div class="card-meta">
         ${badge(box.visibility, box.visibility === "pinned" ? "blue" : "teal")}
         ${badge(`${stats.goals.length} 목표`, "violet")}
@@ -4305,6 +4336,7 @@ function renderBoxCard(box, statsByBoxId = null) {
         ${renderEntityStat("프로젝트", stats.projects.length, "연결")}
       </div>
       <p class="entity-insight">${esc(boxInsight(box, stats))}</p>
+      ${editing ? renderInlineEditPanel("boxes", box, "박스 수정") : ""}
     </article>
   `;
 }
@@ -6925,6 +6957,8 @@ function renderOverlays() {
     ${ui.scheduler ? renderTaskScheduler() : ""}
     ${ui.deleteDrag ? renderDeleteDragOverlay() : ""}
     ${ui.projectDeleteConfirmId ? renderProjectDeleteConfirm() : ""}
+    ${ui.goalDeleteConfirmId ? renderGoalDeleteConfirm() : ""}
+    ${ui.boxDeleteConfirmId ? renderBoxDeleteConfirm() : ""}
     ${ui.habitDeleteConfirmId ? renderHabitDeleteConfirm() : ""}
     ${ui.view === "today" ? renderTodayFloatingDrop() : ""}
     ${ui.blockDrag ? renderBlockDragGhost() : ""}
@@ -7300,6 +7334,50 @@ function renderProjectDeleteConfirm() {
       <div class="confirm-actions">
         <button class="button secondary" type="button" data-project-delete-cancel>취소</button>
         <button class="button danger" type="button" data-project-delete-confirm="${project.id}">삭제</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderGoalDeleteConfirm() {
+  const goal = itemById("goals", ui.goalDeleteConfirmId);
+  if (!goal) return "";
+  const stats = goalStats(goal);
+  return `
+    <div class="confirm-backdrop goal-confirm-backdrop" aria-hidden="true"></div>
+    <section class="confirm-dialog goal-delete-confirm" role="dialog" aria-modal="true" aria-label="목표 삭제 확인">
+      <div class="confirm-dialog-head">
+        <div>
+          <span class="confirm-kicker">Goals</span>
+          <h2>목표를 삭제할까요?</h2>
+        </div>
+      </div>
+      <p class="confirm-copy"><strong>${esc(goal.name)}</strong> 목표가 삭제됩니다. 연결된 ${stats.projects.length}개 프로젝트, ${stats.totalTasks}개 할 일과 ${stats.resources.length}개 자료는 삭제하지 않고 목표 연결만 해제합니다.</p>
+      <div class="confirm-actions">
+        <button class="button secondary" type="button" data-goal-delete-cancel>취소</button>
+        <button class="button danger" type="button" data-goal-delete-confirm="${goal.id}">삭제</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderBoxDeleteConfirm() {
+  const box = itemById("boxes", ui.boxDeleteConfirmId);
+  if (!box) return "";
+  const stats = boxStats(box);
+  return `
+    <div class="confirm-backdrop box-confirm-backdrop" aria-hidden="true"></div>
+    <section class="confirm-dialog box-delete-confirm" role="dialog" aria-modal="true" aria-label="박스 삭제 확인">
+      <div class="confirm-dialog-head">
+        <div>
+          <span class="confirm-kicker">Boxes</span>
+          <h2>박스를 삭제할까요?</h2>
+        </div>
+      </div>
+      <p class="confirm-copy"><strong>${esc(box.name)}</strong> 박스가 삭제됩니다. 연결된 ${stats.goals.length}개 목표, ${stats.projects.length}개 프로젝트, ${stats.totalTasks}개 할 일, ${stats.resources.length}개 자료와 ${stats.habits.length}개 루틴은 삭제하지 않고 박스 연결만 해제합니다.</p>
+      <div class="confirm-actions">
+        <button class="button secondary" type="button" data-box-delete-cancel>취소</button>
+        <button class="button danger" type="button" data-box-delete-confirm="${box.id}">삭제</button>
       </div>
     </section>
   `;
@@ -8811,6 +8889,70 @@ function handleClick(event) {
     return;
   }
 
+  const goalEdit = event.target.closest("[data-goal-edit]");
+  if (goalEdit) {
+    event.preventDefault();
+    event.stopPropagation();
+    openGoalEditor(goalEdit.dataset.goalEdit);
+    return;
+  }
+
+  const goalDelete = event.target.closest("[data-goal-delete]");
+  if (goalDelete) {
+    event.preventDefault();
+    event.stopPropagation();
+    openGoalDeleteConfirm(goalDelete.dataset.goalDelete);
+    return;
+  }
+
+  const goalDeleteCancel = event.target.closest("[data-goal-delete-cancel]");
+  if (goalDeleteCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeGoalDeleteConfirm();
+    return;
+  }
+
+  const goalDeleteConfirm = event.target.closest("[data-goal-delete-confirm]");
+  if (goalDeleteConfirm) {
+    event.preventDefault();
+    event.stopPropagation();
+    confirmGoalDelete(goalDeleteConfirm.dataset.goalDeleteConfirm);
+    return;
+  }
+
+  const boxEdit = event.target.closest("[data-box-edit]");
+  if (boxEdit) {
+    event.preventDefault();
+    event.stopPropagation();
+    openBoxEditor(boxEdit.dataset.boxEdit);
+    return;
+  }
+
+  const boxDelete = event.target.closest("[data-box-delete]");
+  if (boxDelete) {
+    event.preventDefault();
+    event.stopPropagation();
+    openBoxDeleteConfirm(boxDelete.dataset.boxDelete);
+    return;
+  }
+
+  const boxDeleteCancel = event.target.closest("[data-box-delete-cancel]");
+  if (boxDeleteCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeBoxDeleteConfirm();
+    return;
+  }
+
+  const boxDeleteConfirm = event.target.closest("[data-box-delete-confirm]");
+  if (boxDeleteConfirm) {
+    event.preventDefault();
+    event.stopPropagation();
+    confirmBoxDelete(boxDeleteConfirm.dataset.boxDeleteConfirm);
+    return;
+  }
+
   const projectToggle = event.target.closest("[data-project-toggle]");
   if (projectToggle && !event.target.closest("[data-project-edit], [data-project-delete], .project-actions")) {
     event.preventDefault();
@@ -8949,7 +9091,7 @@ function handleClick(event) {
   }
 
   const select = event.target.closest("[data-select-type]");
-  if (select && !event.target.closest("button")) {
+  if (select && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     event.preventDefault();
     event.stopPropagation();
     if (select.dataset.selectType === "resources") {
@@ -17942,6 +18084,12 @@ function afterCreate(type, itemId, view) {
     ui.expandedHabitId = itemId;
     ui.editingHabitId = itemId;
   }
+  if (type === "goals") {
+    ui.editingGoalId = itemId;
+  }
+  if (type === "boxes") {
+    ui.editingBoxId = itemId;
+  }
   if (type === "resources") {
     openResourceNote(itemId);
   }
@@ -18006,6 +18154,74 @@ function confirmProjectDelete(projectId) {
   }
   saveState();
   showToast("프로젝트를 삭제했습니다.");
+  renderView({ soft: true, animateCards: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openGoalEditor(goalId) {
+  if (!collectionIdMap("goals").has(goalId)) return;
+  ui.editingGoalId = ui.editingGoalId === goalId ? "" : goalId;
+  renderView({ soft: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openGoalDeleteConfirm(goalId) {
+  if (!collectionIdMap("goals").has(goalId)) return;
+  ui.goalDeleteConfirmId = goalId;
+  renderOverlays();
+}
+
+function closeGoalDeleteConfirm() {
+  ui.goalDeleteConfirmId = "";
+  renderOverlays();
+}
+
+function confirmGoalDelete(goalId) {
+  const targetId = goalId || ui.goalDeleteConfirmId;
+  const removed = deleteEntity("goals", targetId);
+  ui.goalDeleteConfirmId = "";
+  if (!removed) {
+    renderOverlays();
+    return;
+  }
+  saveState();
+  showToast("목표를 삭제했습니다.");
+  renderView({ soft: true, animateCards: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openBoxEditor(boxId) {
+  if (!collectionIdMap("boxes").has(boxId)) return;
+  ui.editingBoxId = ui.editingBoxId === boxId ? "" : boxId;
+  renderView({ soft: true });
+  renderDetail();
+  renderOverlays();
+}
+
+function openBoxDeleteConfirm(boxId) {
+  if (!collectionIdMap("boxes").has(boxId)) return;
+  ui.boxDeleteConfirmId = boxId;
+  renderOverlays();
+}
+
+function closeBoxDeleteConfirm() {
+  ui.boxDeleteConfirmId = "";
+  renderOverlays();
+}
+
+function confirmBoxDelete(boxId) {
+  const targetId = boxId || ui.boxDeleteConfirmId;
+  const removed = deleteEntity("boxes", targetId);
+  ui.boxDeleteConfirmId = "";
+  if (!removed) {
+    renderOverlays();
+    return;
+  }
+  saveState();
+  showToast("박스를 삭제했습니다.");
   renderView({ soft: true, animateCards: true });
   renderDetail();
   renderOverlays();
@@ -18956,6 +19172,8 @@ function deleteEntity(type, itemId) {
   if (index < 0) return null;
   const [removed] = collection.splice(index, 1);
   cleanupDeletedEntityReferences(type, itemId);
+  localWorkspaceOperationRequired = true;
+  localWorkspaceOperationScope = "workspace";
   return removed;
 }
 
@@ -18974,11 +19192,15 @@ function cleanupDeletedEntityReferences(type, itemId) {
     clearFieldValue(state.tasks, "boxId", itemId);
     clearResourceFieldValue("boxId", itemId);
     clearFieldValue(state.habits, "boxId", itemId);
+    if (ui.editingBoxId === itemId) ui.editingBoxId = "";
+    if (ui.boxDeleteConfirmId === itemId) ui.boxDeleteConfirmId = "";
   }
   if (type === "goals") {
     clearFieldValue(state.projects, "goalId", itemId);
     clearFieldValue(state.tasks, "goalId", itemId);
     clearResourceFieldValue("goalId", itemId);
+    if (ui.editingGoalId === itemId) ui.editingGoalId = "";
+    if (ui.goalDeleteConfirmId === itemId) ui.goalDeleteConfirmId = "";
   }
   if (type === "projects") {
     clearFieldValue(state.tasks, "projectId", itemId);
@@ -18998,12 +19220,37 @@ function cleanupDeletedEntityReferences(type, itemId) {
     if (ui.editingHabitId === itemId) ui.editingHabitId = "";
     if (ui.habitDeleteConfirmId === itemId) ui.habitDeleteConfirmId = "";
   }
+  removeDeletedEntityLinks(type, itemId);
   for (const capture of state.captures) {
     if (capture.convertedTo === type && capture.convertedId === itemId) {
       capture.convertedTo = "";
       capture.convertedId = "";
     }
   }
+}
+
+function removeDeletedEntityLinks(type, itemId) {
+  if (!Array.isArray(state.links) || !state.links.length) return;
+  const singularType = {
+    captures: "capture",
+    boxes: "box",
+    goals: "goal",
+    projects: "project",
+    tasks: "task",
+    resources: "resource",
+    habits: "habit",
+    journals: "journal",
+  }[type] || "";
+  let writeIndex = 0;
+  for (let readIndex = 0; readIndex < state.links.length; readIndex += 1) {
+    const link = state.links[readIndex];
+    const fromMatches = link?.fromId === itemId && (link.fromType === type || link.fromType === singularType);
+    const toMatches = link?.toId === itemId && (link.toType === type || link.toType === singularType);
+    if (fromMatches || toMatches) continue;
+    if (writeIndex !== readIndex) state.links[writeIndex] = link;
+    writeIndex += 1;
+  }
+  state.links.length = writeIndex;
 }
 
 function clearFieldValue(collection, field, value) {

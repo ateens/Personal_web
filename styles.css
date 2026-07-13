@@ -2935,6 +2935,42 @@ button:focus-visible {
   font-weight: 780;
 }
 
+.entity-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.entity-card-head .card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entity-card-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.entity-card.is-editing,
+.entity-card.is-editing:hover {
+  overflow: hidden;
+  border-radius: var(--hover-radius);
+  background: var(--hover-surface);
+  box-shadow: var(--hover-shadow);
+}
+
+.entity-card .inline-edit-panel {
+  margin: 18px 0 0;
+  padding: 16px 14px 4px;
+  background-color: rgba(255, 255, 255, 0.5);
+}
+
 .card.done .card-title {
   color: var(--soft);
   text-decoration: line-through;
@@ -8789,6 +8825,18 @@ button:focus-visible {
 }
 
 @media (max-width: 760px) {
+  .entity-card-head {
+    align-items: flex-start;
+  }
+
+  .entity-card-actions {
+    margin-top: -8px;
+  }
+
+  .entity-card .inline-edit-panel {
+    padding-inline: 10px;
+  }
+
   .project-row {
     grid-template-columns: minmax(0, 1fr) minmax(82px, auto) 18px;
     min-height: 0;
