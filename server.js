@@ -2,7 +2,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { isIP } from "node:net";
 import { promisify } from "node:util";
@@ -160,6 +160,10 @@ let apiProxyAuthCacheGeneration = 0;
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+const googleOAuthHandoffSecretValue = String(process.env.GOOGLE_OAUTH_HANDOFF_SECRET || "");
+const googleOAuthHandoffSecret = validGoogleOAuthHandoffSecret(googleOAuthHandoffSecretValue)
+  ? googleOAuthHandoffSecretValue
+  : "";
 const googleTokenFile = resolve(process.env.GOOGLE_TOKEN_FILE || join(root, ".data/google-token.json"));
 const googleScopes = [
   "https://www.googleapis.com/auth/calendar.events",
@@ -170,7 +174,35 @@ const googleAuthUrl = "https://accounts.google.com/o/oauth2/v2/auth";
 const googleTokenUrl = "https://oauth2.googleapis.com/token";
 const googleCalendarApi = "https://www.googleapis.com/calendar/v3";
 const oauthStateCookie = "sygma_google_oauth_state";
+const GOOGLE_OAUTH_HANDOFF_AUDIENCE = "google-oauth-start";
+const GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX = "sygma-google-oauth-handoff-v1.";
+const GOOGLE_OAUTH_HANDOFF_TTL_SECONDS = 120;
+const GOOGLE_OAUTH_STATE_AUDIENCE = "google-oauth-state";
+const GOOGLE_OAUTH_STATE_SIGNATURE_PREFIX = "sygma-google-oauth-state-v1.";
+const GOOGLE_OAUTH_STATE_TTL_SECONDS = 600;
 let storage;
+
+function validGoogleOAuthHandoffSecret(value) {
+  const raw = String(value || "");
+  return raw === raw.trim()
+    && Buffer.byteLength(raw, "utf8") >= 32
+    && Buffer.byteLength(raw, "utf8") <= 512;
+}
+
+function productionGoogleOAuthConfigurationValid() {
+  if (!deploymentSecurity.isProductionTarget) return true;
+  if (!googleClientId || !googleClientSecret) return false;
+  if (!googleOAuthHandoffSecret) return false;
+  if (process.env.GOOGLE_REDIRECT_URI !== deploymentSecurity.googleRedirectUri) return false;
+  if (process.env.PUBLIC_BASE_URL !== deploymentSecurity.publicBaseUrl) return false;
+  if (apiBearerTokenDigest && timingSafeEqual(tokenDigest(googleOAuthHandoffSecret), apiBearerTokenDigest)) return false;
+  return true;
+}
+
+if (!productionGoogleOAuthConfigurationValid()) {
+  console.error("Production Google OAuth configuration is invalid.");
+  process.exit(1);
+}
 
 try {
   storage = createStorage({ databaseUrl, appStateId, googleTokenFile });
@@ -190,8 +222,29 @@ const contentTypes = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+function validAbsoluteHttpUrl(value, expectedPath = "") {
+  try {
+    const parsed = new URL(String(value || ""));
+    return ["http:", "https:"].includes(parsed.protocol)
+      && !parsed.username
+      && !parsed.password
+      && (!expectedPath || (parsed.pathname === expectedPath && !parsed.search && !parsed.hash));
+  } catch {
+    return false;
+  }
+}
+
+function googleProductionOAuthReady() {
+  if (!deploymentSecurity.isProductionTarget) return true;
+  return Boolean(
+    productionGoogleOAuthConfigurationValid()
+    && validAbsoluteHttpUrl(process.env.GOOGLE_REDIRECT_URI, "/api/google/oauth/callback")
+    && validAbsoluteHttpUrl(process.env.PUBLIC_BASE_URL),
+  );
+}
+
 function googleConfigured() {
-  return Boolean(googleClientId && googleClientSecret);
+  return Boolean(googleClientId && googleClientSecret && googleProductionOAuthReady());
 }
 
 function requestOrigin(request) {
@@ -241,8 +294,6 @@ function operationRateLimit(operation) {
   if (
     operation === "state.write"
     || operation === "resource.write"
-    || operation === "google.connect.start"
-    || operation === "google.connect.callback"
     || operation === "google.event.insert"
     || operation === "google.disconnect"
   ) {
@@ -523,7 +574,8 @@ function denyApiAuthentication(request, response, status, code, reason) {
 
 async function enforceApiAuthentication(request, response, requestUrl) {
   if (!requestUrl.pathname.startsWith("/api/")) return false;
-  if (requestUrl.pathname === "/api/google/oauth/callback") return false;
+  if (request.method === "GET" && requestUrl.pathname === "/api/google/oauth/callback") return false;
+  if (request.method === "GET" && requestUrl.pathname === "/api/google/auth/start" && googleOAuthHandoffSecret) return false;
 
   // The deployment-time environment switch is the authoritative override and
   // deliberately bypasses the database policy, preserving its fail-closed behavior.
@@ -610,6 +662,27 @@ function decodeState(value) {
   }
 }
 
+function signedJson(value, secret, signaturePrefix) {
+  const payload = encodeState(value);
+  const signature = createHmac("sha256", secret).update(`${signaturePrefix}${payload}`, "utf8").digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifiedSignedJson(value, secret, signaturePrefix) {
+  const raw = String(value || "");
+  const parts = raw.split(".");
+  if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[A-Za-z0-9_-]{43}$/.test(parts[1])) return null;
+  const expected = createHmac("sha256", secret).update(`${signaturePrefix}${parts[0]}`, "utf8").digest();
+  let supplied;
+  try {
+    supplied = Buffer.from(parts[1], "base64url");
+  } catch {
+    return null;
+  }
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
+  return decodeState(parts[0]);
+}
+
 function safeReturnTo(value = "/") {
   try {
     const parsed = new URL(value, "http://local.invalid");
@@ -620,10 +693,104 @@ function safeReturnTo(value = "/") {
   }
 }
 
+function validReturnTo(value) {
+  return typeof value === "string"
+    && value.length <= 2_048
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && value === safeReturnTo(value);
+}
+
+function validTimedOAuthPayload(value, audience, maxTtlSeconds) {
+  if (!isPlainObject(value) || value.v !== 1 || value.aud !== audience) return false;
+  if (!Number.isSafeInteger(value.iat) || !Number.isSafeInteger(value.exp)) return false;
+  const now = Math.floor(Date.now() / 1_000);
+  if (value.iat > now + 5 || value.exp <= now || value.exp <= value.iat || value.exp - value.iat > maxTtlSeconds) return false;
+  if (!/^[A-Za-z0-9_-]{32}$/.test(String(value.nonce || ""))) return false;
+  if (!/^[A-Za-z0-9_-]{43}$/.test(String(value.sub || ""))) return false;
+  return validReturnTo(value.returnTo);
+}
+
+async function consumeGoogleOAuthHandoff(value) {
+  if (!googleOAuthHandoffSecret) return null;
+  const payload = verifiedSignedJson(value, googleOAuthHandoffSecret, GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX);
+  if (!validTimedOAuthPayload(payload, GOOGLE_OAUTH_HANDOFF_AUDIENCE, GOOGLE_OAUTH_HANDOFF_TTL_SECONDS)) return null;
+  const claimed = await storage.claimOAuthTransaction(
+    "google_oauth_handoff",
+    payload.nonce,
+    { version: 1 },
+    new Date(payload.exp * 1_000),
+  );
+  if (!claimed) return null;
+  return { returnTo: payload.returnTo, subject: payload.sub };
+}
+
+async function createGoogleOAuthState(returnTo, subject = "") {
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const normalizedSubject = /^[A-Za-z0-9_-]{43}$/.test(subject)
+    ? subject
+    : createHmac("sha256", googleClientSecret).update("sygma-google-oauth-local-user-v1", "utf8").digest("base64url");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const nonce = randomBytes(24).toString("base64url");
+    const payload = {
+      v: 1,
+      aud: GOOGLE_OAUTH_STATE_AUDIENCE,
+      iat: issuedAt,
+      exp: issuedAt + GOOGLE_OAUTH_STATE_TTL_SECONDS,
+      nonce,
+      sub: normalizedSubject,
+      returnTo,
+    };
+    const claimed = await storage.claimOAuthTransaction(
+      "google_oauth_state",
+      nonce,
+      { version: 1, returnTo, subject: normalizedSubject },
+      new Date(payload.exp * 1_000),
+    );
+    if (!claimed) continue;
+    const stateSecret = createHmac("sha256", googleClientSecret).update("sygma-google-oauth-state-key-v1", "utf8").digest();
+    return { nonce, state: signedJson(payload, stateSecret, GOOGLE_OAUTH_STATE_SIGNATURE_PREFIX) };
+  }
+  throw apiError(503, "GOOGLE_OAUTH_TRANSACTION_UNAVAILABLE", "Google OAuth transaction could not be created.");
+}
+
+function verifiedGoogleOAuthState(value) {
+  if (!googleClientSecret) return null;
+  const stateSecret = createHmac("sha256", googleClientSecret).update("sygma-google-oauth-state-key-v1", "utf8").digest();
+  const payload = verifiedSignedJson(value, stateSecret, GOOGLE_OAUTH_STATE_SIGNATURE_PREFIX);
+  return validTimedOAuthPayload(payload, GOOGLE_OAUTH_STATE_AUDIENCE, GOOGLE_OAUTH_STATE_TTL_SECONDS) ? payload : null;
+}
+
+async function consumePendingGoogleOAuthState(state) {
+  const transaction = await storage.consumeOAuthTransaction("google_oauth_state", state.nonce);
+  return Boolean(
+    transaction
+    && transaction.data?.version === 1
+    && transaction.data?.returnTo === state.returnTo
+    && transaction.data?.subject === state.sub,
+  );
+}
+
 function appendQuery(path, key, value) {
   const parsed = new URL(path, "http://local.invalid");
   parsed.searchParams.set(key, value);
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+function publicReturnTo(value = "/") {
+  const relative = safeReturnTo(value);
+  const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || "").trim();
+  if (!publicBaseUrl) return relative;
+  try {
+    const publicOrigin = new URL(publicBaseUrl);
+    if (publicOrigin.protocol !== "https:" && publicOrigin.protocol !== "http:") return relative;
+    return new URL(relative, `${publicOrigin.origin}/`).toString();
+  } catch {
+    return relative;
+  }
+}
+
+function googleResultLocation(returnTo, result) {
+  return publicReturnTo(appendQuery(safeReturnTo(returnTo), "google", result));
 }
 
 async function readBody(request, limit = 1_000_000) {
@@ -1528,7 +1695,7 @@ async function handleResourceWrite(request, response, requestUrl) {
   });
 }
 
-function handleGoogleAuthStart(request, response, requestUrl) {
+async function handleGoogleAuthStart(request, response, requestUrl) {
   if (!googleConfigured()) {
     auditEvent(request, "google.connect", {
       status: 501,
@@ -1538,9 +1705,29 @@ function handleGoogleAuthStart(request, response, requestUrl) {
     sendJson(response, 501, { error: "Google OAuth server credentials are not configured." });
     return;
   }
-  const nonce = randomBytes(24).toString("base64url");
-  const returnTo = safeReturnTo(requestUrl.searchParams.get("returnTo") || "/");
-  const state = encodeState({ nonce, returnTo });
+  let returnTo;
+  let subject = "";
+  if (googleOAuthHandoffSecret) {
+    const handoff = await consumeGoogleOAuthHandoff(requestUrl.searchParams.get("handoff"));
+    if (!handoff) {
+      auditEvent(request, "google.connect", {
+        status: 403,
+        outcome: "rejected",
+        reason: "oauth_handoff_invalid",
+      });
+      sendJson(response, 403, { error: "Google OAuth handoff is invalid or expired.", code: "GOOGLE_OAUTH_HANDOFF_INVALID" });
+      return;
+    }
+    returnTo = handoff.returnTo;
+    subject = handoff.subject;
+  } else {
+    if (googleOAuthHandoffSecretValue) {
+      sendJson(response, 503, { error: "Google OAuth handoff is not configured.", code: "GOOGLE_OAUTH_HANDOFF_NOT_CONFIGURED" });
+      return;
+    }
+    returnTo = safeReturnTo(requestUrl.searchParams.get("returnTo") || "/");
+  }
+  const { nonce, state } = await createGoogleOAuthState(returnTo, subject);
   const params = new URLSearchParams({
     client_id: googleClientId,
     redirect_uri: redirectUri(request),
@@ -1557,17 +1744,26 @@ function handleGoogleAuthStart(request, response, requestUrl) {
 }
 
 async function handleGoogleCallback(request, response, requestUrl) {
-  const state = decodeState(requestUrl.searchParams.get("state"));
+  const state = verifiedGoogleOAuthState(requestUrl.searchParams.get("state"));
   const code = requestUrl.searchParams.get("code");
   const cookies = parseCookies(request);
   clearCookie(response, request, oauthStateCookie);
-  if (!state?.nonce || state.nonce !== cookies[oauthStateCookie] || !code) {
+  if (!state?.nonce || state.nonce !== cookies[oauthStateCookie] || !await consumePendingGoogleOAuthState(state)) {
     auditEvent(request, "google.connect", {
       status: 302,
       outcome: "rejected",
       reason: "oauth_state_invalid",
     });
-    redirect(response, appendQuery(safeReturnTo(state?.returnTo), "google", "failed"));
+    redirect(response, googleResultLocation("/", "failed"));
+    return;
+  }
+  if (!code) {
+    auditEvent(request, "google.connect", {
+      status: 302,
+      outcome: "rejected",
+      reason: "oauth_code_missing",
+    });
+    redirect(response, googleResultLocation(state.returnTo, "failed"));
     return;
   }
   try {
@@ -1589,14 +1785,14 @@ async function handleGoogleCallback(request, response, requestUrl) {
     };
     await storage.writeToken(nextToken);
     auditEvent(request, "google.connect", { status: 302, outcome: "succeeded" });
-    redirect(response, appendQuery(safeReturnTo(state.returnTo), "google", "connected"));
+    redirect(response, googleResultLocation(state.returnTo, "connected"));
   } catch {
     auditEvent(request, "google.connect", {
       status: 302,
       outcome: "failed",
       reason: "oauth_exchange_failed",
     });
-    redirect(response, appendQuery(safeReturnTo(state.returnTo), "google", "failed"));
+    redirect(response, googleResultLocation(state.returnTo, "failed"));
   }
 }
 
@@ -1755,7 +1951,7 @@ async function handleApiRequest(request, response, requestUrl) {
       return true;
     }
     if (request.method === "GET" && requestUrl.pathname === "/api/google/auth/start") {
-      handleGoogleAuthStart(request, response, requestUrl);
+      await handleGoogleAuthStart(request, response, requestUrl);
       return true;
     }
     if (request.method === "GET" && requestUrl.pathname === "/api/google/oauth/callback") {

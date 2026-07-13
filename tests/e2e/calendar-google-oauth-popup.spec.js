@@ -21,7 +21,11 @@ test("Google Calendar login opens a popup and reports completion to the calendar
   });
 
   await page.goto("/");
-  await page.locator('[data-nav-key="calendar"]').evaluate((button) => button.click());
+  const calendarNav = page.locator('[data-nav-key="calendar"]');
+  await expect.poll(async () => {
+    await calendarNav.evaluate((button) => button.click());
+    return calendarNav.getAttribute("aria-current");
+  }).toBe("page");
   const loginButton = page.locator('[data-action="connect-google"]');
   await expect(loginButton).toBeEnabled();
 
@@ -30,11 +34,12 @@ test("Google Calendar login opens a popup and reports completion to the calendar
   const popup = await popupPromise;
   await popup.waitForLoadState("domcontentloaded");
 
+  await expect.poll(() => authStartUrl).not.toBe("");
+  await expect(popup).toHaveTitle("Google OAuth test");
   expect(new URL(authStartUrl).pathname).toBe("/api/google/auth/start");
   const returnTo = new URL(authStartUrl).searchParams.get("returnTo");
   expect(returnTo).toContain("googlePopup=1");
   expect(returnTo).not.toContain("google=connected");
-  await expect(popup).toHaveTitle("Google OAuth test");
 
   connected = true;
   await popup.evaluate(() => window.location.assign("/?google=connected&view=calendar&googlePopup=1"));

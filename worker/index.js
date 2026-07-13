@@ -4,8 +4,13 @@ const HASHED_ASSET_PATTERN = /\/(?:_sygma\/)?assets\/[^/]+\.[a-f0-9]{10,}\.(?:cs
 const PLATFORM_IDENTITY_HEADER = "oai-authenticated-user-email";
 const UPSTREAM_IDENTITY_HEADER = "x-sygma-authenticated-user-email";
 const PROXY_SECRET_BINDING = "API_BEARER_TOKEN";
+const GOOGLE_OAUTH_HANDOFF_SECRET_BINDING = "GOOGLE_OAUTH_HANDOFF_SECRET";
+const GOOGLE_OAUTH_START_PATH = "/api/google/auth/start";
 const GOOGLE_OAUTH_CALLBACK_PATH = "/api/google/oauth/callback";
 const GOOGLE_OAUTH_STATE_COOKIE = "sygma_google_oauth_state";
+const GOOGLE_OAUTH_HANDOFF_AUDIENCE = "google-oauth-start";
+const GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX = "sygma-google-oauth-handoff-v1.";
+const GOOGLE_OAUTH_HANDOFF_TTL_SECONDS = 120;
 const STRIPPED_PROXY_HEADERS = new Set([
   "authorization",
   "cookie",
@@ -106,6 +111,61 @@ function proxyAuthContext(request, env) {
   return { bearerToken, identityEmail };
 }
 
+function safeReturnTo(value = "/") {
+  if (typeof value !== "string" || value.length > 2_048 || /[\u0000-\u001f\u007f]/.test(value)) return "/";
+  try {
+    const parsed = new URL(value, "https://local.invalid");
+    if (parsed.origin !== "https://local.invalid") return "/";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}` || "/";
+  } catch {
+    return "/";
+  }
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8_192) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8_192));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function hmacBase64Url(secret, value) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  return bytesToBase64Url(new Uint8Array(signature));
+}
+
+function randomBase64Url(byteLength = 24) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return bytesToBase64Url(bytes);
+}
+
+async function googleOAuthHandoffTicket(secret, identityEmail, returnTo) {
+  const subject = await hmacBase64Url(secret, `sygma-google-oauth-user-v1.${identityEmail}`);
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const payload = {
+    v: 1,
+    aud: GOOGLE_OAUTH_HANDOFF_AUDIENCE,
+    iat: issuedAt,
+    exp: issuedAt + GOOGLE_OAUTH_HANDOFF_TTL_SECONDS,
+    nonce: randomBase64Url(),
+    sub: subject,
+    returnTo,
+  };
+  const payloadPart = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const signature = await hmacBase64Url(secret, `${GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX}${payloadPart}`);
+  return `${payloadPart}.${signature}`;
+}
+
 function rewriteUpstreamLocation(headers, requestUrl, upstreamOrigin) {
   const location = headers.get("location");
   if (!location) return;
@@ -153,6 +213,35 @@ function staticAssetRequest(url, request) {
   return new Request(url, { method: request.method, headers });
 }
 
+async function googleOAuthStartRedirect(request, env, pathname) {
+  if (request.method !== "GET" || pathname !== GOOGLE_OAUTH_START_PATH) return null;
+  const identityEmail = normalizedPlatformEmail(request);
+  if (!identityEmail) {
+    return proxyAuthError(401, "AUTHENTICATED_SITE_USER_REQUIRED", "Authenticated Sites access is required.");
+  }
+  if (!envFlag(env?.REQUIRE_AUTHENTICATED_PROXY)) {
+    return proxyAuthError(503, "AUTHENTICATED_PROXY_NOT_CONFIGURED", "Authenticated API proxy is not configured.");
+  }
+  const requestUrl = new URL(request.url);
+  const handoffSecret = String(env?.[GOOGLE_OAUTH_HANDOFF_SECRET_BINDING] || "");
+  const handoffSecretBytes = new TextEncoder().encode(handoffSecret).byteLength;
+  if (handoffSecret !== handoffSecret.trim() || handoffSecretBytes < 32 || handoffSecretBytes > 512) {
+    return proxyAuthError(503, "GOOGLE_OAUTH_HANDOFF_NOT_CONFIGURED", "Google OAuth handoff is not configured.");
+  }
+  const returnTo = safeReturnTo(requestUrl.searchParams.get("returnTo") || "/");
+  const handoff = await googleOAuthHandoffTicket(handoffSecret, identityEmail, returnTo);
+  const target = new URL(GOOGLE_OAUTH_START_PATH, apiOrigin(env));
+  target.searchParams.set("handoff", handoff);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      "cache-control": "no-store",
+      location: target.toString(),
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
 async function proxyApiRequest(request, env, authContext) {
   const requestUrl = new URL(request.url);
   const upstreamOrigin = apiOrigin(env);
@@ -182,7 +271,7 @@ async function proxyApiRequest(request, env, authContext) {
 function withStaticHeaders(response, pathname, encodeBody = "automatic") {
   const headers = new Headers(response.headers);
   headers.set("x-content-type-options", "nosniff");
-  headers.set("referrer-policy", "same-origin");
+  if (!headers.has("referrer-policy")) headers.set("referrer-policy", "same-origin");
   headers.set("x-frame-options", "SAMEORIGIN");
   headers.set("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'");
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
@@ -232,6 +321,8 @@ export default {
     if (isApiRequest(url.pathname)) {
       const authContext = proxyAuthContext(request, env);
       if (authContext.error) return withStaticHeaders(authContext.error, url.pathname);
+      const oauthStartRedirect = await googleOAuthStartRedirect(request, env, url.pathname);
+      if (oauthStartRedirect) return withStaticHeaders(oauthStartRedirect, url.pathname);
       const response = await proxyApiRequest(request, env, authContext);
       return withStaticHeaders(response, url.pathname);
     }

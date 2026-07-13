@@ -92,6 +92,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
   let appStateTableReady = null;
   let appStateBackupTablesReady = null;
   let appPrivateDataTableReady = null;
+  let oauthTransactionsTableReady = null;
   let relationalTablesReady = null;
 
   async function ensureAppStateTable() {
@@ -153,6 +154,24 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       )
     `);
     await appPrivateDataTableReady;
+  }
+
+  async function ensureOAuthTransactionsTable() {
+    oauthTransactionsTableReady ||= dbPool.query(`
+      CREATE TABLE IF NOT EXISTS app_oauth_transactions (
+        app_state_id text NOT NULL,
+        kind text NOT NULL,
+        nonce text NOT NULL,
+        data jsonb NOT NULL,
+        expires_at timestamptz NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (app_state_id, kind, nonce)
+      );
+
+      CREATE INDEX IF NOT EXISTS app_oauth_transactions_expiry_idx
+        ON app_oauth_transactions(app_state_id, expires_at)
+    `);
+    await oauthTransactionsTableReady;
   }
 
   async function ensureRelationalTables() {
@@ -401,6 +420,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     await ensureAppStateTable();
     await ensureAppStateBackupTables();
     await ensureAppPrivateDataTable();
+    await ensureOAuthTransactionsTable();
     await ensureRelationalTables();
   }
 
@@ -844,6 +864,51 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     await dbPool.query("DELETE FROM app_private_data WHERE id = $1 AND key = $2", [appStateId, key]);
   }
 
+  async function claimOAuthTransaction(kind, nonce, data, expiresAt) {
+    await ensureOAuthTransactionsTable();
+    const expiry = expiresAt instanceof Date ? expiresAt : new Date(expiresAt);
+    if (!Number.isFinite(expiry.getTime())) throw new Error("Invalid OAuth transaction expiry.");
+    const result = await dbPool.query(
+      `
+        WITH cleanup AS (
+          DELETE FROM app_oauth_transactions
+          WHERE app_state_id = $1 AND expires_at <= now()
+        )
+        INSERT INTO app_oauth_transactions (app_state_id, kind, nonce, data, expires_at)
+        SELECT $1, $2, $3, $4::jsonb, $5::timestamptz
+        WHERE $5::timestamptz > now()
+        ON CONFLICT (app_state_id, kind, nonce) DO NOTHING
+        RETURNING expires_at
+      `,
+      [appStateId, kind, nonce, JSON.stringify(data), expiry.toISOString()],
+    );
+    return Boolean(result.rows[0]);
+  }
+
+  async function consumeOAuthTransaction(kind, nonce) {
+    await ensureOAuthTransactionsTable();
+    const result = await dbPool.query(
+      `
+        WITH consumed AS (
+          DELETE FROM app_oauth_transactions
+          WHERE app_state_id = $1 AND kind = $2 AND nonce = $3
+          RETURNING data, expires_at
+        )
+        SELECT data, expires_at FROM consumed WHERE expires_at > now()
+      `,
+      [appStateId, kind, nonce],
+    );
+    return result.rows[0]
+      ? { data: result.rows[0].data, expiresAt: result.rows[0].expires_at?.toISOString?.() || "" }
+      : null;
+  }
+
+  async function deleteOAuthTransactions() {
+    await ensureOAuthTransactionsTable();
+    const result = await dbPool.query("DELETE FROM app_oauth_transactions WHERE app_state_id = $1", [appStateId]);
+    return result.rowCount;
+  }
+
   async function readTokenFile() {
     if (!googleTokenFile) return null;
     try {
@@ -889,8 +954,11 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
 
   return {
     appStateId,
+    claimOAuthTransaction,
+    consumeOAuthTransaction,
     createMigrationBackup,
     deletePrivateData,
+    deleteOAuthTransactions,
     deleteToken,
     end,
     listMigrationBackups,

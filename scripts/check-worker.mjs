@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import worker from "../worker/index.js";
 
 const GOOGLE_OAUTH_COOKIE_FOR_TEST = "sygma_google_oauth_state";
@@ -73,13 +74,91 @@ try {
   }), {});
   assert.equal(proxiedHeaders.get("cookie"), null);
 
-  upstreamResponseHeaders = {
-    "content-type": "text/html",
-    location: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
-  };
-  const googleRedirectResponse = await worker.fetch(new Request("https://sygma.example/api/google/auth/start"), {});
-  assert.equal(googleRedirectResponse.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=test");
-  upstreamResponseHeaders = { "content-type": "application/json", location: "/api/state/status" };
+  const proxySecret = "server-only-secret";
+  const handoffSecret = "worker-handoff-secret-0123456789abcdef0123456789abcdef";
+  const googleStartUpstreamCalls = upstreamCalls;
+  const anonymousGoogleStartWithoutProxy = await worker.fetch(new Request(
+    "https://sygma.example/api/google/auth/start?returnTo=%2F%3Fview%3Dcalendar",
+  ), {
+    API_BEARER_TOKEN: proxySecret,
+    GOOGLE_OAUTH_HANDOFF_SECRET: handoffSecret,
+  });
+  assert.equal(anonymousGoogleStartWithoutProxy.status, 401);
+  assert.equal((await anonymousGoogleStartWithoutProxy.json()).code, "AUTHENTICATED_SITE_USER_REQUIRED");
+  assert.equal(upstreamCalls, googleStartUpstreamCalls);
+
+  const identifiedGoogleStartWithoutProxy = await worker.fetch(new Request(
+    "https://sygma.example/api/google/auth/start?returnTo=%2F%3Fview%3Dcalendar",
+    { headers: { "oai-authenticated-user-email": "person@example.com" } },
+  ), {
+    API_BEARER_TOKEN: proxySecret,
+    GOOGLE_OAUTH_HANDOFF_SECRET: handoffSecret,
+  });
+  assert.equal(identifiedGoogleStartWithoutProxy.status, 503);
+  assert.equal((await identifiedGoogleStartWithoutProxy.json()).code, "AUTHENTICATED_PROXY_NOT_CONFIGURED");
+  assert.equal(upstreamCalls, googleStartUpstreamCalls);
+
+  const anonymousGoogleStart = await worker.fetch(new Request(
+    "https://sygma.example/api/google/auth/start?returnTo=%2F%3Fview%3Dcalendar%26googlePopup%3D1",
+  ), {
+    REQUIRE_AUTHENTICATED_PROXY: "1",
+    API_BEARER_TOKEN: proxySecret,
+    GOOGLE_OAUTH_HANDOFF_SECRET: handoffSecret,
+  });
+  assert.equal(anonymousGoogleStart.status, 401);
+  assert.equal((await anonymousGoogleStart.json()).code, "AUTHENTICATED_SITE_USER_REQUIRED");
+  assert.equal(upstreamCalls, googleStartUpstreamCalls);
+
+  const missingHandoffSecret = await worker.fetch(new Request(
+    "https://sygma.example/api/google/auth/start?returnTo=%2F%3Fview%3Dcalendar%26googlePopup%3D1",
+    { headers: { "oai-authenticated-user-email": "person@example.com" } },
+  ), {
+    REQUIRE_AUTHENTICATED_PROXY: "1",
+    API_BEARER_TOKEN: proxySecret,
+  });
+  assert.equal(missingHandoffSecret.status, 503);
+  assert.equal((await missingHandoffSecret.json()).code, "GOOGLE_OAUTH_HANDOFF_NOT_CONFIGURED");
+  assert.equal(upstreamCalls, googleStartUpstreamCalls);
+
+  const googleRedirectResponse = await worker.fetch(new Request(
+    "https://sygma.example/api/google/auth/start?returnTo=%2F%3Fview%3Dcalendar%26googlePopup%3D1",
+    { headers: { "oai-authenticated-user-email": "  Person@Example.COM  " } },
+  ), {
+    REQUIRE_AUTHENTICATED_PROXY: "1",
+    API_BEARER_TOKEN: proxySecret,
+    GOOGLE_OAUTH_HANDOFF_SECRET: handoffSecret,
+    API_ORIGIN: "https://railway.example/",
+  });
+  assert.equal(googleRedirectResponse.status, 302);
+  const googleStartLocation = new URL(googleRedirectResponse.headers.get("location"));
+  assert.equal(googleStartLocation.origin, "https://railway.example");
+  assert.equal(googleStartLocation.pathname, "/api/google/auth/start");
+  assert.deepEqual([...googleStartLocation.searchParams.keys()], ["handoff"]);
+  const handoff = googleStartLocation.searchParams.get("handoff");
+  const [payloadPart, signaturePart] = handoff.split(".");
+  const handoffPayload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
+  assert.equal(handoffPayload.v, 1);
+  assert.equal(handoffPayload.aud, "google-oauth-start");
+  assert(Math.abs(handoffPayload.iat - Math.floor(Date.now() / 1_000)) <= 5);
+  assert.equal(handoffPayload.exp - handoffPayload.iat, 120);
+  assert.match(handoffPayload.nonce, /^[A-Za-z0-9_-]{32}$/);
+  assert.match(handoffPayload.sub, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(
+    handoffPayload.sub,
+    createHmac("sha256", handoffSecret)
+      .update("sygma-google-oauth-user-v1.person@example.com", "utf8")
+      .digest("base64url"),
+  );
+  assert.equal(handoffPayload.returnTo, "/?view=calendar&googlePopup=1");
+  assert.equal(
+    signaturePart,
+    createHmac("sha256", handoffSecret)
+      .update(`sygma-google-oauth-handoff-v1.${payloadPart}`, "utf8")
+      .digest("base64url"),
+  );
+  assert.equal(googleRedirectResponse.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(googleRedirectResponse.headers.get("cache-control"), "no-store");
+  assert.equal(upstreamCalls, googleStartUpstreamCalls);
 
   const anonymousCallCount = upstreamCalls;
   const anonymousResponse = await worker.fetch(new Request("https://sygma.example/api/state"), {
@@ -100,7 +179,6 @@ try {
   assert.equal((await missingSecretResponse.json()).code, "AUTHENTICATED_PROXY_NOT_CONFIGURED");
   assert.equal(upstreamCalls, missingSecretCallCount);
 
-  const proxySecret = "server-only-secret";
   upstreamResponseHeaders = {
     authorization: `Bearer ${proxySecret}`,
     "content-type": "application/json",

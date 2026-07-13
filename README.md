@@ -94,6 +94,8 @@ The Node server serves Brotli or gzip when supported, validates conditional requ
 
 Production should use a private Sites access policy plus the authenticated proxy. With `REQUIRE_AUTHENTICATED_PROXY=1`, the Worker requires the Sites-provided `oai-authenticated-user-email` header, strips browser-supplied credentials and identity headers, and injects a server-side `API_BEARER_TOKEN` secret for Railway. The Railway API must enforce the matching staged DB credential before the rollout is considered complete. Do not place that token in source, `.env.example`, shell history, logs, or a non-secret Sites variable.
 
+Google login uses a separate `GOOGLE_OAUTH_HANDOFF_SECRET`, stored as a secret with the same value in Sites and Railway. After Sites authenticates the owner, the Worker creates a signed 120-second launch ticket. Railway consumes that ticket once, then creates a signed, expiring, one-time OAuth state transaction before redirecting to Google. A raw, expired, modified, or replayed Railway start request is rejected. Never reuse `API_BEARER_TOKEN` as the handoff secret.
+
 The exact staged activation, verification, rollback, and failure-mode procedure is in [the API proxy authentication runbook](docs/resource-api-auth-runbook-2026-07-11.md).
 
 ## Railway
@@ -108,11 +110,13 @@ http://127.0.0.1:4180/api/google/oauth/callback
 
 If you run a different port, use that port in the redirect URI.
 
-For the private Sites deployment, register this exact redirect URI as well:
+For the private Sites deployment, OAuth starts and finishes on the Railway backend so the state cookie stays on one origin. The signed launch begins at Sites, so the public Railway start URL cannot be used directly. Register this exact redirect URI:
 
 ```text
-https://sygma-personal-web.ateens.chatgpt.site/api/google/oauth/callback
+https://personalweb-production-81a6.up.railway.app/api/google/oauth/callback
 ```
+
+After Google finishes, the backend redirects the popup to the private Sites origin.
 
 Set these Railway variables for persistence:
 
@@ -140,13 +144,17 @@ TRUST_PROXY_IP_HEADERS=0
 
 `FAIL_CLOSED_API_AUTH=0` is intentional for the staged DB-backed flow; protection begins only after the DB policy is explicitly enabled. Setting it to `1` switches to the deployment-environment override, where `API_BEARER_TOKEN` is mandatory and takes precedence over the DB policy. Never enable `TRUST_PROXY_IP_HEADERS` unless the only reachable ingress strips and recreates forwarded IP headers.
 
-Set these Railway variables before using Google Calendar:
+Set these Railway variables before using Google Calendar. `GOOGLE_OAUTH_HANDOFF_SECRET` must contain at least 32 random bytes and must be stored as a secret with the exact same value in Sites:
 
 ```text
 GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI=https://personalweb-production-81a6.up.railway.app/api/google/oauth/callback
 PUBLIC_BASE_URL=https://sygma-personal-web.ateens.chatgpt.site
+GOOGLE_OAUTH_HANDOFF_SECRET=<shared Railway and Sites secret>
 ```
+
+The production Railway target checks the Google client credentials, callback URI, public Sites origin, and handoff secret during startup and refuses to start if any are missing or changed.
 
 Production URL:
 
