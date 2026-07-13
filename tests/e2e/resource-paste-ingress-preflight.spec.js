@@ -72,9 +72,9 @@ async function dispatchDrop(locator, file = true) {
 
 async function selectResourceBlock(page, blockId) {
   await page.evaluate(({ resourceId, blockId }) => {
-    ui.blockSelection = { ownerType: "resources", ownerId: resourceId, ids: [blockId] };
-    renderDetail({ soft: true });
+    selectSingleBlock("resources", resourceId, blockId);
   }, { resourceId: FIXTURE_IDS.resource, blockId });
+  await expect(page.locator(`.block.is-selected[data-block-id="${blockId}"]`)).toHaveCount(1);
 }
 
 async function selectFixtureParagraphBlock(page) {
@@ -148,8 +148,7 @@ test("oversized raw/custom/html representations reject before native or fallback
   }
 });
 
-test("Resource structural projection enforces exact block, text, and body limits atomically", async ({ page, request }) => {
-  test.setTimeout(120_000);
+test("Resource structural projection enforces exact block-count bounds", async ({ page }) => {
   await openEditor(page);
   expect(await page.evaluate(() => {
     const resource = cloneForLocalPersistence(itemById("resources", "fixture-resource-main"));
@@ -161,8 +160,10 @@ test("Resource structural projection enforces exact block, text, and body limits
     resource.blocks = Array.from({ length: 5001 }, (_, index) => ({ id: `limit-over-${index}`, type: "paragraph", text: "x", marks: [], checked: false, indent: 0, collapsed: false }));
     return resourcePasteProjectionValid(resource);
   })).toBe(false);
+});
 
-  await resetFixture(request);
+test("structural merge overflow preserves stale selection and prior history", async ({ page, request }) => {
+  test.setTimeout(120_000);
   await seedFixtureResourceBlocks(request, [
     { id: "stale-selected", type: "paragraph", text: "stale selection", marks: [], checked: false, indent: 0, collapsed: false },
     { id: "large-target", type: "paragraph", text: "L".repeat(200_000), marks: [], checked: false, indent: 0, collapsed: false },
@@ -182,13 +183,15 @@ test("Resource structural projection enforces exact block, text, and body limits
   await expectNoop(page, request, mergeBefore);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
   await expect(page.locator("text=prior real edit")).toHaveCount(0);
+});
 
-  await resetFixture(request);
+test("exact 250000-character structural merge commits as one undo-redo transaction", async ({ page, request }) => {
+  test.setTimeout(120_000);
   await seedFixtureResourceBlocks(request, [
     { id: "boundary-target", type: "paragraph", text: "B".repeat(199_999), marks: [], checked: false, indent: 0, collapsed: false },
   ]);
   await openSeededResource(page);
-  target = page.locator('[data-block-content="boundary-target"]');
+  const target = page.locator('[data-block-content="boundary-target"]');
   await target.focus();
   const exactBoundary = `- ${"c".repeat(50_001)}`;
   expect(await dispatchPaste(target, { plain: exactBoundary })).toBe(false);
@@ -197,12 +200,14 @@ test("Resource structural projection enforces exact block, text, and body limits
   await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(199_999);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+Z" : "Control+Y");
   await expect.poll(async () => (await resourceState(request)).resource.blocks[0].text.length).toBe(250_000);
+});
 
-  await resetFixture(request);
+test("projected Resource PUT body overflow rejects below the custom representation cap", async ({ page, request }) => {
+  test.setTimeout(120_000);
   const nearBodyLimit = Array.from({ length: 21 }, (_, index) => ({ id: `body-${index}`, type: "paragraph", text: "z".repeat(237_000), marks: [], checked: false, indent: 0, collapsed: false }));
   const seededBody = await seedFixtureResourceBlocks(request, nearBodyLimit);
   await openSeededResource(page);
-  target = page.locator('[data-block-content="body-0"]');
+  const target = page.locator('[data-block-content="body-0"]');
   await target.focus();
   const setupBodyBytes = await page.evaluate(() => {
     const resource = cloneForLocalPersistence(itemById("resources", "fixture-resource-main"));
