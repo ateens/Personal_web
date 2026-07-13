@@ -76,6 +76,85 @@ const checks = [
   ["Google calendar normalization avoids map-filter chains", () => files.app.includes("function normalizeGoogleCalendarEntries(entries = [])") && files.app.includes("function normalizeGoogleApiEvents(entries = [])") && files.app.includes("const calendars = normalizeGoogleCalendarEntries(payload.calendars)") && files.app.includes("state.googleEvents = normalizeGoogleApiEvents(payload.events)") && files.app.includes("const googleCalendars = normalizeGoogleCalendarEntries(objectArrayOrFallback(next.googleCalendars, []))") && !files.app.includes(".map(normalizeGoogleCalendarEntry).filter(Boolean)") && !files.app.includes(".map((entry) => normalizeGoogleApiEvent(entry.event, entry.calendar))")],
   ["Google calendar normalization uses direct loops", () => files.app.includes("function normalizeGoogleCalendarEntries(entries = [])") && files.app.includes("for (const entry of entries)") && files.app.includes("function ensureGoogleCalendarVisibility(calendars)") && files.app.includes("for (const calendar of calendars)") && files.app.includes("function normalizeGoogleApiEvents(entries = [])") && !files.app.includes("entries.forEach((entry)") && !files.app.includes("calendars.forEach((calendar)")],
   ["Google calendar options merge with direct loops", () => files.app.includes("function getGoogleCalendarOptions()") && files.app.includes("for (const calendar of state.googleCalendars || [])") && files.app.includes("for (const event of state.googleEvents || [])") && files.app.includes("for (const calendar of calendarsById.values())") && !files.app.includes("(state.googleCalendars || []).forEach((calendar)") && !files.app.includes("return Array.from(calendarsById.values()).sort")],
+  ["calendar themes persist stable ID assignments and resolve exhausted palettes", () => files.app.includes("const GOOGLE_CALENDAR_COLOR_PALETTE = Object.freeze([") && files.app.includes("function stableCalendarColorIndex(value)") && files.app.includes("const identity = `google:${calendarId}`") && files.app.includes("function derivedGoogleCalendarColor(identity, attempt)") && files.app.includes("if (!usedColors.has(color)) return color;") && files.app.includes("assignments[calendarId] = color;") && files.app.includes("state.settings.calendarColorAssignments = allocation.assignments") && files.app.includes("googleCalendarThemeAssignments(calendars);")],
+  ["calendar theme colors are canonicalized and use safe contrast fallbacks", () => files.app.includes("function sanitizeCalendarHexColor(value, fallback = \"\")") && files.app.includes("/^#[0-9a-f]{6}$/i.test(color)") && files.app.includes("/^#[0-9a-f]{3}$/i.test(color)") && files.app.includes('calendarContrastColor(color, color === preferred ? calendar.foregroundColor : "")') && files.app.includes("sanitizeCalendarHexColor(theme.contrast, calendarContrastColor(color))") && !files.app.includes("/^#[0-9a-f]{3,8}$/i")],
+  ["calendar render pipeline propagates sanitized theme assignments", () => {
+    const renderer = sourceSection(files.app, "function renderCalendar()", "function combinedCalendarSourceEvents");
+    const declarations = sourceSection(files.app, "function calendarColorDeclarations", "function renderDetail");
+    return renderer.includes("const calendarThemes = googleCalendarThemeAssignments()")
+      && renderer.includes("renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)")
+      && renderer.includes("renderWeekDays(combinedEvents, calendarThemes)")
+      && renderer.includes("renderCalendarLegend(combinedEvents, calendarThemes)")
+      && renderer.includes("renderCalendarAgenda(combinedEvents, calendarThemes)")
+      && renderer.includes("renderCombinedCalendar(combinedEvents, calendarThemes)")
+      && declarations.includes("const theme = calendarThemeFor(calendar, calendarThemes)")
+      && declarations.includes("sanitizeCalendarHexColor(theme.color")
+      && declarations.includes("sanitizeCalendarHexColor(theme.contrast")
+      && declarations.includes('return `--calendar-color: ${color}; --calendar-contrast: ${contrast};`;');
+  }],
+  ["calendar theme assignments cross every renderer edge", () => {
+    const controls = sourceSection(files.app, "function renderCalendarControls", "function renderGoogleCalendarToggles");
+    const googleToggles = sourceSection(files.app, "function renderGoogleCalendarToggles", "function renderCalendarLegend");
+    const legend = sourceSection(files.app, "function renderCalendarLegend(events, calendarThemes)", "function renderCalendarLegendItem");
+    const week = sourceSection(files.app, "function renderWeekDays", "function renderCombinedCalendar");
+    const month = sourceSection(files.app, "function renderCombinedCalendar", "function renderCalendarAgenda");
+    const agenda = sourceSection(files.app, "function renderCalendarAgenda", "function calendarAgendaItems");
+    const monthDays = sourceSection(files.app, "function renderCombinedCalendarDays", "function chunkCalendarWeeks");
+    const spanLayer = sourceSection(files.app, "function renderCalendarSpanLayer", "function calendarSpanSegments");
+    const spanEvents = sourceSection(files.app, "function renderCalendarEvents", "function calendarSpanSort");
+    return controls.includes("renderGoogleCalendarToggles(googleCalendars, googleEventCounts, calendarThemes)")
+      && googleToggles.includes("renderGoogleCalendarToggle(calendar, eventCounts, calendarThemes)")
+      && legend.includes("renderCalendarLegendItem") && legend.includes("calendarThemes")
+      && (legend.match(/renderCalendarLegendItem\([\s\S]*?calendarThemes\);/g) || []).length === 3
+      && week.includes("calendarThemes })")
+      && month.includes("renderCombinedCalendarDays(weekDays, events, currentMonth, today, calendarThemes)")
+      && agenda.includes("renderCalendarAgendaItem(item, calendarThemes)")
+      && monthDays.includes("calendarThemes })")
+      && spanLayer.includes("renderCalendarEvents(segments, { compact: true, limit: segments.length, calendarThemes })")
+      && spanEvents.includes("renderCalendarSpanEvent(events[index], { compact, calendarThemes })");
+  }],
+  ["calendar event views share one color declaration contract", () => {
+    const spanStart = files.app.indexOf("function renderCalendarSpanEvent");
+    const spanEnd = files.app.indexOf("function calendarSpanTimeLabel", spanStart);
+    const agendaStart = files.app.indexOf("function renderCalendarAgendaItem");
+    const agendaEnd = files.app.indexOf("function calendarAgendaDateLabel", agendaStart);
+    const spanRenderer = spanStart >= 0 && spanEnd > spanStart ? files.app.slice(spanStart, spanEnd) : "";
+    const agendaRenderer = agendaStart >= 0 && agendaEnd > agendaStart ? files.app.slice(agendaStart, agendaEnd) : "";
+    return spanRenderer.includes("calendarColorDeclarations(event, calendarThemes)")
+      && agendaRenderer.includes("calendarColorDeclarations(event, calendarThemes)")
+      && spanRenderer.includes('target="_blank" rel="noreferrer"')
+      && agendaRenderer.includes('target="_blank" rel="noreferrer"')
+      && !spanRenderer.includes('tabindex="0"');
+  }],
+  ["calendar legend and each toggle renderer expose per-calendar themes", () => {
+    const legend = sourceSection(files.app, "function renderCalendarLegendItem", "function renderCalendarMonthPanelHeader");
+    const localToggle = sourceSection(files.app, "function renderCalendarSourceToggle", "function renderGoogleCalendarToggle");
+    const googleToggle = sourceSection(files.app, "function renderGoogleCalendarToggle", "function eventCountsByCalendarId");
+    return legend.includes('class="calendar-legend-chip" style="${calendarColorDeclarations(calendar, calendarThemes)}"')
+      && localToggle.includes('class="calendar-toggle" style="${calendarColorDeclarations(calendar, calendarThemes)}"')
+      && googleToggle.includes('class="calendar-toggle calendar-google-toggle" style="${calendarColorDeclarations({ ...calendar, source: "google", calendarId: calendar.id }, calendarThemes)}"');
+  }],
+  ["calendar CSS consumes shared accent variables across all event surfaces", () => {
+    const toggle = sourceSection(files.styles, ".calendar-toggle {", ".calendar-toggle:hover");
+    const legend = sourceSection(files.styles, ".calendar-legend-chip {", ".calendar-legend-chip span");
+    const dot = sourceSection(files.styles, ".source-dot {", ".day {");
+    const span = sourceSection(files.styles, ".calendar-span-event {", ".calendar-span-event:hover");
+    const agenda = sourceSection(files.styles, ".calendar-agenda-row {", ".calendar-agenda-row:hover");
+    const agendaTime = sourceSection(files.styles, ".calendar-agenda-row time {", ".calendar-agenda-open {");
+    return toggle.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
+      && toggle.includes("linear-gradient(135deg, color-mix(in srgb, var(--calendar-color)")
+      && legend.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
+      && legend.includes("background: color-mix(in srgb, var(--calendar-color)")
+      && dot.includes("background: var(--calendar-color, var(--blue));")
+      && span.includes("--span-bg:") && span.includes("var(--calendar-color)")
+      && span.includes("--span-border: color-mix(in srgb, var(--calendar-color)")
+      && span.includes("border: 1px solid var(--span-border);")
+      && span.includes("background: var(--span-bg);")
+      && agenda.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
+      && agenda.includes("box-shadow: inset 3px 0 0 var(--calendar-color)")
+      && agendaTime.includes("background: color-mix(in srgb, var(--calendar-color)")
+      && agendaTime.includes("color: color-mix(in srgb, var(--calendar-color)");
+  }],
   ["Google sync candidates avoid direct state task filter", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("const tasks = googleSyncTaskCandidates()") && files.app.includes("if (task.scheduledStart && task.status !== \"done\" && !task.googleEventId) tasks.push(task);") && !files.app.includes("state.tasks.filter((task) => task.scheduledStart && task.status !== \"done\" && !task.googleEventId)")],
   ["Google sync candidates use a direct loop", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("for (const task of state.tasks)") && !/function googleSyncTaskCandidates\(\) \{[\s\S]*?state\.tasks\.forEach[\s\S]*?function upsertGoogleEvents/.test(files.app)],
   ["Google sync upserts events once after task loop", () => files.app.includes("const syncedEvents = [];") && files.app.includes("upsertGoogleEvents(syncedEvents)") && files.app.includes("function upsertGoogleEvents(events = [])") && files.app.includes("const incomingById = new Map();") && !files.app.includes("state.googleEvents = [...(state.googleEvents || []).filter((entry) => entry.id !== normalized.id), normalized]")],
@@ -125,8 +204,8 @@ const checks = [
   ["inbox captures classify statuses once", () => files.app.includes("function captureStatusBuckets(captures = state.captures)") && files.app.includes("const captures = controlledItems(\"captures\", state.captures, \"inbox\")") && files.app.includes("const captureBuckets = captureStatusBuckets(captures)") && !files.app.includes("state.captures.filter((capture) => capture.status")],
   ["inbox captures classify with a direct loop", () => files.app.includes("function captureStatusBuckets(captures = state.captures)") && files.app.includes("for (const capture of captures)") && !files.app.includes("captures.forEach((capture)")],
   ["card list renderers avoid map join allocations", () => files.app.includes("function renderTaskCards(tasks, options = {}, emptyText = \"항목이 없습니다.\")") && files.app.includes("function renderResourceCards(resources, emptyText = \"자료가 없습니다.\")") && files.app.includes("function renderCaptureCards(captures, emptyText = \"항목이 없습니다.\")") && files.app.includes("function renderHabitCards(habits, today, emptyText = \"루틴이 없습니다.\")") && files.app.includes("function renderProjectItems(projects, statsByProjectId = null, emptyText = \"프로젝트가 없습니다.\")") && files.app.includes("function renderBoxCards(boxes, statsByBoxId = null, emptyText = \"박스가 없습니다.\")") && files.app.includes("function renderProjectResources(resources)") && files.app.includes("function renderProjectTaskLines(tasks)") && !files.app.includes("todayTasks.map((task) => renderTaskCard") && !files.app.includes("completed.map(renderTaskCard)") && !files.app.includes("captureBuckets.inbox.map(renderCaptureCard)") && !files.app.includes("tasks.map((task) => renderTaskCard") && !files.app.includes("projects.map((project) => renderProjectItem") && !files.app.includes("boxes.map((box) => renderBoxCard") && !files.app.includes("resources.map(renderResourceCard)") && !files.app.includes("resources.map(renderProjectResource)") && !files.app.includes("tasks.map(renderProjectTaskLine)")],
-  ["calendar and journal renderers avoid map join chains", () => files.app.includes("function renderProjectCalendarDays(days, options = {})") && files.app.includes("function renderProjectCalendarSpanLayer(rowLayout, limit)") && files.app.includes("function renderJournalCards(journals = state.journals)") && files.app.includes("function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today)") && files.app.includes("function renderCalendarEvents(events, { compact = false, limit = Infinity, emptyHtml = \"\" } = {})") && files.app.includes("for (let index = 0; index < days.length; index += 1)") && files.app.includes("for (const journal of journals)") && files.app.includes("for (let index = 0; index < count; index += 1)") && !files.app.includes("days.map((day) => renderProjectCalendarDay") && !files.app.includes("rowLayout.segments.map(") && !files.app.includes(".map(renderJournalCard)") && !files.app.includes("dayEvents.map(renderCalendarEvent)") && !files.app.includes("visibleEvents.map((event) => renderCalendarEvent")],
-  ["remaining collection renderers avoid map join chains", () => files.app.includes("function renderGoalCards(goals, statsByGoalId)") && files.app.includes("function renderGoogleCalendarToggles(calendars, eventCounts)") && files.app.includes("function renderHabitDayButtons(habit, days, today)") && files.app.includes("function renderHabitCalendarDays(habit, days, currentMonth, today)") && files.app.includes("function renderResourceNotes(options = {})") && files.app.includes("function renderBlocks(blocksList, ownerType, ownerId)") && files.app.includes("function renderDeleteDragActions(actions, targetAction)") && !files.app.includes("state.goals.map((goal) => renderGoalCard") && !files.app.includes("googleCalendars.map((calendar) => renderGoogleCalendarToggle") && !files.app.includes("days.map((date) => renderHabitDayButton") && !files.app.includes("days.map((day) => {") && !files.app.includes("ui.resourceNotes\n    .map") && !files.app.includes("safeBlocks.map((block) => renderBlock") && !files.app.includes("actions.map((action) => `")],
+  ["calendar and journal renderers avoid map join chains", () => files.app.includes("function renderProjectCalendarDays(days, options = {})") && files.app.includes("function renderProjectCalendarSpanLayer(rowLayout, limit)") && files.app.includes("function renderJournalCards(journals = state.journals)") && files.app.includes("function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today, calendarThemes)") && files.app.includes("function renderCalendarEvents(events, { compact = false, limit = Infinity, emptyHtml = \"\", calendarThemes } = {})") && files.app.includes("for (let index = 0; index < days.length; index += 1)") && files.app.includes("for (const journal of journals)") && files.app.includes("for (let index = 0; index < count; index += 1)") && !files.app.includes("days.map((day) => renderProjectCalendarDay") && !files.app.includes("rowLayout.segments.map(") && !files.app.includes(".map(renderJournalCard)") && !files.app.includes("dayEvents.map(renderCalendarEvent)") && !files.app.includes("visibleEvents.map((event) => renderCalendarEvent")],
+  ["remaining collection renderers avoid map join chains", () => files.app.includes("function renderGoalCards(goals, statsByGoalId)") && files.app.includes("function renderGoogleCalendarToggles(calendars, eventCounts, calendarThemes)") && files.app.includes("function renderHabitDayButtons(habit, days, today)") && files.app.includes("function renderHabitCalendarDays(habit, days, currentMonth, today)") && files.app.includes("function renderResourceNotes(options = {})") && files.app.includes("function renderBlocks(blocksList, ownerType, ownerId)") && files.app.includes("function renderDeleteDragActions(actions, targetAction)") && !files.app.includes("state.goals.map((goal) => renderGoalCard") && !files.app.includes("googleCalendars.map((calendar) => renderGoogleCalendarToggle") && !files.app.includes("days.map((date) => renderHabitDayButton") && !files.app.includes("days.map((day) => {") && !files.app.includes("ui.resourceNotes\n    .map") && !files.app.includes("safeBlocks.map((block) => renderBlock") && !files.app.includes("actions.map((action) => `")],
   ["task card reorder captures rects without map allocation", () => files.app.includes("function captureCardRects()") && files.app.includes("const rects = new Map();") && files.app.includes('els.viewRoot.querySelectorAll(".card[data-task-id]").forEach((card) =>') && !files.app.includes('Array.from(els.viewRoot.querySelectorAll(".card[data-task-id]")).map')],
   ["task card reorder animation avoids Array.from allocation", () => files.app.includes("function animateCardReorder(previousRects)") && files.app.includes('const cards = els.viewRoot.querySelectorAll(".card[data-task-id]");') && files.app.includes("for (const card of cards)") && !files.app.includes('Array.from(els.viewRoot.querySelectorAll(".card[data-task-id]"))')],
   ["block editor drag target avoids Array.from filter-find allocation", () => files.app.includes("const dragIds = new Set(ui.blockDrag?.dragIds || []);") && files.app.includes("let firstBlock = null;") && files.app.includes('editor.querySelectorAll(".block").forEach((block) =>') && !files.app.includes('Array.from(editor.querySelectorAll(".block")).filter') && !files.app.includes("const blocksList =")],
@@ -218,6 +297,12 @@ console.log("Source audit passed.");
 
 function read(path) {
   return readFileSync(path, "utf8");
+}
+
+function sourceSection(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  return start >= 0 && end > start ? source.slice(start, end) : "";
 }
 
 function cachedAssetUrlsMatchIndex() {

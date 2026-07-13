@@ -1,9 +1,9 @@
-const CACHE_NAME = "sygma-personal-web-v637-google-oauth-popup";
+const CACHE_NAME = "sygma-personal-web-v638-calendar-themes";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
-  "/styles.css?v=20260713-google-oauth-popup",
-  "/app.js?v=20260713-google-oauth-popup",
+  "/styles.css?v=20260714-calendar-themes",
+  "/app.js?v=20260714-calendar-themes",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 

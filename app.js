@@ -43,6 +43,38 @@ const DEFAULT_CALENDAR_SOURCES = {
 };
 const CALENDAR_SOURCE_KEYS = Object.keys(DEFAULT_CALENDAR_SOURCES);
 const CALENDAR_SOURCE_KEY_SET = new Set(CALENDAR_SOURCE_KEYS);
+const LOCAL_CALENDAR_THEMES = Object.freeze({
+  tasks: Object.freeze({ color: "#2563eb", contrast: "#ffffff" }),
+  projects: Object.freeze({ color: "#7c3aed", contrast: "#ffffff" }),
+  local: Object.freeze({ color: "#475569", contrast: "#ffffff" }),
+});
+const GOOGLE_CALENDAR_COLOR_PALETTE = Object.freeze([
+  "#0f766e",
+  "#b45309",
+  "#be123c",
+  "#0e7490",
+  "#4d7c0f",
+  "#c2410c",
+  "#4338ca",
+  "#be185d",
+  "#0369a1",
+  "#047857",
+  "#b91c1c",
+  "#475569",
+  "#a21caf",
+  "#15803d",
+  "#92400e",
+  "#1e40af",
+  "#86198f",
+  "#166534",
+  "#9f1239",
+  "#155e75",
+  "#3f6212",
+  "#9a3412",
+  "#3730a3",
+  "#701a75",
+]);
+const MAX_CALENDAR_COLOR_ASSIGNMENTS = 512;
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
@@ -478,7 +510,7 @@ const DB_SCHEMA = [
   {
     key: "settings",
     label: "Settings",
-    fields: ["navOrder", "calendarSources", "visibleGoogleCalendars", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
+    fields: ["navOrder", "calendarSources", "visibleGoogleCalendars", "calendarColorAssignments", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
     relations: ["PWA", "Google Calendar", "PostgreSQL sync"],
   },
 ];
@@ -1846,6 +1878,7 @@ function renderCalendar() {
   const projectEvents = getProjectCalendarEvents();
   const googleEvents = getGoogleCalendarEvents();
   const visibleGoogleEvents = getVisibleGoogleCalendarEvents();
+  const calendarThemes = googleCalendarThemeAssignments();
   const combinedEvents = controlledItems("calendar", combinedCalendarSourceEvents(taskEvents, projectEvents, visibleGoogleEvents), "calendar");
   const control = viewControl("calendar");
   const weekStart = startOfWeek(new Date());
@@ -1855,21 +1888,17 @@ function renderCalendar() {
       ${renderViewControls("calendar", { count: combinedEvents.length, total: taskEvents.length + projectEvents.length + visibleGoogleEvents.length })}
       <div class="calendar-layout">
         ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
-        ${renderCalendarControls(taskEvents, projectEvents, googleEvents)}
+        ${renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)}
 
         <div class="panel calendar-week-panel">
           ${panelHeader("This Week", `${formatLongDate(weekStart)}부터`)}
-          <div class="calendar-week-grid">${renderWeekDays(combinedEvents)}</div>
+          <div class="calendar-week-grid">${renderWeekDays(combinedEvents, calendarThemes)}</div>
         </div>
 
         <div class="panel calendar-combined-panel">
           ${renderCalendarMonthPanelHeader(selectedMonth, combinedEvents.length)}
-          <div class="calendar-source-legend" aria-label="캘린더 소스">
-            <span><i class="source-dot task"></i>Tasks</span>
-            <span><i class="source-dot project"></i>Projects</span>
-            <span><i class="source-dot google"></i>Google</span>
-          </div>
-          ${control.mode === "agenda" ? renderCalendarAgenda(combinedEvents) : renderCombinedCalendar(combinedEvents)}
+          ${renderCalendarLegend(combinedEvents, calendarThemes)}
+          ${control.mode === "agenda" ? renderCalendarAgenda(combinedEvents, calendarThemes) : renderCombinedCalendar(combinedEvents, calendarThemes)}
         </div>
       </div>
     </section>
@@ -1902,7 +1931,7 @@ function renderGoogleConnectPanel() {
   `;
 }
 
-function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
+function renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes) {
   const googleCalendars = getGoogleCalendarOptions();
   const googleEventCounts = eventCountsByCalendarId(googleEvents);
   return `
@@ -1920,14 +1949,14 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
         <div class="calendar-filter-group">
           <strong class="calendar-filter-title">Personal Web</strong>
           <div class="calendar-toggle-list">
-            ${renderCalendarSourceToggle("tasks", "Tasks", taskEvents.length)}
-            ${renderCalendarSourceToggle("projects", "Projects", projectEvents.length)}
+            ${renderCalendarSourceToggle("tasks", "Tasks", taskEvents.length, calendarThemes)}
+            ${renderCalendarSourceToggle("projects", "Projects", projectEvents.length, calendarThemes)}
           </div>
         </div>
         <div class="calendar-filter-group">
           <strong class="calendar-filter-title">Google Calendar</strong>
           <div class="calendar-toggle-list calendar-google-toggle-list">
-            ${renderGoogleCalendarToggles(googleCalendars, googleEventCounts)}
+            ${renderGoogleCalendarToggles(googleCalendars, googleEventCounts, calendarThemes)}
           </div>
         </div>
       </div>
@@ -1935,13 +1964,68 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents) {
   `;
 }
 
-function renderGoogleCalendarToggles(calendars, eventCounts) {
+function renderGoogleCalendarToggles(calendars, eventCounts, calendarThemes) {
   if (!calendars.length) return `<div class="calendar-empty-state">Google 일정이 아직 불러와지지 않았습니다.</div>`;
   let html = "";
   for (const calendar of calendars) {
-    html += renderGoogleCalendarToggle(calendar, eventCounts);
+    html += renderGoogleCalendarToggle(calendar, eventCounts, calendarThemes);
   }
   return html;
+}
+
+function renderCalendarLegend(events, calendarThemes) {
+  let taskCount = 0;
+  let projectCount = 0;
+  const googleCalendars = new Map();
+  for (const event of events) {
+    if (event.source === "task") {
+      taskCount += 1;
+      continue;
+    }
+    if (event.source === "project") {
+      projectCount += 1;
+      continue;
+    }
+    if (event.source !== "google") continue;
+    const calendarId = event.calendarId || "primary";
+    const current = googleCalendars.get(calendarId);
+    if (current) {
+      current.count += 1;
+    } else {
+      googleCalendars.set(calendarId, {
+        calendarId,
+        count: 1,
+        label: event.calendarSummary || (calendarId === "primary" ? "Primary" : calendarId),
+        backgroundColor: event.backgroundColor || "",
+        foregroundColor: event.foregroundColor || "",
+      });
+    }
+  }
+  let items = "";
+  if (taskCount) items += renderCalendarLegendItem("Tasks", taskCount, { source: "task" }, calendarThemes);
+  if (projectCount) items += renderCalendarLegendItem("Projects", projectCount, { source: "project" }, calendarThemes);
+  for (const option of getGoogleCalendarOptions()) {
+    const calendar = googleCalendars.get(option.id);
+    if (!calendar) continue;
+    items += renderCalendarLegendItem(option.summary || calendar.label, calendar.count, {
+      ...option,
+      source: "google",
+      calendarId: calendar.calendarId,
+    }, calendarThemes);
+  }
+  if (!items) return "";
+  return `<ul class="calendar-source-legend" aria-label="표시 중인 캘린더">${items}</ul>`;
+}
+
+function renderCalendarLegendItem(label, count, calendar, calendarThemes) {
+  const countLabel = calendarCountLabel(count);
+  return `
+    <li class="calendar-legend-chip" style="${calendarColorDeclarations(calendar, calendarThemes)}" aria-label="${esc(`${label}, ${countLabel}`)}">
+      <i class="source-dot" aria-hidden="true"></i>
+      <span>${esc(label)}</span>
+      <small>${esc(String(count))}</small>
+    </li>
+  `;
 }
 
 function renderCalendarMonthPanelHeader(selectedMonth, eventCount) {
@@ -1961,9 +2045,10 @@ function renderCalendarMonthPanelHeader(selectedMonth, eventCount) {
   `;
 }
 
-function renderCalendarSourceToggle(source, label, count) {
+function renderCalendarSourceToggle(source, label, count, calendarThemes) {
+  const calendar = { source: source === "projects" ? "project" : "task" };
   return `
-    <label class="calendar-toggle">
+    <label class="calendar-toggle" style="${calendarColorDeclarations(calendar, calendarThemes)}">
       <input type="checkbox" data-calendar-source="${esc(source)}" ${calendarSourceVisible(source) ? "checked" : ""}>
       <span class="calendar-toggle-mark"></span>
       <span class="calendar-toggle-text">
@@ -1974,10 +2059,10 @@ function renderCalendarSourceToggle(source, label, count) {
   `;
 }
 
-function renderGoogleCalendarToggle(calendar, googleEventCounts) {
+function renderGoogleCalendarToggle(calendar, googleEventCounts, calendarThemes) {
   const count = googleEventCounts.get(calendar.id) || 0;
   return `
-    <label class="calendar-toggle calendar-google-toggle"${calendarColorStyle(calendar)}>
+    <label class="calendar-toggle calendar-google-toggle" style="${calendarColorDeclarations({ ...calendar, source: "google", calendarId: calendar.id }, calendarThemes)}">
       <input type="checkbox" data-google-calendar-toggle="${esc(calendar.id)}" ${googleCalendarVisible(calendar.id) ? "checked" : ""}>
       <span class="calendar-toggle-mark"></span>
       <span class="calendar-toggle-text">
@@ -4769,7 +4854,7 @@ function captureTargetLabel(type) {
   }[type] || "항목";
 }
 
-function renderWeekDays(events = getCombinedCalendarEvents()) {
+function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
   const start = startOfWeek(new Date());
   const days = dateRange(start, 7);
   const today = dateKey(new Date());
@@ -4784,10 +4869,10 @@ function renderWeekDays(events = getCombinedCalendarEvents()) {
       </div>
     `;
   }
-  return `${html}${renderCalendarSpanLayer(events, days, { className: "calendar-week-span-layer", limit: 6 })}`;
+  return `${html}${renderCalendarSpanLayer(events, days, { className: "calendar-week-span-layer", limit: 6, calendarThemes })}`;
 }
 
-function renderCombinedCalendar(events = getCombinedCalendarEvents()) {
+function renderCombinedCalendar(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
   const today = dateKey(new Date());
   const selectedMonth = selectedCalendarMonthDate();
   const currentMonth = monthKey(selectedMonth);
@@ -4795,7 +4880,7 @@ function renderCombinedCalendar(events = getCombinedCalendarEvents()) {
   const weeks = chunkCalendarWeeks(days);
   let weekHtml = "";
   for (const weekDays of weeks) {
-    weekHtml += renderCombinedCalendarDays(weekDays, events, currentMonth, today);
+    weekHtml += renderCombinedCalendarDays(weekDays, events, currentMonth, today, calendarThemes);
   }
   return `
     <div class="calendar-month-weekdays">
@@ -4807,7 +4892,7 @@ function renderCombinedCalendar(events = getCombinedCalendarEvents()) {
   `;
 }
 
-function renderCalendarAgenda(events = getCombinedCalendarEvents()) {
+function renderCalendarAgenda(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
   if (!events.length) return empty("표시할 일정이 없습니다.");
   const range = combinedCalendarRange();
   const items = calendarAgendaItems(events, range);
@@ -4824,7 +4909,7 @@ function renderCalendarAgenda(events = getCombinedCalendarEvents()) {
         </div>
       `;
     }
-    html += renderCalendarAgendaItem(item);
+    html += renderCalendarAgendaItem(item, calendarThemes);
   }
   return `<div class="calendar-agenda">${html}</div>`;
 }
@@ -4853,18 +4938,20 @@ function calendarAgendaSort(a, b) {
   return (a.event.title || "").localeCompare(b.event.title || "");
 }
 
-function renderCalendarAgendaItem(item) {
+function renderCalendarAgendaItem(item, calendarThemes) {
   const event = item.event;
   const attrs = event.selectType && event.selectId ? `data-select-type="${event.selectType}" data-select-id="${event.selectId}"` : "";
   const link = event.htmlLink ? `<a class="calendar-agenda-open" href="${esc(event.htmlLink)}" target="_blank" rel="noreferrer" aria-label="Google Calendar에서 열기">열기</a>` : "";
+  const meta = calendarAgendaMetaLabel(event);
+  const time = calendarAgendaTimeLabel(item);
   return `
-    <article class="calendar-agenda-row ${calendarEventSourceClass(event)}" ${attrs}>
-      <span class="source-dot ${esc(event.source || "local")}"></span>
+    <article class="calendar-agenda-row ${calendarEventSourceClass(event)}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)}" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
+      <span class="source-dot ${esc(event.source || "local")}" aria-hidden="true"></span>
       <div class="calendar-agenda-main">
         <strong>${esc(event.title || "(제목 없음)")}</strong>
-        <span>${esc(calendarAgendaMetaLabel(event))}</span>
+        <span>${esc(meta)}</span>
       </div>
-      <time>${esc(calendarAgendaTimeLabel(item))}</time>
+      <time>${esc(time)}</time>
       ${link}
     </article>
   `;
@@ -4887,7 +4974,7 @@ function calendarAgendaTimeLabel(item) {
   return calendarEventTimeLabel(event) || "종일";
 }
 
-function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today) {
+function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today, calendarThemes) {
   const events = Array.isArray(eventsByDate) ? eventsByDate : [];
   let html = "";
   for (let index = 0; index < days.length; index += 1) {
@@ -4902,7 +4989,7 @@ function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today) {
   return `
     <div class="calendar-month-week">
       ${html}
-      ${renderCalendarSpanLayer(events, days, { className: "calendar-month-span-layer", limit: 4 })}
+      ${renderCalendarSpanLayer(events, days, { className: "calendar-month-span-layer", limit: 4, calendarThemes })}
     </div>
   `;
 }
@@ -4915,10 +5002,10 @@ function chunkCalendarWeeks(days) {
   return weeks;
 }
 
-function renderCalendarSpanLayer(events, days, { className = "", limit = 4 } = {}) {
+function renderCalendarSpanLayer(events, days, { className = "", limit = 4, calendarThemes } = {}) {
   const { segments, overflow } = calendarSpanSegments(events, days, limit);
   const maxRow = Math.max(1, limit + 1);
-  const eventHtml = renderCalendarEvents(segments, { compact: true, limit: segments.length });
+  const eventHtml = renderCalendarEvents(segments, { compact: true, limit: segments.length, calendarThemes });
   const overflowHtml = overflow
     ? `<span class="calendar-span-more" style="grid-row: ${maxRow};">+${overflow}</span>`
     : "";
@@ -4976,12 +5063,12 @@ function calendarSpanSegments(events, days, limit) {
   return { segments, overflow };
 }
 
-function renderCalendarEvents(events, { compact = false, limit = Infinity, emptyHtml = "" } = {}) {
+function renderCalendarEvents(events, { compact = false, limit = Infinity, emptyHtml = "", calendarThemes } = {}) {
   if (!events.length) return emptyHtml;
   let html = "";
   const count = Math.min(events.length, limit);
   for (let index = 0; index < count; index += 1) {
-    html += renderCalendarSpanEvent(events[index], { compact });
+    html += renderCalendarSpanEvent(events[index], { compact, calendarThemes });
   }
   return html;
 }
@@ -4995,15 +5082,17 @@ function calendarSpanSort(a, b) {
   return (a.event.title || "").localeCompare(b.event.title || "");
 }
 
-function renderCalendarSpanEvent(segment) {
+function renderCalendarSpanEvent(segment, { calendarThemes } = {}) {
   const { event } = segment;
   const attrs = event.selectType && event.selectId ? `data-select-type="${event.selectType}" data-select-id="${event.selectId}"` : "";
   const link = event.htmlLink ? `<a class="calendar-span-open" href="${esc(event.htmlLink)}" target="_blank" rel="noreferrer" aria-label="Google Calendar에서 열기">↗</a>` : "";
   const startClass = segment.start === segment.segmentStart ? "is-span-start" : "";
   const endClass = segment.end === segment.segmentEnd ? "is-span-end" : "";
+  const meta = calendarAgendaMetaLabel(event);
+  const time = calendarSpanTimeLabel(event) || "종일";
   return `
-    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass}" ${attrs} style="grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" title="${esc(event.title || "(제목 없음)")}" tabindex="0">
-      <span class="calendar-span-time">${esc(calendarSpanTimeLabel(event))}</span>
+    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)} grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" title="${esc(`${event.title || "(제목 없음)"} · ${meta}`)}" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
+      <span class="calendar-span-time">${esc(time)}</span>
       <strong>${esc(event.title || "(제목 없음)")}</strong>
       ${link}
     </article>
@@ -5278,10 +5367,173 @@ function calendarCountLabel(count) {
   return `${count} ${count === 1 ? "event" : "events"}`;
 }
 
-function calendarColorStyle(calendar) {
-  const color = String(calendar.backgroundColor || "").trim();
-  if (!/^#[0-9a-f]{3,8}$/i.test(color)) return "";
-  return ` style="--calendar-color: ${esc(color)}"`;
+function sanitizeCalendarHexColor(value, fallback = "") {
+  const color = String(value || "").trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/i.test(color)) return color;
+  if (/^#[0-9a-f]{3}$/i.test(color)) {
+    return `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`;
+  }
+  return fallback;
+}
+
+function stableCalendarColorIndex(value) {
+  const text = String(value || "primary");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function nextGoogleCalendarColor(identity, usedColors) {
+  const startIndex = stableCalendarColorIndex(identity) % GOOGLE_CALENDAR_COLOR_PALETTE.length;
+  for (let offset = 0; offset < GOOGLE_CALENDAR_COLOR_PALETTE.length; offset += 1) {
+    const color = GOOGLE_CALENDAR_COLOR_PALETTE[(startIndex + offset) % GOOGLE_CALENDAR_COLOR_PALETTE.length];
+    if (!usedColors.has(color)) return color;
+  }
+  for (let attempt = 0; attempt < MAX_CALENDAR_COLOR_ASSIGNMENTS; attempt += 1) {
+    const color = derivedGoogleCalendarColor(identity, attempt);
+    if (!usedColors.has(color)) return color;
+  }
+  return derivedGoogleCalendarColor(identity, MAX_CALENDAR_COLOR_ASSIGNMENTS);
+}
+
+function derivedGoogleCalendarColor(identity, attempt) {
+  const hash = stableCalendarColorIndex(`${identity}:${attempt}`);
+  const hue = hash % 360;
+  const saturation = 58 + ((hash >>> 9) % 3) * 8;
+  const lightness = 36 + ((hash >>> 17) % 3) * 6;
+  return hslCalendarColor(hue, saturation, lightness);
+}
+
+function hslCalendarColor(hue, saturation, lightness) {
+  const normalizedSaturation = saturation / 100;
+  const normalizedLightness = lightness / 100;
+  const chroma = (1 - Math.abs(2 * normalizedLightness - 1)) * normalizedSaturation;
+  const sector = (((hue % 360) + 360) % 360) / 60;
+  const intermediate = chroma * (1 - Math.abs((sector % 2) - 1));
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  if (sector < 1) [red, green] = [chroma, intermediate];
+  else if (sector < 2) [red, green] = [intermediate, chroma];
+  else if (sector < 3) [green, blue] = [chroma, intermediate];
+  else if (sector < 4) [green, blue] = [intermediate, chroma];
+  else if (sector < 5) [red, blue] = [intermediate, chroma];
+  else [red, blue] = [chroma, intermediate];
+  const match = normalizedLightness - chroma / 2;
+  return `#${calendarHexChannel(red + match)}${calendarHexChannel(green + match)}${calendarHexChannel(blue + match)}`;
+}
+
+function calendarHexChannel(value) {
+  return Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16).padStart(2, "0");
+}
+
+function calendarContrastColor(backgroundColor, foregroundColor = "") {
+  const preferred = sanitizeCalendarHexColor(foregroundColor);
+  if (preferred) return preferred;
+  const safeBackground = sanitizeCalendarHexColor(backgroundColor, LOCAL_CALENDAR_THEMES.local.color);
+  const hex = safeBackground.slice(1);
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  return (red * 299 + green * 587 + blue * 114) / 1000 > 158 ? "#17202f" : "#ffffff";
+}
+
+function normalizeCalendarColorAssignments(value) {
+  const normalized = Object.create(null);
+  if (!isPlainObject(value)) return normalized;
+  let count = 0;
+  for (const calendarId in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, calendarId) || count >= MAX_CALENDAR_COLOR_ASSIGNMENTS) continue;
+    if (!calendarId || calendarId === "__proto__" || calendarId === "prototype" || calendarId === "constructor" || calendarId.length > 512) continue;
+    const color = sanitizeCalendarHexColor(value[calendarId]);
+    if (!color) continue;
+    normalized[calendarId] = color;
+    count += 1;
+  }
+  return normalized;
+}
+
+function allocateGoogleCalendarThemes(calendars, savedAssignments = {}) {
+  const themes = new Map();
+  const usedColors = new Set([
+    LOCAL_CALENDAR_THEMES.tasks.color,
+    LOCAL_CALENDAR_THEMES.projects.color,
+  ]);
+  const assignments = Object.create(null);
+  const normalizedAssignments = normalizeCalendarColorAssignments(savedAssignments);
+  const assignmentIds = Object.keys(normalizedAssignments).sort();
+  for (const calendarId of assignmentIds) {
+    const color = normalizedAssignments[calendarId];
+    if (usedColors.has(color)) continue;
+    assignments[calendarId] = color;
+    usedColors.add(color);
+  }
+  const sortedCalendars = calendars.slice().sort((a, b) => String(a.id || "primary").localeCompare(String(b.id || "primary")));
+  const reservedColors = new Map();
+  for (const calendar of sortedCalendars) {
+    const calendarId = String(calendar.id || "primary");
+    if (assignments[calendarId]) continue;
+    const preferred = sanitizeCalendarHexColor(calendar.backgroundColor);
+    if (preferred && !usedColors.has(preferred) && !reservedColors.has(preferred)) {
+      reservedColors.set(preferred, calendarId);
+    }
+  }
+  for (const color of reservedColors.keys()) usedColors.add(color);
+  for (const calendar of sortedCalendars) {
+    const calendarId = String(calendar.id || "primary");
+    const identity = `google:${calendarId}`;
+    const preferred = sanitizeCalendarHexColor(calendar.backgroundColor);
+    const existing = assignments[calendarId];
+    const color = existing || (preferred && reservedColors.get(preferred) === calendarId
+      ? preferred
+      : nextGoogleCalendarColor(identity, usedColors));
+    assignments[calendarId] = color;
+    usedColors.add(color);
+    themes.set(calendarId, {
+      color,
+      contrast: calendarContrastColor(color, color === preferred ? calendar.foregroundColor : ""),
+    });
+  }
+  return { assignments, themes };
+}
+
+function googleCalendarThemeAssignments(calendars = getGoogleCalendarOptions()) {
+  const allocation = allocateGoogleCalendarThemes(calendars, state?.settings?.calendarColorAssignments);
+  if (state?.settings) state.settings.calendarColorAssignments = allocation.assignments;
+  return allocation.themes;
+}
+
+function calendarThemeFor(calendar, calendarThemes) {
+  const source = String(calendar?.source || "").toLowerCase();
+  if (source === "task" || source === "tasks") return LOCAL_CALENDAR_THEMES.tasks;
+  if (source === "project" || source === "projects") return LOCAL_CALENDAR_THEMES.projects;
+  if (source === "google" || calendar?.calendarId || (!source && calendar?.id)) {
+    const calendarId = source === "google"
+      ? String(calendar?.calendarId || "primary")
+      : String(calendar?.calendarId || calendar?.id || "primary");
+    const assigned = calendarThemes?.get(calendarId);
+    if (assigned) return assigned;
+    const preferred = sanitizeCalendarHexColor(calendar?.backgroundColor);
+    const color = preferred || nextGoogleCalendarColor(`google:${calendarId}`, new Set([
+      LOCAL_CALENDAR_THEMES.tasks.color,
+      LOCAL_CALENDAR_THEMES.projects.color,
+    ]));
+    return {
+      color,
+      contrast: calendarContrastColor(color, color === preferred ? calendar?.foregroundColor : ""),
+    };
+  }
+  return LOCAL_CALENDAR_THEMES.local;
+}
+
+function calendarColorDeclarations(calendar, calendarThemes) {
+  const theme = calendarThemeFor(calendar, calendarThemes);
+  const color = sanitizeCalendarHexColor(theme.color, LOCAL_CALENDAR_THEMES.local.color);
+  const contrast = sanitizeCalendarHexColor(theme.contrast, calendarContrastColor(color));
+  return `--calendar-color: ${color}; --calendar-contrast: ${contrast};`;
 }
 
 function renderDetail(options = {}) {
@@ -23536,6 +23788,7 @@ function mergeWorkspaceDraftStates(baseState, draftState) {
     ...cloneForLocalPersistence(draftSettings),
     calendarSources: { ...(baseSettings.calendarSources || {}), ...(draftSettings.calendarSources || {}) },
     visibleGoogleCalendars: { ...(baseSettings.visibleGoogleCalendars || {}), ...(draftSettings.visibleGoogleCalendars || {}) },
+    calendarColorAssignments: { ...(baseSettings.calendarColorAssignments || {}), ...(draftSettings.calendarColorAssignments || {}) },
     openPagesIn: { ...(baseSettings.openPagesIn || {}), ...(draftSettings.openPagesIn || {}) },
     resourceCommentReadAt: { ...(baseSettings.resourceCommentReadAt || {}), ...(draftSettings.resourceCommentReadAt || {}) },
     viewControls: { ...(baseSettings.viewControls || {}), ...(draftSettings.viewControls || {}) },
@@ -25070,6 +25323,7 @@ function normalizeState(next) {
     ? Math.round(Number(nextSettings.resourceSideWidth))
     : 0;
   settings.visibleGoogleCalendars = isPlainObject(settings.visibleGoogleCalendars) ? { ...settings.visibleGoogleCalendars } : {};
+  settings.calendarColorAssignments = normalizeCalendarColorAssignments(settings.calendarColorAssignments);
   settings.resourceCommentReadAt = normalizeResourceCommentReadAt(nextSettings.resourceCommentReadAt);
   const resourceMigrationAt = new Date().toISOString();
   const resources = normalizeResourceRecords(
@@ -25082,6 +25336,7 @@ function normalizeState(next) {
       settings.visibleGoogleCalendars[calendar.id] = calendar.selected !== false && !calendar.hidden;
     }
   }
+  settings.calendarColorAssignments = allocateGoogleCalendarThemes(googleCalendars, settings.calendarColorAssignments).assignments;
   const normalized = {
     version: APP_STATE_VERSION,
     revision: normalizedWorkspaceRevision(next.revision, 0),
@@ -25113,6 +25368,7 @@ function createDefaultSettings() {
     lastGoogleSyncAt: "",
     calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
     visibleGoogleCalendars: {},
+    calendarColorAssignments: {},
     viewControls: defaultViewControls(),
     notionParityMode: true,
     advancedWindowMode: false,
@@ -26266,6 +26522,7 @@ function ensureGoogleCalendarVisibility(calendars) {
     }
   }
   state.settings.visibleGoogleCalendars = visibleGoogleCalendars;
+  googleCalendarThemeAssignments(calendars);
 }
 
 function normalizeGoogleApiEvent(event, calendar = fallbackGoogleCalendar(state.settings.googleCalendarId || "primary")) {
