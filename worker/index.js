@@ -4,6 +4,8 @@ const HASHED_ASSET_PATTERN = /\/(?:_sygma\/)?assets\/[^/]+\.[a-f0-9]{10,}\.(?:cs
 const PLATFORM_IDENTITY_HEADER = "oai-authenticated-user-email";
 const UPSTREAM_IDENTITY_HEADER = "x-sygma-authenticated-user-email";
 const PROXY_SECRET_BINDING = "API_BEARER_TOKEN";
+const GOOGLE_OAUTH_CALLBACK_PATH = "/api/google/oauth/callback";
+const GOOGLE_OAUTH_STATE_COOKIE = "sygma_google_oauth_state";
 const STRIPPED_PROXY_HEADERS = new Set([
   "authorization",
   "cookie",
@@ -48,13 +50,32 @@ function isSpoofableProxyHeader(name) {
     || normalized.startsWith("x-user-");
 }
 
-function proxyHeaders(request, { bearerToken = "", identityEmail = "" } = {}) {
+function googleOAuthCallbackCookie(request, pathname) {
+  if (request.method !== "GET" || pathname !== GOOGLE_OAUTH_CALLBACK_PATH) return "";
+  const matches = [];
+  for (const rawPart of String(request.headers.get("cookie") || "").split(";")) {
+    const part = rawPart.trim();
+    const separator = part.indexOf("=");
+    if (separator <= 0 || part.slice(0, separator) !== GOOGLE_OAUTH_STATE_COOKIE) continue;
+    const value = part.slice(separator + 1);
+    if (!/^[A-Za-z0-9_-]{24,128}$/.test(value)) return "";
+    matches.push(value);
+  }
+  return matches.length === 1 ? `${GOOGLE_OAUTH_STATE_COOKIE}=${matches[0]}` : "";
+}
+
+function proxyHeaders(request, { bearerToken = "", identityEmail = "", oauthStateCookie = "", publicUrl } = {}) {
   const headers = new Headers(request.headers);
   for (const name of [...headers.keys()]) {
     if (isSpoofableProxyHeader(name)) headers.delete(name);
   }
   headers.delete("host");
   headers.delete("content-length");
+  if (publicUrl) {
+    headers.set("x-forwarded-host", publicUrl.host);
+    headers.set("x-forwarded-proto", publicUrl.protocol.replace(":", ""));
+  }
+  if (oauthStateCookie) headers.set("cookie", oauthStateCookie);
   if (bearerToken) headers.set("authorization", `Bearer ${bearerToken}`);
   if (identityEmail) headers.set(UPSTREAM_IDENTITY_HEADER, identityEmail);
   return headers;
@@ -136,9 +157,10 @@ async function proxyApiRequest(request, env, authContext) {
   const requestUrl = new URL(request.url);
   const upstreamOrigin = apiOrigin(env);
   const target = new URL(`${requestUrl.pathname}${requestUrl.search}`, upstreamOrigin);
+  const oauthStateCookie = googleOAuthCallbackCookie(request, requestUrl.pathname);
   const upstream = await fetch(target, {
     method: request.method,
-    headers: proxyHeaders(request, authContext),
+    headers: proxyHeaders(request, { ...authContext, oauthStateCookie, publicUrl: requestUrl }),
     body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
     redirect: "manual",
   });

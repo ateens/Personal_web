@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import worker from "../worker/index.js";
 
+const GOOGLE_OAUTH_COOKIE_FOR_TEST = "sygma_google_oauth_state";
 const originalFetch = globalThis.fetch;
 const OriginalResponse = globalThis.Response;
 let proxiedUrl = "";
@@ -47,8 +48,38 @@ try {
   assert.equal(proxiedHeaders.get("x-authenticated-user-email"), null);
   assert.equal(proxiedHeaders.get("x-forwarded-user"), null);
   assert.equal(proxiedHeaders.get("x-sygma-authenticated-user-email"), null);
+  assert.equal(proxiedHeaders.get("x-forwarded-host"), "sygma.example");
+  assert.equal(proxiedHeaders.get("x-forwarded-proto"), "https");
   assert.equal(apiResponse.headers.get("x-sygma-backend"), "postgresql");
   assert.equal(apiResponse.headers.get("location"), "https://sygma.example/api/state/status");
+
+  const oauthState = "oauth_state_nonce_1234567890abcd";
+  upstreamResponseHeaders = { "content-type": "text/html", location: "/?google=connected&googlePopup=1" };
+  const oauthCallbackResponse = await worker.fetch(new Request("https://sygma.example/api/google/oauth/callback?state=test&code=test", {
+    headers: {
+      cookie: `sites-session=private; ${GOOGLE_OAUTH_COOKIE_FOR_TEST}=${oauthState}; analytics=discarded`,
+      "x-forwarded-host": "attacker.example",
+      "x-forwarded-proto": "http",
+    },
+  }), {});
+  assert.equal(oauthCallbackResponse.status, 200);
+  assert.equal(proxiedHeaders.get("cookie"), `${GOOGLE_OAUTH_COOKIE_FOR_TEST}=${oauthState}`);
+  assert.equal(proxiedHeaders.get("x-forwarded-host"), "sygma.example");
+  assert.equal(proxiedHeaders.get("x-forwarded-proto"), "https");
+  assert.equal(oauthCallbackResponse.headers.get("location"), "https://sygma.example/?google=connected&googlePopup=1");
+
+  await worker.fetch(new Request("https://sygma.example/api/google/oauth/callback?state=test&code=test", {
+    headers: { cookie: `${GOOGLE_OAUTH_COOKIE_FOR_TEST}=invalid.value; sites-session=discarded` },
+  }), {});
+  assert.equal(proxiedHeaders.get("cookie"), null);
+
+  upstreamResponseHeaders = {
+    "content-type": "text/html",
+    location: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+  };
+  const googleRedirectResponse = await worker.fetch(new Request("https://sygma.example/api/google/auth/start"), {});
+  assert.equal(googleRedirectResponse.headers.get("location"), "https://accounts.google.com/o/oauth2/v2/auth?client_id=test");
+  upstreamResponseHeaders = { "content-type": "application/json", location: "/api/state/status" };
 
   const anonymousCallCount = upstreamCalls;
   const anonymousResponse = await worker.fetch(new Request("https://sygma.example/api/state"), {

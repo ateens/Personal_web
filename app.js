@@ -588,6 +588,7 @@ const REMOTE_STATE_RETRY_DELAY_MS = 3000;
 const REMOTE_STATE_RETRY_MAX_DELAY_MS = 30_000;
 const GOOGLE_CALENDAR_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
+const GOOGLE_OAUTH_MESSAGE_TYPE = "sygma:google-oauth";
 let state = loadState();
 const collectionIndexCache = new Map();
 const resourceSearchTextCache = new Map();
@@ -601,6 +602,7 @@ let googleBackendStatus = {
 let googleCalendarFetchInFlight = false;
 let googleCalendarViewFetchTimer = 0;
 let googleCalendarAutoRefreshTimer = 0;
+let googleAuthPopup = null;
 let databaseBackendStatus = {
   configured: false,
   connected: false,
@@ -859,6 +861,7 @@ function init() {
   document.addEventListener("visibilitychange", handleVisibilityStateSave);
   document.addEventListener("visibilitychange", handleGoogleCalendarWakeRefresh);
   window.addEventListener("focus", handleGoogleCalendarWakeRefresh);
+  window.addEventListener("message", handleGoogleAuthMessage);
   window.addEventListener("pagehide", handlePageHideStateSave);
   window.addEventListener("popstate", handleResourceRoutePopState);
   window.addEventListener("online", handleResourceConnectionRestored);
@@ -883,14 +886,35 @@ function handleGoogleRedirectResult() {
   const params = new URLSearchParams(window.location.search);
   const result = params.get("google");
   const returnView = params.get("view");
+  const popupResult = params.get("googlePopup") === "1";
   if (!result) return { connected: false, failed: false };
   params.delete("google");
   params.delete("view");
+  params.delete("googlePopup");
   const nextUrl = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash}`;
   window.history.replaceState({}, "", nextUrl || "/");
   if (defaultNavOrder().includes(returnView)) ui.view = returnView;
-  if (result === "connected") return { connected: true, failed: false };
-  return { connected: false, failed: true };
+  const connected = result === "connected";
+  if (popupResult && window.opener && window.opener !== window) {
+    window.opener.postMessage({ type: GOOGLE_OAUTH_MESSAGE_TYPE, status: connected ? "connected" : "failed" }, window.location.origin);
+    window.close();
+  }
+  return connected ? { connected: true, failed: false } : { connected: false, failed: true };
+}
+
+function handleGoogleAuthMessage(event) {
+  if (event.origin !== window.location.origin || event.data?.type !== GOOGLE_OAUTH_MESSAGE_TYPE) return;
+  if (!googleAuthPopup || event.source !== googleAuthPopup) return;
+  if (!["connected", "failed"].includes(event.data.status)) return;
+  if (googleAuthPopup && !googleAuthPopup.closed) googleAuthPopup.close();
+  googleAuthPopup = null;
+  if (event.data.status === "connected") {
+    showToast("Google Calendar 연결 완료");
+    refreshGoogleBackendStatus({ silent: true, fetchEvents: true });
+    return;
+  }
+  showToast("Google Calendar 연결에 실패했습니다.");
+  refreshGoogleBackendStatus({ silent: true });
 }
 
 function renderShell() {
@@ -1871,9 +1895,9 @@ function renderGoogleConnectPanel() {
       <div class="calendar-connect-copy">
         <span class="eyebrow">Google Calendar</span>
         <h2 class="panel-title">Google 로그인으로 캘린더 연결</h2>
-        <p>${configured ? "로그인하면 Google 캘린더 목록과 일정을 바로 불러옵니다." : "서버 환경변수에 Google OAuth Client ID와 Client Secret을 등록해야 로그인할 수 있습니다."}</p>
+        <p>${configured ? "로그인하면 Google 캘린더 목록과 일정을 바로 불러옵니다." : "로그인 버튼을 누르면 Google OAuth 설정 상태를 다시 확인합니다."}</p>
       </div>
-      <button class="button calendar-google-login" type="button" data-action="connect-google"${configured ? "" : " disabled"}>Google로 로그인</button>
+      <button class="button calendar-google-login" type="button" data-action="connect-google"${googleBackendStatus.loading ? ' disabled aria-busy="true"' : ""}>${googleBackendStatus.loading ? "로그인 준비 중..." : "Google로 로그인"}</button>
     </div>
   `;
 }
@@ -24838,6 +24862,17 @@ async function refreshGoogleBackendStatus(options = {}) {
 }
 
 async function connectGoogle() {
+  if (googleAuthPopup && !googleAuthPopup.closed) googleAuthPopup.close();
+  const popup = window.open("", "_blank", "popup=yes,width=520,height=680,resizable=yes,scrollbars=yes");
+  if (!popup) {
+    showToast("Google 로그인 팝업이 차단되었습니다. 이 사이트의 팝업을 허용해 주세요.");
+    return;
+  }
+  googleAuthPopup = popup;
+  try {
+    popup.document.title = "Google 로그인 준비 중";
+    popup.document.body.innerHTML = '<main style="font:16px/1.5 system-ui;padding:32px;color:#1f2937">Google 로그인 창을 준비하고 있습니다...</main>';
+  } catch {}
   try {
     const status = await apiJson("/api/google/status");
     googleBackendStatus = {
@@ -24846,14 +24881,26 @@ async function connectGoogle() {
       loading: false,
     };
     if (!googleBackendStatus.configured) {
+      popup.close();
+      googleAuthPopup = null;
       showToast("서버에 GOOGLE_CLIENT_ID와 GOOGLE_CLIENT_SECRET을 설정해야 합니다.");
       renderView({ soft: true });
       return;
     }
+    if (popup.closed) {
+      googleAuthPopup = null;
+      showToast("Google 로그인 창이 닫혔습니다.");
+      return;
+    }
     const returnView = defaultNavOrder().includes(ui.view) ? ui.view : "calendar";
-    const returnTo = `/?google=connected&view=${encodeURIComponent(returnView)}`;
-    window.location.href = `/api/google/auth/start?returnTo=${encodeURIComponent(returnTo)}`;
+    const returnTo = `/?view=${encodeURIComponent(returnView)}&googlePopup=1`;
+    popup.location.replace(`/api/google/auth/start?returnTo=${encodeURIComponent(returnTo)}`);
+    try {
+      popup.focus();
+    } catch {}
   } catch {
+    if (!popup.closed) popup.close();
+    googleAuthPopup = null;
     showToast("Google 로그인 준비 상태를 확인하지 못했습니다.");
   }
 }

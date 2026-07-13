@@ -108,6 +108,12 @@ http://127.0.0.1:4180/api/google/oauth/callback
 
 If you run a different port, use that port in the redirect URI.
 
+For the private Sites deployment, register this exact redirect URI as well:
+
+```text
+https://sygma-personal-web.ateens.chatgpt.site/api/google/oauth/callback
+```
+
 Set these Railway variables for persistence:
 
 ```text
@@ -139,7 +145,7 @@ Set these Railway variables before using Google Calendar:
 ```text
 GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET
-PUBLIC_BASE_URL=https://personalweb-production-81a6.up.railway.app
+PUBLIC_BASE_URL=https://sygma-personal-web.ateens.chatgpt.site
 ```
 
 Production URL:
