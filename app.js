@@ -7368,6 +7368,10 @@ function renderTodayFloatingDrop() {
       <strong>예정</strong>
       <span>${compactDateLabel(scheduledDate)}</span>
     </div>
+    <button class="today-floating-drop today-delete-drop" type="button" data-today-task-action="delete" aria-label="할 일 삭제" aria-hidden="${ui.todayTaskDrag ? "false" : "true"}" tabindex="-1">
+      <strong>삭제</strong>
+      <span>완전히 제거</span>
+    </button>
   `;
 }
 
@@ -15627,6 +15631,7 @@ function beginTodayTaskDrag(task, card, event) {
     offsetX,
     offsetY,
     targetDate: "",
+    targetAction: "",
     targetElement: null,
     sourceCard: card,
   };
@@ -15651,19 +15656,21 @@ function updateTodayTaskDragPosition(clientX, clientY) {
 }
 
 function todayTaskTargetFromPoint(clientX, clientY) {
-  const element = closestElementFromPoint(clientX, clientY, "[data-drop-date]");
+  const element = closestElementFromPoint(clientX, clientY, "[data-drop-date], [data-today-task-action]");
   if (!element) return {};
   return {
     element,
     date: element.dataset.dropDate || "",
+    action: element.dataset.todayTaskAction || "",
   };
 }
 
 function setTodayTaskDropTarget(target = {}) {
   if (!ui.todayTaskDrag) return;
   document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((entry) => entry.classList.remove("is-over"));
-  if (target.date) target.element?.classList.add("is-over");
+  if (target.date || target.action) target.element?.classList.add("is-over");
   ui.todayTaskDrag.targetDate = target.date || "";
+  ui.todayTaskDrag.targetAction = target.action || "";
   ui.todayTaskDrag.targetElement = target.element || null;
 }
 
@@ -15678,15 +15685,21 @@ function finishTodayTaskDrag(event) {
   const drag = ui.todayTaskDrag;
   const task = itemById("tasks", drag.taskId);
   const pointTarget = todayTaskTargetFromPoint(event.clientX, event.clientY);
+  const targetAction = drag.targetAction || pointTarget.action || "";
   const targetDate = drag.targetDate || pointTarget.date || "";
-  const targetElement = pointTarget.date === targetDate
+  const targetElement = (pointTarget.action && pointTarget.action === targetAction) || (pointTarget.date && pointTarget.date === targetDate)
     ? pointTarget.element
     : drag.targetElement?.isConnected
       ? drag.targetElement
       : null;
   clearTodayTaskDragState();
   ui.suppressTaskClickUntil = Date.now() + 900;
-  if (!task || !targetDate) {
+  if (!task || (!targetAction && !targetDate)) {
+    renderOverlays();
+    return;
+  }
+  if (targetAction === "delete") {
+    commitDragAction("tasks", task.id, "delete");
     renderOverlays();
     return;
   }
