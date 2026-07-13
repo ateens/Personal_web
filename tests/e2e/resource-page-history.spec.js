@@ -255,7 +255,7 @@ test("native draft inputs keep native undo and do not consume page history", asy
   await note.locator(`[data-resource-cover-edit="${FIXTURE_IDS.resource}"]`).click();
   const coverDraft = note.locator(`[data-resource-cover-url="${FIXTURE_IDS.resource}"]`);
   await coverDraft.type("https://example.com/native-draft.jpg");
-  await coverDraft.press("Control+z");
+  await coverDraft.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(coverDraft).toHaveValue("");
   await expect.poll(async () => (await currentResource(request)).icon).toBe("📄");
   await expect.poll(async () => (await currentResource(request)).cover.url).toBe("");
