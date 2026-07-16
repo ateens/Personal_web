@@ -358,8 +358,9 @@ const INLINE_TOOLBAR_VIEWPORT_MARGIN = 12;
 const INLINE_TOOLBAR_SELECTION_GAP = 8;
 const INLINE_TOOLBAR_ESTIMATED_WIDTH = 294;
 const INLINE_TOOLBAR_ESTIMATED_HEIGHT = 34;
-const BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE = 2;
-const BLOCK_BODY_DRAG_ACTIVATION_DISTANCE = 2;
+const BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE = 6;
+const BLOCK_BODY_DRAG_ACTIVATION_DISTANCE = 10;
+const POINTER_DRAG_ACTIVATION_DISTANCE = 12;
 const BLOCK_DRAG_HANDLE_HIT_PADDING_LEFT = 12;
 const BLOCK_DRAG_HANDLE_HIT_PADDING_RIGHT = 6;
 const BLOCK_DRAG_HANDLE_HIT_PADDING_Y = 10;
@@ -825,6 +826,8 @@ function init() {
   document.addEventListener("cut", handleDocumentCut);
   document.addEventListener("paste", handleDocumentPaste);
   document.addEventListener("selectionchange", handleDocumentSelectionChange);
+  document.addEventListener("wheel", cancelPendingPointerDrags, { passive: true, capture: true });
+  document.addEventListener("scroll", cancelPendingPointerDrags, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleBlockPointerMove, true);
   document.addEventListener(pointerMoveEvent, scheduleBlockIconHoverPointerMove, true);
@@ -4464,7 +4467,7 @@ function renderResourceCard(resource) {
   const title = resource.title || "제목 없음";
   return `
     <article class="card" data-select-type="resources" data-select-id="${resource.id}" data-delete-drag-type="resources" data-delete-drag-id="${resource.id}">
-      <a class="resource-card-open" href="${esc(resourceDeepLink(resource.id))}" data-open-resource="${resource.id}" aria-label="${esc(`${title} 열기`)}" aria-haspopup="dialog" style="display:block;color:inherit;text-decoration:none">
+      <a class="resource-card-open" href="${esc(resourceDeepLink(resource.id))}" data-open-resource="${resource.id}" aria-label="${esc(`${title} 열기`)}" aria-haspopup="dialog" draggable="false" style="display:block;color:inherit;text-decoration:none">
         <h3 class="card-title" data-resource-title-display="${resource.id}">${esc(title)}</h3>
         <p class="resource-preview">${esc(blockText(resource).slice(0, 112)) || "비어 있는 자료"}</p>
         <div class="card-meta">
@@ -11845,6 +11848,24 @@ function eventPointerId(event) {
   return event.pointerId ?? "mouse";
 }
 
+function canStartCustomPointerDrag(event, options = {}) {
+  if (!event || event.isPrimary === false) return false;
+  if (event.button !== undefined && event.button !== 0) return false;
+  if (event.pointerType === "touch" || event.pointerType === "pen") return false;
+  // iPad trackpads report as mouse pointers; keep whole-surface drags off on touch-capable devices.
+  if (!options.explicit && Number(navigator.maxTouchPoints || 0) > 0) return false;
+  return true;
+}
+
+function cancelPendingPointerDrags() {
+  ui.pendingNavDrag = null;
+  ui.pendingBlockToolDrag = null;
+  ui.pendingEditorMarquee = null;
+  ui.pendingTodayTaskDrag = null;
+  ui.pendingDeleteDrag = null;
+  ui.pendingScheduleDrag = null;
+}
+
 function blockDragIdsForBlock(blocksList, blockId) {
   const index = blocksList.findIndex((block) => block.id === blockId);
   if (index < 0) return [blockId];
@@ -11862,7 +11883,7 @@ function handleBlockPointerMove(event) {
   if (pendingToolDrag && sameMouseLikePointer(pendingToolDrag.pointerId, event)) {
     const distance = Math.hypot(event.clientX - pendingToolDrag.startX, event.clientY - pendingToolDrag.startY);
     pendingToolDrag.maxDistance = Math.max(pendingToolDrag.maxDistance || 0, distance);
-    if (distance < 5) return;
+    if (distance < BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE) return;
     const startedButton =
       pendingToolDrag.target instanceof Element &&
       pendingToolDrag.target.isConnected &&
@@ -11942,7 +11963,7 @@ function finishBlockDrag(event) {
   if (ui.pendingBlockToolDrag && sameMouseLikePointer(ui.pendingBlockToolDrag.pointerId, event)) {
     const pendingToolDrag = ui.pendingBlockToolDrag;
     const distance = Math.hypot((event?.clientX ?? pendingToolDrag.startX) - pendingToolDrag.startX, (event?.clientY ?? pendingToolDrag.startY) - pendingToolDrag.startY);
-    const movedEnoughToCancelClick = Math.max(pendingToolDrag.maxDistance || 0, distance) > 2;
+    const movedEnoughToCancelClick = Math.max(pendingToolDrag.maxDistance || 0, distance) > BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE;
     ui.pendingBlockToolDrag = null;
     if (movedEnoughToCancelClick) {
       ui.suppressBlockAddClickUntil = Date.now() + 220;
@@ -12472,7 +12493,7 @@ function handleEditorMarqueePointerMove(event) {
   const marquee = ui.editorMarquee;
   if (!marquee || marquee.pointerId !== eventPointerId(event)) return;
   const distance = Math.hypot(event.clientX - marquee.startX, event.clientY - marquee.startY);
-  if (!marquee.active && distance < 5) return;
+  if (!marquee.active && distance < BLOCK_BODY_DRAG_ACTIVATION_DISTANCE) return;
   marquee.active = true;
   marquee.currentX = event.clientX;
   marquee.currentY = event.clientY;
@@ -12491,7 +12512,7 @@ function maybeStartPendingEditorMarqueeDrag(event) {
     return false;
   }
   const distance = Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY);
-  if (distance < 5) return false;
+  if (distance < BLOCK_BODY_DRAG_ACTIVATION_DISTANCE) return false;
   const resourceNote = pending.resourceNote?.isConnected
     ? pending.resourceNote
     : document.querySelector(`[data-resource-note="${cssEscape(pending.ownerId)}"]`);
@@ -15766,7 +15787,7 @@ function handlePointerDown(event) {
   const navButton = event.target.closest("[data-nav-key]");
   if (navButton && (ui.navOpen || ui.navDocked)) {
     if (event.type === "mousedown" && (ui.pendingNavDrag || ui.navPointerDrag)) return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     ui.pendingNavDrag = {
       key: navButton.dataset.navKey,
       pointerId: event.pointerId ?? "mouse",
@@ -15779,7 +15800,7 @@ function handlePointerDown(event) {
   const resourceDragHandle = event.target.closest("[data-resource-drag]");
   if (resourceDragHandle && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if (ui.resourceDrag && event.type === "mousedown") return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
     beginResourceDrag(resourceDragHandle.dataset.resourceDrag, event);
     return;
   }
@@ -15787,14 +15808,14 @@ function handlePointerDown(event) {
   const resourceResizeHandle = event.target.closest("[data-resource-resize]");
   if (resourceResizeHandle) {
     if (ui.resourceResize && event.type === "mousedown") return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
     beginResourceResize(resourceResizeHandle.dataset.resourceResize, event);
     return;
   }
 
   const resourceSideResizeHandle = event.target.closest("[data-resource-side-resize]");
   if (resourceSideResizeHandle) {
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
     beginResourceSideResize(resourceSideResizeHandle, event);
     return;
   }
@@ -15802,7 +15823,8 @@ function handlePointerDown(event) {
   const blockDragHandle = blockDragHandleFromEvent(event);
   if (blockDragHandle) {
     if (event.type === "mousedown" && ui.blockDrag) return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    const directBlockDragHandle = event.target.closest("[data-block-drag]");
+    if (!canStartCustomPointerDrag(event, { explicit: Boolean(directBlockDragHandle) })) return;
     beginBlockDrag(blockDragHandle.dataset.blockDrag, event, {
       block: blockDragHandle.closest(".block"),
       editor: blockDragHandle.closest(".block-editor"),
@@ -15815,7 +15837,7 @@ function handlePointerDown(event) {
   const selectedBlockDrag = selectedBlockDragTarget(event) || selectedBlockDragHoverTarget(event);
   if (selectedBlockDrag) {
     if (event.type === "mousedown" && ui.blockDrag) return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginBlockDrag(selectedBlockDrag.blockId, event, {
       block: selectedBlockDrag.block,
       editor: selectedBlockDrag.editor,
@@ -15839,7 +15861,7 @@ function handlePointerDown(event) {
       ui.blockSelection.ids.includes(selectedAddBlockId);
     if (selectedAddMatchesSelection) {
       if (event.type === "mousedown" && ui.pendingBlockToolDrag) return;
-      if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+      if (!canStartCustomPointerDrag(event, { explicit: true })) return;
       ui.pendingBlockToolDrag = {
         blockId: selectedAddBlockId,
         pointerId: eventPointerId(event),
@@ -15853,7 +15875,7 @@ function handlePointerDown(event) {
 
   const rangeGutterNote = event.target.closest("[data-resource-note]");
   if (rangeGutterNote && isResourceNoteRangeGutterPoint(event.target, event.clientX) && canStartEditorMarqueeDragWithinNote(rangeGutterNote, event)) {
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     const selectedGutterDrag = selectedBlockRowDragTargetFromPoint(event);
     if (selectedGutterDrag) {
       if (event.type === "mousedown" && ui.pendingBlockToolDrag) return;
@@ -15873,7 +15895,7 @@ function handlePointerDown(event) {
   const blockAddDrag = event.target.closest("[data-block-add]");
   if (blockAddDrag && !isResourceNoteRangeGutterPoint(event.target, event.clientX)) {
     if (event.type === "mousedown" && ui.pendingBlockToolDrag) return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
     ui.pendingBlockToolDrag = {
       blockId: blockAddDrag.dataset.blockAdd,
       pointerId: eventPointerId(event),
@@ -15887,14 +15909,14 @@ function handlePointerDown(event) {
   const resourceNote = event.target.closest("[data-resource-note]");
   if (resourceNote && canStartEditorMarqueeDrag(resourceNote, event)) {
     if (event.type === "mousedown" && (ui.pendingEditorMarquee || ui.editorMarquee)) return;
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginPendingEditorMarqueeDrag(resourceNote, event);
     return;
   }
 
   const todayTaskDragRow = event.target.closest(".today-dashboard-grid [data-task-inline-toggle]");
   if (ui.view === "today" && todayTaskDragRow && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     const card = todayTaskDragRow.closest("[data-today-task-id]");
     const task = itemById("tasks", card?.dataset.todayTaskId);
     if (!card || !task || ["done", "canceled"].includes(task.status)) return;
@@ -15911,7 +15933,7 @@ function handlePointerDown(event) {
 
   const deleteDragCard = event.target.closest("[data-delete-drag-type][data-delete-drag-id]");
   if (deleteDragCard && ["inbox", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event)) return;
     window.getSelection()?.removeAllRanges();
     ui.pendingDeleteDrag = {
       type: deleteDragCard.dataset.deleteDragType,
@@ -15925,7 +15947,7 @@ function handlePointerDown(event) {
 
   const schedulerButton = event.target.closest("[data-scheduler-open]");
   if (schedulerButton) {
-    if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
     const card = schedulerButton.closest("[data-schedule-hold]");
     const task = itemById("tasks", schedulerButton.dataset.schedulerOpen);
     if (!card || !task || ["done", "canceled"].includes(task.status)) return;
@@ -15942,12 +15964,15 @@ function handlePointerDown(event) {
   if (!card || event.target.closest("[data-toggle-task]")) return;
   if (event.type === "mousedown" && Date.now() - ui.lastSchedulePointerAt < 500) return;
   if (event.type === "pointerdown") ui.lastSchedulePointerAt = Date.now();
-  if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return;
+  if (!canStartCustomPointerDrag(event)) return;
   const task = itemById("tasks", card.dataset.scheduleHold);
   if (!task || ["done", "canceled"].includes(task.status)) return;
-  event.preventDefault();
-  event.stopPropagation();
-  beginScheduleDrag(task, card, event);
+  ui.pendingScheduleDrag = {
+    taskId: task.id,
+    pointerId: event.pointerId ?? "mouse",
+    startX: event.clientX,
+    startY: event.clientY,
+  };
 }
 
 function beginScheduleDrag(task, card, event) {
@@ -16025,7 +16050,7 @@ function maybeStartPendingTodayTaskDrag(event) {
   }
   const dx = event.clientX - pending.startX;
   const dy = event.clientY - pending.startY;
-  if (Math.hypot(dx, dy) < 8) return;
+  if (Math.hypot(dx, dy) < POINTER_DRAG_ACTIVATION_DISTANCE) return;
   const card = pending.card instanceof Element && pending.card.isConnected
     ? pending.card
     : document.querySelector(`[data-today-task-id="${cssEscape(pending.taskId)}"]`);
@@ -16177,7 +16202,7 @@ function maybeStartPendingDeleteDrag(event) {
   }
   const dx = event.clientX - pending.startX;
   const dy = event.clientY - pending.startY;
-  if (Math.hypot(dx, dy) < 8) return;
+  if (Math.hypot(dx, dy) < POINTER_DRAG_ACTIVATION_DISTANCE) return;
   const card = document.querySelector(`[data-delete-drag-type="${pending.type}"][data-delete-drag-id="${pending.id}"]`);
   const item = itemById(pending.type, pending.id);
   ui.pendingDeleteDrag = null;
@@ -16534,7 +16559,7 @@ function maybeStartPendingScheduleDrag(event) {
   }
   const dx = event.clientX - pending.startX;
   const dy = event.clientY - pending.startY;
-  if (Math.hypot(dx, dy) < 8) return;
+  if (Math.hypot(dx, dy) < POINTER_DRAG_ACTIVATION_DISTANCE) return;
   const task = itemById("tasks", pending.taskId);
   const card = document.querySelector(`[data-schedule-hold="${pending.taskId}"]`);
   ui.pendingScheduleDrag = null;
@@ -17989,7 +18014,7 @@ function handleNavPointerMove(event) {
   const pending = ui.pendingNavDrag;
   if (pending && navPointerMatches(pending, event)) {
     const distance = Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY);
-    if (distance < 6) return;
+    if (distance < BLOCK_BODY_DRAG_ACTIVATION_DISTANCE) return;
     beginNavPointerDrag(pending, event);
   }
 

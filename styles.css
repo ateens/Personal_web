@@ -5040,7 +5040,7 @@ button:focus-visible {
 
 .schedule-hold-card {
   user-select: none;
-  touch-action: manipulation;
+  touch-action: pan-y pinch-zoom;
   cursor: grab;
 }
 
@@ -5051,6 +5051,16 @@ button:focus-visible {
 
 [data-delete-drag-type] {
   user-select: none;
+  touch-action: pan-y pinch-zoom;
+}
+
+.nav-button,
+.today-dashboard-grid [data-task-inline-toggle] {
+  touch-action: pan-y pinch-zoom;
+}
+
+.resource-card-open {
+  -webkit-user-drag: none;
 }
 
 [data-delete-drag-type].is-holding {
