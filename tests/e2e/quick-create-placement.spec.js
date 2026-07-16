@@ -206,7 +206,7 @@ test("done lane advances through Box and preserves completion after every relati
   });
 });
 
-test("choice hover stays still and the persistent backdrop never restarts or fades between phases", async ({ page }) => {
+test("choice hover stays still and large phase surfaces slide without a backdrop flash", async ({ page }) => {
   await page.goto("/");
   await waitForFixtureWorkspace(page);
   await startTopbarCreate(page, "new-task", "깜빡임 없이 전환할 Task");
@@ -214,7 +214,7 @@ test("choice hover stays still and the persistent backdrop never restarts or fad
   const scheduler = page.getByRole("dialog", { name: "Task 날짜 배치" });
   await expect(scheduler).toBeVisible();
   await page.waitForTimeout(260);
-  await clickWithoutBackdropFlash(scheduler.locator('[data-scheduler-lane="today"]'));
+  await clickWithPlacementMotion(scheduler.locator('[data-scheduler-lane="today"]'));
 
   const choices = [
     ["boxId", FIXTURE_IDS.box],
@@ -227,8 +227,48 @@ test("choice hover stays still and the persistent backdrop never restarts or fad
     const activePhase = await expectOnlyPlacementPhase(page, phase);
     const choice = activePhase.locator(`[data-placement-choice][data-placement-value="${value}"]`);
     await expectChoiceDoesNotMoveOnHover(page, choice);
-    if (index < choices.length - 1) await clickWithoutBackdropFlash(choice);
+    if (index < choices.length - 1) await clickWithPlacementMotion(choice);
   }
+});
+
+test("reduced motion changes placement phases immediately without transition ghosts", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+  await startTopbarCreate(page, "new-task", "모션 감소 배치 Task");
+
+  await page.getByRole("dialog", { name: "Task 날짜 배치" }).locator('[data-scheduler-lane="today"]').click();
+  const placement = await expectOnlyPlacementPhase(page, "boxId");
+  const motion = await placement.evaluate((surface) => ({
+    ghosts: document.querySelectorAll("[data-placement-transition-ghost]").length,
+    running: surface.getAnimations({ subtree: true }).filter((animation) => animation.playState === "running").length,
+  }));
+  expect(motion).toEqual({ ghosts: 0, running: 0 });
+});
+
+test("Escape during phase motion removes the visual ghost without losing the selected date", async ({ page, request }) => {
+  const title = "전환 중 닫아도 저장되는 Task";
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+  const today = await localDateKey(page);
+  await startTopbarCreate(page, "new-task", title);
+
+  const motion = await page.getByRole("dialog", { name: "Task 날짜 배치" })
+    .locator('[data-scheduler-lane="today"]')
+    .evaluate((button) => {
+      button.click();
+      const ghostsBeforeEscape = document.querySelectorAll("[data-placement-transition-ghost]").length;
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      return {
+        ghostsAfterEscape: document.querySelectorAll("[data-placement-transition-ghost]").length,
+        ghostsBeforeEscape,
+      };
+    });
+
+  expect(motion).toEqual({ ghostsAfterEscape: 0, ghostsBeforeEscape: 1 });
+  await expect(page.locator(QUICK_PLACEMENT)).toBeHidden();
+  await expectPlacementScrollUnlocked(page);
+  await expect.poll(async () => taskByTitle(await fixtureSnapshot(request), title)?.dueDate).toBe(today);
 });
 
 test("date placement survives an in-flight create save response", async ({ page, request }) => {
@@ -437,7 +477,7 @@ test("placement supports back, empty choices, and cancel without navigating", as
   await selectPlacementChoice(page, "boxId", FIXTURE_IDS.box);
   await expectOnlyPlacementPhase(page, "goalId");
 
-  await page.locator(`${QUICK_PLACEMENT} [data-placement-back]`).click();
+  await clickWithPlacementMotion(page.locator(`${QUICK_PLACEMENT} [data-placement-back]`), -1);
   await expectOnlyPlacementPhase(page, "boxId");
   await selectPlacementChoice(page, "boxId", "");
   await selectPlacementChoice(page, "goalId", "");
@@ -521,10 +561,19 @@ async function expectChoiceDoesNotMoveOnHover(page, choice) {
   }
 }
 
-async function clickWithoutBackdropFlash(control) {
+async function clickWithPlacementMotion(control, direction = 1) {
+  await expect.poll(() => control.evaluate((element) => !element.closest("[inert]"))).toBe(true);
+  await expect.poll(() => control.evaluate((element) => (
+    !element.closest(".task-scheduler-stage.is-quick-placement, [data-quick-placement]")
+      ?.getAnimations()
+      .some((animation) => animation.playState === "running")
+  ))).toBe(true);
   const probe = await control.evaluate(async (button) => {
     const root = document.querySelector("#overlayRoot");
     if (!root) throw new Error("#overlayRoot is required for the placement backdrop probe");
+    const selector = ".task-scheduler-stage.is-quick-placement, [data-quick-placement]";
+    const startingStage = button.closest(selector);
+    if (!startingStage) throw new Error("A placement stage is required for the motion probe");
     const alpha = (color) => {
       if (!color || color === "transparent") return 0;
       const match = String(color).match(/^rgba?\(([^)]+)\)$/i);
@@ -538,6 +587,10 @@ async function clickWithoutBackdropFlash(control) {
       return alpha(style.backgroundColor) * (Number.isFinite(opacity) ? opacity : 1);
     };
     const baselineDarkness = darkness();
+    const startingCenter = (() => {
+      const rect = startingStage.getBoundingClientRect();
+      return rect.left + rect.width / 2;
+    })();
     const samples = [];
     let animationStarts = 0;
     const onAnimationStart = (event) => {
@@ -547,18 +600,45 @@ async function clickWithoutBackdropFlash(control) {
     };
     root.addEventListener("animationstart", onAnimationStart);
     button.click();
-    for (let frame = 0; frame < 24; frame += 1) {
+    const startedAt = performance.now();
+    while (performance.now() - startedAt < 700) {
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      const stage = document.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
-      samples.push({ darkness: darkness(), stageOpacity: Number.parseFloat(getComputedStyle(stage).opacity) });
+      const stage = root.querySelector(selector);
+      const stageRect = stage?.getBoundingClientRect();
+      const ghostRect = startingStage.isConnected ? startingStage.getBoundingClientRect() : null;
+      samples.push({
+        activeCount: root.querySelectorAll(selector).length,
+        darkness: darkness(),
+        ghostCenter: ghostRect ? ghostRect.left + ghostRect.width / 2 : null,
+        ghostCount: document.querySelectorAll("[data-placement-transition-ghost]").length,
+        incomingCenter: stageRect ? stageRect.left + stageRect.width / 2 : null,
+        stageOpacity: stage ? Number.parseFloat(getComputedStyle(stage).opacity) : 0,
+        titleCount: document.querySelectorAll("#quick-placement-title").length,
+      });
+      const incomingRunning = stage?.getAnimations().some((animation) => animation.playState === "running");
+      if (!startingStage.isConnected && stage && !incomingRunning && performance.now() - startedAt > 250) break;
     }
     root.removeEventListener("animationstart", onAnimationStart);
+    const ghostCenters = samples.map((sample) => sample.ghostCenter).filter(Number.isFinite);
+    const incomingCenters = samples.map((sample) => sample.incomingCenter).filter(Number.isFinite);
     return {
       animationStarts,
       baselineDarkness,
+      distinctGhostCenters: new Set(ghostCenters.map((value) => value.toFixed(1))).size,
+      distinctIncomingCenters: new Set(incomingCenters.map((value) => value.toFixed(1))).size,
+      finalCenter: incomingCenters.at(-1),
+      ghostsAfter: document.querySelectorAll("[data-placement-transition-ghost]").length,
+      maximumActiveCount: Math.max(...samples.map((sample) => sample.activeCount)),
+      maximumGhostCenter: Math.max(...ghostCenters),
+      maximumGhostCount: Math.max(...samples.map((sample) => sample.ghostCount)),
+      maximumIncomingCenter: Math.max(...incomingCenters),
       minimumDarkness: Math.min(...samples.map((sample) => sample.darkness)),
+      minimumGhostCenter: Math.min(...ghostCenters),
+      minimumIncomingCenter: Math.min(...incomingCenters),
       minimumStageOpacity: Math.min(...samples.map((sample) => sample.stageOpacity)),
+      maximumTitleCount: Math.max(...samples.map((sample) => sample.titleCount)),
       sameRoot: root === document.querySelector("#overlayRoot"),
+      startingCenter,
     };
   });
 
@@ -566,6 +646,20 @@ async function clickWithoutBackdropFlash(control) {
   expect(probe.animationStarts).toBe(0);
   expect(probe.minimumDarkness).toBeGreaterThanOrEqual(probe.baselineDarkness - 0.02);
   expect(probe.minimumStageOpacity).toBeGreaterThanOrEqual(0.99);
+  expect(probe.maximumActiveCount).toBe(1);
+  expect(probe.maximumGhostCount).toBe(1);
+  expect(probe.maximumTitleCount).toBeLessThanOrEqual(1);
+  expect(probe.ghostsAfter).toBe(0);
+  expect(probe.distinctGhostCenters).toBeGreaterThanOrEqual(4);
+  expect(probe.distinctIncomingCenters).toBeGreaterThanOrEqual(4);
+  expect(Math.abs(probe.finalCenter - probe.startingCenter)).toBeLessThanOrEqual(1);
+  if (direction >= 0) {
+    expect(probe.minimumGhostCenter).toBeLessThanOrEqual(probe.startingCenter - 24);
+    expect(probe.maximumIncomingCenter).toBeGreaterThanOrEqual(probe.finalCenter + 24);
+  } else {
+    expect(probe.maximumGhostCenter).toBeGreaterThanOrEqual(probe.startingCenter + 24);
+    expect(probe.minimumIncomingCenter).toBeLessThanOrEqual(probe.finalCenter - 24);
+  }
 }
 
 async function expectFloatingOverlay(page, activePhase, viewport) {

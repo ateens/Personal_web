@@ -19652,29 +19652,92 @@ function quickTaskPlacementUsesScheduler(taskId) {
   );
 }
 
+function clearQuickTaskPlacementGhosts() {
+  document.querySelectorAll("[data-placement-transition-ghost]").forEach((ghost) => ghost.remove());
+}
+
 function transitionQuickTaskPlacementSurface(control, done, direction = 1) {
   const placement = ui.taskPlacement;
   if (!placement || placement.transitioning) return Boolean(placement);
   if (!(control instanceof Element)) return false;
-  if (!control.closest(".task-scheduler-stage, .quick-placement-stage")) return false;
+  const surface = control.closest(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
+  if (!surface) return false;
   placement.transitioning = true;
   control.classList.add("is-placement-selected");
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof surface.animate !== "function") {
+    done();
+    animateQuickTaskPlacementPhase(direction);
+    if (ui.taskPlacement === placement) ui.taskPlacement.transitioning = false;
+    return true;
+  }
+  clearQuickTaskPlacementGhosts();
+  const style = getComputedStyle(surface);
+  const translate = !style.translate || style.translate === "none" ? "0px 0px" : style.translate;
+  const clipPath = !style.clipPath || style.clipPath === "none" ? "inset(0px)" : style.clipPath;
+  surface.getAnimations().forEach((animation) => animation.cancel());
+  surface.dataset.placementTransitionGhost = direction >= 0 ? "forward" : "back";
+  surface.removeAttribute("data-quick-placement");
+  surface.removeAttribute("data-placement-phase");
+  surface.removeAttribute("role");
+  surface.removeAttribute("aria-modal");
+  surface.removeAttribute("aria-labelledby");
+  surface.setAttribute("aria-hidden", "true");
+  surface.inert = true;
+  surface.style.pointerEvents = "none";
+  surface.style.zIndex = "86";
+  surface.querySelectorAll("[id]").forEach((element) => element.removeAttribute("id"));
+  document.body.append(surface);
+  const exit = surface.animate(
+    [
+      { clipPath, translate },
+      {
+        clipPath: direction >= 0 ? "inset(0 100% 0 0)" : "inset(0 0 0 100%)",
+        translate: `${direction >= 0 ? -56 : 56}px 0px`,
+      },
+    ],
+    { duration: 150, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" },
+  );
+  exit.finished.then(() => surface.remove(), () => surface.remove());
+
   done();
-  animateQuickTaskPlacementPhase(direction);
-  if (ui.taskPlacement?.taskId === placement.taskId) ui.taskPlacement.transitioning = false;
+  const nextSurface = els.overlayRoot?.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
+  if (!nextSurface) {
+    exit.cancel();
+    surface.remove();
+    if (ui.taskPlacement === placement) ui.taskPlacement.transitioning = false;
+    return true;
+  }
+  nextSurface.inert = true;
+  animateQuickTaskPlacementPhase(direction, 130);
+  window.setTimeout(() => {
+    if (ui.taskPlacement !== placement) return;
+    els.overlayRoot?.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]")?.removeAttribute("inert");
+    placement.transitioning = false;
+    focusQuickTaskPlacement();
+  }, 130);
   return true;
 }
 
-function animateQuickTaskPlacementPhase(direction) {
-  const surface = document.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
+function animateQuickTaskPlacementPhase(direction, delay = 0) {
+  const surface = els.overlayRoot?.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
   if (!surface || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof surface.animate !== "function") return;
 
+  surface.animate(
+    [
+      {
+        clipPath: direction >= 0 ? "inset(0 0 0 100%)" : "inset(0 100% 0 0)",
+        translate: `${direction >= 0 ? 56 : -56}px 0px`,
+      },
+      { clipPath: "inset(0px)", translate: "0px 0px" },
+    ],
+    { duration: 230, delay, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "backwards" },
+  );
   const entrySelector = surface.matches("[data-quick-placement]")
     ? ":scope > .quick-placement-progress, :scope > .quick-placement-head, :scope > .quick-placement-task-title, :scope > .quick-placement-choices, :scope > .quick-placement-footer"
     : ":scope > .task-scheduler-lanes, :scope > .task-scheduler, :scope > .quick-placement-first-actions";
   [...surface.querySelectorAll(entrySelector)].forEach((entry, index) => entry.animate(
     [{ opacity: 0.96 }, { opacity: 1 }],
-    { duration: 180, delay: index * 14, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "backwards" },
+    { duration: 180, delay: delay + index * 14, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "backwards" },
   ));
   const activeProgress = surface.querySelector(".quick-placement-progress-step.is-active i");
   if (activeProgress) {
@@ -19684,7 +19747,7 @@ function animateQuickTaskPlacementPhase(direction) {
         { transform: "scaleX(0.25) scaleY(2)", transformOrigin },
         { transform: "scaleX(1) scaleY(2)", transformOrigin },
       ],
-      { duration: 260, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+      { duration: 260, delay, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
     );
   }
 }
@@ -19757,6 +19820,7 @@ function goBackQuickTaskPlacement() {
 function cancelQuickTaskPlacement(options = {}) {
   const hadPlacement = Boolean(ui.taskPlacement);
   const returnFocus = ui.taskPlacement?.returnFocus || null;
+  clearQuickTaskPlacementGhosts();
   stopSchedulerMonthHover();
   if (ui.scheduleHoldTaskId) {
     document.querySelector(`[data-schedule-hold="${ui.scheduleHoldTaskId}"]`)?.classList.remove("is-holding");
@@ -19774,6 +19838,7 @@ function cancelQuickTaskPlacement(options = {}) {
 function cancelQuickTaskCreation() {
   const placement = ui.taskPlacement;
   if (!placement || placement.phaseIndex !== 0) return;
+  clearQuickTaskPlacementGhosts();
   const returnFocus = placement.returnFocus || null;
   const taskId = placement.taskId;
   stopSchedulerMonthHover();
