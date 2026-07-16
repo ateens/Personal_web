@@ -5,9 +5,9 @@ Measured on 2026-07-16 after the Railway-only deployment cutover work.
 ## Completed in the deployment cutover
 
 - Removed the Sites Worker, hosting metadata, proxy-bearer scripts, OAuth handoff, and unused static-host build artifacts.
-- Added a Railway-native single-owner access controller with opaque sessions and same-origin mutation checks.
+- Removed the Railway access-code/session gate at the operator's request and retained same-origin mutation checks independently.
 - Made the production build explicit and fail closed when `dist/client` is missing.
-- Added access-authentication and Railway build checks to the default verification path.
+- Added Railway deployment-policy, mutation-origin, and production-build checks to the default verification path.
 - Kept Google OAuth on one Railway origin.
 
 ## P1: split the browser monolith
@@ -59,7 +59,7 @@ Recommended boundaries:
 - `storage/migrations` plus collection repositories;
 - a real schema-version table and explicit migration runner.
 
-The new `server/access-auth.js` is the first extracted middleware boundary and should remain independent.
+The new `server/request-security.js` is the first extracted request-policy boundary and should remain independent.
 
 ## P2: reduce CSS cascade debt
 
@@ -78,15 +78,15 @@ Use cascade layers or an equally explicit ordering contract before deleting over
 
 ## P0: add an independent CI and release gate
 
-Railway currently runs source and build checks, but the same deployment is both the verifier and the release target. Add an independent GitHub Actions gate for syntax/source checks, build checks, baseline browser tests, and an isolated PostgreSQL smoke database before deployment. Keep post-deploy `/health`, anonymous/authenticated access, and OAuth-origin probes as release checks.
+Railway currently runs source and build checks, but the same deployment is both the verifier and the release target. Add an independent GitHub Actions gate for syntax/source checks, build checks, baseline browser tests, and an isolated PostgreSQL smoke database before deployment. Keep post-deploy `/health`, public app/API access, mutation-origin rejection, and OAuth-origin probes as release checks.
 
-## P1: close access-session and offline-data gaps
+## P1: harden the intentionally public deployment boundary
 
-The access controller is appropriate for one owner and one Railway replica, but sessions are process-local. A restart invalidates them, and multiple replicas would disagree about authorization. Move sessions to PostgreSQL or another shared TTL store before enabling horizontal scaling. Add authentication success/failure/lockout audit events without logging credentials or session tokens, and evaluate an `__Host-` cookie name once local HTTP development behavior is separated cleanly.
+There is no application-level authorization. Anyone who can reach the Railway URL can read workspace state, initiate Google OAuth, and issue valid mutations after reading the current revision. Revision preconditions, Origin checks, and rate limits protect concurrency and browser request integrity; they do not establish ownership.
 
-Logout currently invalidates the server session but does not erase the browser's IndexedDB snapshot, service-worker asset cache, or pending offline operations. Add an explicit "log out and clear local data" action and a threat-model test for shared-device use.
+If the deployment must become private again, design authorization as an explicit product boundary: identity, per-route policy, shared sessions, audit events, browser logout/local-data handling, tests, credential lifecycle, and operations must land together. Do not silently restore the former single access-code gate.
 
-The access-controller test exercises its real middleware, but the Google OAuth callback is represented by a dummy route. After extracting an injectable server factory, add an integration test that proves the callback still requires signed, expiring, one-time state and its matching cookie.
+After extracting an injectable server factory, add an integration test proving that unsafe public mutations reject missing or foreign Origin headers and that the Google OAuth callback still requires signed, expiring, one-time state and its matching cookie.
 
 The public Railway `/health` readiness path currently performs a PostgreSQL status query on every request. Add a short shared-result cache or split low-cost liveness from database readiness so anonymous polling cannot consume the connection pool; preserve an uncached failure transition for Railway's deployment decision.
 
@@ -98,13 +98,13 @@ Next verification improvements:
 
 - add focused smoke suites for every top-level view;
 - replace fixture-server behavior with an injectable production server and memory storage;
-- add focused authentication/OAuth integration tests against the extracted production server;
+- add focused public-boundary and OAuth integration tests against the extracted production server;
 
 ## Recommended execution order
 
 1. Independent CI and post-deploy release gate.
 2. Shared state contract and injectable server factory, including real OAuth integration coverage.
-3. Shared sessions, authentication audit events, offline-data logout, and cached readiness.
+3. Public-boundary integration tests, request audit events, and cached readiness.
 4. Incremental persistence and batched SQL.
 5. Browser event/router/persistence modules.
 6. Feature-by-feature browser modules.

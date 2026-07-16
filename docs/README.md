@@ -2,7 +2,7 @@
 
 Current operating documents:
 
-- `railway-access-runbook.md` — Railway-only hosting, access control, OAuth, verification, and rollback.
+- `railway-runbook.md` — Railway-only public hosting, OAuth, verification, and rollback.
 - `refactoring-backlog.md` — prioritized structural debt and a safe implementation order.
 - `resource-state-migration-backup-runbook-2026-07-11.md` — PostgreSQL state backup and restore procedure.
 - `sygma-os-structure-review.md` — structural review and longer-term refactoring context.

@@ -7,8 +7,8 @@ import http from "node:http";
 import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
-import { createAccessController } from "./server/access-auth.js";
 import { deploymentSecurityPolicy, railwayRuntimeDetected } from "./server/deployment-security.js";
+import { mutationOriginAllowed } from "./server/request-security.js";
 import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -129,20 +129,14 @@ const requireStatePrecondition = deploymentSecurity.forceStatePrecondition
   || railwayRuntime
   || process.env.NODE_ENV === "production"
   || envFlag("REQUIRE_STATE_PRECONDITION");
-const requireAppAccessAuth = deploymentSecurity.forceAppAccessAuth
-  || railwayRuntime
+const requireMutationOrigin = railwayRuntime
   || process.env.NODE_ENV === "production"
-  || envFlag("REQUIRE_APP_ACCESS_AUTH");
-const appAccess = createAccessController({
-  required: requireAppAccessAuth,
-  passwordSha256: deploymentSecurity.accessPasswordSha256 || process.env.APP_ACCESS_PASSWORD_SHA256,
-  sessionTtlSeconds: envInteger("APP_SESSION_TTL_SECONDS", 60 * 60 * 24 * 30, 300, 60 * 60 * 24 * 365),
-  requestKey: requestClientKey,
-});
+  || envFlag("REQUIRE_MUTATION_ORIGIN");
 const trustProxyIpHeaders = deploymentSecurity.isProductionTarget || envFlag("TRUST_PROXY_IP_HEADERS");
 const apiRateLimitWindowMs = envInteger("API_RATE_LIMIT_WINDOW_MS", 60_000, 100, 3_600_000);
 const apiRateLimitStateReadMax = envInteger("API_RATE_LIMIT_STATE_READ_MAX", 240, 0, 100_000);
 const apiRateLimitStateWriteMax = envInteger("API_RATE_LIMIT_STATE_WRITE_MAX", 120, 0, 100_000);
+const apiRateLimitGoogleReadMax = envInteger("API_RATE_LIMIT_GOOGLE_READ_MAX", 120, 0, 100_000);
 const apiRateLimitGoogleMutationMax = envInteger("API_RATE_LIMIT_GOOGLE_MUTATION_MAX", 20, 0, 100_000);
 const apiRateLimitMaxKeys = envInteger("API_RATE_LIMIT_MAX_KEYS", 10_000, 1, 100_000);
 const stateWriteMaxConcurrency = envInteger("STATE_WRITE_MAX_CONCURRENCY", 2, 1, 32);
@@ -182,11 +176,6 @@ function productionGoogleOAuthConfigurationValid() {
 
 if (productionBuildRequired && !existsSync(join(staticRoot, "index.html"))) {
   console.error("Production static build is missing. Run npm run build before starting the server.");
-  process.exit(1);
-}
-
-if (requireAppAccessAuth && !appAccess.configured) {
-  console.error("Application access authentication is required but not configured.");
   process.exit(1);
 }
 
@@ -293,9 +282,11 @@ function apiOperation(request, requestUrl) {
 
 function operationRateLimit(operation) {
   if (operation === "state.status" || operation === "state.read") return apiRateLimitStateReadMax;
+  if (operation === "google.status" || operation === "google.calendar.read") return apiRateLimitGoogleReadMax;
   if (
     operation === "state.write"
     || operation === "resource.write"
+    || operation === "google.connect.start"
     || operation === "google.event.insert"
     || operation === "google.disconnect"
   ) {
@@ -1774,6 +1765,15 @@ async function handleApiRequest(request, response, requestUrl) {
   try {
     const operation = apiOperation(request, requestUrl);
     request[apiOperationSymbol] = operation;
+    if (!mutationOriginAllowed(request, requestUrl, requireMutationOrigin)) {
+      auditEvent(request, "api.origin_rejected", {
+        status: 403,
+        code: "ORIGIN_NOT_ALLOWED",
+        outcome: "rejected",
+      });
+      sendJson(response, 403, { error: "Request origin is not allowed.", code: "ORIGIN_NOT_ALLOWED" });
+      return true;
+    }
     if (enforceApiRateLimit(request, response, operation)) return true;
     if (request.method === "GET" && requestUrl.pathname === "/api/state/status") {
       await handleStateStatus(response);
@@ -1953,9 +1953,6 @@ async function handleRequest(request, response) {
     }
     return;
   }
-
-  if (await appAccess.handleAuthRoute(request, response, requestUrl)) return;
-  if (appAccess.enforce(request, response, requestUrl)) return;
 
   if (await handleApiRequest(request, response, requestUrl)) return;
 

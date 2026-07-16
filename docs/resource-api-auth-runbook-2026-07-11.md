@@ -1,6 +1,6 @@
 # Resource API proxy authentication runbook
 
-> Archived on 2026-07-16. This document records the former Sites-to-Railway proxy model and is not an active deployment procedure. Use `railway-access-runbook.md` for the current Railway-only access model.
+> Archived on 2026-07-16. This document records the former Sites-to-Railway proxy model and is not an active deployment procedure. Use `railway-runbook.md` for the current Railway-only public model.
 
 Date: 2026-07-11
 

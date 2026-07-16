@@ -1,6 +1,6 @@
 # Resource completion requirement ledger
 
-> Historical verification ledger. Sites deployment statements below describe the pre-2026-07-16 architecture. See `railway-access-runbook.md` for current operations.
+> Historical verification ledger. Sites deployment statements below describe the pre-2026-07-16 architecture. See `railway-runbook.md` for current operations.
 
 Date: 2026-07-12 (Asia/Seoul)
 

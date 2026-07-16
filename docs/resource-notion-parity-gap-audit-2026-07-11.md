@@ -1,6 +1,6 @@
 # Resource / Notion parity gap audit
 
-> Historical gap audit. Sites deployment and anonymous-access statements below describe the pre-2026-07-16 architecture. See `railway-access-runbook.md` for current operations.
+> Historical gap audit. Sites deployment and anonymous-access statements below describe the pre-2026-07-16 architecture. See `railway-runbook.md` for current operations.
 
 Date: 2026-07-11 (Asia/Seoul)
 Phase: pre-implementation audit for Phase A/B/C

@@ -27,7 +27,7 @@ Then open:
 http://127.0.0.1:4180/
 ```
 
-Use `npm start` for PostgreSQL persistence and Google Calendar integration. PostgreSQL remains the remote source of truth. The browser also keeps a workspace-scoped IndexedDB snapshot and pending-operation queue so Resource drafts survive reloads and reconnect safely; it never stores Google OAuth tokens or the access code. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
+Use `npm start` for PostgreSQL persistence and Google Calendar integration. PostgreSQL remains the remote source of truth. The browser also keeps a workspace-scoped IndexedDB snapshot and pending-operation queue so Resource drafts survive reloads and reconnect safely; it never stores Google OAuth tokens. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
 
 The server creates the `app_state` and `app_private_data` tables automatically. The full app state is still stored as a JSONB document in `app_state` for backup, settings, migration, and client compatibility. Internal private data such as Google OAuth tokens is stored in `app_private_data`. Existing `localStorage` state is only read as a legacy migration source and removed after PostgreSQL sync.
 
@@ -61,14 +61,6 @@ DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web npm ru
 
 This starts a temporary app server, writes state through `/api/state`, reads it back, and checks the JSONB tables plus the relational collection tables directly.
 
-Verify the Railway-native access-code session gate with:
-
-```bash
-npm run check:access-auth
-```
-
-This isolated check covers anonymous rejection, access-code login, HttpOnly/Secure/SameSite cookies, mutation origin checks, logout, OAuth callback admission, and redirect safety. It does not require PostgreSQL or change production data.
-
 ## Production Build
 
 Create and verify the optimized production bundle with:
@@ -77,7 +69,6 @@ Create and verify the optimized production bundle with:
 npm run check
 npm run check:build
 npm run check:postgres
-npm run check:access-auth
 ```
 
 The build writes content-hashed, minified JS/CSS to `dist/client/`. To preview that exact bundle locally:
@@ -92,15 +83,9 @@ The Node server compresses responses when supported, validates conditional reque
 
 Railway is the only production hosting and runtime target. `railway.json` runs `npm run check && npm run check:build` during the image build, then starts the verified bundle with `npm run start:production`. The server listens on Railway's injected `PORT`, serves the optimized client and API from one origin, and exposes `/health` for deployment health checks.
 
-Production is private by default. Every Railway runtime and every `NODE_ENV=production` process fails closed unless the single-owner access-code gate has a valid SHA-256 verifier. The exact production project/environment/service IDs supply the committed verifier; Railway preview services must provide `APP_ACCESS_PASSWORD_SHA256`. Successful login creates a bounded in-memory session with an HttpOnly, Secure, SameSite cookie; unsafe authenticated requests must also come from the exact request origin. `/health` and the state-validated Google OAuth callback are the only public runtime paths. A restart invalidates sessions and requires login again.
+There is no application-level password or login gate. The Railway URL, static app, and PostgreSQL-backed API are directly reachable, while production state writes still require revision preconditions and remain rate-limited. Anyone who can reach the URL can read the workspace and issue valid mutations, so do not treat the deployment as private.
 
-The access code for this deployment is stored in the macOS login keychain, not in the repository. Retrieve it locally with:
-
-```bash
-security find-generic-password -a "$USER" -s "SYGMA Railway Access" -w
-```
-
-For a local non-production deployment, set `REQUIRE_APP_ACCESS_AUTH=1` and provide a high-entropy `APP_ACCESS_PASSWORD_SHA256`. The exact production target uses the target-scoped one-way verifier in `server/deployment-security.js`, so a credential rotation is an intentional reviewed code change. Any other Railway service or production-mode start without its own verifier exits before the server begins listening.
+The active operating procedure is in [the Railway runbook](docs/railway-runbook.md).
 
 Register the matching authorized redirect URI in Google Cloud. For the default local server it is:
 
@@ -132,6 +117,7 @@ REQUIRE_STATE_PRECONDITION=1
 API_RATE_LIMIT_WINDOW_MS=60000
 API_RATE_LIMIT_STATE_READ_MAX=240
 API_RATE_LIMIT_STATE_WRITE_MAX=120
+API_RATE_LIMIT_GOOGLE_READ_MAX=120
 API_RATE_LIMIT_GOOGLE_MUTATION_MAX=20
 API_RATE_LIMIT_MAX_KEYS=10000
 STATE_WRITE_MAX_CONCURRENCY=2
@@ -166,9 +152,7 @@ https://personalweb-production-81a6.up.railway.app/
 - `manifest.json`
 - `service-worker.js`
 - `server.js`
-- `server/access-auth.js`
 - `server/deployment-security.js`
 - `scripts/build.mjs`
-- `scripts/check-access-auth.mjs`
 - `railway.json`
 - `icons/`
