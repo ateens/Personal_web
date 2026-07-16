@@ -7420,7 +7420,7 @@ function hasPendingLocalWorkspaceWork() {
     ui.todayTaskDrag ||
     ui.deleteDrag ||
     ui.scheduler?.dragging ||
-    ui.taskPlacement?.transitioning
+    ui.taskPlacement
   );
 }
 
@@ -7436,7 +7436,7 @@ function renderServiceWorkerUpdateNotice() {
 }
 
 function renderServiceWorkerUpdateNoticeIfNeeded() {
-  if (!serviceWorkerUpdateAvailable || !els.overlayRoot) return;
+  if (!serviceWorkerUpdateAvailable || !els.overlayRoot || ui.taskPlacement) return;
   renderOverlays();
 }
 
@@ -7484,8 +7484,12 @@ async function handleResourceConnectionRestored() {
 
 function updateTaskSchedulingMode() {
   const taskPlacementOpen = Boolean(ui.taskPlacement);
+  const relationPlacementOpen = taskPlacementOpen && Number(ui.taskPlacement?.phaseIndex || 0) > 0;
   app.classList.toggle("is-task-scheduling", Boolean(ui.scheduler?.dragging && ui.view === "tasks"));
   app.classList.toggle("is-task-placement", taskPlacementOpen);
+  app.classList.toggle("is-task-placement-date", taskPlacementOpen && !relationPlacementOpen);
+  els.overlayRoot?.classList.toggle("has-task-placement", taskPlacementOpen);
+  els.overlayRoot?.classList.toggle("has-relation-placement", relationPlacementOpen);
   document.documentElement.classList.toggle("is-task-placement-open", taskPlacementOpen);
   document.body.classList.toggle("is-task-placement-open", taskPlacementOpen);
   app.querySelector(".layout")?.toggleAttribute("inert", taskPlacementOpen);
@@ -7506,9 +7510,7 @@ function renderTaskScheduler() {
   const today = dateKey(new Date());
   const scheduledDate = taskScheduledDate(task) || task.dueDate || "";
   const days = monthGridDays(monthDate);
-  const laneTargets = placementFlow
-    ? schedulerLaneTargets(task.id).filter((lane) => ["unplanned", "today", "tomorrow", "scheduled"].includes(lane.key))
-    : schedulerLaneTargets(task.id);
+  const laneTargets = schedulerLaneTargets(task.id);
   const dayTaskCounts = schedulerTaskCountsByDate(task.id);
   const prevMonth = addMonths(monthDate, -1);
   const nextMonth = addMonths(monthDate, 1);
@@ -7523,17 +7525,16 @@ function renderTaskScheduler() {
         <span>${esc(monthSideLabel(prevMonth))}</span>
       </div>
       <div class="task-scheduler">
-        ${placementFlow ? renderQuickTaskPlacementProgress(0) : ""}
         <div class="task-scheduler-head">
           <div>
             <strong>${esc(monthLabel(monthDate))}</strong>
-            <span>${placementFlow ? `1 / 5 · 날짜를 클릭해 배치 · ${esc(task.title)}` : esc(task.title)}</span>
+            <span>${esc(task.title)}</span>
           </div>
           <div class="task-scheduler-nav">
             <button class="task-scheduler-nav-button" type="button" data-scheduler-month="${monthKey(addMonths(monthDate, -1))}" aria-label="이전 달">‹</button>
             <button class="task-scheduler-nav-button" type="button" data-scheduler-month="${monthKey(new Date())}">오늘</button>
             <button class="task-scheduler-nav-button" type="button" data-scheduler-month="${monthKey(addMonths(monthDate, 1))}" aria-label="다음 달">›</button>
-            <button class="task-scheduler-nav-button" type="button" data-scheduler-close aria-label="닫기">${placementFlow ? "나중에" : "닫기"}</button>
+            <button class="task-scheduler-nav-button" type="button" data-scheduler-close aria-label="닫기">닫기</button>
           </div>
         </div>
         <div class="task-scheduler-weekdays">
@@ -7548,7 +7549,7 @@ function renderTaskScheduler() {
       </div>
       ${
         placementFlow
-          ? ""
+          ? renderQuickTaskFirstActions()
           : `<button class="task-scheduler-delete-zone ${scheduler.dragOverAction === "delete" ? "is-drop-target" : ""}" type="button" data-scheduler-action="delete" aria-label="Task 삭제">
               <span>
                 <strong>삭제</strong>
@@ -7565,6 +7566,19 @@ function renderTaskScheduler() {
           </div>`
         : ""
     }
+  `;
+}
+
+function renderQuickTaskFirstActions() {
+  return `
+    <div class="quick-placement-first-actions" role="group" aria-label="새 할 일 생성 방식">
+      <button class="task-scheduler-lane quick-placement-first-action is-cancel" type="button" data-placement-create-cancel>
+        <span><strong>취소</strong><em>할 일 생성 취소</em></span>
+      </button>
+      <button class="task-scheduler-lane quick-placement-first-action is-create" type="button" data-placement-create-now>
+        <span><strong>바로 만들기</strong><em>선택 없이 저장</em></span>
+      </button>
+    </div>
   `;
 }
 
@@ -7592,8 +7606,7 @@ function renderQuickTaskPlacement() {
   const step = relationSteps[relationIndex];
   if (!step) return "";
   let options = "";
-  for (let index = 0; index < step.options.length; index += 1) {
-    const option = step.options[index];
+  for (const option of step.options) {
     const selected = (placement.values[step.key] || "") === option.value;
     options += `
       <button
@@ -7602,7 +7615,6 @@ function renderQuickTaskPlacement() {
         data-placement-choice
         data-placement-step="${step.key}"
         data-placement-value="${esc(option.value)}"
-        style="--placement-option-index:${Math.min(index, 8)}"
       >
         <span>${esc(option.label)}</span>
         ${option.meta ? `<small>${esc(option.meta)}</small>` : ""}
@@ -9436,6 +9448,22 @@ function handleClick(event) {
     event.preventDefault();
     event.stopPropagation();
     cancelQuickTaskPlacement({ announce: true });
+    return;
+  }
+
+  const placementCreateCancel = event.target.closest("[data-placement-create-cancel]");
+  if (placementCreateCancel) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelQuickTaskCreation();
+    return;
+  }
+
+  const placementCreateNow = event.target.closest("[data-placement-create-now]");
+  if (placementCreateNow) {
+    event.preventDefault();
+    event.stopPropagation();
+    finishQuickTaskPlacementImmediately();
     return;
   }
 
@@ -16800,17 +16828,15 @@ function clearPendingScheduleDrag(event) {
 }
 
 function updateScheduleDragPosition(clientX, clientY) {
-  if (!ui.scheduler) return;
-  if (ui.scheduler.dragging) {
-    ui.scheduler.dragX = clientX + 14;
-    ui.scheduler.dragY = clientY + 14;
-    const ghost = document.querySelector(".schedule-drag-ghost");
-    if (ghost) {
-      ghost.style.left = `${ui.scheduler.dragX}px`;
-      ghost.style.top = `${ui.scheduler.dragY}px`;
-    }
-    setScheduleDropTarget(schedulerTargetFromPoint(clientX, clientY));
+  if (!ui.scheduler?.dragging) return;
+  ui.scheduler.dragX = clientX + 14;
+  ui.scheduler.dragY = clientY + 14;
+  const ghost = document.querySelector(".schedule-drag-ghost");
+  if (ghost) {
+    ghost.style.left = `${ui.scheduler.dragX}px`;
+    ghost.style.top = `${ui.scheduler.dragY}px`;
   }
+  setScheduleDropTarget(schedulerTargetFromPoint(clientX, clientY));
   updateSchedulerMonthHover(clientX, clientY);
 }
 
@@ -16906,6 +16932,7 @@ function stopSchedulerMonthHover() {
 }
 
 function handleKeydown(event) {
+  if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (handleInlineColorMenuKeydown(event)) return;
   if (handleSlashMenuDocumentKeydown(event)) return;
@@ -17487,6 +17514,7 @@ function isPrintableBlockReplacementKey(event) {
 }
 
 function handleDocumentKeydown(event) {
+  if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (event.key === "Shift" || event.shiftKey) ui.shiftKeyDown = true;
   if (handleSlashMenuDocumentKeydown(event)) return;
@@ -17680,14 +17708,9 @@ function handleDocumentKeydown(event) {
     ui.slash = null;
     renderOverlays();
   }
-  if (event.key === "Tab" && ui.taskPlacement && trapQuickTaskPlacementFocus(event)) return;
   if (event.key === "Escape") {
     if (ui.scheduler) {
       closeTaskScheduler();
-      return;
-    }
-    if (ui.taskPlacement) {
-      cancelQuickTaskPlacement({ announce: true });
       return;
     }
     if (ui.navOpen && !ui.navDocked) {
@@ -19595,7 +19618,6 @@ function startQuickTaskPlacement(taskId, returnFocus = null) {
     taskId,
     phaseIndex: 0,
     transitioning: false,
-    transitionToken: "",
     returnFocus: returnFocus instanceof HTMLElement
       ? returnFocus
       : document.activeElement instanceof HTMLElement
@@ -19634,17 +19656,10 @@ function transitionQuickTaskPlacementSurface(control, done) {
   const placement = ui.taskPlacement;
   if (!placement || placement.transitioning) return Boolean(placement);
   if (!(control instanceof Element)) return false;
-  const surface = control.closest(".task-scheduler-stage, .quick-placement-stage");
-  if (!surface) return false;
-  const token = id();
+  if (!control.closest(".task-scheduler-stage, .quick-placement-stage")) return false;
   placement.transitioning = true;
-  placement.transitionToken = token;
   control.classList.add("is-placement-selected");
-  surface.classList.add("is-phase-leaving");
-  window.setTimeout(() => {
-    if (ui.taskPlacement?.transitionToken !== token) return;
-    done();
-  }, 190);
+  done();
   return true;
 }
 
@@ -19653,7 +19668,6 @@ function advanceQuickTaskPlacementAfterDate(task) {
   if (!placement || placement.taskId !== task.id) return false;
   placement.phaseIndex = 1;
   placement.transitioning = false;
-  placement.transitionToken = "";
   syncQuickTaskPlacementValues(placement, task);
   renderOverlays();
   focusQuickTaskPlacement();
@@ -19688,7 +19702,6 @@ function selectQuickTaskPlacementChoice(stepKey, value, control) {
     }
     currentPlacement.phaseIndex += 1;
     currentPlacement.transitioning = false;
-    currentPlacement.transitionToken = "";
     renderOverlays();
     focusQuickTaskPlacement();
   };
@@ -19702,7 +19715,6 @@ function goBackQuickTaskPlacement() {
   if (!placement || !task || placement.transitioning) return;
   if (placement.phaseIndex <= 1) {
     placement.phaseIndex = 0;
-    placement.transitionToken = "";
     openTaskScheduler(task.id, window.innerWidth / 2, window.innerHeight / 2, {
       mode: "quick-create",
       month: effectiveTaskDate(task)?.slice(0, 7) || monthKey(new Date()),
@@ -19724,9 +19736,35 @@ function cancelQuickTaskPlacement(options = {}) {
   ui.scheduleHoldTaskId = "";
   ui.scheduler = null;
   ui.taskPlacement = null;
+  renderView({ soft: true, animateCards: ui.view === "tasks" });
+  renderDetail();
   renderOverlays();
   restoreQuickTaskPlacementFocus(returnFocus);
   if (hadPlacement && options.announce) showToast("할 일은 만들었습니다. 배치는 나중에 이어갈 수 있습니다.");
+}
+
+function cancelQuickTaskCreation() {
+  const placement = ui.taskPlacement;
+  if (!placement || placement.phaseIndex !== 0) return;
+  const returnFocus = placement.returnFocus || null;
+  const taskId = placement.taskId;
+  stopSchedulerMonthHover();
+  ui.scheduleHoldTaskId = "";
+  ui.scheduler = null;
+  ui.taskPlacement = null;
+  const removed = deleteEntity("tasks", taskId);
+  if (removed) saveState();
+  renderView({ soft: true, animateCards: ui.view === "tasks" });
+  renderDetail();
+  renderOverlays();
+  restoreQuickTaskPlacementFocus(returnFocus);
+  if (removed) showToast("할 일 생성을 취소했습니다.");
+}
+
+function finishQuickTaskPlacementImmediately() {
+  if (!ui.taskPlacement || ui.taskPlacement.phaseIndex !== 0) return;
+  cancelQuickTaskPlacement();
+  showToast("할 일을 만들었습니다.");
 }
 
 function focusQuickTaskPlacement() {
@@ -19763,6 +19801,23 @@ function trapQuickTaskPlacementFocus(event) {
   if (!movingBeforeFirst && !movingAfterLast) return false;
   event.preventDefault();
   focusable[movingBeforeFirst ? focusable.length - 1 : 0].focus({ preventScroll: true });
+  return true;
+}
+
+function handleTaskPlacementKeydown(event) {
+  if (!ui.taskPlacement) return false;
+  event.stopPropagation();
+  if (event.key === "Tab") {
+    trapQuickTaskPlacementFocus(event);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    if (ui.scheduler) closeTaskScheduler();
+    else cancelQuickTaskPlacement({ announce: true });
+    return true;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) event.preventDefault();
   return true;
 }
 
@@ -19842,7 +19897,7 @@ function commitScheduledTask(task, date) {
   ui.scheduler = null;
   saveState();
   showToast(`${date.slice(5)}에 배치했습니다.`);
-  renderView({ soft: true, animateCards: ui.view === "tasks" });
+  if (!continuePlacement) renderView({ soft: true, animateCards: ui.view === "tasks" });
   if (!continuePlacement || !advanceQuickTaskPlacementAfterDate(task)) renderOverlays();
 }
 
@@ -19856,19 +19911,20 @@ function commitTaskScheduleAction(task, action) {
     ui.scheduler = null;
     saveState();
     showToast("미계획으로 옮겼습니다.");
-    renderView({ soft: true, animateCards: ui.view === "tasks" });
+    if (!continuePlacement) renderView({ soft: true, animateCards: ui.view === "tasks" });
     if (!continuePlacement || !advanceQuickTaskPlacementAfterDate(task)) renderOverlays();
     return;
   }
   if (action === "done") {
+    const continuePlacement = quickTaskPlacementUsesScheduler(task.id);
     task.status = "done";
     task.completedAt = task.completedAt || new Date().toISOString();
     stopSchedulerMonthHover();
     ui.scheduler = null;
     saveState();
     showToast("완료로 옮겼습니다.");
-    renderView({ soft: true, animateCards: ui.view === "tasks" });
-    renderOverlays();
+    if (!continuePlacement) renderView({ soft: true, animateCards: ui.view === "tasks" });
+    if (!continuePlacement || !advanceQuickTaskPlacementAfterDate(task)) renderOverlays();
     return;
   }
   if (action === "delete") {
