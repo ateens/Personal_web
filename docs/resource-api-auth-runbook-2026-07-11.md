@@ -1,5 +1,7 @@
 # Resource API proxy authentication runbook
 
+> Archived on 2026-07-16. This document records the former Sites-to-Railway proxy model and is not an active deployment procedure. Use `railway-access-runbook.md` for the current Railway-only access model.
+
 Date: 2026-07-11
 
 Scope: the single-workspace PostgreSQL API served by `server.js` and reached through the private OpenAI Sites Worker in `worker/index.js`.

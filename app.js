@@ -23399,6 +23399,10 @@ async function apiJson(path, options = {}) {
     payload.revision = responseRevision;
   }
   if (!response.ok) {
+    if (response.status === 401 && payload.code === "AUTH_REQUIRED") {
+      const returnTo = currentRelativeUrl();
+      window.location.assign(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
+    }
     const error = new Error(payload.error || "요청에 실패했습니다.");
     error.status = response.status;
     error.code = typeof payload.code === "string" ? payload.code : "";

@@ -2,12 +2,13 @@ import { createReadStream, existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
-import { deploymentSecurityPolicy } from "./server/deployment-security.js";
+import { createAccessController } from "./server/access-auth.js";
+import { deploymentSecurityPolicy, railwayRuntimeDetected } from "./server/deployment-security.js";
 import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -95,11 +96,6 @@ const RELATION_COLLECTION_ALIASES = new Map([
   ["habits", "habits"],
   ["journals", "journals"],
 ]);
-const API_PROXY_AUTH_PRIVATE_DATA_KEY = "api_proxy_auth";
-const API_PROXY_AUTH_CONFIG_VERSION = 1;
-const API_PROXY_AUTH_TOKEN_MIN_LENGTH = 32;
-const API_PROXY_AUTH_TOKEN_MAX_LENGTH = 512;
-
 async function loadLocalEnv() {
   try {
     const raw = await readFile(join(root, ".env"), "utf8");
@@ -122,23 +118,28 @@ const staticRoot = process.env.STATIC_ROOT
   : existsSync(join(builtStaticRoot, "index.html"))
     ? builtStaticRoot
     : sourceStaticRoot;
+const productionBuildRequired = process.env.NODE_ENV === "production" || envFlag("REQUIRE_PRODUCTION_BUILD");
 const port = Number(process.env.PORT || 4180);
 const host = process.env.HOST || "0.0.0.0";
 const databaseUrl = process.env.DATABASE_URL || "";
 const appStateId = process.env.APP_STATE_ID || "default";
 const deploymentSecurity = deploymentSecurityPolicy(process.env);
-const requireStatePrecondition = deploymentSecurity.forceStatePrecondition || envFlag("REQUIRE_STATE_PRECONDITION");
-const failClosedApiAuth = deploymentSecurity.forceApiAuth || envFlag("FAIL_CLOSED_API_AUTH");
-const apiBearerToken = process.env.API_BEARER_TOKEN || "";
-const configuredApiBearerTokenSha256 = deploymentSecurity.apiBearerTokenSha256
-  || String(process.env.API_BEARER_TOKEN_SHA256 || "").trim();
-const apiBearerTokenDigest = configuredApiBearerTokenSha256
-  ? parseSha256Digest(configuredApiBearerTokenSha256)
-  : apiBearerToken
-    ? tokenDigest(apiBearerToken)
-    : null;
-const apiProxyAuthCacheTtlMs = envInteger("API_PROXY_AUTH_CACHE_TTL_MS", 1_000, 100, 5_000);
-const trustProxyIpHeaders = envFlag("TRUST_PROXY_IP_HEADERS");
+const railwayRuntime = railwayRuntimeDetected(process.env);
+const requireStatePrecondition = deploymentSecurity.forceStatePrecondition
+  || railwayRuntime
+  || process.env.NODE_ENV === "production"
+  || envFlag("REQUIRE_STATE_PRECONDITION");
+const requireAppAccessAuth = deploymentSecurity.forceAppAccessAuth
+  || railwayRuntime
+  || process.env.NODE_ENV === "production"
+  || envFlag("REQUIRE_APP_ACCESS_AUTH");
+const appAccess = createAccessController({
+  required: requireAppAccessAuth,
+  passwordSha256: deploymentSecurity.accessPasswordSha256 || process.env.APP_ACCESS_PASSWORD_SHA256,
+  sessionTtlSeconds: envInteger("APP_SESSION_TTL_SECONDS", 60 * 60 * 24 * 30, 300, 60 * 60 * 24 * 365),
+  requestKey: requestClientKey,
+});
+const trustProxyIpHeaders = deploymentSecurity.isProductionTarget || envFlag("TRUST_PROXY_IP_HEADERS");
 const apiRateLimitWindowMs = envInteger("API_RATE_LIMIT_WINDOW_MS", 60_000, 100, 3_600_000);
 const apiRateLimitStateReadMax = envInteger("API_RATE_LIMIT_STATE_READ_MAX", 240, 0, 100_000);
 const apiRateLimitStateWriteMax = envInteger("API_RATE_LIMIT_STATE_WRITE_MAX", 120, 0, 100_000);
@@ -154,16 +155,9 @@ const rateLimitBuckets = new Map();
 const stateWriteQueue = [];
 let rateLimitChecks = 0;
 let activeStateWrites = 0;
-let apiProxyAuthCache = null;
-let apiProxyAuthRefresh = null;
-let apiProxyAuthCacheGeneration = 0;
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
-const googleOAuthHandoffSecretValue = String(process.env.GOOGLE_OAUTH_HANDOFF_SECRET || "");
-const googleOAuthHandoffSecret = validGoogleOAuthHandoffSecret(googleOAuthHandoffSecretValue)
-  ? googleOAuthHandoffSecretValue
-  : "";
 const googleTokenFile = resolve(process.env.GOOGLE_TOKEN_FILE || join(root, ".data/google-token.json"));
 const googleScopes = [
   "https://www.googleapis.com/auth/calendar.events",
@@ -174,29 +168,26 @@ const googleAuthUrl = "https://accounts.google.com/o/oauth2/v2/auth";
 const googleTokenUrl = "https://oauth2.googleapis.com/token";
 const googleCalendarApi = "https://www.googleapis.com/calendar/v3";
 const oauthStateCookie = "sygma_google_oauth_state";
-const GOOGLE_OAUTH_HANDOFF_AUDIENCE = "google-oauth-start";
-const GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX = "sygma-google-oauth-handoff-v1.";
-const GOOGLE_OAUTH_HANDOFF_TTL_SECONDS = 120;
 const GOOGLE_OAUTH_STATE_AUDIENCE = "google-oauth-state";
 const GOOGLE_OAUTH_STATE_SIGNATURE_PREFIX = "sygma-google-oauth-state-v1.";
 const GOOGLE_OAUTH_STATE_TTL_SECONDS = 600;
 let storage;
 
-function validGoogleOAuthHandoffSecret(value) {
-  const raw = String(value || "");
-  return raw === raw.trim()
-    && Buffer.byteLength(raw, "utf8") >= 32
-    && Buffer.byteLength(raw, "utf8") <= 512;
-}
-
 function productionGoogleOAuthConfigurationValid() {
   if (!deploymentSecurity.isProductionTarget) return true;
   if (!googleClientId || !googleClientSecret) return false;
-  if (!googleOAuthHandoffSecret) return false;
-  if (process.env.GOOGLE_REDIRECT_URI !== deploymentSecurity.googleRedirectUri) return false;
-  if (process.env.PUBLIC_BASE_URL !== deploymentSecurity.publicBaseUrl) return false;
-  if (apiBearerTokenDigest && timingSafeEqual(tokenDigest(googleOAuthHandoffSecret), apiBearerTokenDigest)) return false;
-  return true;
+  return validAbsoluteHttpUrl(deploymentSecurity.googleRedirectUri, "/api/google/oauth/callback")
+    && validAbsoluteHttpUrl(deploymentSecurity.publicBaseUrl);
+}
+
+if (productionBuildRequired && !existsSync(join(staticRoot, "index.html"))) {
+  console.error("Production static build is missing. Run npm run build before starting the server.");
+  process.exit(1);
+}
+
+if (requireAppAccessAuth && !appAccess.configured) {
+  console.error("Application access authentication is required but not configured.");
+  process.exit(1);
 }
 
 if (!productionGoogleOAuthConfigurationValid()) {
@@ -234,12 +225,22 @@ function validAbsoluteHttpUrl(value, expectedPath = "") {
   }
 }
 
+function configuredPublicBaseUrl() {
+  return String(deploymentSecurity.publicBaseUrl || process.env.PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+}
+
+function configuredGoogleRedirectUri(request) {
+  return deploymentSecurity.googleRedirectUri
+    || process.env.GOOGLE_REDIRECT_URI
+    || `${requestOrigin(request)}/api/google/oauth/callback`;
+}
+
 function googleProductionOAuthReady() {
   if (!deploymentSecurity.isProductionTarget) return true;
   return Boolean(
     productionGoogleOAuthConfigurationValid()
-    && validAbsoluteHttpUrl(process.env.GOOGLE_REDIRECT_URI, "/api/google/oauth/callback")
-    && validAbsoluteHttpUrl(process.env.PUBLIC_BASE_URL),
+    && validAbsoluteHttpUrl(configuredGoogleRedirectUri(), "/api/google/oauth/callback")
+    && validAbsoluteHttpUrl(configuredPublicBaseUrl()),
   );
 }
 
@@ -248,14 +249,15 @@ function googleConfigured() {
 }
 
 function requestOrigin(request) {
-  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  const publicBaseUrl = configuredPublicBaseUrl();
+  if (publicBaseUrl) return publicBaseUrl;
   const proto = request.headers["x-forwarded-proto"] || (request.socket.encrypted ? "https" : "http");
   const requestHost = request.headers["x-forwarded-host"] || request.headers.host || `${host}:${port}`;
   return `${proto}://${requestHost}`;
 }
 
 function redirectUri(request) {
-  return process.env.GOOGLE_REDIRECT_URI || `${requestOrigin(request)}/api/google/oauth/callback`;
+  return configuredGoogleRedirectUri(request);
 }
 
 function isSecureRequest(request) {
@@ -313,9 +315,9 @@ function normalizedIpAddress(value) {
 function requestClientKey(request) {
   if (trustProxyIpHeaders) {
     const forwarded = String(request.headers["x-forwarded-for"] || "").split(",", 1)[0];
-    const proxyAddress = normalizedIpAddress(forwarded)
+    const proxyAddress = normalizedIpAddress(request.headers["x-real-ip"])
       || normalizedIpAddress(request.headers["cf-connecting-ip"])
-      || normalizedIpAddress(request.headers["x-real-ip"]);
+      || normalizedIpAddress(forwarded);
     if (proxyAddress) return proxyAddress;
   }
   return normalizedIpAddress(request.socket?.remoteAddress) || "unknown-socket";
@@ -483,127 +485,6 @@ function sendApiError(response, error) {
   sendJson(response, status, payload, headers);
 }
 
-function tokenDigest(value) {
-  return createHash("sha256").update(String(value || ""), "utf8").digest();
-}
-
-function parseSha256Digest(value) {
-  const normalized = String(value || "").trim().replace(/^sha256:/i, "").toLowerCase();
-  if (!/^[a-f0-9]{64}$/.test(normalized)) return null;
-  return Buffer.from(normalized, "hex");
-}
-
-function suppliedBearerToken(request) {
-  const authorization = String(request.headers.authorization || "");
-  if (!authorization.startsWith("Bearer ")) return "";
-  return authorization.slice(7);
-}
-
-function bearerTokenMatchesDigest(request, expectedDigest) {
-  const suppliedDigest = tokenDigest(suppliedBearerToken(request));
-  return timingSafeEqual(suppliedDigest, expectedDigest);
-}
-
-function validProxyAuthConfiguration(value) {
-  return isPlainObject(value)
-    && value.version === API_PROXY_AUTH_CONFIG_VERSION
-    && typeof value.token === "string"
-    && value.token.length >= API_PROXY_AUTH_TOKEN_MIN_LENGTH
-    && value.token.length <= API_PROXY_AUTH_TOKEN_MAX_LENGTH
-    && typeof value.enforced === "boolean";
-}
-
-function proxyAuthPolicyFromStoredData(value) {
-  if (value === null || value === undefined) return { mode: "disabled" };
-  if (!validProxyAuthConfiguration(value)) return { mode: "misconfigured" };
-  if (!value.enforced) return { mode: "disabled" };
-  return { mode: "enforced", tokenDigest: tokenDigest(value.token) };
-}
-
-function invalidateApiProxyAuthCache() {
-  apiProxyAuthCacheGeneration += 1;
-  apiProxyAuthCache = null;
-  apiProxyAuthRefresh = null;
-}
-
-async function readApiProxyAuthPolicy() {
-  const now = Date.now();
-  if (apiProxyAuthCache && apiProxyAuthCache.expiresAt > now) return apiProxyAuthCache.policy;
-  if (apiProxyAuthRefresh) return apiProxyAuthRefresh;
-
-  const generation = apiProxyAuthCacheGeneration;
-  const refresh = (async () => {
-    let policy;
-    try {
-      const stored = await storage.readPrivateData(API_PROXY_AUTH_PRIVATE_DATA_KEY);
-      policy = proxyAuthPolicyFromStoredData(stored.data);
-    } catch {
-      policy = { mode: "unavailable" };
-    }
-    if (generation === apiProxyAuthCacheGeneration) {
-      apiProxyAuthCache = {
-        expiresAt: Date.now() + apiProxyAuthCacheTtlMs,
-        policy,
-      };
-    }
-    return policy;
-  })();
-  apiProxyAuthRefresh = refresh;
-
-  try {
-    return await refresh;
-  } finally {
-    if (apiProxyAuthRefresh === refresh) apiProxyAuthRefresh = null;
-  }
-}
-
-function denyApiAuthentication(request, response, status, code, reason) {
-  auditEvent(request, "auth.denied", {
-    status,
-    code,
-    reason,
-    outcome: "denied",
-  });
-  if (status === 401) {
-    sendJson(response, 401, { error: "Authentication is required.", code }, { "WWW-Authenticate": "Bearer" });
-  } else {
-    sendJson(response, 503, { error: "API access is temporarily unavailable.", code });
-  }
-  return true;
-}
-
-async function enforceApiAuthentication(request, response, requestUrl) {
-  if (!requestUrl.pathname.startsWith("/api/")) return false;
-  if (request.method === "GET" && requestUrl.pathname === "/api/google/oauth/callback") return false;
-  if (request.method === "GET" && requestUrl.pathname === "/api/google/auth/start" && googleOAuthHandoffSecret) return false;
-
-  // The deployment-time environment switch is the authoritative override and
-  // deliberately bypasses the database policy, preserving its fail-closed behavior.
-  if (failClosedApiAuth) {
-    if (!apiBearerTokenDigest) {
-      return denyApiAuthentication(request, response, 503, "API_AUTH_NOT_CONFIGURED", "server_misconfigured");
-    }
-    if (bearerTokenMatchesDigest(request, apiBearerTokenDigest)) return false;
-    return denyApiAuthentication(request, response, 401, "AUTH_REQUIRED", "invalid_or_missing_credential");
-  }
-
-  const policy = await readApiProxyAuthPolicy();
-  if (policy.mode === "disabled") return false;
-  if (policy.mode !== "enforced") {
-    return denyApiAuthentication(
-      request,
-      response,
-      503,
-      "API_AUTH_NOT_CONFIGURED",
-      policy.mode === "unavailable" ? "auth_store_unavailable" : "server_misconfigured",
-    );
-  }
-  if (bearerTokenMatchesDigest(request, policy.tokenDigest)) return false;
-  return denyApiAuthentication(request, response, 401, "AUTH_REQUIRED", "invalid_or_missing_credential");
-}
-
-process.on("SIGHUP", invalidateApiProxyAuthCache);
-
 function parseCookies(request) {
   const cookies = Object.create(null);
   for (const rawPart of String(request.headers.cookie || "").split(";")) {
@@ -710,20 +591,6 @@ function validTimedOAuthPayload(value, audience, maxTtlSeconds) {
   return validReturnTo(value.returnTo);
 }
 
-async function consumeGoogleOAuthHandoff(value) {
-  if (!googleOAuthHandoffSecret) return null;
-  const payload = verifiedSignedJson(value, googleOAuthHandoffSecret, GOOGLE_OAUTH_HANDOFF_SIGNATURE_PREFIX);
-  if (!validTimedOAuthPayload(payload, GOOGLE_OAUTH_HANDOFF_AUDIENCE, GOOGLE_OAUTH_HANDOFF_TTL_SECONDS)) return null;
-  const claimed = await storage.claimOAuthTransaction(
-    "google_oauth_handoff",
-    payload.nonce,
-    { version: 1 },
-    new Date(payload.exp * 1_000),
-  );
-  if (!claimed) return null;
-  return { returnTo: payload.returnTo, subject: payload.sub };
-}
-
 async function createGoogleOAuthState(returnTo, subject = "") {
   const issuedAt = Math.floor(Date.now() / 1_000);
   const normalizedSubject = /^[A-Za-z0-9_-]{43}$/.test(subject)
@@ -778,7 +645,7 @@ function appendQuery(path, key, value) {
 
 function publicReturnTo(value = "/") {
   const relative = safeReturnTo(value);
-  const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || "").trim();
+  const publicBaseUrl = configuredPublicBaseUrl();
   if (!publicBaseUrl) return relative;
   try {
     const publicOrigin = new URL(publicBaseUrl);
@@ -1705,29 +1572,8 @@ async function handleGoogleAuthStart(request, response, requestUrl) {
     sendJson(response, 501, { error: "Google OAuth server credentials are not configured." });
     return;
   }
-  let returnTo;
-  let subject = "";
-  if (googleOAuthHandoffSecret) {
-    const handoff = await consumeGoogleOAuthHandoff(requestUrl.searchParams.get("handoff"));
-    if (!handoff) {
-      auditEvent(request, "google.connect", {
-        status: 403,
-        outcome: "rejected",
-        reason: "oauth_handoff_invalid",
-      });
-      sendJson(response, 403, { error: "Google OAuth handoff is invalid or expired.", code: "GOOGLE_OAUTH_HANDOFF_INVALID" });
-      return;
-    }
-    returnTo = handoff.returnTo;
-    subject = handoff.subject;
-  } else {
-    if (googleOAuthHandoffSecretValue) {
-      sendJson(response, 503, { error: "Google OAuth handoff is not configured.", code: "GOOGLE_OAUTH_HANDOFF_NOT_CONFIGURED" });
-      return;
-    }
-    returnTo = safeReturnTo(requestUrl.searchParams.get("returnTo") || "/");
-  }
-  const { nonce, state } = await createGoogleOAuthState(returnTo, subject);
+  const returnTo = safeReturnTo(requestUrl.searchParams.get("returnTo") || "/");
+  const { nonce, state } = await createGoogleOAuthState(returnTo);
   const params = new URLSearchParams({
     client_id: googleClientId,
     redirect_uri: redirectUri(request),
@@ -1929,7 +1775,6 @@ async function handleApiRequest(request, response, requestUrl) {
     const operation = apiOperation(request, requestUrl);
     request[apiOperationSymbol] = operation;
     if (enforceApiRateLimit(request, response, operation)) return true;
-    if (await enforceApiAuthentication(request, response, requestUrl)) return true;
     if (request.method === "GET" && requestUrl.pathname === "/api/state/status") {
       await handleStateStatus(response);
       return true;
@@ -2093,7 +1938,7 @@ function staticCacheControl(filePath, requestUrl) {
   return "public, max-age=3600";
 }
 
-const server = http.createServer(async (request, response) => {
+async function handleRequest(request, response) {
   request[requestIdSymbol] = randomBytes(12).toString("hex");
   response.setHeader("X-Request-ID", request[requestIdSymbol]);
   const requestUrl = new URL(request.url || "/", requestOrigin(request));
@@ -2108,6 +1953,9 @@ const server = http.createServer(async (request, response) => {
     }
     return;
   }
+
+  if (await appAccess.handleAuthRoute(request, response, requestUrl)) return;
+  if (appAccess.enforce(request, response, requestUrl)) return;
 
   if (await handleApiRequest(request, response, requestUrl)) return;
 
@@ -2158,6 +2006,19 @@ const server = http.createServer(async (request, response) => {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
     response.end("Not found");
   }
+}
+
+const server = http.createServer((request, response) => {
+  handleRequest(request, response).catch((error) => {
+    if (request.aborted || response.destroyed) return;
+    const requestId = auditScalar(request[requestIdSymbol], "unassigned");
+    console.error(`Unhandled request error [${requestId}]: ${error?.message || "unknown error"}`);
+    if (!response.headersSent) {
+      sendJson(response, 500, { error: "Internal server error.", code: "INTERNAL_ERROR" });
+    } else {
+      response.destroy();
+    }
+  });
 });
 
 try {

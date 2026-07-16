@@ -1,5 +1,7 @@
 # Resource / Notion parity final gap audit
 
+> Historical gap audit. Sites deployment and proxy-auth statements below describe the pre-2026-07-16 architecture. See `railway-access-runbook.md` for current operations.
+
 Date: 2026-07-12 (Asia/Seoul)
 
 Implementation: PR #1 merged the parity rebuild to `main` at `665b237`; PR #2 merged production auth hardening at `617f44e`; the current workspace additionally contains undeployed local Trash/recovery safety, docked-Full chrome, Lock/Move/Duplicate/Markdown export, hierarchy-queue corrections, URL Link/Bookmark/Embed paste choice, inline equation/color controls, cross-page block Move, comment-aware history/anchor repair, exact block deep links, and local-only comment read cursors

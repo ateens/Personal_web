@@ -2,17 +2,13 @@ import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
-import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
-import { build, transform } from "esbuild";
+import { transform } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(root, "dist");
 const clientDir = resolve(dist, "client");
 const assetDir = resolve(clientDir, "assets");
-const assetDeliveryVersion = "precompressed-manual-v1";
-const brotliCompressAsync = promisify(brotliCompress);
-const gzipAsync = promisify(gzip);
+const assetDeliveryVersion = "railway-node-v1";
 
 function contentHash(content) {
   return createHash("sha256").update(content).digest("hex").slice(0, 12);
@@ -31,34 +27,6 @@ self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;con
 `;
 }
 
-function staticHeaders() {
-  return `/_sygma/assets/*
-  Cache-Control: public, max-age=31536000, immutable
-
-/assets/*
-  Cache-Control: public, max-age=31536000, immutable
-
-/
-  Cache-Control: no-store
-
-/index.html
-  Cache-Control: no-store
-
-/service-worker.js
-  Cache-Control: no-store
-
-/manifest.json
-  Cache-Control: no-store
-
-/*
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: same-origin
-  X-Frame-Options: SAMEORIGIN
-  Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
-`;
-}
-
 await rm(dist, { recursive: true, force: true });
 await mkdir(assetDir, { recursive: true });
 
@@ -74,23 +42,13 @@ const [appBuild, stylesBuild] = await Promise.all([
   transform(stylesSource, { loader: "css", minify: true, target: "es2022", charset: "utf8" }),
 ]);
 
-const [appBrotli, stylesBrotli, appGzip, stylesGzip] = await Promise.all([
-  brotliCompressAsync(appBuild.code, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 } }),
-  brotliCompressAsync(stylesBuild.code, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 } }),
-  gzipAsync(appBuild.code, { level: 9 }),
-  gzipAsync(stylesBuild.code, { level: 9 }),
-]);
 const appFile = `app.${contentHash(`${assetDeliveryVersion}\0${appBuild.code}`)}.js`;
 const stylesFile = `styles.${contentHash(`${assetDeliveryVersion}\0${stylesBuild.code}`)}.css`;
 const appPath = `/_sygma/assets/${appFile}`;
 const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
   writeFile(resolve(assetDir, appFile), appBuild.code),
-  writeFile(resolve(assetDir, `${appFile}.br`), appBrotli),
-  writeFile(resolve(assetDir, `${appFile}.gz`), appGzip),
   writeFile(resolve(assetDir, stylesFile), stylesBuild.code),
-  writeFile(resolve(assetDir, `${stylesFile}.br`), stylesBrotli),
-  writeFile(resolve(assetDir, `${stylesFile}.gz`), stylesGzip),
 ]);
 
 const builtIndex = indexSource
@@ -114,27 +72,10 @@ await Promise.all([
   writeFile(resolve(clientDir, "index.html"), builtIndex),
   writeFile(resolve(clientDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`),
   writeFile(resolve(clientDir, "service-worker.js"), builtServiceWorker(`sygma-${cacheId}`, precacheAssets)),
-  writeFile(resolve(clientDir, "_headers"), staticHeaders()),
   cp(resolve(root, "icons"), resolve(clientDir, "icons"), { recursive: true }),
   cp(resolve(root, "assets/sygma-social-preview.png"), resolve(clientDir, "assets/sygma-social-preview.png")),
 ]);
 
-await build({
-  entryPoints: [resolve(root, "worker/index.js")],
-  outfile: resolve(dist, "server/index.js"),
-  bundle: true,
-  format: "esm",
-  platform: "browser",
-  target: "es2022",
-  minify: true,
-  logLevel: "warning",
-});
-
-await mkdir(resolve(dist, ".openai"), { recursive: true });
-await cp(resolve(root, ".openai/hosting.json"), resolve(dist, ".openai/hosting.json"));
-
 const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(stylesSource);
 const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(stylesBuild.code);
-const brotliBytes = appBrotli.byteLength + stylesBrotli.byteLength;
 console.log(`Built SYGMA assets: ${originalBytes} -> ${builtBytes} bytes (${Math.round((builtBytes / originalBytes) * 100)}%).`);
-console.log(`Precompressed Brotli assets: ${brotliBytes} bytes (${Math.round((brotliBytes / originalBytes) * 100)}% of source).`);
