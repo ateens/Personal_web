@@ -610,6 +610,8 @@ let remoteStateSaveInFlight = false;
 let remoteStateSaveBlocked = false;
 let databaseInitializationPromise = null;
 let databaseInitializationRequested = false;
+let remoteStateRefreshTimer = 0;
+let remoteStateRefreshInFlight = false;
 let localStateChangedBeforeDatabaseReady = false;
 let lastRemoteSaveFailureKind = "";
 let remoteStateRetryDelayMs = 3000;
@@ -619,6 +621,7 @@ const resourceTitleSaveTimers = new Map();
 const REMOTE_STATE_SAVE_DELAY_MS = 450;
 const REMOTE_STATE_RETRY_DELAY_MS = 3000;
 const REMOTE_STATE_RETRY_MAX_DELAY_MS = 30_000;
+const REMOTE_STATE_REFRESH_INTERVAL_MS = 10_000;
 const GOOGLE_CALENDAR_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
 const GOOGLE_OAUTH_MESSAGE_TYPE = "sygma:google-oauth";
@@ -894,8 +897,11 @@ function init() {
   window.addEventListener("blur", cancelNavPointerDrag);
   window.addEventListener("blur", resetNavShortcutState);
   document.addEventListener("visibilitychange", handleVisibilityStateSave);
+  document.addEventListener("visibilitychange", handleRemoteStateWakeRefresh);
   document.addEventListener("visibilitychange", handleGoogleCalendarWakeRefresh);
+  window.addEventListener("focus", handleRemoteStateWakeRefresh);
   window.addEventListener("focus", handleGoogleCalendarWakeRefresh);
+  window.addEventListener("pageshow", handleRemoteStateWakeRefresh);
   window.addEventListener("message", handleGoogleAuthMessage);
   window.addEventListener("pagehide", handlePageHideStateSave);
   window.addEventListener("popstate", handleResourceRoutePopState);
@@ -7374,6 +7380,37 @@ function hasUnsavedResourceWork() {
   );
 }
 
+function hasPendingLocalWorkspaceWork() {
+  return Boolean(
+    dirtyResourceIds.size ||
+    pendingResourceOperationGroups.length ||
+    localWorkspaceOperationRequired ||
+    localResourceWriteTimer ||
+    resourceSearchSavePending ||
+    resourceSearchSaveTimer ||
+    resourceTitleSaveTimers.size ||
+    localResourcePersistence.pending ||
+    localResourcePersistence.operations.length ||
+    remoteStateSavePending ||
+    remoteStateSaveInFlight ||
+    remoteStateSaveBlocked ||
+    databaseBackendStatus.saving ||
+    databaseBackendStatus.conflict ||
+    localStateChangedBeforeDatabaseReady ||
+    Object.keys(ui.resourceTitleDrafts).length ||
+    ui.resourceSearchComposing ||
+    ui.resourceTitleComposingIds.size ||
+    ui.composingBlockId ||
+    ui.blockDrag ||
+    ui.resourceDrag ||
+    ui.resourceResize ||
+    ui.resourceSideResize ||
+    ui.todayTaskDrag ||
+    ui.deleteDrag ||
+    ui.scheduler?.dragging
+  );
+}
+
 function renderServiceWorkerUpdateNotice() {
   if (!serviceWorkerUpdateAvailable) return "";
   const blocked = hasUnsavedResourceWork();
@@ -7424,6 +7461,8 @@ async function handleResourceConnectionRestored() {
   }
   if (databaseBackendStatus.connected && remoteStateSavePending) {
     queueRemoteStateSave({ immediate: true });
+  } else if (databaseBackendStatus.connected) {
+    await refreshRemoteStateIfNewer();
   } else {
     if (!databaseBackendStatus.connected) initializeDatabaseState();
   }
@@ -24044,6 +24083,10 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
   if (!workspaceId) return false;
   const database = await openLocalResourceDatabase();
   if (!database) return false;
+  const expectedDraftGeneration = Number.isSafeInteger(options.expectedDraftGeneration)
+    ? options.expectedDraftGeneration
+    : null;
+  if (expectedDraftGeneration !== null && expectedDraftGeneration !== localResourceDraftGeneration) return false;
   const committedRevision = normalizedWorkspaceRevision(revision, state.revision);
   const snapshot = {
     workspaceId,
@@ -24061,6 +24104,7 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
     }
   }
   await indexedDbTransactionComplete(transaction);
+  if (expectedDraftGeneration !== null && expectedDraftGeneration !== localResourceDraftGeneration) return false;
   localResourcePersistence.snapshot = snapshot;
   if (options.clearOperations !== false) localResourcePersistence.operations = [];
   localResourcePersistence.pending = localResourcePersistence.operations.length > 0;
@@ -24243,8 +24287,112 @@ function initializeDatabaseState() {
     } while (databaseInitializationRequested);
   })().finally(() => {
     databaseInitializationPromise = null;
+    scheduleRemoteStateRefresh();
   });
   return databaseInitializationPromise;
+}
+
+function stopRemoteStateRefresh() {
+  window.clearTimeout(remoteStateRefreshTimer);
+  remoteStateRefreshTimer = 0;
+}
+
+function scheduleRemoteStateRefresh() {
+  stopRemoteStateRefresh();
+  if (
+    !databaseBackendStatus.connected
+    || document.visibilityState === "hidden"
+    || navigator.onLine === false
+  ) return;
+  remoteStateRefreshTimer = window.setTimeout(() => {
+    remoteStateRefreshTimer = 0;
+    refreshRemoteStateIfNewer();
+  }, REMOTE_STATE_REFRESH_INTERVAL_MS);
+}
+
+function handleRemoteStateWakeRefresh() {
+  if (document.visibilityState === "hidden") {
+    stopRemoteStateRefresh();
+    return;
+  }
+  refreshRemoteStateIfNewer();
+}
+
+async function refreshRemoteStateIfNewer() {
+  if (
+    remoteStateRefreshInFlight
+    || databaseInitializationPromise
+    || !databaseBackendStatus.connected
+    || databaseBackendStatus.loading
+    || navigator.onLine === false
+    || document.visibilityState === "hidden"
+    || hasPendingLocalWorkspaceWork()
+  ) {
+    scheduleRemoteStateRefresh();
+    return false;
+  }
+
+  const startingRevision = currentWorkspaceRevision();
+  const startingDraftGeneration = localResourceDraftGeneration;
+  remoteStateRefreshInFlight = true;
+  try {
+    const status = await apiJson("/api/state/status");
+    const statusRevision = workspaceRevisionFromPayload(status, startingRevision);
+    if (!status.connected || statusRevision <= startingRevision) return false;
+    if (
+      currentWorkspaceRevision() !== startingRevision
+      || localResourceDraftGeneration !== startingDraftGeneration
+      || hasPendingLocalWorkspaceWork()
+    ) return false;
+
+    const payload = await apiJson("/api/state");
+    const remoteRevision = workspaceRevisionFromPayload(payload, statusRevision);
+    if (!payload.state || remoteRevision <= startingRevision) return false;
+    if (
+      currentWorkspaceRevision() !== startingRevision
+      || localResourceDraftGeneration !== startingDraftGeneration
+      || hasPendingLocalWorkspaceWork()
+    ) return false;
+
+    const remoteState = normalizeState(payload.state);
+    remoteState.revision = remoteRevision;
+    await mergeLocalResourceCommentReadAt(remoteState.settings?.resourceCommentReadAt);
+    if (
+      currentWorkspaceRevision() !== startingRevision
+      || localResourceDraftGeneration !== startingDraftGeneration
+      || hasPendingLocalWorkspaceWork()
+    ) return false;
+
+    state = remoteState;
+    remoteStateSaveBlocked = false;
+    localStateChangedBeforeDatabaseReady = false;
+    databaseBackendStatus = {
+      ...databaseBackendStatus,
+      configured: Boolean(status.configured),
+      connected: true,
+      loading: false,
+      saving: false,
+      error: "",
+      lastSyncedAt: payload.updatedAt || status.updatedAt || remoteState.updatedAt || "",
+      revision: remoteRevision,
+      conflict: null,
+      e2eFixtureGeneration: Number.isSafeInteger(status.resetGeneration)
+        ? status.resetGeneration
+        : databaseBackendStatus.e2eFixtureGeneration,
+    };
+    clearLegacyLocalState();
+    rerenderAfterStateReplace();
+    await persistCommittedLocalResourceState(remoteRevision, {
+      expectedDraftGeneration: startingDraftGeneration,
+    });
+    renderDatabaseStatusIfVisible();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    remoteStateRefreshInFlight = false;
+    scheduleRemoteStateRefresh();
+  }
 }
 
 async function initializeDatabaseStateNow() {
@@ -24319,10 +24467,7 @@ async function initializeDatabaseStateNow() {
         localStateChangedBeforeDatabaseReady = false;
         return;
       }
-      const shouldUploadLocal =
-        localStateChangedBeforeDatabaseReady ||
-        (localStateHadStoredState &&
-          stateTimestamp(state.updatedAt) > stateTimestamp(remoteState.updatedAt) + 1000);
+      const shouldUploadLocal = localStateChangedBeforeDatabaseReady;
       if (shouldUploadLocal) {
         state.revision = remoteRevision;
         await saveStateRemoteNow();
