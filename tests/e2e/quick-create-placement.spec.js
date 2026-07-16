@@ -126,6 +126,31 @@ test("create now keeps one completely unplaced Task and closes the first phase",
   });
 });
 
+test("scheduled lane sets the scheduled state without inventing a date", async ({ page, request }) => {
+  const title = "날짜 없는 예정 Task";
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+  await startTopbarCreate(page, "new-task", title);
+
+  const scheduler = page.getByRole("dialog", { name: "Task 날짜 배치" });
+  await scheduler.locator('[data-scheduler-lane="scheduled"]').click();
+  await expectOnlyPlacementPhase(page, "boxId");
+  await expect.poll(async () => {
+    const task = taskByTitle(await fixtureSnapshot(request), title);
+    return task && {
+      dueDate: task.dueDate,
+      scheduledEnd: task.scheduledEnd,
+      scheduledStart: task.scheduledStart,
+      status: task.status,
+    };
+  }).toEqual({
+    dueDate: "",
+    scheduledEnd: "",
+    scheduledStart: "",
+    status: "scheduled",
+  });
+});
+
 test("first phase matches the six-lane calendar and two-action reference composition", async ({ page }) => {
   await page.goto("/");
   await waitForFixtureWorkspace(page);

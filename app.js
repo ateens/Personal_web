@@ -3688,8 +3688,8 @@ function matchesTaskFilter(task, filter, context = {}) {
   if (filter === "overdue") return isOverdueOnDate(task, context.today || dateKey(new Date()));
   if (filter === "today") return isTaskOnDate(task, context.today || dateKey(new Date()));
   if (filter === "tomorrow") return isTaskOnDate(task, context.tomorrow || dateKey(addDays(new Date(), 1)));
-  if (filter === "scheduled") return Boolean(task.scheduledStart || task.dueDate) && task.status !== "done" && task.status !== "canceled";
-  if (filter === "unplanned") return !task.scheduledStart && !task.dueDate && task.status !== "done" && task.status !== "canceled";
+  if (filter === "scheduled") return taskHasSchedule(task) && task.status !== "done" && task.status !== "canceled";
+  if (filter === "unplanned") return !taskHasSchedule(task) && task.status !== "done" && task.status !== "canceled";
   if (filter === "active") return task.status !== "done" && task.status !== "canceled";
   return task.status === filter;
 }
@@ -7875,11 +7875,10 @@ function renderTodayDragCard(task) {
 }
 
 function renderTodayFloatingDrop() {
-  const scheduledDate = dateKey(addDays(new Date(), 2));
   return `
     <div class="delete-drag-stage is-multi-action today-drag-stage" role="dialog" aria-label="할 일 이동">
-      <button class="task-scheduler-lane today-floating-drop" type="button" data-drop-date="${scheduledDate}" aria-label="예정으로 이동" tabindex="-1">
-        <span><strong>예정</strong><em>${compactDateLabel(scheduledDate)}</em></span>
+      <button class="task-scheduler-lane today-floating-drop" type="button" data-today-task-action="scheduled" aria-label="예정으로 이동" tabindex="-1">
+        <span><strong>예정</strong><em>날짜 미정</em></span>
       </button>
       <button class="task-scheduler-delete-zone today-floating-drop today-delete-drop" type="button" data-today-task-action="delete" aria-label="할 일 삭제" tabindex="-1">
         <span><strong>삭제</strong><em>완전히 제거</em></span>
@@ -16403,6 +16402,10 @@ function finishTodayTaskDrag(event) {
     renderOverlays();
     return;
   }
+  if (targetAction === "scheduled") {
+    commitTaskScheduleAction(task, "scheduled");
+    return;
+  }
   moveTaskToDate(task, targetDate);
   saveState();
   showToast(targetElement?.classList.contains("today-floating-drop") ? "예정으로 옮겼습니다." : `${compactDateLabel(targetDate)}로 옮겼습니다.`);
@@ -19977,6 +19980,19 @@ function commitScheduledTask(task, date) {
 }
 
 function commitTaskScheduleAction(task, action) {
+  if (action === "scheduled") {
+    const continuePlacement = quickTaskPlacementUsesScheduler(task.id);
+    setTaskDate(task, "");
+    task.status = "scheduled";
+    task.completedAt = "";
+    stopSchedulerMonthHover();
+    ui.scheduler = null;
+    saveState();
+    showToast("예정으로 옮겼습니다.");
+    if (!continuePlacement) renderView({ soft: true, animateCards: ui.view === "tasks" });
+    if (!continuePlacement || !advanceQuickTaskPlacementAfterDate(task)) renderOverlays();
+    return;
+  }
   if (action === "unplanned") {
     const continuePlacement = quickTaskPlacementUsesScheduler(task.id);
     setTaskDate(task, "");
@@ -26806,10 +26822,11 @@ function taskBoardBuckets(tasks, today, tomorrow) {
     const onToday = isTaskOnDate(task, today);
     const onTomorrow = isTaskOnDate(task, tomorrow);
     const overdue = isOverdueOnDate(task, today);
-    if (!task.scheduledStart && !task.dueDate) buckets.unplannedOnly.push(task);
+    const hasSchedule = taskHasSchedule(task);
+    if (!hasSchedule) buckets.unplannedOnly.push(task);
     if (onToday) buckets.todayTasks.push(task);
     if (onTomorrow) buckets.tomorrowTasks.push(task);
-    if ((task.scheduledStart || task.dueDate) && !onToday && !onTomorrow && !overdue) buckets.scheduled.push(task);
+    if (hasSchedule && !onToday && !onTomorrow && !overdue) buckets.scheduled.push(task);
     if (overdue) buckets.overdue.push(task);
   }
   buckets.todayTasks.sort(bySchedule);
@@ -26838,6 +26855,10 @@ function effectiveTaskDate(task) {
   return taskScheduledDate(task) || task.dueDate || "";
 }
 
+function taskHasSchedule(task) {
+  return task?.status === "scheduled" || Boolean(task?.scheduledStart || task?.dueDate);
+}
+
 function taskScheduledDate(task) {
   const value = task?.scheduledStart;
   if (!value) return "";
@@ -26848,14 +26869,13 @@ function taskScheduledDate(task) {
 function schedulerLaneTargets(excludedTaskId = "") {
   const today = dateKey(new Date());
   const tomorrow = dateKey(addDays(new Date(), 1));
-  const nextScheduled = dateKey(addDays(new Date(), 2));
   const late = dateKey(addDays(new Date(), -1));
   const schedulerCounts = schedulerLaneCounts(excludedTaskId, today, tomorrow);
   return [
     { key: "unplanned", title: "미계획", action: "unplanned", targetKey: "action:unplanned", meta: "날짜 제거", count: schedulerCounts.unplanned },
     { key: "today", title: "오늘", date: today, targetKey: `date:${today}`, meta: shortDateLabel(today), count: schedulerCounts.today },
     { key: "tomorrow", title: "내일", date: tomorrow, targetKey: `date:${tomorrow}`, meta: shortDateLabel(tomorrow), count: schedulerCounts.tomorrow },
-    { key: "scheduled", title: "예정", date: nextScheduled, targetKey: `date:${nextScheduled}`, meta: `${shortDateLabel(nextScheduled)}로`, count: schedulerCounts.scheduled },
+    { key: "scheduled", title: "예정", action: "scheduled", targetKey: "action:scheduled", meta: "날짜 미정", count: schedulerCounts.scheduled },
     { key: "overdue", title: "지연", date: late, targetKey: `date:${late}`, meta: `${shortDateLabel(late)}로`, count: schedulerCounts.overdue },
     { key: "done", title: "완료", action: "done", targetKey: "action:done", meta: "완료 처리", count: schedulerCounts.done },
   ];
@@ -26881,10 +26901,11 @@ function schedulerLaneCounts(excludedTaskId, today, tomorrow) {
     const onToday = isTaskOnDate(task, today);
     const onTomorrow = isTaskOnDate(task, tomorrow);
     const overdue = isOverdueOnDate(task, today);
-    if (!task.scheduledStart && !task.dueDate) counts.unplanned += 1;
+    const hasSchedule = taskHasSchedule(task);
+    if (!hasSchedule) counts.unplanned += 1;
     if (onToday) counts.today += 1;
     if (onTomorrow) counts.tomorrow += 1;
-    if ((task.scheduledStart || task.dueDate) && !onToday && !onTomorrow && !overdue) counts.scheduled += 1;
+    if (hasSchedule && !onToday && !onTomorrow && !overdue) counts.scheduled += 1;
     if (overdue) counts.overdue += 1;
   }
   return counts;

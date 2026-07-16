@@ -8,20 +8,20 @@ test.beforeEach(async ({ request }) => {
   await resetFixture(request);
 });
 
-test("Today mouse drag uses the shared scheduled and delete action UI", async ({ page, request }) => {
+test("Today mouse drag moves a task to the date-free scheduled state", async ({ page, request }) => {
   await page.goto("/");
   const task = await createTodayTask(page, request);
 
   await beginMouseDrag(page, task.card);
   await expectSharedActionStage(page);
 
-  const deleteTarget = page.locator(".today-drag-stage .today-delete-drop");
-  const target = await locatorCenter(deleteTarget);
+  const scheduledTarget = page.locator(".today-drag-stage .task-scheduler-lane");
+  const target = await locatorCenter(scheduledTarget);
   await page.mouse.move(target.x, target.y, { steps: 8 });
-  await expect(deleteTarget).toHaveClass(/is-over/);
+  await expect(scheduledTarget).toHaveClass(/is-over/);
   await page.mouse.up();
 
-  await expectTaskDeleted(page, request, task.id);
+  await expectTaskScheduled(page, request, task.id);
 });
 
 test("Today iPad touch drag does not scroll and uses the shared delete action UI", async ({ browser, request }, testInfo) => {
@@ -97,7 +97,7 @@ async function expectSharedActionStage(page) {
   const scheduled = stage.locator(".task-scheduler-lane.today-floating-drop");
   const deleteTarget = stage.locator(".task-scheduler-delete-zone.today-delete-drop");
   await expect(stage).toBeVisible();
-  await expect(scheduled).toContainText("예정");
+  await expect(scheduled).toContainText("예정날짜 미정");
   await expect(deleteTarget).toContainText("삭제");
   await expect(page.locator(".today-drag-ghost")).toBeVisible();
   await expect(page.locator(".app")).toHaveClass(/is-today-task-dragging/);
@@ -132,6 +132,36 @@ async function expectSharedActionStage(page) {
     stageRight: "54px",
   });
   expect(styles.ghostZ).toBeGreaterThan(styles.stageZ);
+}
+
+async function expectTaskScheduled(page, request, taskId) {
+  await expect(page.locator(".today-drag-stage")).toHaveCount(0);
+  await expect(page.locator(".today-drag-ghost")).toHaveCount(0);
+  await expect(page.locator(".app")).not.toHaveClass(/is-today-task-dragging/);
+  await expect(page.locator(`[data-today-task-id="${taskId}"]`)).toHaveCount(0);
+  await expect.poll(async () => {
+    const task = (await fixtureSnapshot(request)).state.tasks.find((entry) => entry.id === taskId);
+    return task && {
+      dueDate: task.dueDate,
+      scheduledEnd: task.scheduledEnd,
+      scheduledStart: task.scheduledStart,
+      status: task.status,
+    };
+  }).toEqual({
+    dueDate: "",
+    scheduledEnd: "",
+    scheduledStart: "",
+    status: "scheduled",
+  });
+  expect(await page.evaluate((id) => {
+    const today = dateKey(new Date());
+    const tomorrow = dateKey(addDays(new Date(), 1));
+    const buckets = taskBoardBuckets(state.tasks, today, tomorrow);
+    return {
+      scheduled: buckets.scheduled.some((task) => task.id === id),
+      unplanned: buckets.unplannedOnly.some((task) => task.id === id),
+    };
+  }, taskId)).toEqual({ scheduled: true, unplanned: false });
 }
 
 async function expectTaskDeleted(page, request, taskId) {
