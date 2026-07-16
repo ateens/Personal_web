@@ -5044,7 +5044,7 @@ button:focus-visible {
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-user-drag: none;
-  touch-action: pan-y pinch-zoom;
+  touch-action: none;
   cursor: grab;
 }
 
@@ -5058,7 +5058,7 @@ button:focus-visible {
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-user-drag: none;
-  touch-action: pan-y pinch-zoom;
+  touch-action: none;
 }
 
 .nav-button,
@@ -5067,7 +5067,7 @@ button:focus-visible {
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-user-drag: none;
-  touch-action: pan-y pinch-zoom;
+  touch-action: none;
 }
 
 .resource-card-open {

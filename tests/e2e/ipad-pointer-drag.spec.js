@@ -186,7 +186,7 @@ async function dragWithCdpTouch(context, page) {
 
   try {
     await dispatchTouch(session, "touchStart", start);
-    await dispatchTouch(session, "touchMove", { x: start.x + 30, y: start.y + 2 });
+    await dispatchTouch(session, "touchMove", { x: start.x + 2, y: start.y + 30 });
 
     await expectCustomDragActive(page);
 
@@ -214,7 +214,7 @@ async function beginBlockToolDragWithTouch(context, page, source) {
   const session = await context.newCDPSession(page);
   const start = await locatorCenter(source);
   await dispatchTouch(session, "touchStart", start);
-  await dispatchTouch(session, "touchMove", { x: start.x + 30, y: start.y + 2 });
+  await dispatchTouch(session, "touchMove", { x: start.x + 2, y: start.y + 30 });
   return session;
 }
 
