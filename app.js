@@ -829,6 +829,7 @@ function init() {
   document.addEventListener("cut", handleDocumentCut);
   document.addEventListener("paste", handleDocumentPaste);
   document.addEventListener("selectionchange", handleDocumentSelectionChange);
+  document.addEventListener("selectstart", handleCustomPointerDragSelectStart, true);
   document.addEventListener("wheel", cancelPendingPointerDrags, { passive: true, capture: true });
   document.addEventListener("scroll", cancelPendingPointerDrags, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
@@ -11887,13 +11888,42 @@ function eventPointerId(event) {
   return event.pointerId ?? "mouse";
 }
 
-function canStartCustomPointerDrag(event, options = {}) {
+function canStartCustomPointerDrag(event) {
   if (!event || event.isPrimary === false) return false;
   if (event.button !== undefined && event.button !== 0) return false;
-  if (event.pointerType === "touch" || event.pointerType === "pen") return false;
-  // iPad trackpads report as mouse pointers; keep whole-surface drags off on touch-capable devices.
-  if (!options.explicit && Number(navigator.maxTouchPoints || 0) > 0) return false;
   return true;
+}
+
+function canStartEditorMarqueePointer(event) {
+  if (!canStartCustomPointerDrag(event)) return false;
+  if (event.pointerType === "touch" || event.pointerType === "pen") return false;
+  // iPad trackpads identify as mouse pointers while the device still reports touch points.
+  return Number(navigator.maxTouchPoints || 0) === 0;
+}
+
+function customPointerDragPendingOrActive() {
+  return Boolean(
+    ui.pendingNavDrag ||
+    ui.navPointerDrag ||
+    ui.pendingBlockToolDrag ||
+    ui.blockDrag ||
+    ui.pendingEditorMarquee ||
+    ui.editorMarquee ||
+    ui.resourceDrag ||
+    ui.resourceResize ||
+    ui.resourceSideResize ||
+    ui.pendingTodayTaskDrag ||
+    ui.todayTaskDrag ||
+    ui.pendingDeleteDrag ||
+    ui.deleteDrag ||
+    ui.pendingScheduleDrag ||
+    ui.scheduler?.dragging
+  );
+}
+
+function handleCustomPointerDragSelectStart(event) {
+  if (!customPointerDragPendingOrActive()) return;
+  event.preventDefault();
 }
 
 function cancelPendingPointerDrags() {
@@ -11932,7 +11962,6 @@ function handleBlockPointerMove(event) {
     const button = startedButton || document.querySelector(`[data-block-add="${cssEscape(pendingToolDrag.blockId)}"]`);
     const block = button?.closest(".block");
     const editor = block?.closest(".block-editor");
-    const resourceNote = button?.closest("[data-resource-note]");
     ui.pendingBlockToolDrag = null;
     if (!block || !editor) return;
     const blockIsSelectedForDrag =
@@ -11950,25 +11979,6 @@ function handleBlockPointerMove(event) {
         indentOriginX: selectedContentRect?.left ?? pendingToolDrag.startX,
         activationDistance: BLOCK_BODY_DRAG_ACTIVATION_DISTANCE,
       });
-    } else if (resourceNote) {
-      beginEditorMarqueeDrag(resourceNote, event, {
-        startX: pendingToolDrag.startX,
-        startY: pendingToolDrag.startY,
-        clickBlockId: "",
-        anchorBlockId: pendingToolDrag.blockId,
-      });
-      if (ui.editorMarquee?.pointerId === eventPointerId(event)) {
-        ui.editorMarquee.active = true;
-        ui.editorMarquee.currentX = event.clientX;
-        ui.editorMarquee.currentY = event.clientY;
-        event.preventDefault();
-        event.stopPropagation();
-        const rect = normalizedRect(ui.editorMarquee.startX, ui.editorMarquee.startY, event.clientX, event.clientY);
-        updateEditorMarqueeElement(rect);
-        updateBlocksInMarquee(ui.editorMarquee.ownerType, ui.editorMarquee.ownerId, rect);
-        updateDragAutoScroll("marquee", ui.editorMarquee.ownerType, ui.editorMarquee.ownerId, event.clientX, event.clientY);
-      }
-      return;
     } else {
       beginBlockDrag(pendingToolDrag.blockId, event, {
         block,
@@ -12438,6 +12448,7 @@ function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
 }
 
 function beginEditorMarqueeDrag(editorPage, event, options = {}) {
+  if (!canStartEditorMarqueePointer(event)) return;
   const dragHandle = blockDragHandleFromEvent(event);
   if (dragHandle) {
     beginBlockDrag(dragHandle.dataset.blockDrag, event, {
@@ -12476,6 +12487,7 @@ function beginEditorMarqueeDrag(editorPage, event, options = {}) {
 }
 
 function beginPendingEditorMarqueeDrag(resourceNote, event) {
+  if (!canStartEditorMarqueePointer(event)) return;
   const editor = resourceNote.querySelector(".block-editor");
   if (!editor) return;
   const startY = event.clientY;
@@ -15721,9 +15733,9 @@ function canBypassBlockClickSuppressionForDrag(event) {
   if ((event.pointerType === "mouse" || event.type === "mousedown") && event.button !== 0) return false;
   if (event.target.closest("[data-block-content]")) return true;
   if (blockDragHandleFromEvent(event)) return true;
-  if (event.target.closest("[data-block-add]") && selectedBlockRowDragTargetFromPoint(event)) return true;
+  if (event.target.closest("[data-block-add]")) return true;
   const resourceNote = event.target.closest("[data-resource-note]");
-  if (resourceNote && canStartEditorMarqueeDrag(resourceNote, event)) return true;
+  if (resourceNote && canStartEditorMarqueePointer(event) && canStartEditorMarqueeDrag(resourceNote, event)) return true;
   return Boolean(selectedBlockDragTarget(event));
 }
 
@@ -15839,7 +15851,7 @@ function handlePointerDown(event) {
   const resourceDragHandle = event.target.closest("[data-resource-drag]");
   if (resourceDragHandle && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if (ui.resourceDrag && event.type === "mousedown") return;
-    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginResourceDrag(resourceDragHandle.dataset.resourceDrag, event);
     return;
   }
@@ -15847,14 +15859,14 @@ function handlePointerDown(event) {
   const resourceResizeHandle = event.target.closest("[data-resource-resize]");
   if (resourceResizeHandle) {
     if (ui.resourceResize && event.type === "mousedown") return;
-    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginResourceResize(resourceResizeHandle.dataset.resourceResize, event);
     return;
   }
 
   const resourceSideResizeHandle = event.target.closest("[data-resource-side-resize]");
   if (resourceSideResizeHandle) {
-    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginResourceSideResize(resourceSideResizeHandle, event);
     return;
   }
@@ -15862,8 +15874,7 @@ function handlePointerDown(event) {
   const blockDragHandle = blockDragHandleFromEvent(event);
   if (blockDragHandle) {
     if (event.type === "mousedown" && ui.blockDrag) return;
-    const directBlockDragHandle = event.target.closest("[data-block-drag]");
-    if (!canStartCustomPointerDrag(event, { explicit: Boolean(directBlockDragHandle) })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     beginBlockDrag(blockDragHandle.dataset.blockDrag, event, {
       block: blockDragHandle.closest(".block"),
       editor: blockDragHandle.closest(".block-editor"),
@@ -15900,7 +15911,7 @@ function handlePointerDown(event) {
       ui.blockSelection.ids.includes(selectedAddBlockId);
     if (selectedAddMatchesSelection) {
       if (event.type === "mousedown" && ui.pendingBlockToolDrag) return;
-      if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+      if (!canStartCustomPointerDrag(event)) return;
       ui.pendingBlockToolDrag = {
         blockId: selectedAddBlockId,
         pointerId: eventPointerId(event),
@@ -15913,7 +15924,12 @@ function handlePointerDown(event) {
   }
 
   const rangeGutterNote = event.target.closest("[data-resource-note]");
-  if (rangeGutterNote && isResourceNoteRangeGutterPoint(event.target, event.clientX) && canStartEditorMarqueeDragWithinNote(rangeGutterNote, event)) {
+  if (
+    rangeGutterNote
+    && !event.target.closest("[data-block-add]")
+    && isResourceNoteRangeGutterPoint(event.target, event.clientX)
+    && canStartEditorMarqueeDragWithinNote(rangeGutterNote, event)
+  ) {
     if (!canStartCustomPointerDrag(event)) return;
     const selectedGutterDrag = selectedBlockRowDragTargetFromPoint(event);
     if (selectedGutterDrag) {
@@ -15927,14 +15943,14 @@ function handlePointerDown(event) {
       };
       return;
     }
-    beginPendingEditorMarqueeDrag(rangeGutterNote, event);
+    if (canStartEditorMarqueePointer(event)) beginPendingEditorMarqueeDrag(rangeGutterNote, event);
     return;
   }
 
   const blockAddDrag = event.target.closest("[data-block-add]");
-  if (blockAddDrag && !isResourceNoteRangeGutterPoint(event.target, event.clientX)) {
+  if (blockAddDrag) {
     if (event.type === "mousedown" && ui.pendingBlockToolDrag) return;
-    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     ui.pendingBlockToolDrag = {
       blockId: blockAddDrag.dataset.blockAdd,
       pointerId: eventPointerId(event),
@@ -15946,9 +15962,8 @@ function handlePointerDown(event) {
   }
 
   const resourceNote = event.target.closest("[data-resource-note]");
-  if (resourceNote && canStartEditorMarqueeDrag(resourceNote, event)) {
+  if (resourceNote && canStartEditorMarqueePointer(event) && canStartEditorMarqueeDrag(resourceNote, event)) {
     if (event.type === "mousedown" && (ui.pendingEditorMarquee || ui.editorMarquee)) return;
-    if (!canStartCustomPointerDrag(event)) return;
     beginPendingEditorMarqueeDrag(resourceNote, event);
     return;
   }
@@ -15986,7 +16001,7 @@ function handlePointerDown(event) {
 
   const schedulerButton = event.target.closest("[data-scheduler-open]");
   if (schedulerButton) {
-    if (!canStartCustomPointerDrag(event, { explicit: true })) return;
+    if (!canStartCustomPointerDrag(event)) return;
     const card = schedulerButton.closest("[data-schedule-hold]");
     const task = itemById("tasks", schedulerButton.dataset.schedulerOpen);
     if (!card || !task || ["done", "canceled"].includes(task.status)) return;
@@ -17982,6 +17997,12 @@ function handleDocumentClick(event) {
 }
 
 function handleDragStart(event) {
+  if (event.target.closest(
+    "[data-nav-key], [data-delete-drag-type], [data-today-task-id], [data-block-drag], [data-block-add], [data-resource-drag], [data-resource-resize], [data-resource-side-resize], [data-scheduler-open], [data-schedule-hold]",
+  )) {
+    event.preventDefault();
+    return;
+  }
   if (handleNavDragStart(event)) return;
   if (["inbox", "boxes", "resources"].includes(ui.view) && event.target.closest("[data-delete-drag-type][data-delete-drag-id]")) {
     event.preventDefault();
