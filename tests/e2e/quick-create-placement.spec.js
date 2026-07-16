@@ -206,7 +206,7 @@ test("done lane advances through Box and preserves completion after every relati
   });
 });
 
-test("choice hover stays still and large phase surfaces slide without a backdrop flash", async ({ page }) => {
+test("choice hover stays still and large phase surfaces fade and slide without a backdrop flash", async ({ page }) => {
   await page.goto("/");
   await waitForFixtureWorkspace(page);
   await startTopbarCreate(page, "new-task", "깜빡임 없이 전환할 Task");
@@ -239,11 +239,17 @@ test("reduced motion changes placement phases immediately without transition gho
 
   await page.getByRole("dialog", { name: "Task 날짜 배치" }).locator('[data-scheduler-lane="today"]').click();
   const placement = await expectOnlyPlacementPhase(page, "boxId");
-  const motion = await placement.evaluate((surface) => ({
-    ghosts: document.querySelectorAll("[data-placement-transition-ghost]").length,
-    running: surface.getAnimations({ subtree: true }).filter((animation) => animation.playState === "running").length,
-  }));
-  expect(motion).toEqual({ ghosts: 0, running: 0 });
+  const motion = await placement.evaluate((surface) => {
+    const style = getComputedStyle(surface);
+    return {
+      ghosts: document.querySelectorAll("[data-placement-transition-ghost]").length,
+      running: surface.getAnimations({ subtree: true }).filter((animation) => animation.playState === "running").length,
+      settled: Number.parseFloat(style.opacity) >= 0.99
+        && style.clipPath === "none"
+        && ["none", "0px", "0px 0px"].includes(style.translate),
+    };
+  });
+  expect(motion).toEqual({ ghosts: 0, running: 0, settled: true });
 });
 
 test("Escape during phase motion removes the visual ghost without losing the selected date", async ({ page, request }) => {
@@ -435,6 +441,7 @@ test("iPad touch completes every placement phase inside a bounded floating overl
     await expectInsideViewport(scheduler, IPAD_VIEWPORT);
     await expectPlacementScrollLocked(page);
     await scheduler.locator('[data-scheduler-lane="today"]').tap();
+    await expect.poll(() => page.locator("[data-placement-transition-ghost]").count()).toBe(0);
 
     const choices = [
       ["boxId", FIXTURE_IDS.box],
@@ -446,6 +453,7 @@ test("iPad touch completes every placement phase inside a bounded floating overl
       const activePhase = await expectOnlyPlacementPhase(page, phase);
       await expectFloatingOverlay(page, activePhase, IPAD_VIEWPORT);
       await activePhase.locator(`[data-placement-choice][data-placement-value="${value}"]`).tap();
+      await expect.poll(() => page.locator("[data-placement-transition-ghost]").count()).toBe(0);
     }
 
     await expect(page.locator(QUICK_PLACEMENT)).toBeHidden();
@@ -606,13 +614,23 @@ async function clickWithPlacementMotion(control, direction = 1) {
       const stage = root.querySelector(selector);
       const stageRect = stage?.getBoundingClientRect();
       const ghostRect = startingStage.isConnected ? startingStage.getBoundingClientRect() : null;
+      const stageStyle = stage ? getComputedStyle(stage) : null;
+      const ghostStyle = startingStage.isConnected ? getComputedStyle(startingStage) : null;
       samples.push({
         activeCount: root.querySelectorAll(selector).length,
         darkness: darkness(),
+        ghostClipPath: ghostStyle?.clipPath || "none",
         ghostCenter: ghostRect ? ghostRect.left + ghostRect.width / 2 : null,
         ghostCount: document.querySelectorAll("[data-placement-transition-ghost]").length,
+        ghostIdCount: document.querySelectorAll("[data-placement-transition-ghost] [id]").length,
+        ghostHeight: ghostRect?.height || null,
+        ghostOpacity: ghostStyle ? Number.parseFloat(ghostStyle.opacity) : null,
+        ghostWidth: ghostRect?.width || null,
+        incomingClipPath: stageStyle?.clipPath || "none",
         incomingCenter: stageRect ? stageRect.left + stageRect.width / 2 : null,
-        stageOpacity: stage ? Number.parseFloat(getComputedStyle(stage).opacity) : 0,
+        incomingHeight: stageRect?.height || null,
+        incomingOpacity: stageStyle ? Number.parseFloat(stageStyle.opacity) : null,
+        incomingWidth: stageRect?.width || null,
         titleCount: document.querySelectorAll("#quick-placement-title").length,
       });
       const incomingRunning = stage?.getAnimations().some((animation) => animation.playState === "running");
@@ -621,33 +639,66 @@ async function clickWithPlacementMotion(control, direction = 1) {
     root.removeEventListener("animationstart", onAnimationStart);
     const ghostCenters = samples.map((sample) => sample.ghostCenter).filter(Number.isFinite);
     const incomingCenters = samples.map((sample) => sample.incomingCenter).filter(Number.isFinite);
+    const ghostHeights = samples.map((sample) => sample.ghostHeight).filter(Number.isFinite);
+    const ghostOpacities = samples.map((sample) => sample.ghostOpacity).filter(Number.isFinite);
+    const ghostWidths = samples.map((sample) => sample.ghostWidth).filter(Number.isFinite);
+    const incomingHeights = samples.map((sample) => sample.incomingHeight).filter(Number.isFinite);
+    const incomingOpacities = samples.map((sample) => sample.incomingOpacity).filter(Number.isFinite);
+    const incomingWidths = samples.map((sample) => sample.incomingWidth).filter(Number.isFinite);
     return {
       animationStarts,
       baselineDarkness,
       distinctGhostCenters: new Set(ghostCenters.map((value) => value.toFixed(1))).size,
+      distinctGhostOpacities: new Set(ghostOpacities.map((value) => value.toFixed(2))).size,
       distinctIncomingCenters: new Set(incomingCenters.map((value) => value.toFixed(1))).size,
+      distinctIncomingOpacities: new Set(incomingOpacities.map((value) => value.toFixed(2))).size,
       finalCenter: incomingCenters.at(-1),
+      finalDarkness: darkness(),
+      finalIncomingOpacity: incomingOpacities.at(-1),
       ghostsAfter: document.querySelectorAll("[data-placement-transition-ghost]").length,
+      ghostHeightDelta: Math.max(...ghostHeights) - Math.min(...ghostHeights),
+      ghostWidthDelta: Math.max(...ghostWidths) - Math.min(...ghostWidths),
       maximumActiveCount: Math.max(...samples.map((sample) => sample.activeCount)),
+      maximumDarkness: Math.max(...samples.map((sample) => sample.darkness)),
       maximumGhostCenter: Math.max(...ghostCenters),
       maximumGhostCount: Math.max(...samples.map((sample) => sample.ghostCount)),
+      maximumGhostIdCount: Math.max(...samples.map((sample) => sample.ghostIdCount)),
+      maximumGhostOpacity: Math.max(...ghostOpacities),
       maximumIncomingCenter: Math.max(...incomingCenters),
+      maximumIncomingOpacity: Math.max(...incomingOpacities),
       minimumDarkness: Math.min(...samples.map((sample) => sample.darkness)),
       minimumGhostCenter: Math.min(...ghostCenters),
+      minimumGhostOpacity: Math.min(...ghostOpacities),
       minimumIncomingCenter: Math.min(...incomingCenters),
-      minimumStageOpacity: Math.min(...samples.map((sample) => sample.stageOpacity)),
+      minimumIncomingOpacity: Math.min(...incomingOpacities),
+      incomingHeightDelta: Math.max(...incomingHeights) - Math.min(...incomingHeights),
+      incomingWidthDelta: Math.max(...incomingWidths) - Math.min(...incomingWidths),
       maximumTitleCount: Math.max(...samples.map((sample) => sample.titleCount)),
       sameRoot: root === document.querySelector("#overlayRoot"),
       startingCenter,
+      usesClipPath: samples.some((sample) => sample.ghostClipPath !== "none" || sample.incomingClipPath !== "none"),
     };
   });
 
   expect(probe.sameRoot).toBe(true);
   expect(probe.animationStarts).toBe(0);
   expect(probe.minimumDarkness).toBeGreaterThanOrEqual(probe.baselineDarkness - 0.02);
-  expect(probe.minimumStageOpacity).toBeGreaterThanOrEqual(0.99);
+  expect(probe.maximumDarkness).toBeLessThanOrEqual(Math.max(probe.baselineDarkness, probe.finalDarkness) + 0.02);
+  expect(probe.minimumGhostOpacity).toBeLessThanOrEqual(0.2);
+  expect(probe.maximumGhostOpacity).toBeGreaterThanOrEqual(0.75);
+  expect(probe.minimumIncomingOpacity).toBeLessThanOrEqual(0.1);
+  expect(probe.maximumIncomingOpacity).toBeGreaterThanOrEqual(0.99);
+  expect(probe.finalIncomingOpacity).toBeGreaterThanOrEqual(0.99);
+  expect(probe.distinctGhostOpacities).toBeGreaterThanOrEqual(4);
+  expect(probe.distinctIncomingOpacities).toBeGreaterThanOrEqual(4);
+  expect(probe.ghostWidthDelta).toBeLessThanOrEqual(0.5);
+  expect(probe.ghostHeightDelta).toBeLessThanOrEqual(0.5);
+  expect(probe.incomingWidthDelta).toBeLessThanOrEqual(0.5);
+  expect(probe.incomingHeightDelta).toBeLessThanOrEqual(0.5);
+  expect(probe.usesClipPath).toBe(false);
   expect(probe.maximumActiveCount).toBe(1);
   expect(probe.maximumGhostCount).toBe(1);
+  expect(probe.maximumGhostIdCount).toBe(0);
   expect(probe.maximumTitleCount).toBeLessThanOrEqual(1);
   expect(probe.ghostsAfter).toBe(0);
   expect(probe.distinctGhostCenters).toBeGreaterThanOrEqual(4);
