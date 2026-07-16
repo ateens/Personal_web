@@ -19652,7 +19652,7 @@ function quickTaskPlacementUsesScheduler(taskId) {
   );
 }
 
-function transitionQuickTaskPlacementSurface(control, done) {
+function transitionQuickTaskPlacementSurface(control, done, direction = 1) {
   const placement = ui.taskPlacement;
   if (!placement || placement.transitioning) return Boolean(placement);
   if (!(control instanceof Element)) return false;
@@ -19660,14 +19660,39 @@ function transitionQuickTaskPlacementSurface(control, done) {
   placement.transitioning = true;
   control.classList.add("is-placement-selected");
   done();
+  animateQuickTaskPlacementPhase(direction);
+  if (ui.taskPlacement?.taskId === placement.taskId) ui.taskPlacement.transitioning = false;
   return true;
+}
+
+function animateQuickTaskPlacementPhase(direction) {
+  const surface = document.querySelector(".task-scheduler-stage.is-quick-placement, [data-quick-placement]");
+  if (!surface || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof surface.animate !== "function") return;
+
+  const entrySelector = surface.matches("[data-quick-placement]")
+    ? ":scope > .quick-placement-progress, :scope > .quick-placement-head, :scope > .quick-placement-task-title, :scope > .quick-placement-choices, :scope > .quick-placement-footer"
+    : ":scope > .task-scheduler-lanes, :scope > .task-scheduler, :scope > .quick-placement-first-actions";
+  [...surface.querySelectorAll(entrySelector)].forEach((entry, index) => entry.animate(
+    [{ opacity: 0.96 }, { opacity: 1 }],
+    { duration: 180, delay: index * 14, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "backwards" },
+  ));
+  const activeProgress = surface.querySelector(".quick-placement-progress-step.is-active i");
+  if (activeProgress) {
+    const transformOrigin = direction >= 0 ? "left center" : "right center";
+    activeProgress.animate(
+      [
+        { transform: "scaleX(0.25) scaleY(2)", transformOrigin },
+        { transform: "scaleX(1) scaleY(2)", transformOrigin },
+      ],
+      { duration: 260, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+  }
 }
 
 function advanceQuickTaskPlacementAfterDate(task) {
   const placement = ui.taskPlacement;
   if (!placement || placement.taskId !== task.id) return false;
   placement.phaseIndex = 1;
-  placement.transitioning = false;
   syncQuickTaskPlacementValues(placement, task);
   renderOverlays();
   focusQuickTaskPlacement();
@@ -19701,7 +19726,6 @@ function selectQuickTaskPlacementChoice(stepKey, value, control) {
       return;
     }
     currentPlacement.phaseIndex += 1;
-    currentPlacement.transitioning = false;
     renderOverlays();
     focusQuickTaskPlacement();
   };
@@ -19713,17 +19737,21 @@ function goBackQuickTaskPlacement() {
   const placement = ui.taskPlacement;
   const task = itemById("tasks", placement?.taskId);
   if (!placement || !task || placement.transitioning) return;
-  if (placement.phaseIndex <= 1) {
-    placement.phaseIndex = 0;
-    openTaskScheduler(task.id, window.innerWidth / 2, window.innerHeight / 2, {
-      mode: "quick-create",
-      month: effectiveTaskDate(task)?.slice(0, 7) || monthKey(new Date()),
-    });
-  } else {
-    placement.phaseIndex -= 1;
-    renderOverlays();
-  }
-  focusQuickTaskPlacement();
+  const commit = () => {
+    if (placement.phaseIndex <= 1) {
+      placement.phaseIndex = 0;
+      openTaskScheduler(task.id, window.innerWidth / 2, window.innerHeight / 2, {
+        mode: "quick-create",
+        month: effectiveTaskDate(task)?.slice(0, 7) || monthKey(new Date()),
+      });
+    } else {
+      placement.phaseIndex -= 1;
+      renderOverlays();
+    }
+    focusQuickTaskPlacement();
+  };
+  const control = document.querySelector("[data-quick-placement] [data-placement-back]");
+  if (!transitionQuickTaskPlacementSurface(control, commit, -1)) commit();
 }
 
 function cancelQuickTaskPlacement(options = {}) {
