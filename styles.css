@@ -2598,137 +2598,11 @@ button:focus-visible {
     0 28px 80px -58px rgba(37, 99, 235, 0.42);
 }
 
-.today-floating-drop {
-  position: fixed;
-  left: calc(50% - 128px);
-  bottom: calc(var(--nav-toggle-bottom) + var(--nav-toggle-height) + 26px);
-  z-index: 52;
-  display: grid;
-  min-width: 224px;
-  gap: 5px;
-  overflow: hidden;
-  border-radius: 8px;
-  padding: 20px 28px 22px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.76) 54%, rgba(239, 246, 255, 0.62)),
-    rgba(255, 255, 255, 0.92);
-  box-shadow:
-    inset 16px 16px 34px rgba(15, 23, 42, 0.045),
-    inset -18px -18px 38px rgba(255, 255, 255, 0.96),
-    inset 0 0 0 1px rgba(37, 99, 235, 0.11),
-    0 30px 78px -42px rgba(37, 99, 235, 0.32),
-    0 16px 48px -36px rgba(15, 23, 42, 0.34);
-  color: var(--ink);
-  text-align: center;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, 18px) scale(0.94);
-  transition:
-    opacity 180ms var(--ease),
-    transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1),
-    box-shadow 180ms var(--ease);
-}
-
-.today-delete-drop {
-  left: calc(50% + 128px);
-  border: 0;
-  appearance: none;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.97), rgba(255, 247, 250, 0.82) 54%, rgba(255, 228, 236, 0.68)),
-    rgba(255, 255, 255, 0.94);
-  box-shadow:
-    inset 16px 16px 34px rgba(190, 18, 60, 0.035),
-    inset -18px -18px 38px rgba(255, 255, 255, 0.98),
-    inset 0 0 0 1px rgba(190, 18, 60, 0.13),
-    0 30px 78px -42px rgba(190, 18, 60, 0.32),
-    0 16px 48px -36px rgba(15, 23, 42, 0.34);
-  color: var(--ink);
-  cursor: grabbing;
-  font-family: inherit;
-}
-
-.today-floating-drop::before {
-  content: "";
-  position: absolute;
-  inset: 7px;
-  z-index: 0;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow:
-    inset 10px 10px 22px rgba(15, 23, 42, 0.035),
-    inset -12px -12px 26px rgba(255, 255, 255, 0.88);
-  pointer-events: none;
-}
-
-.today-delete-drop::before {
-  background: rgba(255, 248, 250, 0.78);
-  box-shadow:
-    inset 10px 10px 22px rgba(190, 18, 60, 0.035),
-    inset -12px -12px 26px rgba(255, 255, 255, 0.9);
-}
-
-.today-floating-drop > * {
-  position: relative;
-  z-index: 1;
-}
-
-.today-floating-drop strong {
-  font-size: 15px;
-  font-weight: 880;
-}
-
-.today-delete-drop strong {
-  color: var(--rose);
-}
-
-.today-floating-drop span {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 760;
-}
-
-.app.is-today-task-dragging .today-floating-drop {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(-50%, 0) scale(1);
-}
-
-.today-floating-drop.is-over {
-  box-shadow:
-    inset 18px 18px 38px rgba(37, 99, 235, 0.055),
-    inset -20px -20px 42px rgba(255, 255, 255, 0.98),
-    inset 0 0 0 1px rgba(37, 99, 235, 0.2),
-    0 36px 92px -34px rgba(37, 99, 235, 0.48),
-    0 18px 52px -34px rgba(15, 23, 42, 0.42);
-}
-
-.today-delete-drop.is-over {
-  box-shadow:
-    inset 18px 18px 38px rgba(190, 18, 60, 0.065),
-    inset -20px -20px 42px rgba(255, 255, 255, 0.98),
-    inset 0 0 0 1px rgba(190, 18, 60, 0.24),
-    0 36px 92px -34px rgba(190, 18, 60, 0.48),
-    0 18px 52px -34px rgba(15, 23, 42, 0.42);
-}
-
-@media (max-width: 560px) {
-  .today-floating-drop {
-    left: calc(25% + 3px);
-    width: calc(50vw - 22px);
-    min-width: 0;
-    padding: 17px 12px 19px;
-  }
-
-  .today-delete-drop {
-    left: calc(75% - 3px);
-  }
-}
-
 .today-drag-ghost {
   position: fixed;
   left: 0;
   top: 0;
-  z-index: 70;
+  z-index: 88;
   display: block;
   max-width: none;
   border-radius: var(--hover-radius);
@@ -8754,7 +8628,8 @@ body.is-task-placement-open {
 
 .task-scheduler-delete-zone:hover,
 .task-scheduler-delete-zone:focus-visible,
-.task-scheduler-delete-zone.is-drop-target {
+.task-scheduler-delete-zone.is-drop-target,
+.today-delete-drop.is-over {
   outline: 0;
   background-size: 100% 2px, 100% 1px, 100% 1px;
   box-shadow:
@@ -8794,7 +8669,8 @@ body.is-task-placement-open {
 
 .task-scheduler-lane:hover,
 .task-scheduler-lane:focus-visible,
-.task-scheduler-lane.is-drop-target {
+.task-scheduler-lane.is-drop-target,
+.today-drag-stage .task-scheduler-lane.is-over {
   outline: 0;
   background-size: 100% 2px, 100% 1px, 100% 1px;
   transform: translateX(6px);

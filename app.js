@@ -7257,7 +7257,7 @@ function renderOverlays() {
     ${ui.goalDeleteConfirmId ? renderGoalDeleteConfirm() : ""}
     ${ui.boxDeleteConfirmId ? renderBoxDeleteConfirm() : ""}
     ${ui.habitDeleteConfirmId ? renderHabitDeleteConfirm() : ""}
-    ${ui.view === "today" ? renderTodayFloatingDrop() : ""}
+    ${ui.view === "today" && ui.todayTaskDrag ? renderTodayFloatingDrop() : ""}
     ${ui.blockDrag ? renderBlockDragGhost() : ""}
     ${ui.todayTaskDrag ? renderTodayTaskDragGhost() : ""}
     ${renderServiceWorkerUpdateNotice()}
@@ -7877,14 +7877,14 @@ function renderTodayDragCard(task) {
 function renderTodayFloatingDrop() {
   const scheduledDate = dateKey(addDays(new Date(), 2));
   return `
-    <div class="today-floating-drop" data-drop-date="${scheduledDate}" aria-hidden="${ui.todayTaskDrag ? "false" : "true"}">
-      <strong>예정</strong>
-      <span>${compactDateLabel(scheduledDate)}</span>
+    <div class="delete-drag-stage is-multi-action today-drag-stage" role="dialog" aria-label="할 일 이동">
+      <button class="task-scheduler-lane today-floating-drop" type="button" data-drop-date="${scheduledDate}" aria-label="예정으로 이동" tabindex="-1">
+        <span><strong>예정</strong><em>${compactDateLabel(scheduledDate)}</em></span>
+      </button>
+      <button class="task-scheduler-delete-zone today-floating-drop today-delete-drop" type="button" data-today-task-action="delete" aria-label="할 일 삭제" tabindex="-1">
+        <span><strong>삭제</strong><em>완전히 제거</em></span>
+      </button>
     </div>
-    <button class="today-floating-drop today-delete-drop" type="button" data-today-task-action="delete" aria-label="할 일 삭제" aria-hidden="${ui.todayTaskDrag ? "false" : "true"}" tabindex="-1">
-      <strong>삭제</strong>
-      <span>완전히 제거</span>
-    </button>
   `;
 }
 
