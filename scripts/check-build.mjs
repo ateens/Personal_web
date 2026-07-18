@@ -7,6 +7,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const client = resolve(root, "dist/client");
 const index = await readFile(resolve(client, "index.html"), "utf8");
 const serviceWorker = await readFile(resolve(client, "service-worker.js"), "utf8");
+assert.doesNotThrow(() => new Function(serviceWorker), "built service worker is not valid JavaScript");
 const appPath = index.match(/src="(\/_sygma\/assets\/app\.[a-f0-9]{12}\.js)"/)?.[1];
 const stylesPath = index.match(/href="(\/_sygma\/assets\/styles\.[a-f0-9]{12}\.css)"/)?.[1];
 assert(appPath, "built index is missing a content-hashed app asset");
