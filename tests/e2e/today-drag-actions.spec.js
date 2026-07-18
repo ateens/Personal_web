@@ -143,14 +143,12 @@ async function expectTaskScheduled(page, request, taskId) {
     const task = (await fixtureSnapshot(request)).state.tasks.find((entry) => entry.id === taskId);
     return task && {
       dueDate: task.dueDate,
-      scheduledEnd: task.scheduledEnd,
-      scheduledStart: task.scheduledStart,
+      hasTimeFields: ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"].some((field) => Object.hasOwn(task, field)),
       status: task.status,
     };
   }).toEqual({
     dueDate: "",
-    scheduledEnd: "",
-    scheduledStart: "",
+    hasTimeFields: false,
     status: "scheduled",
   });
   expect(await page.evaluate((id) => {

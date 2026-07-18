@@ -26,6 +26,8 @@ assert(socialPreviewStat.size > 0, "social preview asset is missing from the cli
 assert(index.includes('property="og:image" content="/assets/sygma-social-preview.png"'), "built index is missing its Open Graph preview");
 assert(serviceWorker.includes("/assets/sygma-social-preview.png"), "service worker does not precache the social preview");
 assert(serviceWorker.includes(appPath) && serviceWorker.includes(stylesPath), "service worker does not precache built assets");
+assert(serviceWorker.includes('url.pathname.startsWith("/_sygma/assets/")'), "service worker is missing hashed-asset cache-first delivery");
+assert(!serviceWorker.includes('url.pathname.startsWith("/icons/")'), "service worker cache-first must not include unhashed icons");
 
 const builtBytes = appStat.size + stylesStat.size;
 const sourceBytes = sourceAppStat.size + sourceStylesStat.size;

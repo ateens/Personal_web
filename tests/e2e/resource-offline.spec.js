@@ -295,7 +295,7 @@ test("a stale queued edit becomes a durable conflict and never overwrites the re
   }
 });
 
-test("a waiting service-worker update is blocked by pending work and only applies after a successful save", async ({ browser, request }, testInfo) => {
+test("a waiting service-worker update is blocked by pending work and automatically applies after a successful save", async ({ browser, request }, testInfo) => {
   test.setTimeout(60_000);
   const { context, page } = await openServiceWorkerControlledApp(browser, testInfo);
   const localTitle = "Save before applying update";
@@ -342,23 +342,14 @@ test("a waiting service-worker update is blocked by pending work and only applie
     expect(await page.evaluate(() => window.__e2eDocumentIdentity)).toBe(documentIdentity);
     await expect(resourceTitle(page)).toHaveValue(localTitle);
 
+    const automaticReload = page.waitForEvent("framenavigated");
     await context.unroute("**/api/**", holdWrites);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect.poll(async () => resourceTitleFromState((await fixtureSnapshot(request)).state)).toBe(localTitle);
-    await expectSyncState(page, "saved", /Saved|저장됨/i);
-
-    const readyUpdate = page.locator('[data-service-worker-update][data-update-state="ready"]');
-    const readyApply = readyUpdate.locator('[data-action="apply-app-update"]');
-    await expect(readyUpdate).toBeVisible();
-    await expect(readyApply).toBeEnabled();
-    expect(await page.evaluate(() => window.__e2eDocumentIdentity)).toBe(documentIdentity);
-
-    await Promise.all([
-      page.waitForEvent("framenavigated"),
-      readyApply.click(),
-    ]);
+    await automaticReload;
     await expect.poll(() => new URL(page.url()).pathname).toBe(RESOURCE_PATH);
     await expect(resourceTitle(page)).toHaveValue(localTitle);
+    expect(await page.evaluate(() => window.__e2eDocumentIdentity)).toBeUndefined();
     await expect.poll(() => waitingServiceWorker(page)).toBe(false);
     await expect.poll(() => controlledByServiceWorker(page)).toBe(true);
     await expect.poll(async () => (await readLocalPersistence(page)).operations.length).toBe(0);
@@ -407,41 +398,55 @@ function saveStatus(page) {
 
 async function expectSyncState(page, state, textPattern) {
   const status = saveStatus(page);
-  await expect(status).toHaveAttribute("data-sync-state", state);
-  await expect(status).toContainText(textPattern);
+  await expect.poll(async () => {
+    const [syncState, text] = await Promise.all([
+      status.getAttribute("data-sync-state"),
+      status.textContent(),
+    ]);
+    return { syncState, textMatches: textPattern.test(text || "") };
+  }).toEqual({ syncState: state, textMatches: true });
 }
 
 async function expectQueuedResourceOperation(page, expected) {
   await expect.poll(async () => {
     const local = await readLocalPersistence(page);
-    return local.operations.length === 1 ? local.operations[0].status : "";
-  }).toBe(expected.status);
-
-  const local = await readLocalPersistence(page);
-  expect(local.exists).toBe(true);
-  expect(local.operations).toHaveLength(1);
-  const operation = local.operations[0];
-  expect(operation).toMatchObject({
-    id: expect.any(String),
+    const operation = local.operations.length === 1 ? local.operations[0] : null;
+    return {
+      exists: local.exists,
+      operationCount: local.operations.length,
+      idPresent: Boolean(operation?.id),
+      workspaceId: operation?.workspaceId || "",
+      entityType: operation?.entityType || "",
+      entityId: operation?.entityId || "",
+      baseRevision: operation?.baseRevision ?? null,
+      status: operation?.status || "",
+      attemptsValid: Number.isFinite(operation?.attempts),
+      minimumAttemptsMet: expected.minimumAttempts === undefined || Number(operation?.attempts || 0) >= expected.minimumAttempts,
+      timestampValid: Number.isFinite(Date.parse(operation?.createdAt || "")),
+      payloadId: operation?.payload?.resource?.id || "",
+      payloadTitle: operation?.payload?.resource?.title || "",
+      remoteRevision: operation?.remoteRevision ?? null,
+      snapshotRevision: local.snapshot?.baseRevision ?? null,
+      snapshotTitle: resourceTitleFromState(local.snapshot?.state),
+    };
+  }).toEqual({
+    exists: true,
+    operationCount: 1,
+    idPresent: true,
     workspaceId: FIXTURE_IDS.appState,
     entityType: "resource",
     entityId: expected.entityId,
     baseRevision: expected.baseRevision,
     status: expected.status,
-    attempts: expect.any(Number),
-    createdAt: expect.any(String),
-    payload: {
-      resource: {
-        id: expected.entityId,
-        title: expected.title,
-      },
-    },
+    attemptsValid: true,
+    minimumAttemptsMet: true,
+    timestampValid: true,
+    payloadId: expected.entityId,
+    payloadTitle: expected.title,
+    remoteRevision: expected.remoteRevision ?? null,
+    snapshotRevision: expected.baseRevision,
+    snapshotTitle: expected.title,
   });
-  expectTimestamp(operation.createdAt);
-  if (expected.minimumAttempts !== undefined) expect(operation.attempts).toBeGreaterThanOrEqual(expected.minimumAttempts);
-  if (expected.remoteRevision !== undefined) expect(operation.remoteRevision).toBe(expected.remoteRevision);
-  expect(local.snapshot.baseRevision).toBe(expected.baseRevision);
-  expect(resourceTitleFromState(local.snapshot.state)).toBe(expected.title);
 }
 
 async function readLocalPersistence(page) {

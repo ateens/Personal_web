@@ -46,7 +46,7 @@ Box
 | Boxes | 삶의 영역/컨테이너 | 이름, 구분, 목표, 프로젝트, 할 일, 자료 | 최상위 영역 또는 life area |
 | Goals | 목표 | 이름, 연도, 분기, 목표 달성일, 진행상태, 박스, 프로젝트, 자료 | 장기/중기 outcome |
 | Projects | 프로젝트 | 이름, 상태, 날짜, 목표, 박스, 할 일, 노트, 선후행, 장애물, 작업시간 | 기한과 산출물이 있는 실행 묶음 |
-| Tasks | 할 일 | Task, 날짜, 계획시각, 구분, 중요/긴급, 완료, 소요시간, 프로젝트, 자료, 박스 | 실제 실행 단위 |
+| Tasks | 할 일 | Task, 날짜, 구분, 중요/긴급, 완료, 프로젝트, 자료, 박스 | 실제 실행 단위 |
 | Resources | 자료/노트 | 이름, URL, 분류, 중요도, 고정, 나중에 보기, 상위/하위 노트, 연결 엔티티 | 지식, 메모, 링크, 참고자료 |
 | Daily Journal | 일간 회고 | 날짜, 감정, 만족도, 기록, 교훈 | 일간 리뷰 로그 |
 | WM Journal | 주간/월간 회고 | 구분, 기간, 목표, 리뷰, 문제, 감사, 만족도 | 주간/월간 리뷰 |
@@ -145,37 +145,37 @@ Box
 
 ### 5.3 Task DB가 너무 많은 역할을 떠안음
 
-Tasks에 일반 할 일, 일정, 위임, 나중에, 저널, 습관/루틴이 함께 들어 있습니다. Notion에서는 반복 템플릿과 linked view 때문에 이렇게 된 것으로 보입니다.
+Tasks에 일반 할 일, 일정, 위임, 저널, 습관/루틴이 함께 들어 있습니다. Notion에서는 반복 템플릿과 linked view 때문에 이렇게 된 것으로 보입니다.
 
 웹앱 대안:
 
 - Task는 실행 단위로 유지
 - Habit은 `habits`와 `habit_instances`로 분리
 - Journal은 `journals` 또는 `reviews`로 분리
-- Calendar event 성격의 항목은 `scheduled_start/end`를 명확히 둠
+- 시각이 필요한 외부 일정은 Task가 아니라 Calendar event로 분리
 
-### 5.4 계획시각이 text임
+### 5.4 Task는 날짜 단위로 배치
 
-`계획시각`이 텍스트라 계산, 정렬, 알림, 시간표 view에 약합니다.
-
-웹앱 대안:
-
-- `scheduled_start`
-- `scheduled_end`
-- `due_at`
-- `planned_for`
-- `review_at`
-
-### 5.5 "나중에" 상태가 과부하됨
-
-현재 `나중에`는 GTD의 someday, waiting, reminder, backlog를 모두 포함합니다.
+Task는 실행 날짜만 가지며 시작·종료 시각이나 예상 소요 시간을 저장하지 않습니다.
 
 웹앱 대안:
 
-- Someday: 언젠가 할 일
-- Waiting: 외부 응답 대기
-- Reminder: 특정 날짜에 다시 보기
-- Backlog: 프로젝트나 목표에 연결된 후보 작업
+- Task는 `due_date` 하나만 사용
+- 시각이 필요한 일정은 Google Calendar event로 관리
+
+### 5.5 `예정`과 `나중에` 상태 통합
+
+`나중에(someday)`는 날짜가 정해지지 않은 `예정(scheduled)`과 의미가 겹치므로 별도 Task 상태로 두지 않습니다.
+
+웹앱 기준:
+
+- Todo: 아직 완료되지 않은 기본 실행 상태이며, 배정 여부는 상태가 아니라 `due_date` 유무로 판단
+- Scheduled: 의도적으로 예정 처리한 할 일이며 `due_date`는 선택 사항
+- Waiting: 외부 응답을 기다리는 할 일
+- Reminder: 별도 상태가 아니라 Task 날짜 또는 Calendar event로 표현
+- Backlog: 프로젝트나 목표에 연결된 기본 `할 일(todo)`로 표현
+
+따라서 미계획 Task는 `due_date`가 없고 `scheduled`가 아닌 항목으로 계산합니다.
 
 ### 5.6 Formula/Rollup에 핵심 로직이 숨어 있음
 
@@ -207,7 +207,7 @@ SYGMA Mobile은 빠른 추가와 몇 개 view를 따로 둔 페이지입니다. 
 | Today | 오늘 실행 | 오늘 할 일, 루틴, 지연 항목, 빠른 수집, 집중 프로젝트 |
 | Inbox | 수집/분류 | 빠른 입력, URL 저장, capture 변환, 일괄 분류 |
 | Plan | 계획 | 미계획/지연 항목, 주간/월간 캘린더, 프로젝트 타임라인 |
-| Tasks | 실행 단위 관리 | 필터, 완료, 일정, 위임, someday/waiting |
+| Tasks | 실행 단위 관리 | 필터, 완료, 일정, 예정/대기 |
 | Projects | 프로젝트 관리 | 상태, 진행률, 타임라인, 연결 task/resource |
 | Goals | 목표 관리 | 연/분기 목표, 진행률, 목표별 프로젝트 |
 | Boxes | 삶의 영역 | 고정/일반/아카이브 영역, 영역별 요약 |
@@ -251,7 +251,7 @@ Plan은 Notion의 `계획하기`를 대체하는 핵심 화면입니다.
 
 - 미계획 Task
 - 지연 Task
-- Someday/Reminder 재검토
+- 날짜 없는 예정/Reminder 재검토
 - 미계획 Project
 - 프로젝트 타임라인
 - 이번 주 캘린더
@@ -295,10 +295,9 @@ Task detail:
 
 - 제목
 - 상태/완료
-- 날짜와 시간
+- 날짜
 - 구분
 - 중요/긴급
-- 소요시간
 - 연결 프로젝트/자료/박스
 - 메모
 
@@ -372,16 +371,11 @@ activity_logs
 - box_id
 - title
 - note
-- status: todo | scheduled | doing | waiting | someday | done | canceled
+- status: todo | scheduled | doing | waiting | done | canceled
 - kind: focus | normal | easy | delegated | event
 - priority_matrix: important_urgent | important_not_urgent | not_important_urgent | not_important_not_urgent | routine
-- due_at
-- scheduled_start
-- scheduled_end
-- review_at
+- due_date
 - completed_at
-- estimated_minutes
-- actual_minutes
 - assignee_text
 
 `resources`
@@ -527,7 +521,7 @@ activity_logs
 1. Notion의 화면 배치가 아니라 사용 흐름을 복제한다.
 2. 데이터는 한 번 저장하고, view는 여러 개 만든다.
 3. 수집과 실행을 분리한다.
-4. `나중에`, `대기`, `다시 알림`은 명확히 분리한다.
+4. `예정`과 `나중에`를 중복 상태로 만들지 않고, `대기`는 외부 응답 의미로만 사용한다.
 5. 습관은 Task 템플릿이 아니라 별도 모델로 둔다.
 6. Formula/Rollup은 테스트 가능한 앱 로직으로 바꾼다.
 7. 모바일은 별도 페이지 복제가 아니라 반응형 UX로 해결한다.

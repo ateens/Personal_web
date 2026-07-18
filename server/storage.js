@@ -20,6 +20,8 @@ const COLLECTION_KEYS = [
 ];
 const STRING_SETTING_KEYS = ["googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt"];
 const LEGACY_KIND_COLLECTION_KEYS = new Set(["tasks", "journals"]);
+const LEGACY_TASK_TIME_FIELDS = ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"];
+const LEGACY_TASK_SOMEDAY_STATUS = "someday";
 const DEFAULT_NAV_ORDER = ["today", "inbox", "tasks", "projects", "goals", "boxes", "resources", "habits", "journal", "calendar", "database"];
 const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 const DEFAULT_CALENDAR_SOURCES = {
@@ -233,11 +235,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
         title text NOT NULL DEFAULT '',
         status text NOT NULL DEFAULT '',
         due_date date,
-        scheduled_start timestamptz,
-        scheduled_end timestamptz,
         completed_at timestamptz,
-        estimated_minutes integer,
-        actual_minutes integer,
         google_event_id text NOT NULL DEFAULT '',
         position integer NOT NULL DEFAULT 0,
         data jsonb NOT NULL,
@@ -1076,7 +1074,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     const rows = await readRows(
       client,
       "tasks",
-      "id, box_id, goal_id, project_id, title, status, due_date, scheduled_start, scheduled_end, completed_at, estimated_minutes, actual_minutes, google_event_id, data"
+      "id, box_id, goal_id, project_id, title, status, due_date, completed_at, google_event_id, data"
     );
     const items = [];
     for (const row of rows) {
@@ -1089,11 +1087,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       item.title = textValue(row.title);
       item.status = textValue(row.status);
       item.dueDate = databaseDateString(row.due_date);
-      item.scheduledStart = databaseTimestampString(row.scheduled_start);
-      item.scheduledEnd = databaseTimestampString(row.scheduled_end);
       item.completedAt = databaseTimestampString(row.completed_at);
-      item.estimatedMinutes = numberOrDefault(row.estimated_minutes, item.estimatedMinutes);
-      item.actualMinutes = numberOrDefault(row.actual_minutes, item.actualMinutes);
       item.googleEventId = textValue(row.google_event_id);
       items.push(item);
     }
@@ -1307,9 +1301,9 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       if (!relationalId(task)) continue;
       await client.query(
         `INSERT INTO tasks (
-          app_state_id, id, box_id, goal_id, project_id, title, status, due_date, scheduled_start,
-          scheduled_end, completed_at, estimated_minutes, actual_minutes, google_event_id, position, data
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb)`,
+          app_state_id, id, box_id, goal_id, project_id, title, status, due_date,
+          completed_at, google_event_id, position, data
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
         [
           appStateId,
           task.id,
@@ -1319,11 +1313,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
           textValue(task.title),
           textValue(task.status),
           dateValue(task.dueDate),
-          timestampValue(task.scheduledStart),
-          timestampValue(task.scheduledEnd),
           timestampValue(task.completedAt),
-          integerValue(task.estimatedMinutes),
-          integerValue(task.actualMinutes),
           textValue(task.googleEventId),
           index,
           jsonValue(task),
@@ -1837,8 +1827,13 @@ function normalizeAppStateForStorage(state) {
         changed = true;
         continue;
       }
-      if (LEGACY_KIND_COLLECTION_KEYS.has(key) && Object.prototype.hasOwnProperty.call(item, "kind")) {
-        const { kind, ...cleanItem } = item;
+      let cleanItem = item;
+      if (LEGACY_KIND_COLLECTION_KEYS.has(key) && Object.prototype.hasOwnProperty.call(cleanItem, "kind")) {
+        const { kind, ...itemWithoutKind } = cleanItem;
+        cleanItem = itemWithoutKind;
+      }
+      if (key === "tasks") cleanItem = normalizeTaskForStorage(cleanItem);
+      if (cleanItem !== item) {
         if (!normalizedItems) normalizedItems = items.slice(0, index);
         normalizedItems.push(cleanItem);
         changed = true;
@@ -1849,6 +1844,35 @@ function normalizeAppStateForStorage(state) {
     if (normalizedItems) nextState[key] = normalizedItems;
   }
   return { state: nextState, changed };
+}
+
+function normalizeTaskForStorage(task) {
+  if (!taskNeedsDateOnlyMigration(task)) return task;
+  const cleanTask = { ...task };
+  const legacySomeday = task.status === LEGACY_TASK_SOMEDAY_STATUS;
+  cleanTask.status = legacySomeday ? "scheduled" : cleanTask.status;
+  cleanTask.dueDate = normalizeTaskDate(cleanTask.dueDate);
+  if (!legacySomeday && !cleanTask.dueDate) {
+    const legacyDate = databaseTimestampString(task.scheduledStart).slice(0, 10);
+    if (legacyDate) cleanTask.dueDate = legacyDate;
+  }
+  for (const field of LEGACY_TASK_TIME_FIELDS) delete cleanTask[field];
+  return cleanTask;
+}
+
+function taskNeedsDateOnlyMigration(task) {
+  if (task.status === LEGACY_TASK_SOMEDAY_STATUS) return true;
+  if (task.dueDate && normalizeTaskDate(task.dueDate) !== task.dueDate) return true;
+  for (const field of LEGACY_TASK_TIME_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(task, field)) return true;
+  }
+  return false;
+}
+
+function normalizeTaskDate(value) {
+  if (!value) return "";
+  const date = String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
 }
 
 function isValidDateString(value) {

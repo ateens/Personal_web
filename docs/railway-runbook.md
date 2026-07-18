@@ -11,7 +11,7 @@ https://personalweb-production-81a6.up.railway.app
 - There is no application-level password, session gate, Sites Worker, proxy bearer, or OAuth handoff ticket.
 - `GET /`, workspace reads, Google Calendar reads, and the mutation APIs are reachable by anyone who can reach the Railway URL.
 - Production and every Railway runtime require revision preconditions for state mutations. This prevents stale concurrent writes; it is not authorization.
-- Unsafe API requests require the exact app `Origin`, limiting cross-site browser submission. This does not stop a person from opening the app and using its API directly.
+- Unsafe requests carrying browser `Origin` or `Sec-Fetch-Site` metadata must be same-origin. Native app requests without browser fetch metadata are accepted. This does not stop a person from using the API directly.
 - API rate limits and the state-write queue remain enabled.
 - Google OAuth uses a signed, expiring, one-time state transaction and matching cookie on the Railway origin. This protects the callback protocol, not workspace ownership.
 - `/health` remains public for Railway readiness checks.
@@ -38,8 +38,8 @@ After `main` is pushed and Railway reports the new deployment healthy:
 1. Confirm `GET /health` returns `200` and `{"ok":true,"database":"postgresql"}`.
 2. Confirm anonymous `GET /` returns `200` without redirecting to `/auth/login`.
 3. Confirm anonymous `GET /api/state/status` and `GET /api/state` return `200`.
-4. Confirm an unsafe API request without `Origin` returns `403 ORIGIN_NOT_ALLOWED`.
-5. Confirm the browser can save with the current revision precondition.
+4. Confirm a cross-site browser mutation returns `403 ORIGIN_NOT_ALLOWED` while a native request without browser fetch metadata reaches normal payload validation.
+5. Confirm the browser and iPhone app can save with the current revision precondition.
 6. Confirm `/api/google/auth/start` redirects to Google and uses the Railway callback URI.
 7. Confirm a Resource deep link reloads through the SPA fallback.
 

@@ -9,6 +9,47 @@ test.beforeEach(async ({ request }) => {
   await resetFixture(request);
 });
 
+test("two active clients converge through state events without focus or reload", async ({ browser, request }, testInfo) => {
+  const macContext = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
+  const ipadContext = await newAppContext(browser, testInfo, { width: 1024, height: 1366, hasTouch: true, isMobile: true });
+  const macPage = await macContext.newPage();
+  const ipadPage = await ipadContext.newPage();
+  const changedTitle = "Synced live without a wake event";
+
+  try {
+    const macEventStream = waitForStateEventStream(macPage);
+    const ipadEventStream = waitForStateEventStream(ipadPage);
+    await Promise.all([macPage.goto("/"), ipadPage.goto("/"), macEventStream, ipadEventStream]);
+    await openResources(macPage);
+    await openResources(ipadPage);
+    await expectResourceTitle(ipadPage, ORIGINAL_TITLE);
+    await expect.poll(() => localSnapshotRevision(macPage)).toBe(1);
+    await expect.poll(() => localSnapshotRevision(ipadPage)).toBe(1);
+
+    const ipadDocumentIdentity = await ipadPage.evaluate(() => {
+      window.__e2eDocumentIdentity = crypto.randomUUID();
+      return window.__e2eDocumentIdentity;
+    });
+
+    await macPage.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
+    const macTitle = macPage.locator(`[data-resource-title="${FIXTURE_IDS.resource}"]`);
+    await expect(macTitle).toBeVisible();
+    await macTitle.fill(changedTitle);
+    await expect.poll(async () => {
+      const snapshot = await fixtureSnapshot(request);
+      return { revision: snapshot.serverRevision, title: resourceTitle(snapshot.state) };
+    }).toEqual({ revision: 2, title: changedTitle });
+
+    await expect(
+      ipadPage.locator(`[data-resource-title-display="${FIXTURE_IDS.resource}"]`).first()
+    ).toHaveText(changedTitle, { timeout: 5_000 });
+    await expect.poll(() => localSnapshotRevision(ipadPage), { timeout: 5_000 }).toBe(2);
+    expect(await ipadPage.evaluate(() => window.__e2eDocumentIdentity)).toBe(ipadDocumentIdentity);
+  } finally {
+    await Promise.all([macContext.close(), ipadContext.close()]);
+  }
+});
+
 for (const wakeEvent of ["focus", "pageshow"]) {
   test(`a second device pulls a newer revision on ${wakeEvent} without reloading`, async ({ browser, request }, testInfo) => {
     const macContext = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
@@ -107,6 +148,10 @@ async function newAppContext(browser, testInfo, viewport) {
 
 async function expectResourceTitle(page, title) {
   await expect(page.locator(`[data-resource-title-display="${FIXTURE_IDS.resource}"]`).first()).toHaveText(title);
+}
+
+function waitForStateEventStream(page) {
+  return page.waitForResponse((response) => new URL(response.url()).pathname === "/api/state/events");
 }
 
 async function dispatchWakeEvent(page, eventName) {

@@ -24,6 +24,8 @@ const sourceStaticFiles = new Set([
 ]);
 const STATE_VERSION = 4;
 const STATE_BODY_LIMIT = 5_000_000;
+const STATE_EVENT_POLL_INTERVAL_MS = 1_000;
+const STATE_EVENT_HEARTBEAT_MS = 15_000;
 const MAX_STATE_DEPTH = 32;
 const MAX_STATE_NODES = 200_000;
 const MAX_ARRAY_ITEMS = 20_000;
@@ -147,8 +149,13 @@ const requestIdSymbol = Symbol("requestId");
 const apiOperationSymbol = Symbol("apiOperation");
 const rateLimitBuckets = new Map();
 const stateWriteQueue = [];
+const stateEventClients = new Set();
 let rateLimitChecks = 0;
 let activeStateWrites = 0;
+let stateEventPollTimer = null;
+let stateEventPollInFlight = false;
+let latestStateEventRevision = -1;
+let lastStateEventHeartbeatAt = 0;
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
@@ -267,6 +274,7 @@ function envInteger(name, fallback, minimum, maximum) {
 function apiOperation(request, requestUrl) {
   const method = String(request.method || "GET").toUpperCase();
   const pathname = requestUrl.pathname;
+  if (method === "GET" && pathname === "/api/state/events") return "state.events";
   if (method === "GET" && pathname === "/api/state/status") return "state.status";
   if (method === "GET" && pathname === "/api/state") return "state.read";
   if ((method === "PUT" || method === "POST") && pathname === "/api/state") return "state.write";
@@ -281,7 +289,7 @@ function apiOperation(request, requestUrl) {
 }
 
 function operationRateLimit(operation) {
-  if (operation === "state.status" || operation === "state.read") return apiRateLimitStateReadMax;
+  if (operation === "state.events" || operation === "state.status" || operation === "state.read") return apiRateLimitStateReadMax;
   if (operation === "google.status" || operation === "google.calendar.read") return apiRateLimitGoogleReadMax;
   if (
     operation === "state.write"
@@ -1361,6 +1369,61 @@ function stateRevisionHeaders(revision, mode = "conditional") {
   };
 }
 
+function writeStateEvent(response, revision, updatedAt = "") {
+  if (response.destroyed || response.writableEnded) return false;
+  const value = Number(revision);
+  if (!Number.isSafeInteger(value) || value < 0) return false;
+  response.write(`id: ${value}\nevent: state\ndata: ${JSON.stringify({ revision: value, updatedAt: String(updatedAt || "") })}\n\n`);
+  return true;
+}
+
+function broadcastStateEvent(revision, updatedAt = "") {
+  const value = Number(revision);
+  if (!Number.isSafeInteger(value) || value < 0) return;
+  latestStateEventRevision = Math.max(latestStateEventRevision, value);
+  for (const response of stateEventClients) {
+    if (!writeStateEvent(response, value, updatedAt)) stateEventClients.delete(response);
+  }
+  stopStateEventPollingIfIdle();
+}
+
+function broadcastStateHeartbeat() {
+  const heartbeat = `: heartbeat ${Date.now()}\n\n`;
+  for (const response of stateEventClients) {
+    if (response.destroyed || response.writableEnded) stateEventClients.delete(response);
+    else response.write(heartbeat);
+  }
+  lastStateEventHeartbeatAt = Date.now();
+  stopStateEventPollingIfIdle();
+}
+
+async function pollStateEventRevision() {
+  if (stateEventPollInFlight || !stateEventClients.size) return;
+  stateEventPollInFlight = true;
+  try {
+    if (Date.now() - lastStateEventHeartbeatAt >= STATE_EVENT_HEARTBEAT_MS) broadcastStateHeartbeat();
+    const status = await storage.stateStatus();
+    if (status.revision > latestStateEventRevision) broadcastStateEvent(status.revision, status.updatedAt);
+  } catch {} finally {
+    stateEventPollInFlight = false;
+  }
+}
+
+function startStateEventPolling() {
+  if (stateEventPollTimer) return;
+  lastStateEventHeartbeatAt = Date.now();
+  stateEventPollTimer = setInterval(() => {
+    pollStateEventRevision();
+  }, STATE_EVENT_POLL_INTERVAL_MS);
+  stateEventPollTimer.unref?.();
+}
+
+function stopStateEventPollingIfIdle() {
+  if (stateEventClients.size || !stateEventPollTimer) return;
+  clearInterval(stateEventPollTimer);
+  stateEventPollTimer = null;
+}
+
 async function exchangeToken(params) {
   const response = await fetch(googleTokenUrl, {
     method: "POST",
@@ -1449,6 +1512,35 @@ async function handleGoogleStatus(response) {
   });
 }
 
+async function handleStateEvents(request, response) {
+  await storage.stateStatus();
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.flushHeaders?.();
+  response.write("retry: 1000\n\n");
+  stateEventClients.add(response);
+  startStateEventPolling();
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    stateEventClients.delete(response);
+    stopStateEventPollingIfIdle();
+  };
+  request.once("close", cleanup);
+  response.once("close", cleanup);
+  response.once("error", cleanup);
+
+  const current = await storage.stateStatus();
+  latestStateEventRevision = Math.max(latestStateEventRevision, current.revision);
+  writeStateEvent(response, current.revision, current.updatedAt);
+}
+
 async function handleStateStatus(response) {
   try {
     const status = await storage.stateStatus();
@@ -1492,6 +1584,7 @@ async function handleStateWrite(request, response) {
   } finally {
     releaseStateWrite();
   }
+  broadcastStateEvent(saved.revision, saved.updatedAt);
   const concurrencyMode = baseRevision === null ? (saved.bootstrap ? "bootstrap" : "legacy-unconditional") : "conditional";
   sendJson(response, 200, {
     ok: true,
@@ -1536,6 +1629,7 @@ async function handleResourceWrite(request, response, requestUrl) {
     releaseStateWrite();
   }
 
+  broadcastStateEvent(saved.revision, saved.updatedAt);
   sendJson(response, 200, {
     ok: true,
     configured: true,
@@ -1775,6 +1869,10 @@ async function handleApiRequest(request, response, requestUrl) {
       return true;
     }
     if (enforceApiRateLimit(request, response, operation)) return true;
+    if (request.method === "GET" && requestUrl.pathname === "/api/state/events") {
+      await handleStateEvents(request, response);
+      return true;
+    }
     if (request.method === "GET" && requestUrl.pathname === "/api/state/status") {
       await handleStateStatus(response);
       return true;
@@ -1904,14 +2002,15 @@ async function sendFile(request, response, requestUrl, filePath) {
   const extension = extname(filePath);
   const encoding = responseEncoding(request, extension, fileStat.size);
   const etag = `\"${fileStat.size.toString(16)}-${Math.trunc(fileStat.mtimeMs).toString(16)}\"`;
+  const cacheControl = staticCacheControl(filePath);
   const headers = {
     "Content-Type": contentTypes[extension] || "application/octet-stream",
-    "Cache-Control": staticCacheControl(filePath, requestUrl),
+    "Cache-Control": cacheControl,
     ETag: etag,
     Vary: "Accept-Encoding",
     "X-Content-Type-Options": "nosniff",
   };
-  if (request.headers["if-none-match"] === etag) {
+  if (cacheControl !== "no-store" && request.headers["if-none-match"] === etag) {
     response.writeHead(304, headers);
     response.end();
     return;
@@ -1930,12 +2029,10 @@ async function sendFile(request, response, requestUrl, filePath) {
   createReadStream(filePath).pipe(response);
 }
 
-function staticCacheControl(filePath, requestUrl) {
+function staticCacheControl(filePath) {
   const name = filePath.slice(staticRoot.length).replace(/^[/\\]+/, "");
-  if (name === "index.html" || name === "service-worker.js" || name === "manifest.json") return "no-store";
   if (/^assets\/[^/]+\.[a-f0-9]{10,}\./.test(name)) return "public, max-age=31536000, immutable";
-  if (requestUrl.searchParams.has("v")) return "public, max-age=31536000, immutable";
-  return "public, max-age=3600";
+  return "no-store";
 }
 
 async function handleRequest(request, response) {

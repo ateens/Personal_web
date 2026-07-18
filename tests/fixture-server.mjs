@@ -53,6 +53,7 @@ let externalWrites = [];
 let serverRevision = 1;
 let resetGeneration = 1;
 let serviceWorkerVersion = 1;
+const stateEventClients = new Set();
 
 const server = createServer(async (request, response) => {
   if (!localRequestHost(request.headers.host)) {
@@ -66,6 +67,10 @@ const server = createServer(async (request, response) => {
   try {
     if (request.method === "GET" && path === "/health") {
       sendJson(response, 200, { ok: true, database: "memory", appStateId: FIXTURE_IDS.appState });
+      return;
+    }
+    if (request.method === "GET" && path === "/api/state/events") {
+      sendStateEvents(request, response);
       return;
     }
     if (request.method === "GET" && path === "/api/state/status") {
@@ -184,6 +189,7 @@ const server = createServer(async (request, response) => {
         stateUpdatedAt: state.updatedAt || "",
         resourceRevisions: Object.fromEntries((state.resources || []).map((resource) => [resource.id, resource.revision ?? null])),
       });
+      broadcastStateEvent();
       sendJson(response, 200, {
         ok: true,
         concurrency: baseRevision === null ? "fixture-unconditional" : "conditional",
@@ -278,6 +284,7 @@ const server = createServer(async (request, response) => {
         stateUpdatedAt: state.updatedAt,
         resourceRevisions: { [resourceId]: body.resource.revision ?? null },
       });
+      broadcastStateEvent();
       sendJson(response, 200, {
         ok: true,
         appStateId: FIXTURE_IDS.appState,
@@ -343,6 +350,7 @@ const server = createServer(async (request, response) => {
       nextState.revision = serverRevision;
       state = nextState;
       externalWrites.push({ serverRevision, resourceId: resource.id, title: nextTitle });
+      broadcastStateEvent();
       sendJson(response, 200, { ok: true, revision: serverRevision, title: nextTitle }, stateRevisionHeaders("external"));
       return;
     }
@@ -394,7 +402,11 @@ server.listen(port, "127.0.0.1", () => {
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, () => {
+    for (const response of stateEventClients) response.end();
+    stateEventClients.clear();
+    server.close(() => process.exit(0));
+  });
 }
 
 function statePayload() {
@@ -407,6 +419,45 @@ function statePayload() {
     resetGeneration,
     state: structuredClone(state),
   };
+}
+
+function sendStateEvents(request, response) {
+  response.writeHead(200, {
+    ...guardHeaders,
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  stateEventClients.add(response);
+
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    stateEventClients.delete(response);
+  };
+  request.once("close", cleanup);
+  response.once("close", cleanup);
+  response.once("error", cleanup);
+
+  response.write("retry: 1000\n\n");
+  writeStateEvent(response);
+}
+
+function broadcastStateEvent() {
+  for (const response of stateEventClients) {
+    if (!writeStateEvent(response)) stateEventClients.delete(response);
+  }
+}
+
+function writeStateEvent(response) {
+  if (response.destroyed || response.writableEnded) return false;
+  response.write(`id: ${serverRevision}\nevent: state\ndata: ${JSON.stringify({
+    revision: serverRevision,
+    updatedAt: String(state.updatedAt || ""),
+  })}\n\n`);
+  return true;
 }
 
 function omittedResourceIds(currentState, incomingState) {

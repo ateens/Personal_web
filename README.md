@@ -83,7 +83,7 @@ The Node server compresses responses when supported, validates conditional reque
 
 Railway is the only production hosting and runtime target. `railway.json` runs `npm run check && npm run check:build` during the image build, then starts the verified bundle with `npm run start:production`. The server listens on Railway's injected `PORT`, serves the optimized client and API from one origin, and exposes `/health` for deployment health checks.
 
-There is no application-level password or login gate. The Railway URL, static app, and PostgreSQL-backed API are directly reachable, while production state writes still require revision preconditions and remain rate-limited. Anyone who can reach the URL can read the workspace and issue valid mutations, so do not treat the deployment as private.
+There is no application-level password or login gate. The Railway URL, static app, and PostgreSQL-backed API are directly reachable, while production state writes still require revision preconditions and remain rate-limited. Cross-site browser mutations are rejected; native app requests without browser fetch metadata are accepted. Anyone who can reach the URL can read the workspace and issue valid mutations, so do not treat the deployment as private.
 
 The active operating procedure is in [the Railway runbook](docs/railway-runbook.md).
 

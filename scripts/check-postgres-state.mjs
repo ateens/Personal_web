@@ -44,6 +44,8 @@ let legacyTokenStorage;
 let operatorResetStorage;
 let serverStderr = "";
 let resourceServerStderr = "";
+let stateEventAbort;
+let stateEventIterator;
 
 try {
   serverProcess = spawn("node", ["server.js"], {
@@ -77,6 +79,18 @@ try {
   assert(statusResult.response.headers.get("etag") === '"state-0"', "empty state status did not expose the bootstrap ETag");
   assert(statusResult.response.headers.get("x-state-concurrency") === "required", "state status did not advertise required preconditions");
 
+  stateEventAbort = new AbortController();
+  const stateEventResponse = await fetch(`${baseUrl}/api/state/events`, {
+    headers: { Accept: "text/event-stream" },
+    signal: stateEventAbort.signal,
+  });
+  assert(stateEventResponse.ok, "state event stream request failed");
+  assert(stateEventResponse.headers.get("content-type")?.startsWith("text/event-stream"), "state event stream content type is invalid");
+  assert(stateEventResponse.headers.get("cache-control") === "no-store, no-transform", "state event stream must bypass caches and transforms");
+  stateEventIterator = stateEvents(stateEventResponse.body)[Symbol.asyncIterator]();
+  const initialStateEvent = await nextStateEvent(stateEventIterator);
+  assert(initialStateEvent.revision === 0, "state event stream did not emit the initial revision");
+
   const indexHead = await fetch(`${baseUrl}/`, { method: "HEAD" });
   assert(indexHead.ok, "static index HEAD request failed");
   assert(indexHead.headers.get("cache-control") === "no-store", "static index response should not be cached");
@@ -84,13 +98,13 @@ try {
   assert(indexHead.headers.get("content-security-policy")?.includes("frame-ancestors 'none'"), "static index response is missing the application CSP");
   const versionedAppHead = await fetch(`${baseUrl}/app.js?v=check`, { method: "HEAD" });
   assert(versionedAppHead.ok, "versioned static asset HEAD request failed");
-  assert(versionedAppHead.headers.get("cache-control")?.includes("immutable"), "versioned static asset should be immutable cached");
+  assert(versionedAppHead.headers.get("cache-control") === "no-store", "query-versioned source assets must not be cached");
   const compressedApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "Accept-Encoding": "br" } });
   assert(compressedApp.ok && compressedApp.headers.get("content-encoding") === "br", "static JavaScript did not use Brotli compression");
   const staticEtag = compressedApp.headers.get("etag");
   assert(staticEtag, "static JavaScript response is missing an ETag");
   const conditionalApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "If-None-Match": staticEtag } });
-  assert(conditionalApp.status === 304, "conditional static request did not return 304");
+  assert(conditionalApp.status === 200, "no-store source assets must return a fresh 200 response");
 
   const invalidJsonResult = await requestJson("/api/state", {
     method: "PUT",
@@ -113,6 +127,8 @@ try {
   assert(bootstrapResult.payload.revision === 1 && bootstrapResult.payload.state?.revision === 1, "state bootstrap did not create revision 1");
   assert(bootstrapResult.response.headers.get("etag") === '"state-1"', "state bootstrap did not return the revision 1 ETag");
   assert(bootstrapResult.response.headers.get("x-state-revision") === "1", "state bootstrap did not return X-State-Revision 1");
+  const bootstrapStateEvent = await nextStateEvent(stateEventIterator);
+  assert(bootstrapStateEvent.revision === 1, "state event stream did not broadcast the committed revision");
 
   const firstRead = await readState();
   assert(firstRead.payload.revision === 1 && firstRead.payload.state?.revision === 1, "state read did not return bootstrap revision 1");
@@ -143,8 +159,23 @@ try {
   );
   assert(firstRead.payload.state?.settings?.notionParityMode === false, "Resource notionParityMode changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.settings?.advancedWindowMode === true, "Resource advancedWindowMode changed during PostgreSQL round trip");
+  assert(firstRead.payload.state?.tasks?.[0]?.status === "scheduled", "legacy someday task status did not migrate to scheduled during PostgreSQL round trip");
   assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
+
+  await pool.query("UPDATE tasks SET status = 'someday' WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
+  const healedSomedayRead = await readState();
+  assert(healedSomedayRead.payload.state?.tasks?.[0]?.status === "scheduled", "relational someday task did not read-heal to scheduled");
+  assert(healedSomedayRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "relational someday read-heal changed the existing task date");
+  const healedSomedayRow = await pool.query("SELECT status, due_date FROM tasks WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
+  assert(healedSomedayRow.rows[0]?.status === "scheduled", "relational someday read-heal was not persisted");
+  const healedSomedayDueDate = healedSomedayRow.rows[0]?.due_date;
+  const healedSomedayDateKey = typeof healedSomedayDueDate === "string"
+    ? healedSomedayDueDate.slice(0, 10)
+    : healedSomedayDueDate instanceof Date
+      ? `${healedSomedayDueDate.getFullYear()}-${String(healedSomedayDueDate.getMonth() + 1).padStart(2, "0")}-${String(healedSomedayDueDate.getDate()).padStart(2, "0")}`
+      : "";
+  assert(healedSomedayDateKey === "2026-06-02", "relational someday read-heal did not preserve due_date");
 
   const missingPreconditionState = structuredClone(firstRead.payload.state);
   missingPreconditionState.updatedAt = "2026-06-02T00:01:00.000Z";
@@ -720,6 +751,8 @@ try {
   console.error(error.message || error);
   process.exitCode = 1;
 } finally {
+  stateEventAbort?.abort();
+  await stateEventIterator?.return?.().catch(() => {});
   try {
     await cleanupCheckRows();
     await assertCleanupComplete();
@@ -762,7 +795,7 @@ function makeValidState() {
     boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
     goals: [{ id: "check-goal", name: "PostgreSQL check goal", boxId: "check-box" }],
     projects: [{ id: "check-project", name: "PostgreSQL check project", goalId: "check-goal", boxId: "check-box" }],
-    tasks: [{ id: "check-task", title: "PostgreSQL check task", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
+    tasks: [{ id: "check-task", title: "PostgreSQL check task", status: "someday", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
     resources: [{
       id: "check-resource",
       title: "PostgreSQL check resource",
@@ -1415,6 +1448,49 @@ async function requestJsonAt(url, path, options = {}) {
   const response = await fetch(`${url}${path}`, options);
   const payload = await response.json().catch(() => ({}));
   return { response, payload };
+}
+
+async function* stateEvents(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const separator = buffer.indexOf("\n\n");
+      if (separator >= 0) {
+        const frame = buffer.slice(0, separator);
+        buffer = buffer.slice(separator + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) yield JSON.parse(data);
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function nextStateEvent(iterator, timeoutMs = 5_000) {
+  let timeout;
+  try {
+    const result = await Promise.race([
+      iterator.next(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("state event stream timed out")), timeoutMs);
+      }),
+    ]);
+    assert(!result.done && Number.isSafeInteger(result.value?.revision), "state event stream returned an invalid event");
+    return result.value;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function assert(condition, message) {

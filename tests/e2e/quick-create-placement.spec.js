@@ -100,8 +100,7 @@ test("create now keeps one completely unplaced Task and closes the first phase",
         title: task.title,
         status: task.status,
         dueDate: task.dueDate,
-        scheduledStart: task.scheduledStart,
-        scheduledEnd: task.scheduledEnd,
+        hasTimeFields: ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"].some((field) => Object.hasOwn(task, field)),
         completedAt: task.completedAt,
         boxId: task.boxId,
         goalId: task.goalId,
@@ -115,8 +114,7 @@ test("create now keeps one completely unplaced Task and closes the first phase",
       title,
       status: "todo",
       dueDate: "",
-      scheduledStart: "",
-      scheduledEnd: "",
+      hasTimeFields: false,
       completedAt: "",
       boxId: "",
       goalId: "",
@@ -139,16 +137,85 @@ test("scheduled lane sets the scheduled state without inventing a date", async (
     const task = taskByTitle(await fixtureSnapshot(request), title);
     return task && {
       dueDate: task.dueDate,
-      scheduledEnd: task.scheduledEnd,
-      scheduledStart: task.scheduledStart,
+      hasTimeFields: ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"].some((field) => Object.hasOwn(task, field)),
       status: task.status,
     };
   }).toEqual({
     dueDate: "",
-    scheduledEnd: "",
-    scheduledStart: "",
+    hasTimeFields: false,
     status: "scheduled",
   });
+});
+
+test("Task date choices do not disguise two days later as scheduled", async ({ page }) => {
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+
+  const labels = await page.evaluate(() => {
+    const template = document.createElement("template");
+    template.innerHTML = renderTaskDatePropertyChoices({ id: "date-choice-test", dueDate: "" }, "dueDate");
+    return Array.from(template.content.querySelectorAll("[data-task-property-value] > span"), (label) => label.textContent);
+  });
+
+  expect(labels).toEqual(["오늘", "내일", "다음 주", "날짜 없음"]);
+});
+
+test("legacy Task dates normalize to YYYY-MM-DD and drop every time field", async ({ page }) => {
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+
+  const migrated = await page.evaluate(() => {
+    const legacyTask = {
+      id: "legacy-timed-task",
+      title: "Legacy timed Task",
+      status: "scheduled",
+      boxId: "",
+      goalId: "",
+      projectId: "",
+      resourceId: "",
+      dueDate: "",
+      scheduledStart: "2031-04-12T09:00:00.000Z",
+      scheduledEnd: "2031-04-12T10:00:00.000Z",
+      estimatedMinutes: 60,
+      actualMinutes: 15,
+      completedAt: "",
+      googleEventId: "",
+      blocks: [],
+    };
+    const dateTimeDueTask = {
+      ...legacyTask,
+      id: "legacy-datetime-due-task",
+      dueDate: "2032-05-06T23:59:00.000Z",
+      scheduledStart: "",
+      scheduledEnd: "",
+    };
+    const legacyBlankSomedayTask = {
+      ...legacyTask,
+      id: "legacy-blank-someday-task",
+      status: "someday",
+      dueDate: "",
+      scheduledStart: "2033-06-08T09:00:00.000Z",
+    };
+    const legacyDatedSomedayTask = {
+      ...legacyTask,
+      id: "legacy-dated-someday-task",
+      status: "someday",
+      dueDate: "2033-06-07",
+      scheduledStart: "2033-06-08T09:00:00.000Z",
+    };
+    return normalizeState({ ...state, tasks: [legacyTask, dateTimeDueTask, legacyBlankSomedayTask, legacyDatedSomedayTask] }).tasks;
+  });
+
+  expect(migrated).toHaveLength(4);
+  expect(migrated[0]).toMatchObject({ dueDate: "2031-04-12", status: "scheduled" });
+  expect(migrated[1]).toMatchObject({ dueDate: "2032-05-06", status: "scheduled" });
+  expect(migrated[2]).toMatchObject({ dueDate: "", status: "scheduled" });
+  expect(migrated[3]).toMatchObject({ dueDate: "2033-06-07", status: "scheduled" });
+  for (const task of migrated) {
+    for (const field of ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"]) {
+      expect(task).not.toHaveProperty(field);
+    }
+  }
 });
 
 test("first phase matches the six-lane calendar and two-action reference composition", async ({ page }) => {

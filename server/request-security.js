@@ -13,5 +13,9 @@ export function requestOriginMatches(request, requestUrl) {
 export function mutationOriginAllowed(request, requestUrl, required) {
   if (!required) return true;
   const method = String(request?.method || "GET").toUpperCase();
-  return SAFE_METHODS.has(method) || requestOriginMatches(request, requestUrl);
+  if (SAFE_METHODS.has(method)) return true;
+  const suppliedOrigin = String(request?.headers?.origin || "").trim();
+  if (suppliedOrigin) return requestOriginMatches(request, requestUrl);
+  const fetchSite = String(request?.headers?.["sec-fetch-site"] || "").trim().toLowerCase();
+  return !fetchSite || fetchSite === "none";
 }

@@ -1,9 +1,9 @@
-const CACHE_NAME = "sygma-personal-web-v638-calendar-themes";
+const CACHE_NAME = "sygma-personal-web-v639-realtime-sync";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
-  "/styles.css?v=20260714-calendar-themes",
-  "/app.js?v=20260714-calendar-themes",
+  "/styles.css?v=20260718-realtime-sync",
+  "/app.js?v=20260718-realtime-sync",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 
@@ -85,6 +85,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  const immutableAsset = url.searchParams.has("v") || url.pathname.startsWith("/icons/");
+  const immutableAsset = url.pathname.startsWith("/_sygma/assets/")
+    || /^\/assets\/[^/]+\.[a-f0-9]{10,}\./.test(url.pathname);
   event.respondWith(immutableAsset ? cacheFirst(event.request) : networkFirst(event.request));
 });

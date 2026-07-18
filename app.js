@@ -125,7 +125,7 @@ const VIEW_FILTER_OPTIONS = {
   database: [["all", "전체"], ["core", "핵심"], ["activity", "활동"], ["integration", "연동"]],
 };
 const VIEW_SORT_OPTIONS = {
-  today: [["date", "시간순"], ["title", "이름순"], ["status", "상태순"]],
+  today: [["date", "날짜순"], ["title", "이름순"], ["status", "상태순"]],
   inbox: [["recent", "최근순"], ["title", "이름순"], ["status", "상태순"]],
   tasks: [["date", "날짜순"], ["status", "상태순"], ["title", "이름순"], ["project", "프로젝트순"]],
   projects: [["status", "상태순"], ["end", "종료일순"], ["name", "이름순"], ["progress", "진행률순"]],
@@ -412,7 +412,6 @@ const STATUSES = {
     scheduled: "예정",
     doing: "진행",
     waiting: "대기",
-    someday: "나중에",
     done: "완료",
     canceled: "중단",
   },
@@ -463,7 +462,7 @@ const DB_SCHEMA = [
   {
     key: "tasks",
     label: "Tasks",
-    fields: ["id", "title", "status", "boxId", "goalId", "projectId", "resourceId", "dueDate", "scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes", "completedAt", "googleEventId", "blocks"],
+    fields: ["id", "title", "status", "boxId", "goalId", "projectId", "resourceId", "dueDate", "completedAt", "googleEventId", "blocks"],
     relations: ["boxId -> Boxes", "goalId -> Goals", "projectId -> Projects", "resourceId -> Resources"],
   },
   {
@@ -544,9 +543,10 @@ const TASK_PROPERTY_COLLECTIONS = {
 const TASK_DATE_CHOICE_DEFS = [
   [0, "오늘"],
   [1, "내일"],
-  [2, "예정"],
   [7, "다음 주"],
 ];
+const LEGACY_TASK_TIME_FIELDS = ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"];
+const LEGACY_TASK_SOMEDAY_STATUS = "someday";
 const CAPTURE_CONVERT_TYPES = [
   ["tasks", "Task"],
   ["projects", "Project"],
@@ -602,6 +602,7 @@ let localResourcePersistence = {
   conflictResourceId: "",
 };
 let waitingServiceWorkerRegistration = null;
+let activeServiceWorkerRegistration = null;
 let serviceWorkerUpdateAvailable = false;
 let serviceWorkerUpdateApplying = false;
 let remoteStateSaveTimer = 0;
@@ -612,6 +613,7 @@ let databaseInitializationPromise = null;
 let databaseInitializationRequested = false;
 let remoteStateRefreshTimer = 0;
 let remoteStateRefreshInFlight = false;
+let remoteStateEventSource = null;
 let localStateChangedBeforeDatabaseReady = false;
 let lastRemoteSaveFailureKind = "";
 let remoteStateRetryDelayMs = 3000;
@@ -1542,7 +1544,7 @@ function renderToday() {
       </div>
       <div class="grid cols-2 today-dashboard-grid">
         <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
-          ${panelHeader("오늘 할 일", "시간순")}
+          ${panelHeader("오늘 할 일", "날짜순")}
           <div class="stack">${renderTaskCards(todayTasks, { todayList: true, todayInline: true }, "오늘 할 일이 없습니다.")}</div>
         </div>
         <div class="panel">
@@ -4028,7 +4030,7 @@ function renderTaskCard(task, draggable = false, options = {}) {
   const classes = ["card"];
   const inline = Boolean(options.todayInline);
   const expanded = inline && ui.expandedTodayTaskId === task.id;
-  const scheduleLabel = task.scheduledStart || task.dueDate ? "잡아서 날짜 옮기기" : "잡아서 날짜에 놓기";
+  const scheduleLabel = task.dueDate ? "잡아서 날짜 옮기기" : "잡아서 날짜에 놓기";
   if (done) classes.push("done");
   if (done && options.todayList) classes.push("today-done");
   if (options.scheduleHold) classes.push("schedule-hold-card");
@@ -4045,9 +4047,8 @@ function renderTaskCard(task, draggable = false, options = {}) {
           <h3 class="card-title">${esc(task.title)}</h3>
           ${options.scheduleHold ? `<button class="schedule-hint" type="button" data-scheduler-open="${task.id}">${scheduleLabel}</button>` : ""}
           <div class="card-meta">
-            ${task.scheduledStart ? badge(formatDateTime(task.scheduledStart), "blue") : ""}
-            ${task.dueDate && !task.scheduledStart ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
-            ${["waiting", "someday"].includes(task.status) ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
+            ${task.dueDate ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
+            ${task.status === "waiting" ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
             ${task.projectId ? badge(nameOf("projects", task.projectId), "violet") : ""}
           </div>
         </div>
@@ -4394,7 +4395,7 @@ function renderProjectTaskLines(tasks) {
 
 function renderProjectTaskLine(task) {
   const done = task.status === "done";
-  const date = task.scheduledStart ? formatDateTime(task.scheduledStart) : task.dueDate ? `날짜 ${task.dueDate}` : "";
+  const date = task.dueDate ? `날짜 ${task.dueDate}` : "";
   return `
     <div class="project-task-line ${done ? "is-done" : ""}">
       <span class="project-task-mark" aria-hidden="true"></span>
@@ -4800,7 +4801,7 @@ function getTaskCaptureSteps(draft) {
 }
 
 function boxCaptureOptions() {
-  const options = [{ value: "", label: "미지정", meta: "나중에 연결" }];
+  const options = [{ value: "", label: "미지정", meta: "추후 연결" }];
   for (const box of state.boxes) {
     options.push({ value: box.id, label: box.name, meta: box.visibility === "pinned" ? "고정" : "" });
   }
@@ -5142,19 +5143,16 @@ function getLocalCalendarEvents() {
 function getTaskCalendarEvents() {
   const events = [];
   for (const task of state.tasks) {
-    if (!(task.scheduledStart || task.dueDate) || task.status === "done" || task.status === "canceled") continue;
-    const allDay = !task.scheduledStart;
-    const start = task.scheduledStart || `${task.dueDate}T00:00`;
-    const end = task.scheduledEnd || (task.scheduledStart ? new Date(new Date(task.scheduledStart).getTime() + (task.estimatedMinutes || 60) * 60000).toISOString() : `${task.dueDate}T23:59`);
+    if (!task.dueDate || task.status === "done" || task.status === "canceled") continue;
     events.push({
       id: task.id,
       source: "task",
       title: task.title,
-      start,
-      end,
-      startDate: task.scheduledStart ? dateKey(new Date(task.scheduledStart)) : task.dueDate,
-      endDate: task.scheduledStart ? dateKey(new Date(end)) : task.dueDate,
-      allDay,
+      start: `${task.dueDate}T00:00`,
+      end: `${task.dueDate}T23:59`,
+      startDate: task.dueDate,
+      endDate: task.dueDate,
+      allDay: true,
       selectType: "tasks",
       selectId: task.id,
     });
@@ -7349,12 +7347,18 @@ function syncEditorCommandMenuAria() {
 function registerServiceWorkerUpdateFlow() {
   if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (!serviceWorkerUpdateApplying) return;
+    if (hasUnsavedResourceWork()) {
+      serviceWorkerUpdateApplying = false;
+      serviceWorkerUpdateAvailable = true;
+      renderServiceWorkerUpdateNoticeIfNeeded();
+      return;
+    }
     window.location.reload();
   });
   navigator.serviceWorker
     .register("/service-worker.js", { updateViaCache: "none" })
     .then((registration) => {
+      activeServiceWorkerRegistration = registration;
       observeServiceWorkerRegistration(registration);
       return registration.update();
     })
@@ -7377,7 +7381,15 @@ function observeServiceWorkerRegistration(registration) {
 function setWaitingServiceWorkerRegistration(registration) {
   waitingServiceWorkerRegistration = registration;
   serviceWorkerUpdateAvailable = true;
+  if (!hasUnsavedResourceWork()) {
+    applyWaitingServiceWorkerUpdate();
+    return;
+  }
   renderServiceWorkerUpdateNoticeIfNeeded();
+}
+
+function checkForServiceWorkerUpdate() {
+  activeServiceWorkerRegistration?.update().catch(() => {});
 }
 
 function hasUnsavedResourceWork() {
@@ -7437,17 +7449,28 @@ function renderServiceWorkerUpdateNotice() {
 
 function renderServiceWorkerUpdateNoticeIfNeeded() {
   if (!serviceWorkerUpdateAvailable || !els.overlayRoot || ui.taskPlacement) return;
+  if (!hasUnsavedResourceWork()) {
+    applyWaitingServiceWorkerUpdate();
+    return;
+  }
   renderOverlays();
 }
 
 async function applyWaitingServiceWorkerUpdate() {
-  if (!serviceWorkerUpdateAvailable || hasUnsavedResourceWork()) return false;
+  if (!serviceWorkerUpdateAvailable || serviceWorkerUpdateApplying || hasUnsavedResourceWork()) return false;
   serviceWorkerUpdateApplying = true;
   const registration = waitingServiceWorkerRegistration || await navigator.serviceWorker.getRegistration();
   if (registration?.waiting) {
     registration.waiting.postMessage({ type: "SKIP_WAITING" });
     window.setTimeout(() => {
-      if (serviceWorkerUpdateApplying) window.location.reload();
+      if (!serviceWorkerUpdateApplying) return;
+      if (hasUnsavedResourceWork()) {
+        serviceWorkerUpdateApplying = false;
+        serviceWorkerUpdateAvailable = true;
+        renderServiceWorkerUpdateNoticeIfNeeded();
+        return;
+      }
+      window.location.reload();
     }, 750);
   } else {
     window.location.reload();
@@ -7456,11 +7479,18 @@ async function applyWaitingServiceWorkerUpdate() {
 }
 
 function handleResourceConnectionLost() {
+  stopRemoteStateEvents();
+  scheduleRemoteStateRefresh();
   patchResourcePageSaveStatus();
   renderServiceWorkerUpdateNoticeIfNeeded();
 }
 
 async function handleResourceConnectionRestored() {
+  if (navigator.onLine === false) {
+    scheduleRemoteStateRefresh();
+    return;
+  }
+  connectRemoteStateEvents();
   if (databaseBackendStatus.conflict) {
     patchResourcePageSaveStatus();
     return;
@@ -7479,6 +7509,7 @@ async function handleResourceConnectionRestored() {
   } else {
     if (!databaseBackendStatus.connected) initializeDatabaseState();
   }
+  scheduleRemoteStateRefresh();
   patchResourcePageSaveStatus();
 }
 
@@ -7508,7 +7539,7 @@ function renderTaskScheduler() {
   const placementFlow = scheduler.mode === "quick-create" && ui.taskPlacement?.taskId === task.id;
   const monthDate = parseMonthKey(scheduler.month);
   const today = dateKey(new Date());
-  const scheduledDate = taskScheduledDate(task) || task.dueDate || "";
+  const scheduledDate = task.dueDate || "";
   const days = monthGridDays(monthDate);
   const laneTargets = schedulerLaneTargets(task.id);
   const dayTaskCounts = schedulerTaskCountsByDate(task.id);
@@ -7622,7 +7653,7 @@ function renderQuickTaskPlacement() {
     `;
   }
   return `
-    <button class="quick-placement-backdrop" type="button" data-placement-cancel aria-label="할 일 배치를 나중에 계속"></button>
+    <button class="quick-placement-backdrop" type="button" data-placement-cancel aria-label="할 일 배치 건너뛰기"></button>
     <section
       class="quick-placement-stage"
       data-quick-placement
@@ -7638,7 +7669,7 @@ function renderQuickTaskPlacement() {
           <h2 id="quick-placement-title">${esc(step.label)}에 배치</h2>
           <p>${esc(step.hint)}을 선택하면 다음 단계로 이어집니다.</p>
         </div>
-        <button class="quick-placement-close" type="button" data-placement-cancel aria-label="할 일 배치 닫기">나중에</button>
+        <button class="quick-placement-close" type="button" data-placement-cancel aria-label="할 일 배치 건너뛰기">건너뛰기</button>
       </header>
       <div class="quick-placement-task-title" title="${esc(task.title)}">${esc(task.title)}</div>
       <div class="quick-placement-choices" role="group" aria-label="${esc(step.label)} 선택">
@@ -7862,9 +7893,8 @@ function renderTodayDragCard(task) {
         <div>
           <h3 class="card-title">${esc(task.title)}</h3>
           <div class="card-meta">
-            ${task.scheduledStart ? badge(formatDateTime(task.scheduledStart), "blue") : ""}
-            ${task.dueDate && !task.scheduledStart ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
-            ${["waiting", "someday"].includes(task.status) ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
+            ${task.dueDate ? badge(taskDateDisplay(task.dueDate), isOverdue(task) ? "rose" : "amber") : ""}
+            ${task.status === "waiting" ? badge(STATUSES.task[task.status] || task.status, "amber") : ""}
             ${task.projectId ? badge(nameOf("projects", task.projectId), "violet") : ""}
           </div>
         </div>
@@ -18488,10 +18518,6 @@ function createTask(title = "새 할 일", options = {}) {
     projectId: "",
     resourceId: "",
     dueDate: "",
-    scheduledStart: "",
-    scheduledEnd: "",
-    estimatedMinutes: 30,
-    actualMinutes: 0,
     completedAt: "",
     googleEventId: "",
     blocks: blocks(""),
@@ -19465,31 +19491,6 @@ function focusTaskFlow(captureId) {
 
 function setTaskDate(task, date) {
   task.dueDate = date || "";
-  if (!date) {
-    task.scheduledStart = "";
-    task.scheduledEnd = "";
-    if (!["done", "canceled"].includes(task.status)) task.status = "todo";
-    return;
-  }
-
-  if (task.scheduledStart) task.scheduledStart = replaceDatePart(task.scheduledStart, date, "09:00");
-  if (task.scheduledStart && task.scheduledEnd) task.scheduledEnd = replaceDatePart(task.scheduledEnd, date, "10:00");
-  if (!task.scheduledStart) task.scheduledEnd = "";
-  if (task.scheduledStart && !["done", "canceled"].includes(task.status)) task.status = "scheduled";
-}
-
-function replaceDatePart(dateTime, date, fallbackTime) {
-  const source = new Date(dateTime);
-  const fallback = String(fallbackTime || "00:00").split(":");
-  const validSource = Number.isFinite(source.getTime());
-  const target = parseDateOnly(date);
-  target.setHours(
-    validSource ? source.getHours() : Number(fallback[0]) || 0,
-    validSource ? source.getMinutes() : Number(fallback[1]) || 0,
-    validSource ? source.getSeconds() : 0,
-    validSource ? source.getMilliseconds() : 0
-  );
-  return target.toISOString();
 }
 
 function normalizeTaskRelations(task, changedField) {
@@ -19530,7 +19531,7 @@ function toggleTaskDone(taskId, button) {
     task.status = "done";
     task.completedAt = new Date().toISOString();
   } else {
-    task.status = task.scheduledStart ? "scheduled" : "todo";
+    task.status = "todo";
     task.completedAt = "";
   }
   saveState();
@@ -19603,8 +19604,6 @@ function setHabitDayVisualState(dayButton, completed) {
 
 function scheduleTask(task, date) {
   setTaskDate(task, date);
-  task.scheduledStart = replaceDatePart("", date, "09:00");
-  task.scheduledEnd = replaceDatePart("", date, "10:00");
   task.status = "scheduled";
   task.completedAt = "";
 }
@@ -19813,7 +19812,7 @@ function cancelQuickTaskPlacement(options = {}) {
   renderDetail();
   renderOverlays();
   restoreQuickTaskPlacementFocus(returnFocus);
-  if (hadPlacement && options.announce) showToast("할 일은 만들었습니다. 배치는 나중에 이어갈 수 있습니다.");
+  if (hadPlacement && options.announce) showToast("할 일은 만들었습니다. 배치는 이후에 이어갈 수 있습니다.");
 }
 
 function cancelQuickTaskCreation() {
@@ -24001,6 +24000,7 @@ function applyEmojiSelection(index = null) {
 
 async function apiJson(path, options = {}) {
   const response = await fetch(path, {
+    cache: "no-store",
     ...options,
     headers: {
       ...(options.body ? { "Content-Type": "application/json" } : {}),
@@ -24837,6 +24837,7 @@ function initializeDatabaseState() {
     } while (databaseInitializationRequested);
   })().finally(() => {
     databaseInitializationPromise = null;
+    connectRemoteStateEvents();
     scheduleRemoteStateRefresh();
   });
   return databaseInitializationPromise;
@@ -24849,11 +24850,14 @@ function stopRemoteStateRefresh() {
 
 function scheduleRemoteStateRefresh() {
   stopRemoteStateRefresh();
-  if (
-    !databaseBackendStatus.connected
-    || document.visibilityState === "hidden"
-    || navigator.onLine === false
-  ) return;
+  if (document.visibilityState === "hidden") return;
+  if (!databaseBackendStatus.connected || navigator.onLine === false) {
+    remoteStateRefreshTimer = window.setTimeout(() => {
+      remoteStateRefreshTimer = 0;
+      handleResourceConnectionRestored();
+    }, REMOTE_STATE_RETRY_DELAY_MS);
+    return;
+  }
   remoteStateRefreshTimer = window.setTimeout(() => {
     remoteStateRefreshTimer = 0;
     refreshRemoteStateIfNewer();
@@ -24862,10 +24866,38 @@ function scheduleRemoteStateRefresh() {
 
 function handleRemoteStateWakeRefresh() {
   if (document.visibilityState === "hidden") {
+    stopRemoteStateEvents();
     stopRemoteStateRefresh();
     return;
   }
+  checkForServiceWorkerUpdate();
+  connectRemoteStateEvents();
   refreshRemoteStateIfNewer();
+}
+
+function stopRemoteStateEvents() {
+  remoteStateEventSource?.close();
+  remoteStateEventSource = null;
+}
+
+function connectRemoteStateEvents() {
+  if (
+    remoteStateEventSource
+    || !("EventSource" in window)
+    || !databaseBackendStatus.connected
+    || navigator.onLine === false
+    || document.visibilityState === "hidden"
+  ) return;
+
+  const source = new EventSource("/api/state/events");
+  remoteStateEventSource = source;
+  source.addEventListener("state", (event) => {
+    if (remoteStateEventSource !== source) return;
+    try {
+      const revision = parseWorkspaceRevision(JSON.parse(event.data)?.revision);
+      if (revision !== null && revision > currentWorkspaceRevision()) refreshRemoteStateIfNewer();
+    } catch {}
+  });
 }
 
 async function refreshRemoteStateIfNewer() {
@@ -25342,6 +25374,7 @@ function stateNeedsClientMigration(nextState) {
     !isPlainObject(settings.openPagesIn) ||
     Object.keys(DEFAULT_RESOURCE_OPEN_PAGES_IN).some((view) => !RESOURCE_OPEN_PAGE_MODES.has(settings.openPagesIn?.[view])) ||
     !RESOURCE_SEARCH_SCOPES.has(settings.viewControls?.resources?.searchScope) ||
+    (Array.isArray(nextState?.tasks) && nextState.tasks.some(taskNeedsDateOnlyMigration)) ||
     (nextState?.resources || []).some(resourceNeedsMigration)
   );
 }
@@ -25934,8 +25967,7 @@ async function syncGoogleCalendar() {
   let synced = 0;
   const syncedEvents = [];
   for (const task of tasks) {
-    const start = new Date(task.scheduledStart);
-    const end = task.scheduledEnd ? new Date(task.scheduledEnd) : new Date(start.getTime() + (task.estimatedMinutes || 30) * 60000);
+    const endDate = dateKey(addDays(parseDateOnly(task.dueDate), 1));
     try {
       const payload = await apiJson("/api/google/events", {
         method: "POST",
@@ -25944,8 +25976,8 @@ async function syncGoogleCalendar() {
           event: {
             summary: task.title,
             description: blockText(task),
-            start: { dateTime: start.toISOString() },
-            end: { dateTime: end.toISOString() },
+            start: { date: task.dueDate },
+            end: { date: endDate },
           },
         }),
       });
@@ -25965,7 +25997,7 @@ async function syncGoogleCalendar() {
 function googleSyncTaskCandidates() {
   const tasks = [];
   for (const task of state.tasks) {
-    if (task.scheduledStart && task.status !== "done" && !task.googleEventId) tasks.push(task);
+    if (task.dueDate && task.status !== "done" && !task.googleEventId) tasks.push(task);
   }
   return tasks;
 }
@@ -26027,7 +26059,7 @@ function normalizeState(next) {
   let seeded = null;
   const fallbackState = () => (seeded ||= createMinimalSeedState());
   const nextSettings = isPlainObject(next.settings) ? next.settings : {};
-  const tasks = objectArrayWithoutLegacyKind(next.tasks, []);
+  const tasks = normalizeTaskRecords(objectArrayWithoutLegacyKind(next.tasks, []));
   const journals = objectArrayWithoutLegacyKind(next.journals, []);
   const shouldSeedStatsDemo = !nextSettings.statsDemoDataSeeded;
   const settings = { ...createDefaultSettings(), ...nextSettings };
@@ -26229,6 +26261,47 @@ function objectArrayWithoutLegacyKind(value, fallback) {
   return cleaned || source;
 }
 
+function normalizeTaskRecords(tasks) {
+  let normalized = null;
+  for (let index = 0; index < tasks.length; index += 1) {
+    const task = tasks[index];
+    if (!taskNeedsDateOnlyMigration(task)) {
+      if (normalized) normalized.push(task);
+      continue;
+    }
+    const cleanTask = { ...task };
+    const legacySomeday = task.status === LEGACY_TASK_SOMEDAY_STATUS;
+    cleanTask.status = legacySomeday ? "scheduled" : cleanTask.status;
+    cleanTask.dueDate = normalizeTaskDate(cleanTask.dueDate) || (legacySomeday ? "" : legacyTaskDate(task.scheduledStart));
+    for (const field of LEGACY_TASK_TIME_FIELDS) delete cleanTask[field];
+    if (!normalized) normalized = tasks.slice(0, index);
+    normalized.push(cleanTask);
+  }
+  return normalized || tasks;
+}
+
+function taskNeedsDateOnlyMigration(task) {
+  if (!isPlainObject(task)) return false;
+  if (task.status === LEGACY_TASK_SOMEDAY_STATUS) return true;
+  if (task.dueDate && normalizeTaskDate(task.dueDate) !== task.dueDate) return true;
+  for (const field of LEGACY_TASK_TIME_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(task, field)) return true;
+  }
+  return false;
+}
+
+function normalizeTaskDate(value) {
+  if (!value) return "";
+  const date = String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
+}
+
+function legacyTaskDate(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? dateKey(parsed) : String(value).slice(0, 10);
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -26397,10 +26470,6 @@ function ensureStatsDemoData(targetState, options = {}) {
       projectId: project.id,
       resourceId: "",
       dueDate,
-      scheduledStart: "",
-      scheduledEnd: "",
-      estimatedMinutes: 20 + (index % 5) * 15,
-      actualMinutes: status === "done" ? 25 + (index % 3) * 20 : 0,
       completedAt: status === "done" ? new Date(dueDate).toISOString() : "",
       googleEventId: "",
       blocks: blocks("통계 확인용 더미 Task입니다."),
@@ -26759,7 +26828,7 @@ function badge(text, color = "") {
 }
 
 function bySchedule(a, b) {
-  return (a.scheduledStart || a.dueDate || "").localeCompare(b.scheduledStart || b.dueDate || "");
+  return (a.dueDate || "").localeCompare(b.dueDate || "");
 }
 
 function todayTaskBuckets(today, tomorrow, tasks = state.tasks) {
@@ -26852,18 +26921,11 @@ function isOverdueOnDate(task, today) {
 }
 
 function effectiveTaskDate(task) {
-  return taskScheduledDate(task) || task.dueDate || "";
+  return task?.dueDate || "";
 }
 
 function taskHasSchedule(task) {
-  return task?.status === "scheduled" || Boolean(task?.scheduledStart || task?.dueDate);
-}
-
-function taskScheduledDate(task) {
-  const value = task?.scheduledStart;
-  if (!value) return "";
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) ? dateKey(parsed) : String(value).slice(0, 10);
+  return task?.status === "scheduled" || Boolean(task?.dueDate);
 }
 
 function schedulerLaneTargets(excludedTaskId = "") {
@@ -26915,10 +26977,8 @@ function schedulerTaskCountsByDate(excludedTaskId) {
   const counts = new Map();
   for (const task of state.tasks) {
     if (task.id === excludedTaskId || task.status === "done") continue;
-    const scheduledDate = taskScheduledDate(task);
     const dueDate = task.dueDate;
-    if (scheduledDate) counts.set(scheduledDate, (counts.get(scheduledDate) || 0) + 1);
-    if (dueDate && dueDate !== scheduledDate) counts.set(dueDate, (counts.get(dueDate) || 0) + 1);
+    if (dueDate) counts.set(dueDate, (counts.get(dueDate) || 0) + 1);
   }
   return counts;
 }
