@@ -368,7 +368,7 @@ test("server rejects a non-boolean locked field without changing state", async (
   expect(after.writes).toEqual(before.writes);
 });
 
-test("an offline Lock survives reload and replays through the durable Resource queue", async ({ browser, request }, testInfo) => {
+test("an online restart discards a reloaded offline Lock in favor of the remote Resource", async ({ browser, request }, testInfo) => {
   test.setTimeout(45_000);
   const { context, page } = await openServiceWorkerControlledApp(browser, testInfo);
   try {
@@ -402,13 +402,13 @@ test("an offline Lock survives reload and replays through the durable Resource q
     await expect(reloaded).toBeVisible();
     await expect(reloaded).toHaveAttribute("data-resource-locked", "true");
     await expect(reloaded.locator(`[data-resource-title="${RESOURCE_ID}"]`)).toHaveAttribute("readonly", "");
-    const reloadedMenu = await openPageMenu(page, reloaded);
-    await expect(lockMenuItem(reloadedMenu)).toHaveAttribute("aria-checked", "true");
-    await expect(lockMenuItem(reloadedMenu)).toContainText(/Unlock page/i);
-    await page.keyboard.press("Escape");
+    await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "offline");
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeVisible();
 
     await context.setOffline(false);
-    await expect.poll(async () => resourceFromSnapshot(await fixtureSnapshot(request))?.locked).toBe(true);
+    await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeHidden();
+    await expect.poll(async () => resourceFromSnapshot(await fixtureSnapshot(request))?.locked).toBe(false);
     await expect.poll(async () => {
       const local = await readLocalPersistence(page);
       return local.operations.map((operation) => ({
@@ -420,6 +420,8 @@ test("an offline Lock survives reload and replays through the durable Resource q
         locked: operation.payload?.resource?.locked,
       }));
     }).toEqual([]);
+    await expect(reloaded).toHaveAttribute("data-resource-locked", "false");
+    await expect(reloaded.locator(`[data-resource-title="${RESOURCE_ID}"]`)).not.toHaveAttribute("readonly", "");
     await expect(reloaded.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "saved");
   } finally {
     await context.setOffline(false);

@@ -38,12 +38,9 @@ test("the online workspace snapshot is durable in IndexedDB before edits begin",
   }
 });
 
-test("a first-offline title input survives immediate pagehide and migrates once to the real workspace", async ({ browser, request }, testInfo) => {
-  test.setTimeout(60_000);
+test("a cold offline start stays read-only until the authoritative workspace becomes available", async ({ browser, request }, testInfo) => {
   const { context, page } = await openServiceWorkerControlledApp(browser, testInfo);
-  const localTitle = "First offline close-safe title";
   let offlinePage = null;
-  let recoveredPage = null;
   try {
     await clearLocalPersistence(page);
     await page.close();
@@ -51,70 +48,24 @@ test("a first-offline title input survives immediate pagehide and migrates once 
 
     offlinePage = await context.newPage();
     await offlinePage.goto("/", { waitUntil: "domcontentloaded" });
-    await expect(offlinePage.locator("#app")).toBeVisible();
-    const navToggle = offlinePage.locator('[data-action="toggle-nav"]');
-    if (await navToggle.isVisible()) {
-      await navToggle.click();
-      await expect(offlinePage.locator("[data-sidebar]")).toHaveClass(/is-open/);
-    }
-    await offlinePage.locator('[data-nav-key="resources"]').click();
-    await expect(offlinePage.locator('[data-resource-view="library"]')).toBeVisible();
-    const opener = offlinePage.locator("[data-open-resource]").first();
-    const resourceId = await opener.getAttribute("data-open-resource");
-    expect(resourceId).toBeTruthy();
-    await opener.click();
-    const dynamicTitle = offlinePage.locator(`[data-resource-title="${resourceId}"]`);
-    await expect(dynamicTitle).toBeVisible();
-
-    await dynamicTitle.evaluate((input, title) => {
-      input.value = title;
-      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: title, inputType: "insertText" }));
-      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
-    }, localTitle);
-    await offlinePage.close();
-    offlinePage = null;
-
-    recoveredPage = await context.newPage();
-    await recoveredPage.goto(`/resources/${encodeURIComponent(resourceId)}`, { waitUntil: "domcontentloaded" });
-    const recoveredShell = recoveredPage.locator(`[data-resource-note="${resourceId}"]`);
-    await expect(recoveredShell).toBeVisible();
-    await expect(recoveredPage.locator(`[data-resource-title="${resourceId}"]`)).toHaveValue(localTitle);
-    await expect(recoveredShell.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "offline");
-
-    const provisional = await readAllLocalPersistence(recoveredPage);
-    expect(provisional.snapshots.filter((snapshot) => snapshot.workspaceId === PROVISIONAL_WORKSPACE_ID)).toHaveLength(1);
-    const provisionalOperations = provisional.operations.filter((operation) => operation.workspaceId === PROVISIONAL_WORKSPACE_ID);
-    expect(provisionalOperations).toHaveLength(1);
-    expect(provisionalOperations[0]).toMatchObject({
-      entityType: "resource",
-      entityId: resourceId,
-      payload: { resource: { id: resourceId, title: localTitle } },
-    });
+    const app = offlinePage.locator("#app");
+    await expect(app).toHaveAttribute("data-workspace-authority", "offline");
+    await expect(offlinePage.locator("[data-workspace-authority-gate]")).toContainText("서버에 연결할 수 없습니다");
+    expect(await offlinePage.locator(".layout").evaluate((element) => element.inert)).toBe(true);
+    expect((await readAllLocalPersistence(offlinePage)).operations).toEqual([]);
 
     await context.setOffline(false);
-    await expect.poll(async () => {
-      const snapshot = await fixtureSnapshot(request);
-      return snapshot.state.resources.filter((resource) => resource.id === resourceId && resource.title === localTitle).length;
-    }).toBe(1);
-    await expect(recoveredShell.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "saved");
-
-    await expect.poll(async () => (await readAllLocalPersistence(recoveredPage)).operations.length).toBe(0);
-    const migrated = await readAllLocalPersistence(recoveredPage);
-    expect(migrated.snapshots.some((snapshot) => snapshot.workspaceId === PROVISIONAL_WORKSPACE_ID)).toBe(false);
-    expect(migrated.snapshots.filter((snapshot) => snapshot.workspaceId === FIXTURE_IDS.appState)).toHaveLength(1);
+    await expect(app).toHaveAttribute("data-workspace-authority", "ready");
+    await expect(offlinePage.locator("[data-workspace-authority-gate]")).toBeHidden();
+    expect(await offlinePage.locator(".layout").evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(async () => (await readAllLocalPersistence(offlinePage)).snapshots.length).toBe(1);
     const remote = await fixtureSnapshot(request);
-    expect(remote.writeAttempts.filter((attempt) => attempt.resourceId === resourceId)).toEqual([
-      expect.objectContaining({ baseRevision: 1, outcome: "saved" }),
-    ]);
-    expect(remote.state.resources.filter((resource) => resource.id === resourceId)).toHaveLength(1);
-
-    await recoveredPage.reload({ waitUntil: "domcontentloaded" });
-    await expect(recoveredPage.locator(`[data-resource-title="${resourceId}"]`)).toHaveValue(localTitle);
-    expect((await fixtureSnapshot(request)).state.resources.filter((resource) => resource.id === resourceId)).toHaveLength(1);
+    expect(remote.serverRevision).toBe(1);
+    expect(remote.writes).toEqual([]);
+    expect(remote.writeAttempts).toEqual([]);
   } finally {
     await context.setOffline(false);
     await offlinePage?.close();
-    await recoveredPage?.close();
     await context.close();
   }
 });

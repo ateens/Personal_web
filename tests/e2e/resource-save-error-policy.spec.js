@@ -10,7 +10,7 @@ test.beforeEach(async ({ request }) => {
   await resetFixture(request);
 });
 
-test("terminal validation failure is durable, never loops or reload-retries, and only the affected Resource rearms it", async ({ page, request }) => {
+test("terminal validation failure never loops, and an online restart restores the remote Resource", async ({ page, request }) => {
   test.setTimeout(45_000);
   let rejectMain = true;
   let mainWriteAttempts = 0;
@@ -83,7 +83,10 @@ test("terminal validation failure is durable, never loops or reload-retries, and
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`)).toBeVisible();
-  await expectSyncState(page, FIXTURE_IDS.resource, "error", /Error|저장하지 못함/i);
+  await expect(resourceTitle(page, FIXTURE_IDS.resource)).toHaveValue("E2E Notion Parity Resource");
+  await expectSyncState(page, FIXTURE_IDS.resource, "saved", /Saved|저장됨/i);
+  await expect(page.locator(`[data-resource-save-error="${FIXTURE_IDS.resource}"]`)).toHaveCount(0);
+  await expect.poll(async () => (await readLocalPersistence(page)).operations.length).toBe(0);
   await page.waitForTimeout(3_400);
   expect(mainWriteAttempts).toBe(2);
 
@@ -95,17 +98,12 @@ test("terminal validation failure is durable, never loops or reload-retries, and
   expect(mainWriteAttempts).toBe(2);
 
   local = await readLocalPersistence(page);
-  expect(local.operations).toHaveLength(1);
-  expect(local.operations[0]).toMatchObject({
-    entityId: FIXTURE_IDS.resource,
-    status: "failed",
-    payload: { resource: { title: failedTitle } },
-  });
+  expect(local.operations).toEqual([]);
 
   rejectMain = false;
   const correctedTitle = "Affected Resource valid follow-up";
   await page.goto(RESOURCE_PATH);
-  await expect(resourceTitle(page, FIXTURE_IDS.resource)).toHaveValue(failedTitle);
+  await expect(resourceTitle(page, FIXTURE_IDS.resource)).toHaveValue("E2E Notion Parity Resource");
   await resourceTitle(page, FIXTURE_IDS.resource).fill(correctedTitle);
   await expect.poll(async () => resourceFrom((await fixtureSnapshot(request)).state, FIXTURE_IDS.resource).title).toBe(correctedTitle);
   await expectSyncState(page, FIXTURE_IDS.resource, "saved", /Saved|저장됨/i);

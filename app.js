@@ -798,6 +798,7 @@ function init() {
     overlayRoot: app.querySelector("#overlayRoot"),
     appAnnouncements: app.querySelector("#appAnnouncements"),
   };
+  setWorkspaceAuthorityMode("loading");
 
   decorateButtons(app);
   app.addEventListener("click", handleClick);
@@ -921,7 +922,7 @@ function init() {
   updateTopbarStickiness();
   if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
-  initializeLocalResourcePersistence().then(initializeDatabaseState).finally(() => {
+  initializeLocalResourcePersistence({ applySnapshot: false }).then(initializeDatabaseState).finally(() => {
     finalizeInitialResourceRoute();
     refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
   });
@@ -1001,7 +1002,36 @@ function renderShell() {
     <button class="fab" type="button" data-action="open-command" aria-label="빠른 생성">+</button>
     <div id="detailRoot"></div>
     <div id="overlayRoot"></div>
+    <div class="workspace-authority-gate" data-workspace-authority-gate role="status" aria-live="polite">
+      <span class="workspace-authority-spinner" aria-hidden="true"></span>
+      <strong data-workspace-authority-title>서버 Workspace를 불러오는 중</strong>
+      <span data-workspace-authority-message>PostgreSQL의 최신 데이터를 확인하고 있습니다.</span>
+      <button class="button" type="button" data-action="retry-workspace-authority" hidden>다시 시도</button>
+    </div>
   `;
+}
+
+function setWorkspaceAuthorityMode(mode = "ready") {
+  const blocked = mode !== "ready";
+  app.classList.toggle("is-workspace-authority-blocked", blocked);
+  app.dataset.workspaceAuthority = mode;
+  for (const element of [app.querySelector(".layout"), els.fab, els.detailRoot, els.overlayRoot]) {
+    if (element) element.inert = blocked;
+  }
+  const gate = app.querySelector("[data-workspace-authority-gate]");
+  if (!gate) return;
+  gate.hidden = !blocked;
+  const title = gate.querySelector("[data-workspace-authority-title]");
+  const message = gate.querySelector("[data-workspace-authority-message]");
+  const retry = gate.querySelector('[data-action="retry-workspace-authority"]');
+  if (retry) retry.hidden = mode !== "offline";
+  if (mode === "offline") {
+    if (title) title.textContent = "서버에 연결할 수 없습니다";
+    if (message) message.textContent = "로컬 데이터는 서버를 덮지 않습니다. 연결 후 다시 불러옵니다.";
+    return;
+  }
+  if (title) title.textContent = "서버 Workspace를 불러오는 중";
+  if (message) message.textContent = "PostgreSQL의 최신 데이터를 확인하고 있습니다.";
 }
 
 function renderNavButtons() {
@@ -7487,11 +7517,26 @@ function handleResourceConnectionLost() {
 
 async function handleResourceConnectionRestored() {
   if (navigator.onLine === false) {
+    if (app.dataset.workspaceAuthority !== "ready") setWorkspaceAuthorityMode("offline");
     scheduleRemoteStateRefresh();
+    return;
+  }
+  const requiresAuthoritativeReload = app.dataset.workspaceAuthority !== "ready";
+  if (!databaseBackendStatus.connected || requiresAuthoritativeReload) {
+    setWorkspaceAuthorityMode("loading");
+  }
+  if (requiresAuthoritativeReload) {
+    await initializeDatabaseState();
+    setWorkspaceAuthorityMode(databaseBackendStatus.connected && !databaseBackendStatus.conflict ? "ready" : "offline");
+    scheduleRemoteStateRefresh();
+    patchResourcePageSaveStatus();
     return;
   }
   connectRemoteStateEvents();
   if (databaseBackendStatus.conflict) {
+    const restored = await reloadRemoteStateAfterConflict({ force: true, silent: true });
+    if (!restored) setWorkspaceAuthorityMode("offline");
+    scheduleRemoteStateRefresh();
     patchResourcePageSaveStatus();
     return;
   }
@@ -7507,8 +7552,9 @@ async function handleResourceConnectionRestored() {
   } else if (databaseBackendStatus.connected) {
     await refreshRemoteStateIfNewer();
   } else {
-    if (!databaseBackendStatus.connected) initializeDatabaseState();
+    if (!databaseBackendStatus.connected) await initializeDatabaseState();
   }
+  setWorkspaceAuthorityMode(databaseBackendStatus.connected && !databaseBackendStatus.conflict ? "ready" : "offline");
   scheduleRemoteStateRefresh();
   patchResourcePageSaveStatus();
 }
@@ -8636,6 +8682,12 @@ function renderRelationOptions(items, value, nameField) {
 }
 
 function handleClick(event) {
+  const workspaceRetry = event.target.closest('[data-action="retry-workspace-authority"]');
+  if (workspaceRetry) {
+    event.preventDefault();
+    handleResourceConnectionRestored();
+    return;
+  }
   const urlPasteChoiceAction = event.target.closest("[data-url-paste-choice-action]");
   if (urlPasteChoiceAction) {
     event.preventDefault();
@@ -17547,6 +17599,7 @@ function isPrintableBlockReplacementKey(event) {
 }
 
 function handleDocumentKeydown(event) {
+  if (app.dataset.workspaceAuthority !== "ready") return;
   if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (event.key === "Shift" || event.shiftKey) ui.shiftKeyDown = true;
@@ -24295,7 +24348,7 @@ async function migrateProvisionalLocalResourceMetadata(workspaceId) {
   });
 }
 
-async function initializeLocalResourcePersistence() {
+async function initializeLocalResourcePersistence(options = {}) {
   if (!localResourcePersistence.available) {
     localResourcePersistence.ready = true;
     return;
@@ -24316,11 +24369,13 @@ async function initializeLocalResourcePersistence() {
       operations: local.operations,
       pending: local.operations.length > 0 || draftWasStagedBeforeReady,
     };
-    await loadLocalResourceCommentReadAt(localResourcePersistence.workspaceId, {
-      ...(state.settings?.resourceCommentReadAt || {}),
-      ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
-    });
-    if (!draftWasStagedBeforeReady && local.snapshot?.state && isPlainObject(local.snapshot.state)) {
+    if (options.applySnapshot !== false) {
+      await loadLocalResourceCommentReadAt(localResourcePersistence.workspaceId, {
+        ...(state.settings?.resourceCommentReadAt || {}),
+        ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
+      });
+    }
+    if (options.applySnapshot !== false && !draftWasStagedBeforeReady && local.snapshot?.state && isPlainObject(local.snapshot.state)) {
       const localState = normalizeState(cloneForLocalPersistence(local.snapshot.state));
       localState.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, localState.revision);
       state = localState;
@@ -24338,10 +24393,11 @@ async function initializeLocalResourcePersistence() {
   patchResourcePageSaveStatus();
 }
 
-async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
+async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0, options = {}) {
   const normalizedWorkspaceId = String(workspaceId || "").trim();
   if (!normalizedWorkspaceId || !localResourcePersistence.available) return { snapshot: null, operations: [] };
-  const migrateFromProvisional = localResourcePersistence.workspaceId === LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID
+  const migrateFromProvisional = options.migrateProvisional !== false
+    && localResourcePersistence.workspaceId === LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID
     && normalizedWorkspaceId !== LOCAL_RESOURCE_PROVISIONAL_WORKSPACE_ID;
   if (migrateFromProvisional) await migrateProvisionalLocalResourceMetadata(normalizedWorkspaceId);
   const migrated = migrateFromProvisional
@@ -24352,17 +24408,37 @@ async function selectLocalResourceWorkspace(workspaceId, fallbackRevision = 0) {
   localResourcePersistence.snapshot = local.snapshot;
   localResourcePersistence.operations = local.operations;
   localResourcePersistence.pending = local.operations.length > 0;
-  await loadLocalResourceCommentReadAt(normalizedWorkspaceId, {
-    ...(state.settings?.resourceCommentReadAt || {}),
-    ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
-  });
-  if (local.snapshot?.state && local.operations.length) {
+  if (options.applySnapshot !== false) {
+    await loadLocalResourceCommentReadAt(normalizedWorkspaceId, {
+      ...(state.settings?.resourceCommentReadAt || {}),
+      ...(local.snapshot?.state?.settings?.resourceCommentReadAt || {}),
+    });
+  }
+  if (options.applySnapshot !== false && local.snapshot?.state && local.operations.length) {
     state = normalizeState(cloneForLocalPersistence(local.snapshot.state));
     state.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, fallbackRevision);
     localStateChangedBeforeDatabaseReady = true;
     rerenderAfterStateReplace();
   }
   return local;
+}
+
+async function applyLocalResourceFallback(local = null) {
+  const fallback = local || {
+    snapshot: localResourcePersistence.snapshot,
+    operations: localResourcePersistence.operations,
+  };
+  if (!fallback?.snapshot?.state || !isPlainObject(fallback.snapshot.state)) return false;
+  state = normalizeState(cloneForLocalPersistence(fallback.snapshot.state));
+  state.revision = normalizedWorkspaceRevision(fallback.snapshot.baseRevision, state.revision);
+  databaseBackendStatus.revision = state.revision;
+  localStateHadStoredState = true;
+  localStateChangedBeforeDatabaseReady = fallback.operations?.length > 0;
+  await loadLocalResourceCommentReadAt(localResourcePersistence.workspaceId, {
+    ...(state.settings?.resourceCommentReadAt || {}),
+  });
+  rerenderAfterStateReplace();
+  return true;
 }
 
 function localResourceOperationKey(operation) {
@@ -24669,6 +24745,54 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
   return true;
 }
 
+async function resetLocalWorkspacePersistenceToRemote(workspaceId, revision) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
+  if (!normalizedWorkspaceId || !localResourcePersistence.available || !localResourcePersistence.ready) return false;
+  window.clearTimeout(localResourceWriteTimer);
+  localResourceWriteTimer = 0;
+  localResourceDraftGeneration += 1;
+  const resetGeneration = localResourceDraftGeneration;
+  const committedRevision = normalizedWorkspaceRevision(revision, state.revision);
+  const authoritativeState = cloneForLocalPersistence(state);
+  const reset = async () => {
+    const database = await openLocalResourceDatabase();
+    if (!database) return false;
+    const snapshot = {
+      workspaceId: normalizedWorkspaceId,
+      schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
+      baseRevision: committedRevision,
+      savedAt: new Date().toISOString(),
+      state: authoritativeState,
+    };
+    const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
+    const snapshotStore = transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE);
+    const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
+    snapshotStore.clear();
+    operationStore.clear();
+    snapshotStore.put(snapshot);
+    await indexedDbTransactionComplete(transaction);
+    const newerDraftExists = resetGeneration !== localResourceDraftGeneration;
+    localResourcePersistence.workspaceId = normalizedWorkspaceId;
+    localResourcePersistence.snapshot = snapshot;
+    localResourcePersistence.operations = [];
+    localResourcePersistence.pending = newerDraftExists;
+    localResourcePersistence.error = "";
+    localResourcePersistence.conflictRemoteState = null;
+    localResourcePersistence.conflictResourceId = "";
+    if (!newerDraftExists) {
+      dirtyResourceIds.clear();
+      pendingResourceOperationGroups = [];
+      localWorkspaceOperationRequired = false;
+      localWorkspaceOperationScope = "";
+    }
+    patchResourcePageSaveStatus();
+    renderServiceWorkerUpdateNoticeIfNeeded();
+    return true;
+  };
+  localResourceWriteChain = localResourceWriteChain.then(reset, reset);
+  return localResourceWriteChain;
+}
+
 async function markLocalResourceOperations(status, options = {}) {
   if (!localResourcePersistence.available || !localResourcePersistence.workspaceId || !localResourcePersistence.operations.length) return;
   const operationIds = Array.isArray(options.operationIds) ? new Set(options.operationIds) : null;
@@ -24727,115 +24851,26 @@ function localOperationWasSuperseded(operation) {
   return Boolean(current && current.updatedAt !== operation.updatedAt);
 }
 
-function mergeResourceControlDraftSettings(remoteState, localState) {
-  const merged = cloneForLocalPersistence(remoteState);
-  const localControl = localState?.settings?.viewControls?.resources;
-  if (!isPlainObject(localControl)) return merged;
-  merged.settings ||= {};
-  merged.settings.viewControls ||= {};
-  merged.settings.viewControls.resources = cloneForLocalPersistence(localControl);
-  return merged;
-}
-
-function sanitizeMigratedIncrementalResource(resource, remoteState) {
-  const sanitized = normalizeResourceRecord(cloneForLocalPersistence(resource));
-  const remoteIds = (collection) => new Set((remoteState?.[collection] || []).map((item) => item.id));
-  for (const [field, collection] of [["boxId", "boxes"], ["goalId", "goals"], ["projectId", "projects"]]) {
-    if (sanitized[field] && !remoteIds(collection).has(sanitized[field])) sanitized[field] = "";
-  }
-  const resourceIds = remoteIds("resources");
-  if (sanitized.parentId && !resourceIds.has(sanitized.parentId)) sanitized.parentId = "";
-  sanitized.childOrder = sanitized.childOrder.filter((childId) => resourceIds.has(childId));
-  return sanitized;
-}
-
-async function reconcileMigratedProvisionalWorkspace(local, remoteState, remoteRevision) {
-  if (!local?.migratedFromProvisional || !local.operations.length) return local;
-  const localBaseRevision = normalizedWorkspaceRevision(local.snapshot?.baseRevision, state.revision);
-  if (local.targetHadPendingOperations && localBaseRevision !== remoteRevision) return local;
-  const localState = local.snapshot?.state || state;
-  const hasFullWorkspaceOperation = local.operations.some((operation) => (
-    operation.entityType === "workspace" && operation.scope !== "resource-controls"
-  ));
-  const hasResourceControlOperation = local.operations.some((operation) => (
-    operation.entityType === "workspace" && operation.scope === "resource-controls"
-  ));
-  let mergedState = hasFullWorkspaceOperation
-    ? mergeWorkspaceDraftStates(remoteState, localState)
-    : cloneForLocalPersistence(remoteState);
-  if (!hasFullWorkspaceOperation && hasResourceControlOperation) {
-    mergedState = mergeResourceControlDraftSettings(mergedState, localState);
-  }
-  const resourceOperations = local.operations.filter((operation) => operation.entityType === "resource");
-  for (const operation of resourceOperations) {
-    const localResource = operation.payload?.resource
-      || localState?.resources?.find((resource) => resource.id === operation.entityId);
-    if (!localResource) continue;
-    const migratedResource = hasFullWorkspaceOperation
-      ? normalizeResourceRecord(cloneForLocalPersistence(localResource))
-      : sanitizeMigratedIncrementalResource(localResource, remoteState);
-    const index = mergedState.resources.findIndex((resource) => resource.id === migratedResource.id);
-    if (index >= 0) mergedState.resources[index] = migratedResource;
-    else mergedState.resources.push(migratedResource);
-  }
-  mergedState.version = APP_STATE_VERSION;
-  mergedState.revision = remoteRevision;
-  if (stateTimestamp(localState?.updatedAt) > stateTimestamp(mergedState.updatedAt)) {
-    mergedState.updatedAt = localState.updatedAt;
-  }
-  mergedState = normalizeState(mergedState);
-  mergedState.revision = remoteRevision;
-  const now = new Date().toISOString();
-  const resourcesById = new Map(mergedState.resources.map((resource) => [resource.id, resource]));
-  const operations = orderedLocalResourceOperations(local.operations.map((operation) => {
-    const next = {
-      ...cloneForLocalPersistence(operation),
-      workspaceId: localResourcePersistence.workspaceId,
-      baseRevision: remoteRevision,
-      status: ["conflict", "failed"].includes(operation.status) ? operation.status : "pending",
-      updatedAt: now,
-    };
-    if (next.entityType === "resource" && resourcesById.has(next.entityId)) {
-      next.payload = { resource: cloneForLocalPersistence(resourcesById.get(next.entityId)) };
-    } else if (next.entityType === "workspace") {
-      next.payload = { state: cloneForLocalPersistence(mergedState) };
-    }
-    return next;
-  }));
-  const snapshot = {
-    workspaceId: localResourcePersistence.workspaceId,
-    schemaVersion: LOCAL_RESOURCE_SCHEMA_VERSION,
-    baseRevision: remoteRevision,
-    savedAt: now,
-    state: cloneForLocalPersistence(mergedState),
-  };
-  const database = await openLocalResourceDatabase();
-  if (!database) return local;
-  const transaction = database.transaction([LOCAL_RESOURCE_SNAPSHOT_STORE, LOCAL_RESOURCE_OPERATION_STORE], "readwrite");
-  const operationStore = transaction.objectStore(LOCAL_RESOURCE_OPERATION_STORE);
-  for (const operation of localResourcePersistence.operations) operationStore.delete(operation.id);
-  for (const operation of operations) operationStore.put(operation);
-  transaction.objectStore(LOCAL_RESOURCE_SNAPSHOT_STORE).put(snapshot);
-  await indexedDbTransactionComplete(transaction);
-  state = mergedState;
-  localResourcePersistence.snapshot = snapshot;
-  localResourcePersistence.operations = operations;
-  localResourcePersistence.pending = operations.length > 0;
-  rerenderAfterStateReplace();
-  return { ...local, snapshot, operations };
-}
-
 function initializeDatabaseState() {
   if (databaseInitializationPromise) {
     databaseInitializationRequested = true;
     return databaseInitializationPromise;
   }
+  let initializationFinished = false;
+  setWorkspaceAuthorityMode("loading");
   databaseInitializationPromise = (async () => {
     do {
       databaseInitializationRequested = false;
+      setWorkspaceAuthorityMode("loading");
       await initializeDatabaseStateNow();
     } while (databaseInitializationRequested);
+    initializationFinished = true;
   })().finally(() => {
+    setWorkspaceAuthorityMode(
+      initializationFinished && databaseBackendStatus.connected && !databaseBackendStatus.conflict
+        ? "ready"
+        : "offline",
+    );
     databaseInitializationPromise = null;
     connectRemoteStateEvents();
     scheduleRemoteStateRefresh();
@@ -24851,7 +24886,12 @@ function stopRemoteStateRefresh() {
 function scheduleRemoteStateRefresh() {
   stopRemoteStateRefresh();
   if (document.visibilityState === "hidden") return;
-  if (!databaseBackendStatus.connected || navigator.onLine === false) {
+  if (
+    !databaseBackendStatus.connected
+    || navigator.onLine === false
+    || databaseBackendStatus.conflict
+    || app.dataset.workspaceAuthority === "offline"
+  ) {
     remoteStateRefreshTimer = window.setTimeout(() => {
       remoteStateRefreshTimer = 0;
       handleResourceConnectionRestored();
@@ -24981,7 +25021,6 @@ async function initializeDatabaseStateNow() {
   try {
     const status = await apiJson("/api/state/status");
     const statusRevision = workspaceRevisionFromPayload(status, state.revision);
-    let local = await selectLocalResourceWorkspace(status.appStateId || localResourcePersistence.workspaceId, statusRevision);
     databaseBackendStatus = {
       ...databaseBackendStatus,
       configured: Boolean(status.configured),
@@ -24997,11 +25036,18 @@ async function initializeDatabaseStateNow() {
     lastRemoteSaveFailureKind = "";
     remoteStateRetryDelayMs = REMOTE_STATE_RETRY_DELAY_MS;
     if (!databaseBackendStatus.connected) {
+      const local = await selectLocalResourceWorkspace(
+        status.appStateId || localResourcePersistence.workspaceId,
+        statusRevision,
+      );
+      await applyLocalResourceFallback(local);
       if (localResourcePersistence.pending) await persistLocalResourceDraft();
       renderDatabaseStatusIfVisible();
       return;
     }
 
+    const workspaceId = String(status.appStateId || localResourcePersistence.workspaceId || "").trim();
+    localResourcePersistence.workspaceId = workspaceId;
     const payload = await apiJson("/api/state");
     const remoteRevision = workspaceRevisionFromPayload(payload, statusRevision);
     databaseBackendStatus.revision = remoteRevision;
@@ -25009,67 +25055,19 @@ async function initializeDatabaseStateNow() {
       const shouldCleanRemoteState = stateNeedsClientMigration(payload.state);
       const remoteState = normalizeState(payload.state);
       remoteState.revision = remoteRevision;
-      await mergeLocalResourceCommentReadAt(remoteState.settings?.resourceCommentReadAt);
-      local = await reconcileMigratedProvisionalWorkspace(local, remoteState, remoteRevision);
-      if (local.operations.length) {
-        const localBaseRevision = normalizedWorkspaceRevision(local.snapshot?.baseRevision, state.revision);
-        if (localBaseRevision !== remoteRevision) {
-          remoteStateSaveBlocked = true;
-          databaseBackendStatus = {
-            ...databaseBackendStatus,
-            connected: true,
-            loading: false,
-            saving: false,
-            revision: remoteRevision,
-            conflict: {
-              status: 409,
-              code: "LOCAL_STATE_REVISION_CONFLICT",
-              localRevision: localBaseRevision,
-              remoteRevision,
-            },
-          };
-          localResourcePersistence.conflictRemoteState = remoteState;
-          localResourcePersistence.conflictResourceId = local.operations.find((operation) => operation.entityType === "resource")?.entityId || "";
-          await markLocalResourceOperations("conflict", { remoteRevision, incrementAttempts: false });
-          renderDatabaseStatusIfVisible();
-          renderDetail({ soft: true });
-          return;
-        }
-        state.revision = remoteRevision;
-        remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
-        if (!remoteStateSavePending) {
-          const failed = failedLocalResourceOperation();
-          databaseBackendStatus.error = failed ? resourceSaveErrorIssue(failed) : databaseBackendStatus.error;
-          renderDatabaseStatusIfVisible();
-          renderDetail({ soft: true });
-          localStateChangedBeforeDatabaseReady = false;
-          return;
-        }
-        await saveStateRemoteNow();
-        localStateChangedBeforeDatabaseReady = false;
-        return;
-      }
-      const shouldUploadLocal = localStateChangedBeforeDatabaseReady;
-      if (shouldUploadLocal) {
-        state.revision = remoteRevision;
-        await saveStateRemoteNow();
-      } else {
-        state = remoteState;
-        clearLegacyLocalState();
-        databaseBackendStatus.lastSyncedAt = payload.updatedAt || remoteState.updatedAt || "";
-        rerenderAfterStateReplace();
-        await persistCommittedLocalResourceState(remoteRevision);
-        if (shouldCleanRemoteState) await saveStateRemoteNow();
-      }
+      state = remoteState;
+      remoteStateSavePending = false;
+      localStateChangedBeforeDatabaseReady = false;
+      await loadLocalResourceCommentReadAt(workspaceId, remoteState.settings?.resourceCommentReadAt);
+      clearLegacyLocalState();
+      databaseBackendStatus.lastSyncedAt = payload.updatedAt || remoteState.updatedAt || "";
+      rerenderAfterStateReplace();
+      await resetLocalWorkspacePersistenceToRemote(workspaceId, remoteRevision);
+      if (shouldCleanRemoteState) await saveStateRemoteNow();
     } else {
-      const shouldSeedInitialRemoteState = !localStateHadStoredState && !localStateChangedBeforeDatabaseReady;
-      if (shouldSeedInitialRemoteState) {
-        state = createSeedState();
-        state.revision = remoteRevision;
-        rerenderAfterStateReplace();
-      } else {
-        state.revision = remoteRevision;
-      }
+      state = createSeedState();
+      state.revision = remoteRevision;
+      rerenderAfterStateReplace();
       await saveStateRemoteNow();
     }
     localStateChangedBeforeDatabaseReady = false;
@@ -25082,6 +25080,7 @@ async function initializeDatabaseStateNow() {
       saving: false,
       error: error.message || "PostgreSQL 상태를 불러오지 못했습니다.",
     };
+    await applyLocalResourceFallback();
     if (localResourcePersistence.pending) await persistLocalResourceDraft();
     renderDatabaseStatusIfVisible();
   }
@@ -25380,7 +25379,7 @@ function stateNeedsClientMigration(nextState) {
 }
 
 function queueRemoteStateSave(options = {}) {
-  if (!databaseBackendStatus.connected) return;
+  if (!databaseBackendStatus.connected || app.dataset.workspaceAuthority !== "ready") return;
   remoteStateSavePending = true;
   patchResourcePageSaveStatus();
   window.clearTimeout(remoteStateSaveTimer);
@@ -25393,7 +25392,13 @@ function queueRemoteStateSave(options = {}) {
 }
 
 async function flushRemoteStateSave(options = {}) {
-  if (!databaseBackendStatus.connected || remoteStateSaveBlocked || remoteStateSaveInFlight || !remoteStateSavePending) return;
+  if (
+    !databaseBackendStatus.connected
+    || app.dataset.workspaceAuthority !== "ready"
+    || remoteStateSaveBlocked
+    || remoteStateSaveInFlight
+    || !remoteStateSavePending
+  ) return;
   remoteStateSavePending = false;
   remoteStateSaveInFlight = true;
   let retryLater = false;
@@ -25533,6 +25538,10 @@ async function saveStateRemoteNow(options = {}) {
         : terminalFailure ? null : databaseBackendStatus.conflict,
     };
     if (terminalConflict) {
+      if (operation?.entityType !== "resource") {
+        await reloadRemoteStateAfterConflict({ force: true, silent: true });
+        return null;
+      }
       localResourcePersistence.conflictResourceId = operation?.entityId || ui.resourceNotes[0]?.id || "";
       await markLocalResourceOperations("conflict", {
         remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
@@ -25793,8 +25802,9 @@ async function resolveResourceSyncConflict(resourceId, resolution) {
   return true;
 }
 
-async function reloadRemoteStateAfterConflict() {
-  if (!databaseBackendStatus.connected || !databaseBackendStatus.conflict || databaseBackendStatus.loading) return false;
+async function reloadRemoteStateAfterConflict(options = {}) {
+  if (!databaseBackendStatus.connected || (!databaseBackendStatus.conflict && options.force !== true) || databaseBackendStatus.loading) return false;
+  setWorkspaceAuthorityMode("loading");
   window.clearTimeout(remoteStateSaveTimer);
   databaseBackendStatus = {
     ...databaseBackendStatus,
@@ -25826,9 +25836,10 @@ async function reloadRemoteStateAfterConflict() {
       conflict: null,
     };
     clearLegacyLocalState();
-    await persistCommittedLocalResourceState(remoteRevision);
+    await resetLocalWorkspacePersistenceToRemote(localResourcePersistence.workspaceId, remoteRevision);
     rerenderAfterStateReplace();
-    showToast("원격 상태를 다시 불러왔습니다.");
+    setWorkspaceAuthorityMode("ready");
+    if (options.silent !== true) showToast("원격 상태를 다시 불러왔습니다.");
     return true;
   } catch (error) {
     databaseBackendStatus = {
@@ -25838,6 +25849,7 @@ async function reloadRemoteStateAfterConflict() {
       error: error.message || "원격 상태를 다시 불러오지 못했습니다.",
     };
     renderDatabaseStatusIfVisible();
+    setWorkspaceAuthorityMode("offline");
     return false;
   }
 }
@@ -26041,16 +26053,7 @@ function resetDemoData() {
 }
 
 function loadState() {
-  try {
-    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (raw) {
-      const normalized = normalizeState(JSON.parse(raw));
-      localStateHadStoredState = true;
-      return normalized;
-    }
-  } catch {
-    clearLegacyLocalState();
-  }
+  clearLegacyLocalState();
   return createMinimalSeedState();
 }
 

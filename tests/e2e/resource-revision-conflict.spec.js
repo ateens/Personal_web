@@ -5,6 +5,7 @@ const fixtureGuardHeaders = { "x-e2e-reset-token": "sygma-local-e2e-reset" };
 
 test.beforeEach(async ({ page, request }) => {
   await resetFixture(request);
+  await page.route("**/api/state/events", (route) => route.abort());
   await page.goto("/");
 });
 
@@ -14,6 +15,7 @@ test("stale Resource save stops on conflict and an explicit remote reload resolv
   await page.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
   const note = page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`);
   await expect(note).toBeVisible();
+  await expect(note.locator("[data-resource-save-status]")).toHaveAttribute("data-sync-state", "saved");
 
   const externalTitle = "Remote collaborator title";
   const externalWrite = await request.post("/__e2e__/external-write", {

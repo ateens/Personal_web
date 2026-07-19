@@ -191,7 +191,7 @@ test("Duplicate under a parent creates the child before updating parent childOrd
   await expectResourceWriteIds(request, [duplicateId, OLD_PARENT_ID]);
 });
 
-test("offline hierarchy queue survives reload and a transient retry in old→moved→new order", async ({ browser, request }, testInfo) => {
+test("an online restart discards a reloaded offline hierarchy queue in favor of the remote hierarchy", async ({ browser, request }, testInfo) => {
   test.setTimeout(45_000);
   const context = await browser.newContext({
     baseURL: String(testInfo.project.use.baseURL),
@@ -201,18 +201,15 @@ test("offline hierarchy queue survives reload and a transient retry in old→mov
     serviceWorkers: "allow",
   });
   const page = await context.newPage();
-  let abortedWrites = 0;
-  const abortFirstResourceWrite = async (route) => {
-    if (abortedWrites === 0 && route.request().method() === "PUT") {
-      abortedWrites += 1;
-      await route.abort("failed");
-      return;
-    }
-    await route.continue();
-  };
   try {
     await page.goto("/");
-    await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker?.controller)), { timeout: 15_000 }).toBe(true);
+    await expect.poll(async () => {
+      try {
+        return await page.evaluate(() => Boolean(navigator.serviceWorker?.controller));
+      } catch {
+        return false;
+      }
+    }, { timeout: 15_000 }).toBe(true);
     await page.goto(`/resources/${encodeURIComponent(NEW_PARENT_ID)}`);
     const newParentNote = page.locator(`[data-resource-note="${NEW_PARENT_ID}"]`);
     await expect(newParentNote).toBeVisible();
@@ -245,17 +242,18 @@ test("offline hierarchy queue survives reload and a transient retry in old→mov
       MOVED_RESOURCE_ID,
       NEW_PARENT_ID,
     ]);
+    await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "offline");
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeVisible();
 
-    await context.route("**/api/resources/**", abortFirstResourceWrite);
     await context.setOffline(false);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
-    await expectHierarchy(request, NEW_PARENT_ID);
-    await expectResourceWriteIds(request, [OLD_PARENT_ID, MOVED_RESOURCE_ID, NEW_PARENT_ID]);
-    expect(abortedWrites).toBe(1);
+    await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+    await expectHierarchy(request, OLD_PARENT_ID);
+    await expectResourceWriteIds(request, []);
+    await expect(page.locator(`[data-resource-parent="${MOVED_RESOURCE_ID}"]`)).toHaveValue(OLD_PARENT_ID);
     await expect.poll(async () => (await readResourceQueue(page)).length).toBe(0);
   } finally {
     await context.setOffline(false);
-    await context.unroute("**/api/resources/**", abortFirstResourceWrite);
     await context.close();
   }
 });

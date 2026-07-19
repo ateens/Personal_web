@@ -13,10 +13,15 @@ struct RootView: View {
             SYGMATheme.backgroundGradient
                 .ignoresSafeArea()
 
-            activeScreen
-                .id(store.selectedSection)
-                .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .trailing)))
-                .accessibilityHidden(store.isNavigationOpen)
+            if store.isInitialRemoteLoadComplete {
+                activeScreen
+                    .id(store.selectedSection)
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .trailing)))
+                    .accessibilityHidden(store.isNavigationOpen)
+                    .disabled(!store.isWorkspaceEditable && store.selectedSection != .settings)
+            } else {
+                initialLoadingView
+            }
 
             if syncNeedsAttention, !store.isNavigationOpen {
                 VStack {
@@ -102,6 +107,18 @@ struct RootView: View {
         }
     }
 
+    private var initialLoadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .tint(SYGMATheme.blue)
+            Text("서버 Workspace를 불러오는 중")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(SYGMATheme.muted)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("서버 Workspace를 불러오는 중")
+    }
+
     private var syncNeedsAttention: Bool {
         switch store.syncState {
         case .conflict, .authenticationRequired: true
@@ -136,6 +153,8 @@ struct RootView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("빠른 생성")
+            .disabled(!store.isWorkspaceEditable)
+            .opacity(store.isWorkspaceEditable ? 1 : 0)
             .accessibilityHidden(store.isNavigationOpen)
             .allowsHitTesting(!store.isNavigationOpen)
             .padding(.trailing, 20)
@@ -236,7 +255,7 @@ private struct NavigationMenu: View {
                 case .conflict, .authenticationRequired:
                     store.select(.settings)
                 default:
-                    Task { await store.refreshFromRemote(discardingLocalChanges: false) }
+                    Task { await store.refreshFromRemote() }
                 }
             } label: {
                 HStack {

@@ -157,6 +157,58 @@ button:focus-visible {
   min-height: 100vh;
 }
 
+.workspace-authority-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 32px;
+  color: var(--ink);
+  text-align: center;
+  background: var(--surface-main);
+}
+
+.workspace-authority-gate[hidden] {
+  display: none;
+}
+
+.workspace-authority-gate [hidden] {
+  display: none;
+}
+
+.workspace-authority-gate strong {
+  font-size: clamp(17px, 2.4vw, 21px);
+}
+
+.workspace-authority-gate > span:last-child {
+  max-width: 34rem;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.workspace-authority-spinner {
+  width: 26px;
+  height: 26px;
+  margin-bottom: 4px;
+  border: 2px solid rgba(37, 99, 235, 0.18);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: workspace-authority-spin 760ms linear infinite;
+}
+
+.app[data-workspace-authority="offline"] .workspace-authority-spinner {
+  border-color: var(--rose-soft);
+  border-top-color: var(--rose);
+  animation: none;
+}
+
+@keyframes workspace-authority-spin {
+  to { transform: rotate(360deg); }
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

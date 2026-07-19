@@ -37,13 +37,6 @@ private struct PendingConflict: Codable, Equatable {
     let message: String
 }
 
-private struct ConflictBackup: Codable {
-    let side: String
-    let state: JSONValue
-    let revision: Int
-    let createdAt: String
-}
-
 private struct LocalStoreSnapshot: Codable {
     static let currentFormatVersion = 2
 
@@ -71,7 +64,8 @@ final class AppStore {
     private(set) var revision: Int
     private(set) var hasPendingChanges = false
     private(set) var conflictRemoteRevision: Int?
-    private(set) var latestConflictBackupURL: URL?
+    private(set) var isInitialRemoteLoadComplete: Bool
+    private(set) var isWorkspaceEditable: Bool
 
     @ObservationIgnored private(set) var state: JSONValue
     @ObservationIgnored private let apiClient: APIClient
@@ -112,14 +106,19 @@ final class AppStore {
                 state: seed, revision: Self.revision(in: seed), needsRemoteSave: false, pendingConflict: nil
             )
         }
+        let requiresRemoteAuthority = initialState == nil && persistenceURL != nil
         let migration = Self.migratingRemovedTaskStatuses(in: loaded.state)
         state = migration.state
         snapshot = AppSnapshot(state: migration.state)
         revision = loaded.revision
-        hasPendingChanges = loaded.needsRemoteSave || migration.didChange
-        pendingConflict = loaded.pendingConflict
-        conflictRemoteRevision = loaded.pendingConflict?.remoteRevision
-        if let conflict = loaded.pendingConflict {
+        hasPendingChanges = requiresRemoteAuthority ? false : loaded.needsRemoteSave || migration.didChange
+        pendingConflict = requiresRemoteAuthority ? nil : loaded.pendingConflict
+        conflictRemoteRevision = pendingConflict?.remoteRevision
+        isInitialRemoteLoadComplete = !requiresRemoteAuthority
+        isWorkspaceEditable = !requiresRemoteAuthority
+        if requiresRemoteAuthority {
+            syncState = .loading
+        } else if let conflict = pendingConflict {
             syncState = .conflict(conflict.message)
         } else {
             syncState = persistenceURL == nil || hasPendingChanges ? .localOnly : .loading
@@ -159,17 +158,12 @@ final class AppStore {
         commit(.object(root))
     }
 
-    func refreshFromRemote(
-        discardingLocalChanges: Bool = false,
-        silent: Bool = false,
-        minimumRevision: Int = 0
-    ) async {
+    func refreshFromRemote(silent: Bool = false, minimumRevision: Int = 0) async {
         queuedMinimumRevision = max(queuedMinimumRevision, minimumRevision)
         guard !remoteRefreshInFlight else { return }
         remoteRefreshInFlight = true
         defer { remoteRefreshInFlight = false }
 
-        var discard = discardingLocalChanges
         var quiet = silent
         var pass = 0
         repeat {
@@ -177,60 +171,52 @@ final class AppStore {
             let targetRevision = queuedMinimumRevision
             queuedMinimumRevision = 0
             await performRemoteRefresh(
-                discardingLocalChanges: discard,
                 silent: quiet,
                 minimumRevision: targetRevision
             )
-            discard = false
             quiet = true
         } while queuedMinimumRevision > revision && pass < 3
     }
 
     private func performRemoteRefresh(
-        discardingLocalChanges: Bool,
         silent: Bool,
         minimumRevision: Int
     ) async {
-        if discardingLocalChanges, pendingConflict != nil {
-            await useRemoteVersion()
-            return
-        }
         guard !remoteSaveInFlight else {
             queuedMinimumRevision = max(queuedMinimumRevision, minimumRevision)
             syncState = .saving
             return
         }
-        let startingGeneration = generation
         if !silent, pendingConflict == nil { syncState = .loading }
+        let startingGeneration = generation
+        let startingRevision = revision
         do {
             let envelope = try await apiClient.fetchState()
-            guard envelope.revision >= revision else { return }
             if envelope.revision < minimumRevision {
                 queuedMinimumRevision = max(queuedMinimumRevision, minimumRevision)
                 return
             }
-            if let conflict = pendingConflict {
-                registerConflict(envelope, message: conflict.message)
+            if remoteReady, envelope.revision < revision || revision != startingRevision || remoteSaveInFlight {
                 return
             }
-            if !discardingLocalChanges && (hasPendingChanges || generation != startingGeneration) {
-                if envelope.revision == revision {
-                    remoteReady = true
-                    syncState = .localOnly
-                    persistLocal()
-                    scheduleRemoteSave()
-                } else {
-                    registerConflict(envelope, message: "저장되지 않은 로컬 변경과 원격 revision이 다릅니다.")
-                }
+            if generation != startingGeneration {
+                queuedMinimumRevision = max(queuedMinimumRevision, envelope.revision)
+                if hasPendingChanges { scheduleRemoteSave() }
                 return
             }
-            if envelope.revision == revision, remoteReady {
+            if envelope.revision == revision, hasPendingChanges {
                 remoteReady = true
-                if persistLocal() { syncState = .synced }
+                isInitialRemoteLoadComplete = true
+                isWorkspaceEditable = true
+                if persistLocal() { syncState = .localOnly }
+                scheduleRemoteSave()
                 return
             }
+            clearConflict()
             let persistedLocally = applyRemote(envelope)
             remoteReady = true
+            isInitialRemoteLoadComplete = true
+            isWorkspaceEditable = true
             if hasPendingChanges {
                 if persistedLocally { syncState = .localOnly }
                 scheduleRemoteSave()
@@ -239,6 +225,7 @@ final class AppStore {
             }
         } catch {
             if Self.isCancellationError(error) { return }
+            isInitialRemoteLoadComplete = true
             handleSyncError(error)
         }
     }
@@ -319,78 +306,9 @@ final class AppStore {
         await refreshFromRemote(silent: true, minimumRevision: event.revision)
     }
 
-    func useRemoteVersion() async {
-        guard !remoteSaveInFlight, var conflict = pendingConflict else { return }
-        do {
-            if conflict.remoteState == nil {
-                let envelope = try await apiClient.fetchState()
-                registerConflict(envelope, message: conflict.message)
-                conflict = pendingConflict ?? conflict
-            }
-            guard let remoteState = conflict.remoteState else { return }
-            try writeConflictBackup(side: "local", state: state, revision: revision)
-            clearConflict()
-            revision = conflict.remoteRevision
-            generation = 0
-            let incomingState = remoteState == .null
-                ? Self.stamped(SeedState.make(), revision: conflict.remoteRevision)
-                : remoteState
-            let migration = Self.migratingRemovedTaskStatuses(in: incomingState)
-            state = migration.state
-            snapshot = AppSnapshot(state: state)
-            hasPendingChanges = migration.didChange
-            remoteReady = true
-            if persistLocal() { syncState = hasPendingChanges ? .localOnly : .synced }
-            if hasPendingChanges { scheduleRemoteSave() }
-        } catch {
-            handleResolutionError(error)
-        }
-    }
-
-    func overwriteRemoteWithLocalVersion() async {
-        guard !remoteSaveInFlight, pendingConflict != nil else { return }
-        let localState = state
-        let localGeneration = generation
-        syncState = .saving
-        do {
-            let latest = try await apiClient.fetchState()
-            registerConflict(latest, message: pendingConflict?.message ?? "동기화 충돌이 발생했습니다.")
-            try writeConflictBackup(side: "remote", state: latest.state, revision: latest.revision)
-            let rebased = Self.stamped(localState, revision: latest.revision)
-            let saved = try await apiClient.saveState(rebased, baseRevision: latest.revision)
-            clearConflict()
-            revision = saved.revision
-            remoteReady = true
-            if generation == localGeneration {
-                let migration = Self.migratingRemovedTaskStatuses(in: saved.state)
-                state = migration.state
-                snapshot = AppSnapshot(state: state)
-                hasPendingChanges = migration.didChange
-            } else {
-                state = Self.stamped(state, revision: saved.revision)
-                snapshot = AppSnapshot(state: state)
-                hasPendingChanges = true
-            }
-            let persistedLocally = persistLocal()
-            if persistedLocally { syncState = hasPendingChanges ? .localOnly : .synced }
-            if hasPendingChanges { scheduleRemoteSave() }
-        } catch {
-            if Self.isConflictError(error) {
-                registerRevisionOnlyConflict(error)
-                do {
-                    let latest = try await apiClient.fetchState()
-                    registerConflict(latest, message: "로컬 버전을 저장하는 동안 원격 버전이 다시 변경되었습니다.")
-                } catch {
-                    handleSyncError(error)
-                }
-            } else {
-                handleResolutionError(error)
-            }
-        }
-    }
-
     @discardableResult
     func createTask(title: String, lane: TaskLane = .today, date: Date? = nil) -> String? {
+        guard isWorkspaceEditable else { return nil }
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return nil }
         let dateKey: String
@@ -420,7 +338,8 @@ final class AppStore {
 
     @discardableResult
     func createTask(_ draft: TaskDraft) -> String? {
-        guard case .object(var root) = state,
+        guard isWorkspaceEditable,
+              case .object(var root) = state,
               Self.idAvailable(draft.id, in: root),
               let item = Self.taskItem(from: draft, root: root) else { return nil }
         var items = root["tasks"]?.arrayValue ?? []
@@ -1217,6 +1136,7 @@ final class AppStore {
     }
 
     private func commit(_ newState: JSONValue) {
+        guard isWorkspaceEditable else { return }
         generation += 1
         state = Self.migratingRemovedTaskStatuses(
             in: Self.stamped(newState, revision: revision)
@@ -1283,17 +1203,24 @@ final class AppStore {
             let persistedLocally = persistLocal()
             if persistedLocally { syncState = hasPendingChanges ? .localOnly : .synced }
         } catch {
-            hasPendingChanges = true
-            persistLocal()
             if Self.isConflictError(error) {
-                registerRevisionOnlyConflict(error)
+                hasPendingChanges = false
+                isWorkspaceEditable = false
+                clearConflict()
                 do {
                     let latest = try await apiClient.fetchState()
-                    registerConflict(latest, message: error.localizedDescription)
+                    let persistedLocally = applyRemote(latest)
+                    remoteReady = true
+                    isWorkspaceEditable = true
+                    if persistedLocally { syncState = hasPendingChanges ? .localOnly : .synced }
+                    if hasPendingChanges { scheduleRemoteSave() }
                 } catch {
+                    persistLocal()
                     handleSyncError(error)
                 }
             } else {
+                hasPendingChanges = true
+                persistLocal()
                 handleSyncError(error)
             }
         }
@@ -1328,41 +1255,6 @@ final class AppStore {
         return persistLocal()
     }
 
-    private func registerConflict(_ envelope: StateEnvelope, message: String) {
-        pendingConflict = PendingConflict(
-            remoteState: envelope.state,
-            remoteRevision: envelope.revision,
-            remoteUpdatedAt: envelope.updatedAt,
-            message: message
-        )
-        conflictRemoteRevision = envelope.revision
-        hasPendingChanges = true
-        remoteReady = false
-        syncState = .conflict(message)
-        persistLocal()
-    }
-
-    private func registerRevisionOnlyConflict(_ error: Error) {
-        let remoteRevision: Int
-        if case let APIClientError.server(_, _, _, _, revision, _) = error {
-            remoteRevision = revision ?? conflictRemoteRevision ?? self.revision
-        } else {
-            remoteRevision = conflictRemoteRevision ?? revision
-        }
-        let message = error.localizedDescription
-        pendingConflict = PendingConflict(
-            remoteState: nil,
-            remoteRevision: remoteRevision,
-            remoteUpdatedAt: "",
-            message: message
-        )
-        conflictRemoteRevision = remoteRevision
-        hasPendingChanges = true
-        remoteReady = false
-        syncState = .conflict(message)
-        persistLocal()
-    }
-
     private func retainConflict(message: String) {
         guard let conflict = pendingConflict else {
             syncState = .offline(message)
@@ -1388,21 +1280,13 @@ final class AppStore {
 
     private func handleSyncError(_ error: Error) {
         remoteReady = false
+        isWorkspaceEditable = false
         if Self.isAuthenticationError(error) {
             syncState = .authenticationRequired(error.localizedDescription)
         } else if pendingConflict != nil {
             retainConflict(message: pendingConflict?.message ?? error.localizedDescription)
         } else {
             syncState = .offline(error.localizedDescription)
-        }
-    }
-
-    private func handleResolutionError(_ error: Error) {
-        if Self.isAuthenticationError(error) {
-            remoteReady = false
-            syncState = .authenticationRequired(error.localizedDescription)
-        } else {
-            retainConflict(message: "충돌 해결을 완료하지 못했습니다. \(error.localizedDescription)")
         }
     }
 
@@ -1418,21 +1302,6 @@ final class AppStore {
 
     private static func isCancellationError(_ error: Error) -> Bool {
         error is CancellationError || (error as? URLError)?.code == .cancelled
-    }
-
-    private func writeConflictBackup(side: String, state: JSONValue, revision: Int) throws {
-        guard let persistenceURL else {
-            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "충돌 백업 저장 위치가 없습니다."])
-        }
-        let directory = persistenceURL.deletingLastPathComponent().appendingPathComponent("Conflict Backups", isDirectory: true)
-        try Self.prepareProtectedDirectory(directory)
-        let backupURL = directory.appendingPathComponent(
-            "conflict-\(Int(Date().timeIntervalSince1970))-\(side)-\(UUID().uuidString.lowercased()).json"
-        )
-        let backup = ConflictBackup(side: side, state: state, revision: revision, createdAt: Self.timestamp())
-        try JSONEncoder().encode(backup).write(to: backupURL, options: .atomic)
-        try Self.protectAndExcludeFromBackup(backupURL)
-        latestConflictBackupURL = backupURL
     }
 
     private static func prepareProtectedDirectory(_ url: URL) throws {

@@ -2,9 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppStore.self) private var store
-    @State private var confirmsUseRemote = false
-    @State private var confirmsOverwriteRemote = false
-    @State private var resolvingConflict = false
 
     var body: some View {
         SYGMAScreen(
@@ -14,7 +11,6 @@ struct SettingsView: View {
             actions: {
                 Button("지금 동기화") { Task { await testConnection() } }
                     .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.blue))
-                    .disabled(resolvingConflict)
             }
         ) {
             syncPanel
@@ -22,24 +18,6 @@ struct SettingsView: View {
             appPanel
         }
         .refreshable { await testConnection() }
-        .confirmationDialog(
-            "서버 버전을 사용하면 아직 동기화되지 않은 이 iPhone의 변경을 버립니다. 로컬 백업을 만든 뒤 진행합니다.",
-            isPresented: $confirmsUseRemote,
-            titleVisibility: .visible
-        ) {
-            Button("서버 버전 사용", role: .destructive) {
-                Task { await useRemoteVersion() }
-            }
-        }
-        .confirmationDialog(
-            "이 iPhone의 전체 Workspace로 서버 버전을 덮어씁니다. 병합이 아니며, 서버 백업을 만든 뒤 진행합니다.",
-            isPresented: $confirmsOverwriteRemote,
-            titleVisibility: .visible
-        ) {
-            Button("서버 덮어쓰기", role: .destructive) {
-                Task { await overwriteRemote() }
-            }
-        }
     }
 
     private var syncPanel: some View {
@@ -57,38 +35,16 @@ struct SettingsView: View {
                         .foregroundStyle(syncTint)
                         .textSelection(.enabled)
                 }
-                if let backup = store.latestConflictBackupURL {
-                    Label("보호 백업: \(backup.lastPathComponent)", systemImage: "lock.doc")
-                        .font(.caption)
-                        .foregroundStyle(SYGMATheme.muted)
-                        .lineLimit(2)
-                }
                 if case .conflict = store.syncState {
-                    Text("자동 병합은 하지 않습니다. 어느 전체 버전을 유지할지 직접 선택하세요.")
+                    Text("서버 Workspace를 다시 불러오면 이 기기의 충돌 상태는 자동으로 폐기됩니다.")
                         .font(.caption)
                         .foregroundStyle(SYGMATheme.rose)
-                    ViewThatFits(in: .horizontal) {
-                        HStack {
-                            conflictButtons
-                        }
-                        VStack(alignment: .leading) {
-                            conflictButtons
-                        }
-                    }
+                    Button("서버 다시 불러오기") { Task { await testConnection() } }
+                        .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.blue))
                 }
             }
             .font(.subheadline)
         }
-    }
-
-    @ViewBuilder
-    private var conflictButtons: some View {
-        Button("서버 버전 사용") { confirmsUseRemote = true }
-            .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.blue))
-            .disabled(resolvingConflict)
-        Button("이 iPhone 버전 유지") { confirmsOverwriteRemote = true }
-            .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.rose, isActive: true))
-            .disabled(resolvingConflict)
     }
 
     private var calendarPanel: some View {
@@ -127,6 +83,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            .disabled(!store.isWorkspaceEditable)
         }
     }
 
@@ -163,20 +120,6 @@ struct SettingsView: View {
     @MainActor
     private func testConnection() async {
         await store.refreshFromRemote()
-    }
-
-    @MainActor
-    private func useRemoteVersion() async {
-        resolvingConflict = true
-        await store.useRemoteVersion()
-        resolvingConflict = false
-    }
-
-    @MainActor
-    private func overwriteRemote() async {
-        resolvingConflict = true
-        await store.overwriteRemoteWithLocalVersion()
-        resolvingConflict = false
     }
 
     private func sourceSymbol(_ source: CalendarSource) -> String {

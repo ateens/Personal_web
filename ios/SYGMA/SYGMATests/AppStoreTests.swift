@@ -802,67 +802,42 @@ final class AppStoreTests: XCTestCase {
         XCTAssertFalse(store.snapshot.googleCalendarVisible("primary"))
     }
 
-    func testConflictSurvivesLaterEditsAndRelaunch() async throws {
+    func testOnlineLaunchTreatsPendingLocalSnapshotAsReadOnlyUntilRemoteLoads() async throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SYGMA-ConflictPersistence-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SYGMA-ServerAuthority-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("state.json")
         defer { try? FileManager.default.removeItem(at: directory) }
         let remote = Self.namedState("remote-v2", revision: 2)
         StubURLProtocol.handler = { request in
             try Self.stateResponse(for: request, state: remote, revision: 2)
         }
-        let store = AppStore(
-            initialState: SeedState.make(), apiClient: makeStubClient(), persistenceURL: url, autoRefresh: false
+        let localStore = AppStore(
+            initialState: Self.namedState("local-v9", revision: 9), persistenceURL: url, autoRefresh: false
         )
-        store.createTask(title: "local-before-conflict", lane: .today)
+        localStore.createTask(title: "local-pending", lane: .today)
 
-        await store.refreshFromRemote()
+        let relaunched = AppStore(apiClient: makeStubClient(), persistenceURL: url, autoRefresh: false)
 
-        guard case .conflict = store.syncState else { return XCTFail("Dirty mismatched revisions must conflict") }
-        XCTAssertEqual(store.conflictRemoteRevision, 2)
-        XCTAssertTrue(store.hasPendingChanges)
-        store.createTask(title: "local-after-conflict", lane: .today)
-        guard case .conflict = store.syncState else { return XCTFail("A later edit must not hide the conflict") }
+        XCTAssertFalse(relaunched.isInitialRemoteLoadComplete)
+        XCTAssertFalse(relaunched.isWorkspaceEditable)
+        XCTAssertFalse(relaunched.hasPendingChanges)
+        XCTAssertTrue(relaunched.snapshot.tasks.contains { $0.title == "local-pending" })
+        XCTAssertNil(relaunched.createTask(title: "must-not-edit", lane: .today))
 
-        let relaunched = AppStore(persistenceURL: url, autoRefresh: false)
-        guard case .conflict = relaunched.syncState else { return XCTFail("Conflict must survive relaunch") }
-        XCTAssertEqual(relaunched.conflictRemoteRevision, 2)
-        XCTAssertTrue(relaunched.hasPendingChanges)
-        XCTAssertTrue(relaunched.snapshot.tasks.contains { $0.title == "local-after-conflict" })
+        await relaunched.refreshFromRemote()
+
+        XCTAssertTrue(relaunched.isInitialRemoteLoadComplete)
+        XCTAssertTrue(relaunched.isWorkspaceEditable)
+        XCTAssertEqual(relaunched.syncState, .synced)
+        XCTAssertEqual(relaunched.revision, 2, "The lower server revision must still be authoritative")
+        XCTAssertEqual(relaunched.snapshot.tasks.first?.title, "remote-v2")
+        XCTAssertFalse(relaunched.snapshot.tasks.contains { $0.title == "local-pending" })
+        XCTAssertFalse(relaunched.hasPendingChanges)
     }
 
-    func testUseRemoteBacksUpLocalThenClearsConflictAndDirtyState() async throws {
+    func testSaveRevisionConflictAppliesLatestRemoteWithoutRebaseOrSecondPut() async throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SYGMA-UseRemote-\(UUID().uuidString)", isDirectory: true)
-        let url = directory.appendingPathComponent("state.json")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let remote = Self.namedState("remote-selected", revision: 2)
-        StubURLProtocol.handler = { request in
-            try Self.stateResponse(for: request, state: remote, revision: 2)
-        }
-        let store = AppStore(
-            initialState: SeedState.make(), apiClient: makeStubClient(), persistenceURL: url, autoRefresh: false
-        )
-        store.createTask(title: "local-losing-change", lane: .today)
-        await store.refreshFromRemote()
-
-        await store.useRemoteVersion()
-
-        XCTAssertEqual(store.syncState, .synced)
-        XCTAssertFalse(store.hasPendingChanges)
-        XCTAssertNil(store.conflictRemoteRevision)
-        XCTAssertEqual(store.snapshot.tasks.first?.title, "remote-selected")
-        XCTAssertFalse(store.snapshot.tasks.contains { $0.title == "local-losing-change" })
-        let backupURL = try XCTUnwrap(store.latestConflictBackupURL)
-        let backup = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: backupURL))
-        XCTAssertEqual(backup["side"]?.stringValue, "local")
-        XCTAssertTrue(backup["state"]?["tasks"]?.arrayValue?.contains { $0["title"]?.stringValue == "local-losing-change" } == true)
-        XCTAssertEqual(try backupURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
-    }
-
-    func testOverwriteRemoteBacksUpLatestRemoteAndRebasesOnce() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SYGMA-KeepLocal-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SYGMA-ConflictServerWins-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("state.json")
         defer { try? FileManager.default.removeItem(at: directory) }
         let lock = NSLock()
@@ -877,65 +852,24 @@ final class AppStoreTests: XCTestCase {
                 )
             }
             lock.withLock { putCount += 1 }
-            XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "\"state-3\"")
-            let payload = try JSONDecoder().decode(JSONValue.self, from: Self.requestBody(from: request))
-            return try Self.stateResponse(for: request, state: try XCTUnwrap(payload["state"]), revision: 4)
+            return try Self.conflictResponse(for: request, revision: 3)
         }
         let store = AppStore(
             initialState: SeedState.make(), apiClient: makeStubClient(), persistenceURL: url, autoRefresh: false
         )
-        store.createTask(title: "local-winner", lane: .today)
         await store.refreshFromRemote()
+        store.createTask(title: "local-loser", lane: .today)
 
-        await store.overwriteRemoteWithLocalVersion()
+        try await Task.sleep(nanoseconds: 900_000_000)
 
         XCTAssertEqual(store.syncState, .synced)
         XCTAssertFalse(store.hasPendingChanges)
         XCTAssertNil(store.conflictRemoteRevision)
-        XCTAssertEqual(store.revision, 4)
-        XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "local-winner" })
+        XCTAssertEqual(store.revision, 3)
+        XCTAssertEqual(store.snapshot.tasks.first?.title, "remote-v3")
+        XCTAssertFalse(store.snapshot.tasks.contains { $0.title == "local-loser" })
         XCTAssertEqual(lock.withLock { putCount }, 1)
-        let backup = try JSONDecoder().decode(
-            JSONValue.self, from: Data(contentsOf: try XCTUnwrap(store.latestConflictBackupURL))
-        )
-        XCTAssertEqual(backup["side"]?.stringValue, "remote")
-        XCTAssertEqual(backup["revision"]?.intValue, 3)
-        XCTAssertEqual(backup["state"]?["tasks"]?[0]?["title"]?.stringValue, "remote-v3")
-    }
-
-    func testOverwriteRemoteSecondRaceRemainsConflictWithoutSecondPut() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SYGMA-SecondRace-\(UUID().uuidString)", isDirectory: true)
-        let url = directory.appendingPathComponent("state.json")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let lock = NSLock()
-        var getCount = 0
-        var putCount = 0
-        StubURLProtocol.handler = { request in
-            if request.httpMethod == "GET" {
-                let count = lock.withLock { getCount += 1; return getCount }
-                let revision = min(count + 1, 4)
-                return try Self.stateResponse(
-                    for: request, state: Self.namedState("remote-v\(revision)", revision: revision), revision: revision
-                )
-            }
-            lock.withLock { putCount += 1 }
-            return try Self.conflictResponse(for: request, revision: 4)
-        }
-        let store = AppStore(
-            initialState: SeedState.make(), apiClient: makeStubClient(), persistenceURL: url, autoRefresh: false
-        )
-        store.createTask(title: "local-still-safe", lane: .today)
-        await store.refreshFromRemote()
-
-        await store.overwriteRemoteWithLocalVersion()
-
-        guard case .conflict = store.syncState else { return XCTFail("A second race must remain a conflict") }
-        XCTAssertTrue(store.hasPendingChanges)
-        XCTAssertEqual(store.conflictRemoteRevision, 4)
-        XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "local-still-safe" })
-        XCTAssertEqual(lock.withLock { putCount }, 1)
-        XCTAssertEqual(lock.withLock { getCount }, 3)
+        XCTAssertEqual(lock.withLock { getCount }, 2)
     }
 
     func testAuthenticationRequiredIsNotReportedAsOffline() async throws {
@@ -953,10 +887,21 @@ final class AppStoreTests: XCTestCase {
         }
     }
 
-    func testDirtyLocalStateIsNotOverwrittenByRefresh() async throws {
+    func testRefreshPreservesDirtyLocalStateWhenServerRevisionStillMatches() async throws {
         let remote = SeedState.make()
+        let lock = NSLock()
+        var putCount = 0
         StubURLProtocol.handler = { request in
-            try Self.stateResponse(for: request, state: remote, revision: 0)
+            if request.httpMethod == "GET" {
+                return try Self.stateResponse(for: request, state: remote, revision: 0)
+            }
+            lock.withLock { putCount += 1 }
+            let payload = try JSONDecoder().decode(JSONValue.self, from: Self.requestBody(from: request))
+            return try Self.stateResponse(
+                for: request,
+                state: try XCTUnwrap(payload["state"]),
+                revision: 1
+            )
         }
         let store = AppStore(
             initialState: SeedState.make(),
@@ -967,11 +912,61 @@ final class AppStoreTests: XCTestCase {
         store.createTask(title: "unsaved-local-task", lane: .today)
 
         await store.refreshFromRemote()
+        try await Task.sleep(nanoseconds: 700_000_000)
 
         XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "unsaved-local-task" })
+        XCTAssertFalse(store.hasPendingChanges)
+        XCTAssertEqual(store.syncState, .synced)
+        XCTAssertEqual(lock.withLock { putCount }, 1)
     }
 
-    func testDirtyMetadataAndStateSurviveRelaunch() throws {
+    func testEditDuringLateRefreshIsPreservedAndSaved() async throws {
+        let lock = NSLock()
+        let secondGetStarted = expectation(description: "second GET started")
+        let putCompleted = expectation(description: "PUT completed")
+        var getCount = 0
+        var putCount = 0
+        StubURLProtocol.handler = { request in
+            if request.httpMethod == "GET" {
+                let count = lock.withLock { getCount += 1; return getCount }
+                if count == 2 {
+                    secondGetStarted.fulfill()
+                    Thread.sleep(forTimeInterval: 0.9)
+                }
+                return try Self.stateResponse(for: request, state: SeedState.make(), revision: 0)
+            }
+            lock.withLock { putCount += 1 }
+            let payload = try JSONDecoder().decode(JSONValue.self, from: Self.requestBody(from: request))
+            let response = try Self.stateResponse(
+                for: request,
+                state: try XCTUnwrap(payload["state"]),
+                revision: 1
+            )
+            putCompleted.fulfill()
+            return response
+        }
+        let store = AppStore(
+            initialState: SeedState.make(),
+            apiClient: makeStubClient(),
+            persistenceURL: nil,
+            autoRefresh: false
+        )
+        await store.refreshFromRemote()
+
+        let lateRefresh = Task { await store.refreshFromRemote(silent: true) }
+        await fulfillment(of: [secondGetStarted], timeout: 2)
+        store.createTask(title: "saved-before-old-get", lane: .today)
+        await lateRefresh.value
+        await fulfillment(of: [putCompleted], timeout: 2)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(store.revision, 1)
+        XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "saved-before-old-get" })
+        XCTAssertEqual(store.syncState, .synced)
+        XCTAssertEqual(lock.withLock { putCount }, 1)
+    }
+
+    func testDirtySnapshotBecomesReadOnlyCacheAfterRelaunch() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SYGMA-AppStoreTests-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("state.json")
@@ -988,7 +983,10 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(raw["needsRemoteSave"]?.boolValue, true)
         let relaunched = AppStore(persistenceURL: url, autoRefresh: false)
         XCTAssertTrue(relaunched.snapshot.tasks.contains { $0.title == "persisted-pending-task" })
-        XCTAssertEqual(relaunched.syncState, .localOnly)
+        XCTAssertEqual(relaunched.syncState, .loading)
+        XCTAssertFalse(relaunched.hasPendingChanges)
+        XCTAssertFalse(relaunched.isWorkspaceEditable)
+        XCTAssertFalse(relaunched.isInitialRemoteLoadComplete)
     }
 
     func testNullRemoteStateUsesSeedState() async throws {
@@ -1050,7 +1048,7 @@ final class AppStoreTests: XCTestCase {
         XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "second-save" })
     }
 
-    func testFailedSaveKeepsDirtySnapshotAndRetriesAfterRefresh() async throws {
+    func testFailedSaveUsesReadOnlyCacheAndRetriesWhenServerRevisionStillMatches() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SYGMA-AppStoreRetryTests-\(UUID().uuidString)", isDirectory: true)
         let url = directory.appendingPathComponent("state.json")
@@ -1085,6 +1083,7 @@ final class AppStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 700_000_000)
 
         guard case .offline = store.syncState else { return XCTFail("A failed PUT should remain offline and dirty") }
+        XCTAssertFalse(store.isWorkspaceEditable)
         var persisted = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
         XCTAssertEqual(persisted["needsRemoteSave"]?.boolValue, true)
 
@@ -1093,10 +1092,11 @@ final class AppStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 700_000_000)
 
         XCTAssertEqual(store.syncState, .synced)
+        XCTAssertTrue(store.isWorkspaceEditable)
         XCTAssertTrue(store.snapshot.tasks.contains { $0.title == "retry-after-failure" })
         persisted = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
         XCTAssertEqual(persisted["needsRemoteSave"]?.boolValue, false)
-        XCTAssertGreaterThanOrEqual(lock.withLock { putCount }, 2)
+        XCTAssertEqual(lock.withLock { putCount }, 2)
     }
 
     private func makeStubClient() -> APIClient {

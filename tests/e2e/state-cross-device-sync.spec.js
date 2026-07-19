@@ -3,6 +3,7 @@ import { FIXTURE_IDS, fixtureSnapshot, openResources, resetFixture } from "./hel
 
 const LOCAL_DATABASE_NAME = "sygma-resource-local-v1";
 const SNAPSHOT_STORE = "snapshots";
+const OPERATION_STORE = "operations";
 const ORIGINAL_TITLE = "E2E Notion Parity Resource";
 
 test.beforeEach(async ({ request }) => {
@@ -134,6 +135,85 @@ test("a future-dated stale IndexedDB snapshot cannot overwrite the remote worksp
   }
 });
 
+test("an online restart discards even a same-revision pending workspace operation and shows the remote workspace", async ({ browser, request }, testInfo) => {
+  const context = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
+  const setupPage = await context.newPage();
+  const staleTitle = "Stale pending workspace title";
+
+  try {
+    await setupPage.goto("/");
+    await expect.poll(() => localSnapshotRevision(setupPage)).toBe(1);
+    await installStaleWorkspaceDraft(setupPage, staleTitle);
+    expect(await localSnapshotTitle(setupPage)).toBe(staleTitle);
+    expect(await localWorkspaceOperationCount(setupPage)).toBe(1);
+    await setupPage.close();
+
+    const restartPage = await context.newPage();
+    await restartPage.goto("/");
+    await openResources(restartPage);
+    await expectResourceTitle(restartPage, ORIGINAL_TITLE);
+    await expect.poll(() => localSnapshotTitle(restartPage)).toBe(ORIGINAL_TITLE);
+    await expect.poll(() => localSnapshotRevision(restartPage)).toBe(1);
+    await expect.poll(() => localWorkspaceOperationCount(restartPage)).toBe(0);
+
+    const remote = await fixtureSnapshot(request);
+    expect(remote.serverRevision).toBe(1);
+    expect(resourceTitle(remote.state)).toBe(ORIGINAL_TITLE);
+    expect(remote.writes).toEqual([]);
+    expect(remote.writeAttempts).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});
+
+test("overlapping initialization requests keep the workspace locked until the final remote read completes", async ({ browser, request }, testInfo) => {
+  const context = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
+  const page = await context.newPage();
+  let stateRequestCount = 0;
+  let releaseFirstState;
+  let releaseSecondState;
+  const firstStateGate = new Promise((resolve) => { releaseFirstState = resolve; });
+  const secondStateGate = new Promise((resolve) => { releaseSecondState = resolve; });
+
+  await page.route("**/api/state", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    stateRequestCount += 1;
+    if (stateRequestCount === 1) await firstStateGate;
+    if (stateRequestCount === 2) await secondStateGate;
+    await route.continue();
+  });
+
+  try {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect.poll(() => stateRequestCount).toBe(1);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    releaseFirstState();
+    await expect.poll(() => stateRequestCount).toBe(2);
+
+    const app = page.locator("#app");
+    await expect(app).toHaveAttribute("data-workspace-authority", "loading");
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeVisible();
+    expect(await page.locator(".layout").evaluate((element) => element.inert)).toBe(true);
+
+    releaseSecondState();
+    await expect(app).toHaveAttribute("data-workspace-authority", "ready");
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeHidden();
+    expect(await page.locator(".layout").evaluate((element) => element.inert)).toBe(false);
+
+    const remote = await fixtureSnapshot(request);
+    expect(remote.serverRevision).toBe(1);
+    expect(remote.writes).toEqual([]);
+    expect(remote.writeAttempts).toEqual([]);
+  } finally {
+    releaseFirstState?.();
+    releaseSecondState?.();
+    await context.close();
+  }
+});
+
 async function newAppContext(browser, testInfo, viewport) {
   const { width, height, ...deviceOptions } = viewport;
   return browser.newContext({
@@ -214,12 +294,107 @@ async function overwriteLocalSnapshot(page, staleTitle) {
   });
 }
 
+async function installStaleWorkspaceDraft(page, staleTitle) {
+  await page.evaluate(async ({ databaseName, snapshotStore, operationStore, workspaceId, title }) => {
+    const database = await openDatabase(databaseName);
+    const transaction = database.transaction([snapshotStore, operationStore], "readwrite");
+    const snapshots = transaction.objectStore(snapshotStore);
+    const operations = transaction.objectStore(operationStore);
+    const snapshot = await requestResult(snapshots.get(workspaceId));
+    if (!snapshot) throw new Error(`Missing local snapshot for ${workspaceId}.`);
+
+    const staleState = structuredClone(snapshot.state);
+    const resource = staleState.resources.find((entry) => entry.id === "fixture-resource-main");
+    if (!resource) throw new Error("Missing fixture Resource in local snapshot.");
+    const staleTimestamp = "2020-01-01T00:00:00.000Z";
+    resource.title = title;
+    resource.updatedAt = staleTimestamp;
+    staleState.updatedAt = staleTimestamp;
+    staleState.revision = snapshot.baseRevision;
+
+    snapshots.put({
+      ...snapshot,
+      baseRevision: snapshot.baseRevision,
+      savedAt: staleTimestamp,
+      state: staleState,
+    });
+    operations.put({
+      id: `workspace:${workspaceId}`,
+      workspaceId,
+      entityType: "workspace",
+      entityId: workspaceId,
+      baseRevision: snapshot.baseRevision,
+      status: "pending",
+      attempts: 0,
+      queueOrder: 0,
+      createdAt: staleTimestamp,
+      updatedAt: staleTimestamp,
+      payload: { state: structuredClone(staleState) },
+      scope: "workspace",
+    });
+
+    await transactionComplete(transaction);
+    database.close();
+
+    function openDatabase(name) {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error(`Unable to open ${name}.`));
+      });
+    }
+
+    function requestResult(request) {
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("IndexedDB request failed."));
+      });
+    }
+
+    function transactionComplete(pendingTransaction) {
+      return new Promise((resolve, reject) => {
+        pendingTransaction.oncomplete = resolve;
+        pendingTransaction.onerror = () => reject(pendingTransaction.error || new Error("IndexedDB transaction failed."));
+        pendingTransaction.onabort = () => reject(pendingTransaction.error || new Error("IndexedDB transaction aborted."));
+      });
+    }
+  }, {
+    databaseName: LOCAL_DATABASE_NAME,
+    snapshotStore: SNAPSHOT_STORE,
+    operationStore: OPERATION_STORE,
+    workspaceId: FIXTURE_IDS.appState,
+    title: staleTitle,
+  });
+}
+
 async function localSnapshotRevision(page) {
   return readLocalSnapshot(page).then((snapshot) => snapshot?.baseRevision ?? null);
 }
 
 async function localSnapshotTitle(page) {
   return readLocalSnapshot(page).then((snapshot) => resourceTitle(snapshot?.state));
+}
+
+async function localWorkspaceOperationCount(page) {
+  return page.evaluate(async ({ databaseName, operationStore, workspaceId }) => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(databaseName);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error(`Unable to open ${databaseName}.`));
+    });
+    const transaction = database.transaction(operationStore, "readonly");
+    const operations = await new Promise((resolve, reject) => {
+      const request = transaction.objectStore(operationStore).getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB operation read failed."));
+    });
+    database.close();
+    return operations.filter((operation) => operation.workspaceId === workspaceId).length;
+  }, {
+    databaseName: LOCAL_DATABASE_NAME,
+    operationStore: OPERATION_STORE,
+    workspaceId: FIXTURE_IDS.appState,
+  });
 }
 
 async function readLocalSnapshot(page) {
