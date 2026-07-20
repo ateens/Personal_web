@@ -236,7 +236,7 @@ test("first phase matches the six-lane calendar and two-action reference composi
   const days = scheduler.locator(".task-scheduler-grid > [data-scheduler-date]");
   await expect(weekdays).toHaveCount(7);
   await expect(days).toHaveCount(42);
-  await expect(weekdays).toHaveText(["월", "화", "수", "목", "금", "토", "일"]);
+  await expect(weekdays).toHaveText(["일", "월", "화", "수", "목", "금", "토"]);
 
   const actionGroup = scheduler.locator(".quick-placement-first-actions");
   const actions = actionGroup.locator(":scope > [data-placement-create-cancel], :scope > [data-placement-create-now]");

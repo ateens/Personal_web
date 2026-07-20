@@ -8,7 +8,7 @@ struct CalendarView: View {
     @State private var selectedTask: SygmaTask?
     @State private var selectedProject: SygmaProject?
     @State private var showsTaskCreate = false
-    @State private var calendarMode = CalendarDisplayMode.twoWeeks
+    @State private var calendarMode = CalendarDisplayMode.month
 
     var body: some View {
         SYGMAScreen(
@@ -78,7 +78,7 @@ struct CalendarView: View {
                     Image(systemName: "chevron.left").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(calendarMode == .month ? "이전 달" : "이전 2주")
+                .accessibilityLabel(previousPeriodLabel)
 
                 Spacer()
                 Text(calendarTitle)
@@ -91,7 +91,7 @@ struct CalendarView: View {
                     Image(systemName: "chevron.right").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(calendarMode == .month ? "다음 달" : "다음 2주")
+                .accessibilityLabel(nextPeriodLabel)
             }
             .padding(.horizontal, 8)
 
@@ -99,7 +99,7 @@ struct CalendarView: View {
                 ForEach(Array(weekdayLabels.enumerated()), id: \.offset) { index, label in
                     Text(label)
                         .font(.caption2.weight(.bold))
-                        .foregroundStyle(index == 5 ? SYGMATheme.blue : index == 6 ? SYGMATheme.rose : SYGMATheme.muted)
+                        .foregroundStyle(index == 0 ? SYGMATheme.rose : index == 6 ? SYGMATheme.blue : SYGMATheme.muted)
                         .frame(maxWidth: .infinity, minHeight: 30)
                 }
 
@@ -167,19 +167,19 @@ struct CalendarView: View {
     private var calendar: Calendar {
         var value = Calendar(identifier: .gregorian)
         value.locale = Locale(identifier: "ko_KR")
-        value.firstWeekday = 2
+        value.firstWeekday = 1
         return value
     }
     private var columns: [GridItem] {
         Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 7)
     }
-    private var weekdayLabels: [String] { ["월", "화", "수", "목", "금", "토", "일"] }
+    private var weekdayLabels: [String] { ["일", "월", "화", "수", "목", "금", "토"] }
     private var calendarTitle: String {
         if calendarMode == .month {
             return displayedMonth.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).year().month(.wide))
         }
-        guard let end = twoWeekDays.last else { return "" }
-        return "\(twoWeekDays[0].formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day())) – \(end.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day()))"
+        guard let first = displayedDays.first, let end = displayedDays.last else { return "" }
+        return "\(first.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day())) – \(end.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day()))"
     }
     private var twoWeekDays: [Date] {
         let weekday = calendar.component(.weekday, from: displayedMonth)
@@ -189,16 +189,40 @@ struct CalendarView: View {
     }
 
     private var monthDays: [Date] {
-        let components = calendar.dateComponents([.year, .month], from: displayedMonth)
-        guard let first = calendar.date(from: components) else { return [] }
-        let offset = (calendar.component(.weekday, from: first) - calendar.firstWeekday + 7) % 7
-        let start = calendar.date(byAdding: .day, value: -offset, to: first) ?? first
+        let weekday = calendar.component(.weekday, from: displayedMonth)
+        let offset = (weekday - calendar.firstWeekday + 7) % 7
+        let currentWeekStart = calendar.date(byAdding: .day, value: -offset, to: displayedMonth) ?? displayedMonth
+        let start = calendar.date(byAdding: .weekOfYear, value: -1, to: currentWeekStart) ?? currentWeekStart
         return (0..<42).map { calendar.date(byAdding: .day, value: $0, to: start) ?? start }
     }
 
     private var calendarWeeks: [[Date]] {
-        let days = calendarMode == .month ? monthDays : twoWeekDays
+        let days = displayedDays
         return stride(from: 0, to: days.count, by: 7).map { Array(days[$0..<min($0 + 7, days.count)]) }
+    }
+
+    private var displayedDays: [Date] {
+        switch calendarMode {
+        case .week: Array(twoWeekDays.prefix(7))
+        case .twoWeeks: twoWeekDays
+        case .month: monthDays
+        }
+    }
+
+    private var previousPeriodLabel: String {
+        switch calendarMode {
+        case .week: "이전 주"
+        case .twoWeeks: "이전 2주"
+        case .month: "이전 달"
+        }
+    }
+
+    private var nextPeriodLabel: String {
+        switch calendarMode {
+        case .week: "다음 주"
+        case .twoWeeks: "다음 2주"
+        case .month: "다음 달"
+        }
     }
 
     private var screenHorizontalPadding: CGFloat {
@@ -207,7 +231,7 @@ struct CalendarView: View {
 
     private func movePeriod(_ offset: Int) {
         let component: Calendar.Component = calendarMode == .month ? .month : .weekOfYear
-        let value = calendarMode == .month ? offset : offset * 2
+        let value = calendarMode == .twoWeeks ? offset * 2 : offset
         guard let next = calendar.date(byAdding: component, value: value, to: displayedMonth) else { return }
         displayedMonth = next
         selectedDate = next
@@ -234,11 +258,18 @@ struct CalendarView: View {
 }
 
 private enum CalendarDisplayMode: String, CaseIterable, Identifiable {
+    case week
     case twoWeeks
     case month
 
     var id: String { rawValue }
-    var title: String { self == .twoWeeks ? "2주" : "월간" }
+    var title: String {
+        switch self {
+        case .week: "주간"
+        case .twoWeeks: "2주"
+        case .month: "월간"
+        }
+    }
 }
 
 private struct CalendarWeekRow: View {
