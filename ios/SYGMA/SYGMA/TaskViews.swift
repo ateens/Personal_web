@@ -150,21 +150,39 @@ struct TaskRow: View {
     let onOpen: () -> Void
 
     @Environment(AppStore.self) private var store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pendingCompletion: Bool?
+
+    private var displayedCompletion: Bool { pendingCompletion ?? task.isDone }
+    private var completionAnimation: Animation {
+        .spring(response: 0.34, dampingFraction: 0.78, blendDuration: 0.08)
+    }
 
     var body: some View {
         SYGMACard(accent: SYGMATheme.blue) {
             HStack(alignment: .top, spacing: 10) {
-                SYGMATaskCheck(isCompleted: task.isDone, label: task.title) {
-                    store.toggleTask(task.id)
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
+                SYGMATaskCheck(isCompleted: displayedCompletion, label: task.title, action: toggleCompletion)
+                    .allowsHitTesting(pendingCompletion == nil)
 
                 Button(action: onOpen) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(task.title)
                             .font(.body.weight(.semibold))
-                            .foregroundStyle(task.isDone ? SYGMATheme.soft : SYGMATheme.ink)
-                            .strikethrough(task.isDone)
+                            .foregroundStyle(displayedCompletion ? SYGMATheme.soft : SYGMATheme.ink)
+                            .overlay {
+                                GeometryReader { proxy in
+                                    Rectangle()
+                                        .fill(SYGMATheme.soft)
+                                        .frame(width: proxy.size.width, height: 1.5)
+                                        .scaleEffect(x: displayedCompletion ? 1 : 0, anchor: .leading)
+                                        .frame(maxHeight: .infinity, alignment: .center)
+                                }
+                                .allowsHitTesting(false)
+                            }
+                            .animation(
+                                reduceMotion ? nil : completionAnimation,
+                                value: displayedCompletion
+                            )
                             .multilineTextAlignment(.leading)
 
                         HStack(spacing: 7) {
@@ -207,6 +225,20 @@ struct TaskRow: View {
         }
         .accessibilityAction(named: "오늘로 이동") { store.placeTask(task.id, in: .today) }
         .accessibilityAction(named: "내일로 이동") { store.placeTask(task.id, in: .tomorrow) }
+    }
+
+    private func toggleCompletion() {
+        guard pendingCompletion == nil else { return }
+        let next = !task.isDone
+        withAnimation(reduceMotion ? nil : completionAnimation) {
+            pendingCompletion = next
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        Task { @MainActor in
+            if !reduceMotion { try? await Task.sleep(for: .milliseconds(300)) }
+            store.toggleTask(task.id)
+            pendingCompletion = nil
+        }
     }
 
     private var separatorDot: some View {

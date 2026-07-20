@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import WidgetKit
 
 enum SyncState: Equatable {
     case loading
@@ -123,6 +124,7 @@ final class AppStore {
         } else {
             syncState = persistenceURL == nil || hasPendingChanges ? .localOnly : .loading
         }
+        reloadWidgets()
         if autoRefresh { startLiveSync() }
     }
 
@@ -1330,6 +1332,7 @@ final class AppStore {
 
     @discardableResult
     private func persistLocal() -> Bool {
+        reloadWidgets()
         guard let persistenceURL else { return true }
         do {
             let directory = persistenceURL.deletingLastPathComponent()
@@ -1348,6 +1351,11 @@ final class AppStore {
             if pendingConflict == nil { syncState = .offline("로컬 상태를 저장하지 못했습니다.") }
             return false
         }
+    }
+
+    private func reloadWidgets() {
+        WidgetCenter.shared.reloadTimelines(ofKind: "SYGMAFourWeekCalendar")
+        WidgetCenter.shared.reloadTimelines(ofKind: "SYGMATodayTasks")
     }
 
     private static func loadLocal(from url: URL?) -> LoadedLocalState? {

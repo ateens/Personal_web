@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0A0000000000000000000025 /* SYGMAWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 0A000000000000000000001C /* SYGMAWidget.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0A0000000000000000000011 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -14,11 +18,33 @@
 			remoteGlobalIDString = 0A0000000000000000000008;
 			remoteInfo = SYGMA;
 		};
+		0A0000000000000000000027 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0A0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0A0000000000000000000021;
+			remoteInfo = SYGMAWidget;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		0A0000000000000000000026 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				0A0000000000000000000025 /* SYGMAWidget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0A0000000000000000000006 /* SYGMA.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SYGMA.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0A0000000000000000000007 /* SYGMATests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SYGMATests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0A000000000000000000001C /* SYGMAWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SYGMAWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,6 +56,11 @@
 		0A0000000000000000000005 /* SYGMATests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = SYGMATests;
+			sourceTree = "<group>";
+		};
+		0A000000000000000000001D /* SYGMAWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SYGMAWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -49,6 +80,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0A000000000000000000001E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -57,6 +95,7 @@
 			children = (
 				0A0000000000000000000004 /* SYGMA */,
 				0A0000000000000000000005 /* SYGMATests */,
+				0A000000000000000000001D /* SYGMAWidget */,
 				0A0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -66,6 +105,7 @@
 			children = (
 				0A0000000000000000000006 /* SYGMA.app */,
 				0A0000000000000000000007 /* SYGMATests.xctest */,
+				0A000000000000000000001C /* SYGMAWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -80,10 +120,12 @@
 				0A0000000000000000000009 /* Sources */,
 				0A000000000000000000000A /* Frameworks */,
 				0A000000000000000000000B /* Resources */,
+				0A0000000000000000000026 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				0A0000000000000000000028 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				0A0000000000000000000004 /* SYGMA */,
@@ -94,6 +136,28 @@
 			productName = SYGMA;
 			productReference = 0A0000000000000000000006 /* SYGMA.app */;
 			productType = "com.apple.product-type.application";
+		};
+		0A0000000000000000000021 /* SYGMAWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0A0000000000000000000024 /* Build configuration list for PBXNativeTarget "SYGMAWidget" */;
+			buildPhases = (
+				0A000000000000000000001F /* Sources */,
+				0A000000000000000000001E /* Frameworks */,
+				0A0000000000000000000020 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0A000000000000000000001D /* SYGMAWidget */,
+			);
+			name = SYGMAWidget;
+			packageProductDependencies = (
+			);
+			productName = SYGMAWidget;
+			productReference = 0A000000000000000000001C /* SYGMAWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		0A000000000000000000000F /* SYGMATests */ = {
 			isa = PBXNativeTarget;
@@ -135,6 +199,9 @@
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = 0A0000000000000000000008;
 					};
+					0A0000000000000000000021 = {
+						CreatedOnToolsVersion = 26.0;
+					};
 				};
 			};
 			buildConfigurationList = 0A0000000000000000000013 /* Build configuration list for PBXProject "SYGMA" */;
@@ -153,6 +220,7 @@
 			targets = (
 				0A0000000000000000000008 /* SYGMA */,
 				0A000000000000000000000F /* SYGMATests */,
+				0A0000000000000000000021 /* SYGMAWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -166,6 +234,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		0A000000000000000000000E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		0A0000000000000000000020 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -189,6 +264,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		0A000000000000000000001F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -196,6 +278,11 @@
 			isa = PBXTargetDependency;
 			target = 0A0000000000000000000008 /* SYGMA */;
 			targetProxy = 0A0000000000000000000011 /* PBXContainerItemProxy */;
+		};
+		0A0000000000000000000028 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0A0000000000000000000021 /* SYGMAWidget */;
+			targetProxy = 0A0000000000000000000027 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -425,6 +512,56 @@
 			};
 			name = Release;
 		};
+		0A0000000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "SYGMAWidget-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ateens.sygma.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		0A0000000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "SYGMAWidget-Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ateens.sygma.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -451,6 +588,15 @@
 			buildConfigurations = (
 				0A000000000000000000001A /* Debug */,
 				0A000000000000000000001B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		0A0000000000000000000024 /* Build configuration list for PBXNativeTarget "SYGMAWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0A0000000000000000000022 /* Debug */,
+				0A0000000000000000000023 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

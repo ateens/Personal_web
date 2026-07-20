@@ -214,7 +214,6 @@ private struct SYGMACheckShape: Shape {
         var path = Path()
         path.move(to: blend(point(1, 8), point(1.5, 7)))
         path.addLine(to: blend(point(8, 8), point(6, 11.5)))
-        path.move(to: blend(point(8, 8), point(6, 11.5)))
         path.addLine(to: blend(point(15, 8), point(15, 2.5)))
         return path
     }
