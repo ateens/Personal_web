@@ -185,7 +185,8 @@ const checks = [
     const agenda = sourceSection(files.styles, ".calendar-agenda-row {", ".calendar-agenda-row:hover");
     const agendaTime = sourceSection(files.styles, ".calendar-agenda-row time {", ".calendar-agenda-open {");
     return toggle.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
-      && toggle.includes("linear-gradient(135deg, color-mix(in srgb, var(--calendar-color)")
+      && toggle.includes("background: color-mix(in srgb, var(--calendar-color)")
+      && toggle.includes("box-shadow: none;")
       && legend.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
       && legend.includes("background: color-mix(in srgb, var(--calendar-color)")
       && dot.includes("background: var(--calendar-color, var(--blue));")
@@ -194,10 +195,12 @@ const checks = [
       && span.includes("box-shadow: none;")
       && span.includes("background: var(--span-bg);")
       && agenda.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
+      && agenda.includes("background: color-mix(in srgb, var(--calendar-color)")
       && agenda.includes("box-shadow: inset 3px 0 0 var(--calendar-color)")
       && agendaTime.includes("background: color-mix(in srgb, var(--calendar-color)")
       && agendaTime.includes("color: color-mix(in srgb, var(--calendar-color)");
   }],
+  ["calendar renders two full weeks and keeps visibility controls collapsible at the bottom", () => files.app.includes("const days = dateRange(start, 14);") && files.app.includes("weekIndex < 2") && files.app.indexOf("renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)") > files.app.indexOf('class="panel calendar-combined-panel"') && files.app.includes('<details class="panel calendar-control-panel">')],
   ["calendar shows every event lane with start times only", () => files.app.includes('className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes('className: "calendar-month-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes("return formatTime(event.start);") && !files.app.includes('return end && end !== start ? `${start}-${end}` : start;')],
   ["Google sync candidates avoid direct state task filter", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("const tasks = googleSyncTaskCandidates()") && files.app.includes("if (task.dueDate && task.status !== \"done\" && !task.googleEventId) tasks.push(task);") && !files.app.includes("state.tasks.filter((task) => task.dueDate && task.status !== \"done\" && !task.googleEventId)")],
   ["Google sync candidates use a direct loop", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("for (const task of state.tasks)") && !/function googleSyncTaskCandidates\(\) \{[\s\S]*?state\.tasks\.forEach[\s\S]*?function upsertGoogleEvents/.test(files.app)],
