@@ -5753,7 +5753,7 @@ button:focus-visible {
 }
 
 .calendar-month-week.is-past-week {
-  opacity: 0.68;
+  opacity: 0.56;
 }
 
 .calendar-month-day {
@@ -10237,6 +10237,117 @@ body.is-task-placement-open {
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
   }
+}
+
+/* One quiet check language: minus at rest, V when selected. */
+.check,
+.block-check,
+.calendar-toggle-mark,
+.resource-checkbox {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: currentColor;
+}
+
+.check {
+  transform: none;
+  filter: none;
+}
+
+.check:hover,
+.check:active {
+  transform: none;
+  filter: none;
+}
+
+.check::before,
+.block-check::before,
+.calendar-toggle-mark::before {
+  content: "−";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: none;
+  transition: opacity 140ms var(--ease), transform 180ms var(--ease);
+}
+
+.check::after,
+.block-check::after,
+.calendar-toggle-mark::after {
+  content: "V";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  opacity: 0;
+  transform: translateY(-2px) scale(0.72);
+  transition: opacity 140ms var(--ease), transform 180ms cubic-bezier(0.16, 0.92, 0.22, 1);
+}
+
+.check.is-done::before,
+.block-check.is-done::before,
+.calendar-toggle input:checked + .calendar-toggle-mark::before {
+  opacity: 0;
+  transform: translateY(2px) scale(0.72);
+}
+
+.check.is-done::after,
+.block-check.is-done::after,
+.calendar-toggle input:checked + .calendar-toggle-mark::after {
+  opacity: 1;
+  transform: none;
+}
+
+.check.is-done::before,
+.block-check.is-done,
+.calendar-toggle input:checked + .calendar-toggle-mark,
+.check.is-done:hover::before {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  animation: none;
+}
+
+.resource-checkbox {
+  appearance: none;
+  margin: 0;
+  background: linear-gradient(currentColor, currentColor) center / 8px 1px no-repeat;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.resource-checkbox:checked {
+  background:
+    linear-gradient(48deg, transparent 44%, var(--ink) 45% 56%, transparent 57%) 3px 7px / 6px 7px no-repeat,
+    linear-gradient(-48deg, transparent 44%, var(--ink) 45% 56%, transparent 57%) 7px 4px / 7px 10px no-repeat;
+}
+
+.check:focus-visible,
+.block-check:focus-visible,
+.calendar-toggle input:focus-visible + .calendar-toggle-mark,
+.resource-checkbox:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 3px;
 }
 
 @media (forced-colors: active) {
