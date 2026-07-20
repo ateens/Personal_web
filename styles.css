@@ -10304,6 +10304,7 @@ body.is-task-placement-open {
   box-shadow: none;
   opacity: 1;
   animation: none;
+  transform: none;
   transform-origin: left center;
   transition: top 220ms var(--ease), left 220ms var(--ease), width 220ms var(--ease), transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1), background-color 180ms var(--ease);
 }
