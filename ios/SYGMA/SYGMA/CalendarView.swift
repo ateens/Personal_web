@@ -7,7 +7,7 @@ struct CalendarView: View {
     @State private var selectedDate = Date().startOfDay
     @State private var selectedTask: SygmaTask?
     @State private var selectedProject: SygmaProject?
-    @State private var expandedEntry: CalendarEntry?
+    @State private var expandedEvent: ExpandedCalendarEvent?
     @State private var showsTaskCreate = false
     @State private var calendarMode = CalendarDisplayMode.month
 
@@ -31,19 +31,25 @@ struct CalendarView: View {
                 agendaPanel
             }
 
-            if let entry = expandedEntry {
-                Color.black.opacity(0.08)
+            if let expandedEvent {
+                Color.clear
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
-                    .onTapGesture { expandedEntry = nil }
+                    .onTapGesture { self.expandedEvent = nil }
 
-                expandedCalendarEntry(entry)
-                    .padding(.horizontal, 12)
-                    .transition(.scale(scale: 0.96).combined(with: .opacity))
-                    .zIndex(100)
+                GeometryReader { proxy in
+                    expandedCalendarEntry(expandedEvent.entry)
+                        .frame(width: proxy.size.width - 16, height: 82)
+                        .position(x: proxy.size.width / 2, y: min(max(expandedEvent.frame.midY, 100), proxy.size.height - 100))
+                        .transition(.scale(scale: 0.18, anchor: UnitPoint(
+                            x: min(max(expandedEvent.frame.midX / max(proxy.size.width, 1), 0), 1),
+                            y: 0.5
+                        )).combined(with: .opacity))
+                }
+                .zIndex(100)
             }
         }
-        .animation(.easeOut(duration: 0.16), value: expandedEntry?.id)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: expandedEvent?.id)
         .refreshable { await store.refreshFromRemote() }
         .sheet(item: $selectedTask) { TaskEditorSheet(task: $0) }
         .sheet(item: $selectedProject) { ProjectEditorSheet(project: $0) }
@@ -127,9 +133,10 @@ struct CalendarView: View {
                     dates: week,
                     entries: visibleEntries,
                     selectedDate: selectedDate,
+                    isPastWeek: week.last.map { $0 < currentWeekStart } ?? false,
                     sourceColor: color(for:),
                     select: { selectedDate = $0 },
-                    expand: { expandedEntry = $0 }
+                    expand: { entry, frame in expandedEvent = ExpandedCalendarEvent(entry: entry, frame: frame) }
                 )
             }
         }
@@ -190,6 +197,9 @@ struct CalendarView: View {
     }
     private var columns: [GridItem] {
         Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 7)
+    }
+    private var currentWeekStart: Date {
+        calendar.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date().startOfDay
     }
     private var weekdayLabels: [String] { ["일", "월", "화", "수", "목", "금", "토"] }
     private var calendarTitle: String {
@@ -267,46 +277,29 @@ struct CalendarView: View {
     }
 
     private func expandedCalendarEntry(_ entry: CalendarEntry) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(entry.source.title.uppercased())
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(color(for: entry.source))
-                    Text(entry.title)
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(SYGMATheme.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                Button { expandedEntry = nil } label: {
-                    Image(systemName: "xmark").frame(width: 36, height: 36)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("일정 상세 닫기")
+        HStack(spacing: 12) {
+            Rectangle().fill(color(for: entry.source)).frame(width: 4, height: 54)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(entry.title)
+                    .font(.body.weight(.bold))
+                    .foregroundStyle(SYGMATheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(entry.timeLabel) · \(entry.startDate == entry.endDate || entry.endDate.isEmpty ? entry.startDate : "\(entry.startDate) – \(entry.endDate)")")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(color(for: entry.source))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Label(entry.timeLabel, systemImage: "clock")
-            Label(entry.startDate == entry.endDate || entry.endDate.isEmpty ? entry.startDate : "\(entry.startDate) – \(entry.endDate)", systemImage: "calendar")
-            if !entry.calendarID.isEmpty { Label(entry.calendarID, systemImage: "calendar.badge.checkmark") }
-
-            HStack {
-                if entry.source != .google {
-                    Button("일정 열기") {
-                        expandedEntry = nil
-                        open(entry)
-                    }
-                    .buttonStyle(SYGMAUnderlineButtonStyle(tint: color(for: entry.source)))
-                }
-                if let url = entry.externalURL { Link("Google Calendar에서 열기", destination: url) }
-            }
+            Spacer(minLength: 8)
+            Text(entry.source.title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(color(for: entry.source))
         }
-        .font(.subheadline)
-        .foregroundStyle(SYGMATheme.muted)
-        .padding(18)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .shadow(color: Color.black.opacity(0.18), radius: 24, y: 10)
+        .background(color(for: entry.source).opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+        .overlay { RoundedRectangle(cornerRadius: 6).stroke(color(for: entry.source).opacity(0.34), lineWidth: 1) }
+        .shadow(color: color(for: entry.source).opacity(0.2), radius: 12, y: 5)
         .contentShape(Rectangle())
         .onTapGesture { }
     }
@@ -318,6 +311,12 @@ struct CalendarView: View {
         case .google: SYGMATheme.teal
         }
     }
+}
+
+private struct ExpandedCalendarEvent: Identifiable, Equatable {
+    let entry: CalendarEntry
+    let frame: CGRect
+    var id: String { entry.id }
 }
 
 private enum CalendarDisplayMode: String, CaseIterable, Identifiable {
@@ -339,9 +338,10 @@ private struct CalendarWeekRow: View {
     let dates: [Date]
     let entries: [CalendarEntry]
     let selectedDate: Date
+    let isPastWeek: Bool
     let sourceColor: (CalendarSource) -> Color
     let select: (Date) -> Void
-    let expand: (CalendarEntry) -> Void
+    let expand: (CalendarEntry, CGRect) -> Void
     @State private var hoveredEntryID: String?
 
     var body: some View {
@@ -366,27 +366,31 @@ private struct CalendarWeekRow: View {
             GeometryReader { proxy in
                 let columnWidth = proxy.size.width / 7
                 ForEach(segments) { segment in
-                    Button { expand(segment.entry) } label: {
-                        Text(segment.entry.title)
-                            .font(.system(size: 9, weight: .semibold))
-                            .lineLimit(1)
-                            .foregroundStyle(SYGMATheme.ink)
-                            .padding(.horizontal, 5)
-                            .frame(width: columnWidth * CGFloat(segment.span) - 4, height: 18, alignment: .leading)
-                            .background(sourceColor(segment.entry.source).opacity(0.16))
-                            .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
+                    GeometryReader { barProxy in
+                        Button { expand(segment.entry, barProxy.frame(in: .global)) } label: {
+                            Text(segment.entry.title)
+                                .font(.system(size: 9, weight: .semibold))
+                                .lineLimit(1)
+                                .foregroundStyle(SYGMATheme.ink)
+                                .padding(.horizontal, 5)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                                .background(sourceColor(segment.entry.source).opacity(0.16))
+                                .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
+                        }
+                        .buttonStyle(.plain)
+                        .help(segment.entry.title)
+                        .accessibilityLabel(segment.entry.title)
                     }
-                    .buttonStyle(.plain)
+                    .frame(width: columnWidth * CGFloat(segment.span) - 4, height: 18)
                     .offset(x: columnWidth * CGFloat(segment.startIndex) + 2, y: CGFloat(34 + segment.lane * 20))
                     .zIndex(hoveredEntryID == segment.entry.id ? 50 : Double(segment.lane + 1))
                     .onHover { hoveredEntryID = $0 ? segment.entry.id : nil }
-                    .help(segment.entry.title)
-                    .accessibilityLabel(segment.entry.title)
                 }
             }
             .zIndex(10)
         }
         .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
+        .opacity(isPastWeek ? 0.56 : 1)
         .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
     }
 
