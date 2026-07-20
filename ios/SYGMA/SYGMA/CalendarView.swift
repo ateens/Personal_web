@@ -369,6 +369,7 @@ private struct CalendarWeekRow: View {
             .zIndex(10)
         }
         .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
+        .zIndex(segments.contains(where: { $0.id == expandedEntryID }) ? 100 : 0)
         .opacity(isPastWeek && !segments.contains(where: { $0.id == expandedEntryID }) ? 0.56 : 1)
         .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
         .animation(.spring(response: 0.42, dampingFraction: 0.72, blendDuration: 0.12), value: expandedEntryID)
