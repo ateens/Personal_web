@@ -44,14 +44,15 @@ struct CalendarView: View {
                     Button {
                         store.setCalendarSource(source, visible: !store.snapshot.calendarSourceVisible(source))
                     } label: {
-                        HStack(spacing: 7) {
-                            Circle().fill(color(for: source)).frame(width: 7, height: 7)
+                        HStack(spacing: 5) {
+                            Circle().fill(color(for: source)).frame(width: 6, height: 6)
                             Text(source.title)
                         }
                     }
                     .buttonStyle(SYGMAUnderlineButtonStyle(
                         tint: color(for: source),
-                        isActive: store.snapshot.calendarSourceVisible(source)
+                        isActive: store.snapshot.calendarSourceVisible(source),
+                        compact: true
                     ))
                     .accessibilityLabel("\(source.title) 캘린더")
                     .accessibilityValue(store.snapshot.calendarSourceVisible(source) ? "표시" : "숨김")
@@ -371,7 +372,11 @@ private struct CalendarWeekRow: View {
         .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
         .zIndex(segments.contains(where: { $0.id == expandedEntryID }) ? 100 : 0)
         .opacity(isPastWeek && !segments.contains(where: { $0.id == expandedEntryID }) ? 0.56 : 1)
-        .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
+        .background(alignment: .bottom) {
+            if !segments.contains(where: { $0.id == expandedEntryID }) {
+                Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1)
+            }
+        }
         .animation(.spring(response: 0.42, dampingFraction: 0.72, blendDuration: 0.12), value: expandedEntryID)
     }
 

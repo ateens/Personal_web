@@ -3,16 +3,17 @@ import SwiftUI
 struct SYGMAUnderlineButtonStyle: ButtonStyle {
     var tint: Color = SYGMATheme.ink
     var isActive = false
+    var compact = false
 
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
             .foregroundStyle(isEnabled ? tint : SYGMATheme.soft)
             .frame(minHeight: SYGMATheme.minimumTapTarget)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, compact ? 8 : 14)
             .contentShape(Rectangle())
             .background(alignment: .bottom) {
                 ZStack(alignment: .leading) {
