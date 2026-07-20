@@ -190,14 +190,15 @@ const checks = [
       && legend.includes("background: color-mix(in srgb, var(--calendar-color)")
       && dot.includes("background: var(--calendar-color, var(--blue));")
       && span.includes("--span-bg:") && span.includes("var(--calendar-color)")
-      && span.includes("--span-border: color-mix(in srgb, var(--calendar-color)")
-      && span.includes("border: 1px solid var(--span-border);")
+      && span.includes("border: 0;")
+      && span.includes("box-shadow: none;")
       && span.includes("background: var(--span-bg);")
       && agenda.includes("border: 1px solid color-mix(in srgb, var(--calendar-color)")
       && agenda.includes("box-shadow: inset 3px 0 0 var(--calendar-color)")
       && agendaTime.includes("background: color-mix(in srgb, var(--calendar-color)")
       && agendaTime.includes("color: color-mix(in srgb, var(--calendar-color)");
   }],
+  ["calendar shows every event lane with start times only", () => files.app.includes('className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes('className: "calendar-month-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes("return formatTime(event.start);") && !files.app.includes('return end && end !== start ? `${start}-${end}` : start;')],
   ["Google sync candidates avoid direct state task filter", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("const tasks = googleSyncTaskCandidates()") && files.app.includes("if (task.dueDate && task.status !== \"done\" && !task.googleEventId) tasks.push(task);") && !files.app.includes("state.tasks.filter((task) => task.dueDate && task.status !== \"done\" && !task.googleEventId)")],
   ["Google sync candidates use a direct loop", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("for (const task of state.tasks)") && !/function googleSyncTaskCandidates\(\) \{[\s\S]*?state\.tasks\.forEach[\s\S]*?function upsertGoogleEvents/.test(files.app)],
   ["Google sync upserts events once after task loop", () => files.app.includes("const syncedEvents = [];") && files.app.includes("upsertGoogleEvents(syncedEvents)") && files.app.includes("function upsertGoogleEvents(events = [])") && files.app.includes("const incomingById = new Map();") && !files.app.includes("state.googleEvents = [...(state.googleEvents || []).filter((entry) => entry.id !== normalized.id), normalized]")],
