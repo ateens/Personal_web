@@ -108,7 +108,7 @@ const VIEW_CONTROL_DEFAULTS = {
   resources: { search: "", searchScope: "fullText", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
   habits: { filters: ["all"], sort: "progress", mode: "list", panels: { filter: false, sort: false } },
   journal: { filters: ["all"], sort: "date", mode: "cards", panels: { filter: false, sort: false } },
-  calendar: { filters: ["all"], sort: "time", mode: "calendar", panels: { filter: false, sort: false } },
+  calendar: { filters: ["all"], sort: "time", mode: "twoWeeks", panels: { filter: false, sort: false } },
   database: { filters: ["all"], sort: "rows", mode: "grid", panels: { filter: false, sort: false } },
 };
 const VIEW_FILTER_OPTIONS = {
@@ -139,7 +139,7 @@ const VIEW_SORT_OPTIONS = {
 };
 const VIEW_MODE_OPTIONS = {
   resources: [["library", "Library"], ["list", "List"], ["map", "Map"]],
-  calendar: [["calendar", "캘린더"], ["agenda", "목록"]],
+  calendar: [["twoWeeks", "2주"], ["week", "주간"], ["calendar", "월간"], ["agenda", "목록"]],
   database: [["grid", "Grid"], ["list", "List"]],
 };
 const BLOCK_TYPES = {
@@ -1926,23 +1926,27 @@ function renderCalendar() {
   const combinedEvents = controlledItems("calendar", combinedCalendarSourceEvents(taskEvents, projectEvents, visibleGoogleEvents), "calendar");
   const control = viewControl("calendar");
   const weekStart = startOfWeek(new Date());
+  const weekCount = control.mode === "week" ? 1 : 2;
   return `
     <section class="view">
       ${renderViewHeader("Calendar", "캘린더", `${combinedEvents.length} visible events`)}
       ${renderViewControls("calendar", { count: combinedEvents.length, total: taskEvents.length + projectEvents.length + visibleGoogleEvents.length })}
+      <div class="calendar-view-switcher">${renderViewModeButtons("calendar", VIEW_MODE_OPTIONS.calendar, control.mode)}</div>
       <div class="calendar-layout">
         ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
 
-        <div class="panel calendar-week-panel">
-          ${panelHeader("This Week", `${formatLongDate(weekStart)}부터`)}
-          <div class="calendar-week-grid">${renderWeekDays(combinedEvents, calendarThemes)}</div>
-        </div>
+        ${control.mode === "week" || control.mode === "twoWeeks" ? `
+          <div class="panel calendar-week-panel">
+            ${panelHeader(weekCount === 1 ? "This Week" : "Two Weeks", `${formatLongDate(weekStart)}부터`)}
+            <div class="calendar-week-grid">${renderWeekDays(combinedEvents, calendarThemes, weekCount)}</div>
+          </div>
+        ` : ""}
 
-        <div class="panel calendar-combined-panel">
+        ${control.mode === "calendar" || control.mode === "agenda" ? `<div class="panel calendar-combined-panel">
           ${renderCalendarMonthPanelHeader(selectedMonth, combinedEvents.length)}
           ${renderCalendarLegend(combinedEvents, calendarThemes)}
           ${control.mode === "agenda" ? renderCalendarAgenda(combinedEvents, calendarThemes) : renderCombinedCalendar(combinedEvents, calendarThemes)}
-        </div>
+        </div>` : ""}
 
         ${renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)}
       </div>
@@ -2243,7 +2247,7 @@ function renderViewControls(view, meta = {}) {
   const filterOptions = VIEW_FILTER_OPTIONS[view] || VIEW_FILTER_OPTIONS.today;
   const sortOptions = VIEW_SORT_OPTIONS[view] || VIEW_SORT_OPTIONS.today;
   const resourceTrashView = view === "resources" && resourceTrashMode(control);
-  const modeOptions = resourceTrashView ? [] : VIEW_MODE_OPTIONS[view] || [];
+  const modeOptions = resourceTrashView || view === "calendar" ? [] : VIEW_MODE_OPTIONS[view] || [];
   const count = meta.count ?? 0;
   const total = meta.total ?? count;
   const defaultControl = defaultViewControl(view);
@@ -2259,7 +2263,9 @@ function renderViewControls(view, meta = {}) {
   const resourceScopeChanged = showSearch && normalizeResourceSearchScope(control.searchScope) !== normalizeResourceSearchScope(defaultControl.searchScope);
   const canReset = filterChanged || sortChanged || resourceChanged || resourceScopeChanged;
   return `
-    <div class="view-controls ${showSearch ? "has-search" : "no-search"} ${filterOpen || sortOpen ? "is-panel-open" : ""}" data-view-controls="${view}">
+    <details class="view-controls-shell">
+      <summary class="view-controls-disclosure">필터 · 정렬${canReset ? `<span aria-label="변경됨">•</span>` : ""}</summary>
+      <div class="view-controls ${showSearch ? "has-search" : "no-search"} ${filterOpen || sortOpen ? "is-panel-open" : ""}" data-view-controls="${view}">
       <div class="view-control-topline">
         ${showSearch ? renderResourceSearchControl(view, control, meta) : ""}
         <div class="view-control-actions" aria-label="필터와 정렬">
@@ -2277,7 +2283,8 @@ function renderViewControls(view, meta = {}) {
         ${renderViewControlPanel(view, "filter", filterOptions, filters, filterOpen)}
         ${renderViewControlPanel(view, "sort", sortOptions, control.sort, sortOpen)}
       </div>
-    </div>
+      </div>
+    </details>
   `;
 }
 
@@ -4903,12 +4910,12 @@ function captureTargetLabel(type) {
   }[type] || "항목";
 }
 
-function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
+function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments(), weekCount = 2) {
   const start = startOfWeek(new Date());
-  const days = dateRange(start, 14);
+  const days = dateRange(start, weekCount * 7);
   const today = dateKey(new Date());
   let html = "";
-  for (let weekIndex = 0; weekIndex < 2; weekIndex += 1) {
+  for (let weekIndex = 0; weekIndex < weekCount; weekIndex += 1) {
     const weekDays = days.slice(weekIndex * 7, weekIndex * 7 + 7);
     let dayHtml = "";
     for (let index = 0; index < weekDays.length; index += 1) {
@@ -27152,11 +27159,7 @@ function monthGridDays(date) {
 
 function calendarMonthGridDays(date) {
   const first = new Date(date.getFullYear(), date.getMonth(), 1);
-  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0);
-  const start = addDays(startOfSundayWeek(first), -7);
-  const end = addDays(startOfSundayWeek(last), 13);
-  const totalDays = Math.round((end - start) / 86400000) + 1;
-  return dateRange(start, totalDays);
+  return dateRange(startOfWeek(first), 42);
 }
 
 function habitCalendarMonthDays(date) {
@@ -27199,8 +27202,7 @@ function addDays(date, days) {
 
 function startOfWeek(date) {
   const start = new Date(date);
-  const day = start.getDay() || 7;
-  start.setDate(start.getDate() - day + 1);
+  start.setDate(start.getDate() - start.getDay());
   start.setHours(0, 0, 0, 0);
   return start;
 }

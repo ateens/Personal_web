@@ -126,7 +126,7 @@ const checks = [
     const declarations = sourceSection(files.app, "function calendarColorDeclarations", "function renderDetail");
     return renderer.includes("const calendarThemes = googleCalendarThemeAssignments()")
       && renderer.includes("renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)")
-      && renderer.includes("renderWeekDays(combinedEvents, calendarThemes)")
+      && renderer.includes("renderWeekDays(combinedEvents, calendarThemes, weekCount)")
       && renderer.includes("renderCalendarLegend(combinedEvents, calendarThemes)")
       && renderer.includes("renderCalendarAgenda(combinedEvents, calendarThemes)")
       && renderer.includes("renderCombinedCalendar(combinedEvents, calendarThemes)")
@@ -200,7 +200,9 @@ const checks = [
       && agendaTime.includes("background: color-mix(in srgb, var(--calendar-color)")
       && agendaTime.includes("color: color-mix(in srgb, var(--calendar-color)");
   }],
-  ["calendar renders two full weeks and keeps visibility controls collapsible at the bottom", () => files.app.includes("const days = dateRange(start, 14);") && files.app.includes("weekIndex < 2") && files.app.indexOf("renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)") > files.app.indexOf('class="panel calendar-combined-panel"') && files.app.includes('<details class="panel calendar-control-panel">')],
+  ["calendar switches between one week, two weeks, month, and agenda while keeping visibility controls at the bottom", () => files.app.includes("const days = dateRange(start, weekCount * 7);") && files.app.includes("weekIndex < weekCount") && files.app.includes('calendar: [["twoWeeks", "2주"], ["week", "주간"], ["calendar", "월간"], ["agenda", "목록"]]') && files.app.indexOf("renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)") > files.app.indexOf('class="panel calendar-combined-panel"') && files.app.includes('<details class="panel calendar-control-panel">')],
+  ["view filters and sorting are collapsed by default on every page", () => files.app.includes('<details class="view-controls-shell">') && files.app.includes('<summary class="view-controls-disclosure">필터 · 정렬')],
+  ["web calendars start on Sunday", () => files.app.includes("start.setDate(start.getDate() - start.getDay());") && files.app.includes("return dateRange(startOfWeek(first), 42);")],
   ["calendar shows every event lane with start times only", () => files.app.includes('className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes('className: "calendar-month-span-layer", limit: Number.MAX_SAFE_INTEGER') && files.app.includes("return formatTime(event.start);") && !files.app.includes('return end && end !== start ? `${start}-${end}` : start;')],
   ["Google sync candidates avoid direct state task filter", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("const tasks = googleSyncTaskCandidates()") && files.app.includes("if (task.dueDate && task.status !== \"done\" && !task.googleEventId) tasks.push(task);") && !files.app.includes("state.tasks.filter((task) => task.dueDate && task.status !== \"done\" && !task.googleEventId)")],
   ["Google sync candidates use a direct loop", () => files.app.includes("function googleSyncTaskCandidates()") && files.app.includes("for (const task of state.tasks)") && !/function googleSyncTaskCandidates\(\) \{[\s\S]*?state\.tasks\.forEach[\s\S]*?function upsertGoogleEvents/.test(files.app)],
