@@ -124,7 +124,7 @@ final class AppStore {
         } else {
             syncState = persistenceURL == nil || hasPendingChanges ? .localOnly : .loading
         }
-        reloadCalendarWidget()
+        reloadWidgets()
         if autoRefresh { startLiveSync() }
     }
 
@@ -1332,7 +1332,7 @@ final class AppStore {
 
     @discardableResult
     private func persistLocal() -> Bool {
-        reloadCalendarWidget()
+        reloadWidgets()
         guard let persistenceURL else { return true }
         do {
             let directory = persistenceURL.deletingLastPathComponent()
@@ -1353,8 +1353,9 @@ final class AppStore {
         }
     }
 
-    private func reloadCalendarWidget() {
+    private func reloadWidgets() {
         WidgetCenter.shared.reloadTimelines(ofKind: "SYGMAFourWeekCalendar")
+        WidgetCenter.shared.reloadTimelines(ofKind: "SYGMATodayTasks")
     }
 
     private static func loadLocal(from url: URL?) -> LoadedLocalState? {

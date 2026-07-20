@@ -1,7 +1,9 @@
+import AppIntents
 import SwiftUI
 import WidgetKit
 
 private let widgetKind = "SYGMAFourWeekCalendar"
+private let todayWidgetKind = "SYGMATodayTasks"
 private let stateURL = URL(string: "https://personalweb-production-81a6.up.railway.app/api/state")!
 
 private struct CalendarItem: Codable, Identifiable {
@@ -16,6 +18,168 @@ private struct CalendarItem: Codable, Identifiable {
 private struct CalendarTimelineEntry: TimelineEntry {
     let date: Date
     let items: [CalendarItem]
+}
+
+private struct TodayTaskItem: Identifiable {
+    let id: String
+    let title: String
+    let isCompleted: Bool
+    let completedAt: String
+}
+
+private struct TodayTasksTimelineEntry: TimelineEntry {
+    let date: Date
+    let tasks: [TodayTaskItem]
+}
+
+private struct WidgetStateSnapshot {
+    let root: [String: Any]
+    let revision: Int
+}
+
+private enum WidgetStateError: Error {
+    case invalidResponse
+    case taskNotFound
+    case server(Int)
+}
+
+private struct OptimisticTaskOverride: Codable {
+    let completed: Bool
+    let expiresAt: Date
+}
+
+private enum WidgetOptimisticState {
+    private static let storageKey = "SYGMATodayTaskOptimisticOverrides"
+
+    static func set(_ taskID: String, completed: Bool) {
+        var overrides = load()
+        overrides[taskID] = OptimisticTaskOverride(
+            completed: completed,
+            expiresAt: Date().addingTimeInterval(12)
+        )
+        save(overrides)
+    }
+
+    static func clear(_ taskID: String) {
+        var overrides = load()
+        overrides.removeValue(forKey: taskID)
+        save(overrides)
+    }
+
+    static func completed(for taskID: String) -> Bool? {
+        var overrides = load()
+        guard let override = overrides[taskID] else { return nil }
+        guard override.expiresAt > Date() else {
+            overrides.removeValue(forKey: taskID)
+            save(overrides)
+            return nil
+        }
+        return override.completed
+    }
+
+    private static func load() -> [String: OptimisticTaskOverride] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let value = try? JSONDecoder().decode([String: OptimisticTaskOverride].self, from: data) else {
+            return [:]
+        }
+        return value
+    }
+
+    private static func save(_ value: [String: OptimisticTaskOverride]) {
+        UserDefaults.standard.set(try? JSONEncoder().encode(value), forKey: storageKey)
+    }
+}
+
+private enum WidgetStateClient {
+    static func fetch() async throws -> WidgetStateSnapshot {
+        var request = URLRequest(url: stateURL)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, rawResponse) = try await URLSession.shared.data(for: request)
+        guard let response = rawResponse as? HTTPURLResponse,
+              (200..<300).contains(response.statusCode),
+              let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let root = envelope["state"] as? [String: Any] else {
+            throw WidgetStateError.invalidResponse
+        }
+        let revision = (envelope["revision"] as? NSNumber)?.intValue
+            ?? Int(response.value(forHTTPHeaderField: "X-State-Revision") ?? "")
+        guard let revision else { throw WidgetStateError.invalidResponse }
+        return WidgetStateSnapshot(root: root, revision: revision)
+    }
+
+    static func setTask(_ taskID: String, completed: Bool) async throws {
+        for attempt in 0..<2 {
+            let snapshot = try await fetch()
+            var root = snapshot.root
+            guard var tasks = root["tasks"] as? [[String: Any]],
+                  let index = tasks.firstIndex(where: { $0["id"] as? String == taskID }) else {
+                throw WidgetStateError.taskNotFound
+            }
+            if (tasks[index]["status"] as? String == "done") == completed { return }
+            tasks[index]["status"] = completed ? "done" : "todo"
+            tasks[index]["completedAt"] = completed ? isoTimestamp() : ""
+            root["tasks"] = tasks
+
+            var request = URLRequest(url: stateURL)
+            request.httpMethod = "PUT"
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("\"state-\(snapshot.revision)\"", forHTTPHeaderField: "If-Match")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "state": root,
+                "baseRevision": snapshot.revision,
+            ])
+            let (_, rawResponse) = try await URLSession.shared.data(for: request)
+            guard let response = rawResponse as? HTTPURLResponse else {
+                throw WidgetStateError.invalidResponse
+            }
+            if (200..<300).contains(response.statusCode) { return }
+            if response.statusCode == 409, attempt == 0 { continue }
+            throw WidgetStateError.server(response.statusCode)
+        }
+    }
+
+    static func isTaskCompleted(_ taskID: String) async throws -> Bool? {
+        let snapshot = try await fetch()
+        let tasks = snapshot.root["tasks"] as? [[String: Any]] ?? []
+        return tasks.first(where: { $0["id"] as? String == taskID })
+            .map { $0["status"] as? String == "done" }
+    }
+}
+
+struct ToggleTodayTaskIntent: AppIntent {
+    static let title: LocalizedStringResource = "오늘 할 일 완료 전환"
+    static let description = IntentDescription("오늘 할 일을 완료하거나 다시 진행 중으로 바꿉니다.")
+
+    @Parameter(title: "할 일 ID") var taskID: String
+    @Parameter(title: "완료 여부") var completed: Bool
+
+    init() {}
+
+    init(taskID: String, completed: Bool) {
+        self.taskID = taskID
+        self.completed = completed
+    }
+
+    func perform() async -> some IntentResult {
+        WidgetOptimisticState.set(taskID, completed: completed)
+        WidgetCenter.shared.reloadTimelines(ofKind: todayWidgetKind)
+
+        try? await Task.sleep(for: .milliseconds(180))
+        try? await WidgetStateClient.setTask(taskID, completed: completed)
+        try? await Task.sleep(for: .seconds(2))
+
+        let verified = try? await WidgetStateClient.isTaskCompleted(taskID)
+        WidgetOptimisticState.clear(taskID)
+        if verified != completed {
+            WidgetCenter.shared.reloadTimelines(ofKind: todayWidgetKind)
+            return .result()
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+        return .result()
+    }
 }
 
 private struct CalendarProvider: TimelineProvider {
@@ -43,18 +207,13 @@ private struct CalendarProvider: TimelineProvider {
     }
 
     private func fetchItems(completion: @escaping ([CalendarItem]) -> Void) {
-        var request = URLRequest(url: stateURL)
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            completion(data.map(Self.decodeItems) ?? [])
-        }.resume()
+        Task {
+            let snapshot = try? await WidgetStateClient.fetch()
+            completion(Self.decodeItems(snapshot?.root ?? [:]))
+        }
     }
 
-    private static func decodeItems(_ data: Data) -> [CalendarItem] {
-        guard let object = try? JSONSerialization.jsonObject(with: data),
-              let envelope = object as? [String: Any],
-              let root = envelope["state"] as? [String: Any] else { return [] }
+    private static func decodeItems(_ root: [String: Any]) -> [CalendarItem] {
         let settings = root["settings"] as? [String: Any] ?? [:]
         let sourceSettings = settings["calendarSources"] as? [String: Any] ?? [:]
         let googleVisibility = settings["visibleGoogleCalendars"] as? [String: Any] ?? [:]
@@ -143,7 +302,6 @@ private struct CalendarProvider: TimelineProvider {
     }
 }
 
-@main
 struct SYGMAFourWeekCalendarWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: widgetKind, provider: CalendarProvider()) { entry in
@@ -154,6 +312,217 @@ struct SYGMAFourWeekCalendarWidget: Widget {
         .description("현재 주부터 4주간의 일정을 한눈에 봅니다.")
         .supportedFamilies([.systemLarge])
         .contentMarginsDisabled()
+    }
+}
+
+private struct TodayTasksProvider: TimelineProvider {
+    func placeholder(in context: Context) -> TodayTasksTimelineEntry {
+        TodayTasksTimelineEntry(date: Date(), tasks: Self.samples)
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (TodayTasksTimelineEntry) -> Void) {
+        guard !context.isPreview else {
+            completion(TodayTasksTimelineEntry(date: Date(), tasks: Self.samples))
+            return
+        }
+        load(completion: completion)
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<TodayTasksTimelineEntry>) -> Void) {
+        load { entry in
+            let refresh = widgetCalendar.date(byAdding: .minute, value: 1, to: entry.date)
+                ?? entry.date.addingTimeInterval(60)
+            completion(Timeline(entries: [entry], policy: .after(refresh)))
+        }
+    }
+
+    private func load(completion: @escaping (TodayTasksTimelineEntry) -> Void) {
+        Task {
+            let now = Date()
+            let snapshot = try? await WidgetStateClient.fetch()
+            completion(TodayTasksTimelineEntry(
+                date: now,
+                tasks: Self.decodeTasks(snapshot?.root ?? [:], today: now)
+            ))
+        }
+    }
+
+    private static func decodeTasks(_ root: [String: Any], today: Date) -> [TodayTaskItem] {
+        let todayKey = dateKey(today)
+        return (root["tasks"] as? [[String: Any]] ?? []).compactMap { task in
+            let id = task["id"] as? String ?? ""
+            let status = task["status"] as? String ?? "todo"
+            let dueDate = String((task["dueDate"] as? String ?? "").prefix(10))
+            let completedAt = task["completedAt"] as? String ?? ""
+            let completedToday = status == "done" && localDayKey(from: completedAt) == todayKey
+            let activeToday = !["done", "canceled"].contains(status) && dueDate == todayKey
+            guard !id.isEmpty, completedToday || activeToday else { return nil }
+            let displayedCompletion = WidgetOptimisticState.completed(for: id) ?? (status == "done")
+            return TodayTaskItem(
+                id: id,
+                title: task["title"] as? String ?? "(제목 없음)",
+                isCompleted: displayedCompletion,
+                completedAt: completedAt
+            )
+        }.sorted {
+            if $0.isCompleted != $1.isCompleted { return !$0.isCompleted }
+            if $0.isCompleted, $0.completedAt != $1.completedAt { return $0.completedAt > $1.completedAt }
+            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    private static var samples: [TodayTaskItem] {
+        [
+            TodayTaskItem(id: "sample-1", title: "오늘 우선순위 정리", isCompleted: false, completedAt: ""),
+            TodayTaskItem(id: "sample-2", title: "자료 검토", isCompleted: true, completedAt: isoTimestamp()),
+            TodayTaskItem(id: "sample-3", title: "다음 일정 준비", isCompleted: false, completedAt: ""),
+        ]
+    }
+}
+
+struct SYGMATodayTasksWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: todayWidgetKind, provider: TodayTasksProvider()) { entry in
+            TodayTasksWidgetView(entry: entry)
+                .containerBackground(Color(red: 0.97, green: 0.975, blue: 0.985), for: .widget)
+        }
+        .configurationDisplayName("오늘 할 일")
+        .description("오늘 할 일을 확인하고 위젯에서 바로 완료하거나 해제합니다.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .contentMarginsDisabled()
+    }
+}
+
+@main
+struct SYGMAWidgets: WidgetBundle {
+    var body: some Widget {
+        SYGMAFourWeekCalendarWidget()
+        SYGMATodayTasksWidget()
+    }
+}
+
+private struct TodayTasksWidgetView: View {
+    let entry: TodayTasksTimelineEntry
+
+    @Environment(\.widgetFamily) private var family
+
+    private var limit: Int {
+        switch family {
+        case .systemSmall: 4
+        case .systemMedium: 5
+        default: 12
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("오늘 할 일")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Palette.ink)
+                    Text(entry.date.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day().weekday()))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                }
+                Spacer(minLength: 8)
+                Text("\(entry.tasks.filter { !$0.isCompleted }.count)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Palette.blue)
+            }
+            .padding(.bottom, 7)
+
+            if entry.tasks.isEmpty {
+                Spacer()
+                Text("오늘 할 일을 모두 마쳤어요")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                Spacer()
+            } else {
+                ForEach(Array(entry.tasks.prefix(limit).enumerated()), id: \.element.id) { index, task in
+                    Toggle(
+                        isOn: task.isCompleted,
+                        intent: ToggleTodayTaskIntent(taskID: task.id, completed: !task.isCompleted)
+                    ) {
+                        Text(task.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .toggleStyle(WidgetTaskToggleStyle())
+
+                    if index < min(entry.tasks.count, limit) - 1 {
+                        Rectangle()
+                            .fill(Palette.muted.opacity(0.11))
+                            .frame(height: 0.5)
+                            .padding(.leading, 23)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, family == .systemSmall ? 12 : 14)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct WidgetTaskToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 7) {
+                WidgetTaskMark(isCompleted: configuration.isOn)
+                    .frame(width: 16, height: 16)
+                configuration.label
+                    .foregroundStyle(configuration.isOn ? Palette.muted.opacity(0.62) : Palette.ink)
+                    .strikethrough(configuration.isOn)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct WidgetTaskMark: View {
+    let isCompleted: Bool
+
+    var body: some View {
+        WidgetTaskCheckShape(progress: isCompleted ? 1 : 0)
+            .stroke(
+                isCompleted ? Palette.ink : Palette.muted,
+                style: StrokeStyle(lineWidth: 1.6, lineCap: .square, lineJoin: .miter)
+            )
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: isCompleted)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct WidgetTaskCheckShape: Shape {
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: x / 16 * rect.width, y: y / 16 * rect.height)
+        }
+        func blend(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
+            CGPoint(
+                x: from.x + (to.x - from.x) * progress,
+                y: from.y + (to.y - from.y) * progress
+            )
+        }
+        var path = Path()
+        path.move(to: blend(point(3, 8), point(1.5, 7)))
+        path.addLine(to: blend(point(8, 8), point(6, 11.5)))
+        path.addLine(to: blend(point(13, 8), point(15, 2.5)))
+        return path
     }
 }
 
@@ -243,10 +612,14 @@ private struct WidgetWeekRow: View {
             GeometryReader { proxy in
                 let columnWidth = proxy.size.width / 7
                 ForEach(segments) { segment in
-                    Text(segment.label)
+                    ViewThatFits(in: .horizontal) {
+                        Text(segment.fullLabel)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Text(segment.item.title)
+                            .lineLimit(1)
+                    }
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                        .lineLimit(1)
                         .padding(.horizontal, 3)
                         .frame(
                             width: columnWidth * CGFloat(segment.span) - 2,
@@ -308,7 +681,7 @@ private struct WeekSegment: Identifiable {
     let lane: Int
 
     var id: String { "\(item.id)-\(weekStart)-\(startIndex)" }
-    var label: String {
+    var fullLabel: String {
         ["종일", "기간", ""].contains(item.timeLabel) ? item.title : "\(item.timeLabel) \(item.title)"
     }
 }
@@ -361,7 +734,17 @@ private func parseISO(_ value: String) -> Date? {
     return formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
 }
 
+private func localDayKey(from value: String) -> String {
+    parseISO(value).map(dateKey) ?? String(value.prefix(10))
+}
+
 private func timeLabel(from value: String) -> String {
     guard let date = parseISO(value) else { return "" }
     return date.formatted(.dateTime.hour().minute())
+}
+
+private func isoTimestamp() -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: Date())
 }
