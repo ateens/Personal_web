@@ -2929,7 +2929,29 @@ button:focus-visible {
 
 .card.done .card-title {
   color: var(--soft);
-  text-decoration: line-through;
+  text-decoration: none;
+}
+
+.card[data-task-id] .card-title {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.card[data-task-id] .card-title::after {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  height: 1.5px;
+  background: currentColor;
+  pointer-events: none;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1);
+}
+
+.card.done[data-task-id] .card-title::after {
+  transform: scaleX(1);
 }
 
 .card.today-done {
@@ -10272,9 +10294,9 @@ body.is-task-placement-open {
 .calendar-toggle-mark::after {
   content: "";
   position: absolute;
-  top: 7px;
-  left: 1px;
-  width: 7px;
+  top: 7.25px;
+  left: 0.5px;
+  width: 8px;
   height: 1.5px;
   border: 0;
   border-radius: 0;
@@ -10289,8 +10311,8 @@ body.is-task-placement-open {
 .check::after,
 .block-check::after,
 .calendar-toggle-mark::after {
-  left: 8px;
-  width: 7px;
+  left: 7.5px;
+  width: 8px;
 }
 
 .check:hover::before,

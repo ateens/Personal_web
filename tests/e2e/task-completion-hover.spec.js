@@ -41,9 +41,21 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
     long: getComputedStyle(element, "::after").width,
     transform: getComputedStyle(element, "::before").transform,
   }));
-  expect(rest).toEqual({ background: "none", short: "7px", long: "7px", transform: "none" });
+  expect(rest).toEqual({ background: "none", short: "8px", long: "8px", transform: "none" });
+
+  const title = cards[0].locator(".card-title");
+  const strikeBefore = await title.evaluate((element) => ({
+    transform: getComputedStyle(element, "::after").transform,
+    duration: getComputedStyle(element, "::after").transitionDuration,
+  }));
+  expect(strikeBefore).toEqual({ transform: "matrix(0, 0, 0, 1, 0, 0)", duration: "0.26s" });
 
   await cards[0].locator(".check").click();
+  await page.waitForTimeout(80);
+  const strikeMidway = await title.evaluate((element) => getComputedStyle(element, "::after").transform);
+  const strikeScale = Number(strikeMidway.match(/^matrix\(([^,]+)/)?.[1]);
+  expect(strikeScale).toBeGreaterThan(0);
+  expect(strikeScale).toBeLessThan(1);
   await cards[1].locator(".check").click();
   await page.waitForTimeout(650);
   await expect(panelTitle(cards[0])).toHaveText("미계획");
