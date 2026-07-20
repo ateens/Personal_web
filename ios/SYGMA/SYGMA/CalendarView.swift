@@ -8,12 +8,13 @@ struct CalendarView: View {
     @State private var selectedTask: SygmaTask?
     @State private var selectedProject: SygmaProject?
     @State private var showsTaskCreate = false
+    @State private var calendarMode = CalendarDisplayMode.twoWeeks
 
     var body: some View {
         SYGMAScreen(
             eyebrow: "Calendar",
             title: "캘린더",
-            subtitle: "\(visibleEntries.count)개 일정 표시",
+            subtitle: "",
             actions: {
                 Button("오늘") {
                     displayedMonth = Date().startOfDay
@@ -23,7 +24,8 @@ struct CalendarView: View {
             }
         ) {
             sourceControls
-            twoWeekPanel
+            calendarModeControl
+            calendarPanel
             agendaPanel
         }
         .refreshable { await store.refreshFromRemote() }
@@ -59,27 +61,37 @@ struct CalendarView: View {
         }
     }
 
-    private var twoWeekPanel: some View {
+    private var calendarModeControl: some View {
+        HStack(spacing: 2) {
+            ForEach(CalendarDisplayMode.allCases) { mode in
+                Button(mode.title) { calendarMode = mode }
+                    .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.ink, isActive: calendarMode == mode))
+                    .accessibilityAddTraits(calendarMode == mode ? .isSelected : [])
+            }
+        }
+    }
+
+    private var calendarPanel: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Button { moveWeeks(-2) } label: {
+                Button { movePeriod(-1) } label: {
                     Image(systemName: "chevron.left").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("이전 2주")
+                .accessibilityLabel(calendarMode == .month ? "이전 달" : "이전 2주")
 
                 Spacer()
-                Text(monthTitle)
+                Text(calendarTitle)
                     .font(.headline.weight(.bold))
                     .foregroundStyle(SYGMATheme.ink)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
 
-                Button { moveWeeks(2) } label: {
+                Button { movePeriod(1) } label: {
                     Image(systemName: "chevron.right").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("다음 2주")
+                .accessibilityLabel(calendarMode == .month ? "다음 달" : "다음 2주")
             }
             .padding(.horizontal, 8)
 
@@ -91,18 +103,17 @@ struct CalendarView: View {
                         .frame(maxWidth: .infinity, minHeight: 30)
                 }
 
-                ForEach(twoWeekDays, id: \.self) { date in
-                    CalendarDayCell(
-                        date: date,
-                        isSelected: calendar.isDate(date, inSameDayAs: selectedDate),
-                        entries: visibleEntries.filter { $0.occurs(on: date.dateKey) },
-                        sourceColor: color(for:)
-                    ) {
-                        selectedDate = date
-                    }
-                }
             }
             .padding(.top, 8)
+
+            ForEach(Array(calendarWeeks.enumerated()), id: \.offset) { _, week in
+                CalendarWeekRow(
+                    dates: week,
+                    entries: visibleEntries,
+                    selectedDate: selectedDate,
+                    sourceColor: color(for:)
+                ) { selectedDate = $0 }
+            }
         }
         .frame(maxWidth: .infinity)
         .background(Color.white.opacity(0.18))
@@ -163,7 +174,10 @@ struct CalendarView: View {
         Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 7)
     }
     private var weekdayLabels: [String] { ["월", "화", "수", "목", "금", "토", "일"] }
-    private var monthTitle: String {
+    private var calendarTitle: String {
+        if calendarMode == .month {
+            return displayedMonth.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).year().month(.wide))
+        }
         guard let end = twoWeekDays.last else { return "" }
         return "\(twoWeekDays[0].formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day())) – \(end.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day()))"
     }
@@ -174,12 +188,27 @@ struct CalendarView: View {
         return (0..<14).map { calendar.date(byAdding: .day, value: $0, to: start) ?? start }
     }
 
+    private var monthDays: [Date] {
+        let components = calendar.dateComponents([.year, .month], from: displayedMonth)
+        guard let first = calendar.date(from: components) else { return [] }
+        let offset = (calendar.component(.weekday, from: first) - calendar.firstWeekday + 7) % 7
+        let start = calendar.date(byAdding: .day, value: -offset, to: first) ?? first
+        return (0..<42).map { calendar.date(byAdding: .day, value: $0, to: start) ?? start }
+    }
+
+    private var calendarWeeks: [[Date]] {
+        let days = calendarMode == .month ? monthDays : twoWeekDays
+        return stride(from: 0, to: days.count, by: 7).map { Array(days[$0..<min($0 + 7, days.count)]) }
+    }
+
     private var screenHorizontalPadding: CGFloat {
         horizontalSizeClass == .compact ? SYGMATheme.screenCompactHorizontalPadding : SYGMATheme.screenHorizontalPadding
     }
 
-    private func moveWeeks(_ offset: Int) {
-        guard let next = calendar.date(byAdding: .weekOfYear, value: offset, to: displayedMonth) else { return }
+    private func movePeriod(_ offset: Int) {
+        let component: Calendar.Component = calendarMode == .month ? .month : .weekOfYear
+        let value = calendarMode == .month ? offset : offset * 2
+        guard let next = calendar.date(byAdding: component, value: value, to: displayedMonth) else { return }
         displayedMonth = next
         selectedDate = next
     }
@@ -204,49 +233,92 @@ struct CalendarView: View {
     }
 }
 
-private struct CalendarDayCell: View {
-    let date: Date
-    let isSelected: Bool
+private enum CalendarDisplayMode: String, CaseIterable, Identifiable {
+    case twoWeeks
+    case month
+
+    var id: String { rawValue }
+    var title: String { self == .twoWeeks ? "2주" : "월간" }
+}
+
+private struct CalendarWeekRow: View {
+    let dates: [Date]
     let entries: [CalendarEntry]
+    let selectedDate: Date
     let sourceColor: (CalendarSource) -> Color
-    let action: () -> Void
+    let select: (Date) -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(date.formatted(.dateTime.day()))
-                    .font(.caption.weight(date.dateKey == Date().dateKey || isSelected ? .heavy : .medium))
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                ForEach(entries) { entry in
-                    HStack(alignment: .top, spacing: 3) {
-                        Rectangle().fill(sourceColor(entry.source)).frame(width: 2)
-                        Text(entry.title)
-                            .font(.system(size: 9, weight: .semibold))
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
+        ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                ForEach(dates, id: \.self) { date in
+                    Button { select(date) } label: {
+                        Text(date.formatted(.dateTime.day()))
+                            .font(.caption.weight(date.dateKey == Date().dateKey || calendar.isDate(date, inSameDayAs: selectedDate) ? .heavy : .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(SYGMATheme.muted)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .padding(.horizontal, 4)
+                            .padding(.top, 6)
+                            .background(calendar.isDate(date, inSameDayAs: selectedDate) ? Color.black.opacity(0.04) : .clear)
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(date.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day().weekday(.wide)))
                 }
-                Spacer(minLength: 0)
             }
-            .foregroundStyle(isSelected ? SYGMATheme.ink : SYGMATheme.muted)
-            .padding(.horizontal, 3)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, minHeight: SYGMATheme.minimumTapTarget, alignment: .topLeading)
-            .background(isSelected ? Color.black.opacity(0.04) : .clear)
-            .overlay(alignment: .bottom) {
-                if isSelected { Rectangle().fill(SYGMATheme.ink).frame(height: 1) }
-                else if date.dateKey == Date().dateKey { Rectangle().fill(SYGMATheme.blue.opacity(0.45)).frame(height: 2) }
+
+            GeometryReader { proxy in
+                let columnWidth = proxy.size.width / 7
+                ForEach(segments) { segment in
+                    Text(segment.entry.title)
+                        .font(.system(size: 9, weight: .semibold))
+                        .lineLimit(1)
+                        .foregroundStyle(SYGMATheme.ink)
+                        .padding(.horizontal, 5)
+                        .frame(width: columnWidth * CGFloat(segment.span) - 4, height: 18, alignment: .leading)
+                        .background(sourceColor(segment.entry.source).opacity(0.16))
+                        .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
+                        .offset(x: columnWidth * CGFloat(segment.startIndex) + 2, y: CGFloat(34 + segment.lane * 20))
+                        .accessibilityLabel(segment.entry.title)
+                }
             }
-            .contentShape(Rectangle())
+            .allowsHitTesting(false)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(date.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day().weekday(.wide)))
-        .accessibilityValue(entries.isEmpty ? "일정 없음" : "일정 \(entries.count)개")
-        .accessibilityHint("두 번 탭하여 이 날짜를 선택합니다.")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
+        .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
     }
+
+    private var calendar: Calendar { Calendar.current }
+
+    private var segments: [CalendarWeekSegment] {
+        guard let first = dates.first?.dateKey, let last = dates.last?.dateKey else { return [] }
+        var lanes: [Int] = []
+        var result: [CalendarWeekSegment] = []
+        let candidates = entries.filter { $0.startDate <= last && ($0.endDate.isEmpty ? $0.startDate : $0.endDate) >= first }
+            .sorted { $0.startDate == $1.startDate ? $0.endDate > $1.endDate : $0.startDate < $1.startDate }
+        for entry in candidates {
+            let startKey = max(entry.startDate, first)
+            let endKey = min(entry.endDate.isEmpty ? entry.startDate : entry.endDate, last)
+            guard let startIndex = dates.firstIndex(where: { $0.dateKey == startKey }),
+                  let endIndex = dates.firstIndex(where: { $0.dateKey == endKey }) else { continue }
+            let lane = lanes.firstIndex(where: { $0 < startIndex }) ?? lanes.count
+            if lane == lanes.count { lanes.append(endIndex) } else { lanes[lane] = endIndex }
+            result.append(CalendarWeekSegment(entry: entry, startIndex: startIndex, span: endIndex - startIndex + 1, lane: lane))
+        }
+        return result
+    }
+
+    private var laneCount: Int {
+        (segments.map(\.lane).max() ?? -1) + 1
+    }
+}
+
+private struct CalendarWeekSegment: Identifiable {
+    let entry: CalendarEntry
+    let startIndex: Int
+    let span: Int
+    let lane: Int
+    var id: String { "\(entry.id)-\(startIndex)" }
 }
 
 private struct CalendarAgendaRow: View {
