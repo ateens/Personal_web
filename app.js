@@ -4916,7 +4916,7 @@ function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = g
       </div>
     `;
   }
-  return `${html}${renderCalendarSpanLayer(events, days, { className: "calendar-week-span-layer", limit: 6, calendarThemes })}`;
+  return `${html}${renderCalendarSpanLayer(events, days, { className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER, calendarThemes })}`;
 }
 
 function renderCombinedCalendar(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
@@ -5036,7 +5036,7 @@ function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today, cal
   return `
     <div class="calendar-month-week">
       ${html}
-      ${renderCalendarSpanLayer(events, days, { className: "calendar-month-span-layer", limit: 4, calendarThemes })}
+      ${renderCalendarSpanLayer(events, days, { className: "calendar-month-span-layer", limit: Number.MAX_SAFE_INTEGER, calendarThemes })}
     </div>
   `;
 }
@@ -5147,7 +5147,6 @@ function renderCalendarSpanEvent(segment, { calendarThemes } = {}) {
 }
 
 function calendarSpanTimeLabel(event) {
-  if (event.source === "project") return "프로젝트";
   return calendarEventTimeLabel(event);
 }
 
@@ -5246,9 +5245,7 @@ function byCalendarEventTime(a, b) {
 function calendarEventTimeLabel(event) {
   if (event.allDay) return "종일";
   if (!event.start) return "";
-  const start = formatTime(event.start);
-  const end = event.end ? formatTime(event.end) : "";
-  return end && end !== start ? `${start}-${end}` : start;
+  return formatTime(event.start);
 }
 
 function googleCalendarStatusLabel() {

@@ -5627,8 +5627,8 @@ button:focus-visible {
 }
 
 .day.is-today {
-  border-color: rgba(37, 99, 235, 0.24);
-  background: linear-gradient(180deg, rgba(219, 234, 254, 0.36), rgba(255, 255, 255, 0.46));
+  border-color: color-mix(in srgb, var(--blue) 14%, var(--line-soft));
+  background: color-mix(in srgb, var(--blue) 4%, rgba(255, 255, 255, 0.46));
 }
 
 .day-title {
@@ -5646,13 +5646,12 @@ button:focus-visible {
 .day.is-today .day-title span:last-child {
   display: inline-grid;
   place-items: center;
-  min-width: 34px;
-  min-height: 24px;
-  border-radius: 999px;
-  padding: 3px 7px;
-  background: var(--blue);
-  color: #fff;
-  box-shadow: 0 5px 12px -8px rgba(37, 99, 235, 0.68);
+  min-width: 28px;
+  min-height: 22px;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  color: color-mix(in srgb, var(--blue) 78%, var(--ink));
 }
 
 .calendar-week-empty {
@@ -5713,8 +5712,8 @@ button:focus-visible {
 }
 
 .calendar-month-day.is-today {
-  background: linear-gradient(180deg, rgba(219, 234, 254, 0.34), rgba(255, 255, 255, 0.38));
-  box-shadow: inset 0 2px 0 rgba(37, 99, 235, 0.26);
+  background: color-mix(in srgb, var(--blue) 4%, rgba(255, 255, 255, 0.38));
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--blue) 18%, transparent);
 }
 
 .calendar-month-date {
@@ -5739,10 +5738,9 @@ button:focus-visible {
   place-items: center;
   width: 26px;
   height: 26px;
-  border-radius: 999px;
-  background: var(--blue);
-  color: #fff;
-  box-shadow: 0 7px 14px -10px rgba(37, 99, 235, 0.78);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  color: color-mix(in srgb, var(--blue) 78%, var(--ink));
 }
 
 .calendar-month-day.is-outside .calendar-month-date span {
@@ -5781,9 +5779,7 @@ button:focus-visible {
 .calendar-span-event {
   --calendar-color: var(--blue);
   --calendar-contrast: #fff;
-  --span-bg:
-    linear-gradient(135deg, color-mix(in srgb, var(--calendar-color) 14%, #fff), color-mix(in srgb, var(--calendar-color) 7%, #fff));
-  --span-border: color-mix(in srgb, var(--calendar-color) 30%, rgba(23, 32, 47, 0.08));
+  --span-bg: color-mix(in srgb, var(--calendar-color) 14%, rgba(255, 255, 255, 0.78));
   --span-ink: var(--ink);
   position: relative;
   display: grid;
@@ -5792,17 +5788,15 @@ button:focus-visible {
   gap: 6px;
   min-width: 0;
   min-height: 24px;
-  border: 1px solid var(--span-border);
-  border-right-width: 0;
-  border-left-width: 0;
-  border-radius: 0;
+  border: 0;
+  border-radius: 5px;
   padding: 0 8px;
   background: var(--span-bg);
   color: var(--span-ink);
   cursor: default;
   overflow: hidden;
   pointer-events: auto;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 7px 14px -13px color-mix(in srgb, var(--calendar-color) 64%, transparent);
+  box-shadow: none;
   transform: translateZ(0);
   transition:
     border-color 160ms var(--ease),
@@ -5812,8 +5806,8 @@ button:focus-visible {
 
 .calendar-span-event:hover,
 .calendar-span-event:focus-within {
-  --span-border: color-mix(in srgb, var(--calendar-color) 46%, rgba(23, 32, 47, 0.1));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 11px 20px -15px color-mix(in srgb, var(--calendar-color) 72%, transparent);
+  background: color-mix(in srgb, var(--calendar-color) 20%, rgba(255, 255, 255, 0.78));
+  box-shadow: none;
   outline: 0;
   transform: translateY(-1px);
 }
@@ -5825,16 +5819,11 @@ button:focus-visible {
 }
 
 .calendar-span-event.is-span-start {
-  border-left-width: 1px;
-  border-top-left-radius: 7px;
-  border-bottom-left-radius: 7px;
   padding-left: 11px;
 }
 
 .calendar-span-event.is-span-end {
-  border-right-width: 1px;
-  border-top-right-radius: 7px;
-  border-bottom-right-radius: 7px;
+  border-radius: 5px;
 }
 
 .calendar-span-event.is-span-start::before {
@@ -5876,9 +5865,8 @@ button:focus-visible {
 }
 
 .calendar-span-time {
-  border-radius: 999px;
-  padding: 2px 4px;
-  background: color-mix(in srgb, var(--calendar-color) 11%, rgba(255, 255, 255, 0.74));
+  padding: 0;
+  background: transparent;
   color: color-mix(in srgb, var(--calendar-color) 66%, var(--ink));
   font-size: 10px;
   font-weight: 820;
