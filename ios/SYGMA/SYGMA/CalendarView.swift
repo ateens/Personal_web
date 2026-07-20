@@ -321,7 +321,6 @@ private struct CalendarWeekRow: View {
                     Button { setExpanded(expanded ? nil : segment.id) } label: {
                         if expanded {
                             HStack(spacing: 7) {
-                                Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 3, height: 36)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(segment.entry.title)
                                         .font(.system(size: 12, weight: .bold))
@@ -335,7 +334,12 @@ private struct CalendarWeekRow: View {
                             .foregroundStyle(SYGMATheme.ink)
                             .padding(.horizontal, 7)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                            .background(sourceColor(segment.entry.source).opacity(0.2))
+                            .background {
+                                ZStack {
+                                    Color.white
+                                    sourceColor(segment.entry.source).opacity(0.14)
+                                }
+                            }
                             .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
                         } else {
                             Text(segment.entry.title)
@@ -356,6 +360,7 @@ private struct CalendarWeekRow: View {
                     )
                     .offset(x: columnWidth * CGFloat(segment.startIndex) + 2, y: CGFloat(34 + segment.lane * 20))
                     .zIndex(expanded ? 100 : hoveredEntryID == segment.entry.id ? 50 : Double(segment.lane + 1))
+                    .shadow(color: expanded ? Color.black.opacity(0.16) : .clear, radius: expanded ? 10 : 0, y: expanded ? 5 : 0)
                     .onHover { hoveredEntryID = $0 ? segment.entry.id : nil }
                     .help(segment.entry.title)
                     .accessibilityLabel(segment.entry.title)
@@ -366,7 +371,7 @@ private struct CalendarWeekRow: View {
         .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
         .opacity(isPastWeek && !segments.contains(where: { $0.id == expandedEntryID }) ? 0.56 : 1)
         .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
-        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: expandedEntryID)
+        .animation(.spring(response: 0.42, dampingFraction: 0.72, blendDuration: 0.12), value: expandedEntryID)
     }
 
     private var calendar: Calendar { Calendar.current }
