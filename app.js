@@ -5145,7 +5145,7 @@ function renderCalendarSpanEvent(segment, { calendarThemes } = {}) {
   const meta = calendarAgendaMetaLabel(event);
   const time = calendarSpanTimeLabel(event) || "종일";
   return `
-    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)} grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" title="${esc(`${event.title || "(제목 없음)"} · ${meta}`)}" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
+    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)} grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" data-event-title="${esc(event.title || "(제목 없음)")}" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
       <span class="calendar-span-time">${esc(time)}</span>
       <strong>${esc(event.title || "(제목 없음)")}</strong>
       ${link}
