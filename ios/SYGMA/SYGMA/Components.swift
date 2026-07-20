@@ -178,46 +178,45 @@ struct SYGMATaskCheck: View {
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .body) private var visualSize: CGFloat = 28
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(
-                        isCompleted
-                            ? LinearGradient(
-                                colors: [Color.white.opacity(0.12), .clear, SYGMATheme.ink],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            : LinearGradient(
-                                colors: [Color.white.opacity(0.78), Color.white.opacity(0.58)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(isCompleted ? SYGMATheme.ink : SYGMATheme.ink.opacity(0.28), lineWidth: 1.3)
-                    }
-                    .shadow(color: SYGMATheme.ink.opacity(isCompleted ? 0.16 : 0.06), radius: isCompleted ? 11 : 8, y: isCompleted ? 6 : 4)
-
-                if isCompleted {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: min(14, visualSize * 0.5), weight: .bold))
-                        .foregroundStyle(.white)
-                }
-            }
-            .frame(width: min(36, visualSize), height: min(36, visualSize))
-            .frame(minWidth: SYGMATheme.minimumTapTarget, minHeight: SYGMATheme.minimumTapTarget)
-            .contentShape(Rectangle())
+            SYGMACheckShape(progress: isCompleted ? 1 : 0)
+                .stroke(
+                    isCompleted ? SYGMATheme.ink : SYGMATheme.muted,
+                    style: StrokeStyle(lineWidth: 1.6, lineCap: .square, lineJoin: .miter)
+                )
+                .frame(width: 16, height: 16)
+                .frame(minWidth: SYGMATheme.minimumTapTarget, minHeight: SYGMATheme.minimumTapTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .animation(reduceMotion ? nil : SYGMATheme.standardAnimation, value: isCompleted)
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.78, blendDuration: 0.08), value: isCompleted)
         .accessibilityLabel(label)
         .accessibilityValue(isCompleted ? "완료" : "미완료")
         .accessibilityHint(isCompleted ? "두 번 탭하여 완료를 취소합니다." : "두 번 탭하여 완료합니다.")
+    }
+}
+
+private struct SYGMACheckShape: Shape {
+    var progress: CGFloat
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let scale = CGSize(width: rect.width / 16, height: rect.height / 16)
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * scale.width, y: y * scale.height) }
+        func blend(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
+            CGPoint(x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress)
+        }
+        var path = Path()
+        path.move(to: blend(point(1, 8), point(1.5, 7)))
+        path.addLine(to: blend(point(8, 8), point(6, 11.5)))
+        path.move(to: blend(point(8, 8), point(6, 11.5)))
+        path.addLine(to: blend(point(15, 8), point(15, 2.5)))
+        return path
     }
 }
 

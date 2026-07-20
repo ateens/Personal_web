@@ -34,6 +34,15 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
   const cards = TASK_IDS.map((id) => page.locator(`[data-task-id="${id}"]`));
   const panelTitle = (card) => card.locator("xpath=ancestor::div[contains(@class,'panel')][1]//h2");
 
+  await cards[0].locator(".check").hover();
+  const rest = await cards[0].locator(".check").evaluate((element) => ({
+    background: getComputedStyle(element, "::before").backgroundImage,
+    short: getComputedStyle(element, "::before").width,
+    long: getComputedStyle(element, "::after").width,
+    transform: getComputedStyle(element, "::before").transform,
+  }));
+  expect(rest).toEqual({ background: "none", short: "7px", long: "7px", transform: "none" });
+
   await cards[0].locator(".check").click();
   await cards[1].locator(".check").click();
   await page.waitForTimeout(650);
@@ -45,7 +54,7 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
     longWidth: getComputedStyle(element, "::after").width,
   }));
   expect(mark.short).not.toBe("none");
-  expect(mark.longWidth).toBe("10px");
+  expect(mark.longWidth).toBe("11.5px");
 
   await page.mouse.move(1400, 980);
   await expect(panelTitle(cards[0])).toHaveText("완료");

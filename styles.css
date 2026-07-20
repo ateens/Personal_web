@@ -10273,8 +10273,8 @@ body.is-task-placement-open {
   content: "";
   position: absolute;
   top: 7px;
-  left: 2px;
-  width: 6px;
+  left: 1px;
+  width: 7px;
   height: 1.5px;
   border: 0;
   border-radius: 0;
@@ -10290,14 +10290,20 @@ body.is-task-placement-open {
 .block-check::after,
 .calendar-toggle-mark::after {
   left: 8px;
-  width: 6px;
+  width: 7px;
+}
+
+.check:hover::before,
+.check:hover::after {
+  background: var(--muted);
+  transform: none;
 }
 
 .check.is-done::before,
 .block-check.is-done::before,
 .calendar-toggle input:checked + .calendar-toggle-mark::before {
   top: 7px;
-  left: 2px;
+  left: 1.5px;
   width: 6px;
   background: var(--ink);
   transform: rotate(45deg);
@@ -10306,9 +10312,19 @@ body.is-task-placement-open {
 .check.is-done::after,
 .block-check.is-done::after,
 .calendar-toggle input:checked + .calendar-toggle-mark::after {
-  top: 11px;
-  left: 6px;
-  width: 10px;
+  top: 11.25px;
+  left: 5.75px;
+  width: 11.5px;
+  background: var(--ink);
+  transform: rotate(-50deg);
+}
+
+.check.is-done:hover::before {
+  background: var(--ink);
+  transform: rotate(45deg);
+}
+
+.check.is-done:hover::after {
   background: var(--ink);
   transform: rotate(-50deg);
 }
@@ -10325,7 +10341,7 @@ body.is-task-placement-open {
 .resource-checkbox {
   appearance: none;
   margin: 0;
-  background: linear-gradient(currentColor, currentColor) center / 12px 1.5px no-repeat;
+  background: linear-gradient(currentColor, currentColor) center / 14px 1.5px no-repeat;
   color: var(--muted);
   cursor: pointer;
 }
