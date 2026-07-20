@@ -4934,7 +4934,8 @@ function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = g
 }
 
 function renderCombinedCalendar(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
-  const today = dateKey(new Date());
+  const now = new Date();
+  const today = dateKey(now);
   const selectedMonth = selectedCalendarMonthDate();
   const currentMonth = monthKey(selectedMonth);
   const days = calendarMonthGridDays(selectedMonth);
@@ -5037,18 +5038,20 @@ function calendarAgendaTimeLabel(item) {
 
 function renderCombinedCalendarDays(days, eventsByDate, currentMonth, today, calendarThemes) {
   const events = Array.isArray(eventsByDate) ? eventsByDate : [];
+  const pastWeek = days.length === 7 && dateKey(days[6]) < dateKey(startOfWeek(new Date()));
   let html = "";
   for (let index = 0; index < days.length; index += 1) {
     const day = days[index];
     const key = dateKey(day);
+    const monthBoundary = day.getDate() === 1 ? `<strong class="calendar-month-boundary">${day.getMonth() + 1}월</strong>` : "";
     html += `
       <div class="calendar-month-day ${monthKey(day) !== currentMonth ? "is-outside" : ""} ${key === today ? "is-today" : ""}" style="grid-column: ${index + 1};">
-        <div class="calendar-month-date"><span>${key.slice(8)}</span></div>
+        <div class="calendar-month-date">${monthBoundary}<span>${key.slice(8)}</span></div>
       </div>
     `;
   }
   return `
-    <div class="calendar-month-week">
+    <div class="calendar-month-week ${pastWeek ? "is-past-week" : ""}">
       ${html}
       ${renderCalendarSpanLayer(events, days, { className: "calendar-month-span-layer", limit: Number.MAX_SAFE_INTEGER, calendarThemes })}
     </div>
