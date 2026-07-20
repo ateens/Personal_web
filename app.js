@@ -14,6 +14,7 @@ const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
 };
 const RESOURCE_SEARCH_SAVE_DELAY_MS = 320;
 const RESOURCE_TITLE_SAVE_DELAY_MS = 360;
+const TASK_DONE_REORDER_GRACE_MS = 520;
 const EDITOR_TEXT_HISTORY_IDLE_MS = 720;
 const MAX_RESOURCE_TITLE_LENGTH = 20_000;
 const MAX_RESOURCE_COMMENT_BODY_LENGTH = 20_000;
@@ -659,6 +660,8 @@ let navShortcutHoldTimer = 0;
 let scheduleMonthHoverTimer = 0;
 let habitResizeTimer = 0;
 let projectCalendarResizeTimer = 0;
+let taskDoneRenderTimer = 0;
+let taskDoneRenderVersion = 0;
 let blockIconHoverFrame = 0;
 let inlineToolbarPositionFrame = 0;
 let pendingBlockIconHoverPoint = null;
@@ -19610,9 +19613,24 @@ function toggleTaskDone(taskId, button) {
     button.classList.toggle("is-done", nextDone);
     button.setAttribute("aria-pressed", nextDone ? "true" : "false");
   }
-  window.setTimeout(() => {
-    renderView({ soft: true, animateCards: ui.view === "today" });
-  }, 220);
+  if (nextDone) scheduleTaskDoneRender(card);
+  else window.setTimeout(() => renderView({ soft: true, animateCards: ui.view === "today" }), 220);
+}
+
+function scheduleTaskDoneRender(card) {
+  const version = ++taskDoneRenderVersion;
+  window.clearTimeout(taskDoneRenderTimer);
+  const queue = () => {
+    if (version !== taskDoneRenderVersion) return;
+    taskDoneRenderTimer = window.setTimeout(() => {
+      if (version === taskDoneRenderVersion) renderView({ soft: true, animateCards: ui.view === "today" });
+    }, TASK_DONE_REORDER_GRACE_MS);
+  };
+  if (card && window.matchMedia("(hover: hover)").matches && card.matches(":hover")) {
+    card.addEventListener("pointerleave", queue, { once: true });
+  } else {
+    queue();
+  }
 }
 
 function toggleHabitDone(habitId, date, button) {

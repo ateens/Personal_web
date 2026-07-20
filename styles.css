@@ -10266,62 +10266,56 @@ body.is-task-placement-open {
 
 .check::before,
 .block-check::before,
-.calendar-toggle-mark::before {
-  content: "−";
+.calendar-toggle-mark::before,
+.check::after,
+.block-check::after,
+.calendar-toggle-mark::after {
+  content: "";
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
+  top: 7px;
+  left: 2px;
+  width: 6px;
+  height: 1.5px;
   border: 0;
   border-radius: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1;
+  background: var(--muted);
   box-shadow: none;
-  transition: opacity 140ms var(--ease), transform 180ms var(--ease);
+  opacity: 1;
+  animation: none;
+  transform-origin: left center;
+  transition: top 220ms var(--ease), left 220ms var(--ease), width 220ms var(--ease), transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1), background-color 180ms var(--ease);
 }
 
 .check::after,
 .block-check::after,
 .calendar-toggle-mark::after {
-  content: "V";
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  width: auto;
-  height: auto;
-  border: 0;
-  border-radius: 0;
-  color: var(--ink);
-  font-size: 10px;
-  font-weight: 900;
-  line-height: 1;
-  opacity: 0;
-  transform: translateY(-2px) scale(0.72);
-  transition: opacity 140ms var(--ease), transform 180ms cubic-bezier(0.16, 0.92, 0.22, 1);
+  left: 8px;
+  width: 6px;
 }
 
 .check.is-done::before,
 .block-check.is-done::before,
 .calendar-toggle input:checked + .calendar-toggle-mark::before {
-  opacity: 0;
-  transform: translateY(2px) scale(0.72);
+  top: 7px;
+  left: 2px;
+  width: 6px;
+  background: var(--ink);
+  transform: rotate(45deg);
 }
 
 .check.is-done::after,
 .block-check.is-done::after,
 .calendar-toggle input:checked + .calendar-toggle-mark::after {
-  opacity: 1;
-  transform: none;
+  top: 11px;
+  left: 6px;
+  width: 10px;
+  background: var(--ink);
+  transform: rotate(-50deg);
 }
 
-.check.is-done::before,
+.check.is-done,
 .block-check.is-done,
-.calendar-toggle input:checked + .calendar-toggle-mark,
-.check.is-done:hover::before {
+.calendar-toggle input:checked + .calendar-toggle-mark {
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -10331,7 +10325,7 @@ body.is-task-placement-open {
 .resource-checkbox {
   appearance: none;
   margin: 0;
-  background: linear-gradient(currentColor, currentColor) center / 8px 1px no-repeat;
+  background: linear-gradient(currentColor, currentColor) center / 12px 1.5px no-repeat;
   color: var(--muted);
   cursor: pointer;
 }
