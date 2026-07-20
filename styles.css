@@ -5752,6 +5752,10 @@ button:focus-visible {
   min-height: 166px;
 }
 
+.calendar-month-week.is-past-week {
+  opacity: 0.68;
+}
+
 .calendar-month-day {
   position: relative;
   grid-row: 1;
@@ -5768,8 +5772,8 @@ button:focus-visible {
 }
 
 .calendar-month-day.is-today {
-  background: color-mix(in srgb, var(--blue) 4%, rgba(255, 255, 255, 0.38));
-  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--blue) 18%, transparent);
+  background: rgba(103, 112, 128, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(71, 79, 92, 0.12);
 }
 
 .calendar-month-date {
@@ -5778,9 +5782,16 @@ button:focus-visible {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 6px;
   min-height: 22px;
   margin-bottom: 8px;
   color: var(--muted);
+}
+
+.calendar-month-boundary {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 900;
 }
 
 .calendar-month-date span {
@@ -5790,13 +5801,7 @@ button:focus-visible {
 }
 
 .calendar-month-day.is-today .calendar-month-date span {
-  display: inline-grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--blue) 10%, transparent);
-  color: color-mix(in srgb, var(--blue) 78%, var(--ink));
+  color: var(--ink);
 }
 
 .calendar-month-day.is-outside .calendar-month-date span {
