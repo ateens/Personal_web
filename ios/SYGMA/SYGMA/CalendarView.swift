@@ -7,13 +7,12 @@ struct CalendarView: View {
     @State private var selectedDate = Date().startOfDay
     @State private var selectedTask: SygmaTask?
     @State private var selectedProject: SygmaProject?
-    @State private var expandedEvent: ExpandedCalendarEvent?
+    @State private var expandedEntryID: String?
     @State private var showsTaskCreate = false
     @State private var calendarMode = CalendarDisplayMode.month
 
     var body: some View {
-        ZStack {
-            SYGMAScreen(
+        SYGMAScreen(
             eyebrow: "Calendar",
             title: "캘린더",
             subtitle: "",
@@ -24,32 +23,12 @@ struct CalendarView: View {
                 }
                 .buttonStyle(SYGMAUnderlineButtonStyle(tint: SYGMATheme.violet))
             }
-            ) {
-                sourceControls
-                calendarModeControl
-                calendarPanel
-                agendaPanel
-            }
-
-            if let expandedEvent {
-                Color.clear
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture { self.expandedEvent = nil }
-
-                GeometryReader { proxy in
-                    expandedCalendarEntry(expandedEvent.entry)
-                        .frame(width: proxy.size.width - 16, height: 82)
-                        .position(x: proxy.size.width / 2, y: min(max(expandedEvent.frame.midY, 100), proxy.size.height - 100))
-                        .transition(.scale(scale: 0.18, anchor: UnitPoint(
-                            x: min(max(expandedEvent.frame.midX / max(proxy.size.width, 1), 0), 1),
-                            y: 0.5
-                        )).combined(with: .opacity))
-                }
-                .zIndex(100)
-            }
+        ) {
+            sourceControls
+            calendarModeControl
+            calendarPanel
+            agendaPanel
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: expandedEvent?.id)
         .refreshable { await store.refreshFromRemote() }
         .sheet(item: $selectedTask) { TaskEditorSheet(task: $0) }
         .sheet(item: $selectedProject) { ProjectEditorSheet(project: $0) }
@@ -134,9 +113,13 @@ struct CalendarView: View {
                     entries: visibleEntries,
                     selectedDate: selectedDate,
                     isPastWeek: week.last.map { $0 < currentWeekStart } ?? false,
+                    expandedEntryID: expandedEntryID,
                     sourceColor: color(for:),
-                    select: { selectedDate = $0 },
-                    expand: { entry, frame in expandedEvent = ExpandedCalendarEvent(entry: entry, frame: frame) }
+                    select: {
+                        expandedEntryID = nil
+                        selectedDate = $0
+                    },
+                    setExpanded: { expandedEntryID = $0 }
                 )
             }
         }
@@ -276,34 +259,6 @@ struct CalendarView: View {
         }
     }
 
-    private func expandedCalendarEntry(_ entry: CalendarEntry) -> some View {
-        HStack(spacing: 12) {
-            Rectangle().fill(color(for: entry.source)).frame(width: 4, height: 54)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(entry.title)
-                    .font(.body.weight(.bold))
-                    .foregroundStyle(SYGMATheme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("\(entry.timeLabel) · \(entry.startDate == entry.endDate || entry.endDate.isEmpty ? entry.startDate : "\(entry.startDate) – \(entry.endDate)")")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(color(for: entry.source))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Text(entry.source.title)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(color(for: entry.source))
-        }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(color(for: entry.source).opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
-        .overlay { RoundedRectangle(cornerRadius: 6).stroke(color(for: entry.source).opacity(0.34), lineWidth: 1) }
-        .shadow(color: color(for: entry.source).opacity(0.2), radius: 12, y: 5)
-        .contentShape(Rectangle())
-        .onTapGesture { }
-    }
-
     private func color(for source: CalendarSource) -> Color {
         switch source {
         case .task: SYGMATheme.blue
@@ -311,12 +266,6 @@ struct CalendarView: View {
         case .google: SYGMATheme.teal
         }
     }
-}
-
-private struct ExpandedCalendarEvent: Identifiable, Equatable {
-    let entry: CalendarEntry
-    let frame: CGRect
-    var id: String { entry.id }
 }
 
 private enum CalendarDisplayMode: String, CaseIterable, Identifiable {
@@ -339,10 +288,12 @@ private struct CalendarWeekRow: View {
     let entries: [CalendarEntry]
     let selectedDate: Date
     let isPastWeek: Bool
+    let expandedEntryID: String?
     let sourceColor: (CalendarSource) -> Color
     let select: (Date) -> Void
-    let expand: (CalendarEntry, CGRect) -> Void
+    let setExpanded: (String?) -> Void
     @State private var hoveredEntryID: String?
+    @Namespace private var eventExpansion
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -366,8 +317,27 @@ private struct CalendarWeekRow: View {
             GeometryReader { proxy in
                 let columnWidth = proxy.size.width / 7
                 ForEach(segments) { segment in
-                    GeometryReader { barProxy in
-                        Button { expand(segment.entry, barProxy.frame(in: .global)) } label: {
+                    let expanded = expandedEntryID == segment.id
+                    Button { setExpanded(expanded ? nil : segment.id) } label: {
+                        if expanded {
+                            HStack(spacing: 7) {
+                                Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 3, height: 36)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(segment.entry.title)
+                                        .font(.system(size: 12, weight: .bold))
+                                        .lineLimit(2)
+                                    Text("\(segment.entry.timeLabel) · \(segment.entry.startDate == segment.entry.endDate || segment.entry.endDate.isEmpty ? segment.entry.startDate : "\(segment.entry.startDate) – \(segment.entry.endDate)")")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundStyle(sourceColor(segment.entry.source))
+                                }
+                                Spacer(minLength: 4)
+                            }
+                            .foregroundStyle(SYGMATheme.ink)
+                            .padding(.horizontal, 7)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            .background(sourceColor(segment.entry.source).opacity(0.2))
+                            .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
+                        } else {
                             Text(segment.entry.title)
                                 .font(.system(size: 9, weight: .semibold))
                                 .lineLimit(1)
@@ -377,21 +347,26 @@ private struct CalendarWeekRow: View {
                                 .background(sourceColor(segment.entry.source).opacity(0.16))
                                 .overlay(alignment: .leading) { Rectangle().fill(sourceColor(segment.entry.source)).frame(width: 2) }
                         }
-                        .buttonStyle(.plain)
-                        .help(segment.entry.title)
-                        .accessibilityLabel(segment.entry.title)
                     }
-                    .frame(width: columnWidth * CGFloat(segment.span) - 4, height: 18)
+                    .buttonStyle(.plain)
+                    .matchedGeometryEffect(id: segment.id, in: eventExpansion)
+                    .frame(
+                        width: expanded ? min(max(columnWidth * CGFloat(segment.span) - 4, 230), proxy.size.width - columnWidth * CGFloat(segment.startIndex) - 6) : columnWidth * CGFloat(segment.span) - 4,
+                        height: expanded ? 54 : 18
+                    )
                     .offset(x: columnWidth * CGFloat(segment.startIndex) + 2, y: CGFloat(34 + segment.lane * 20))
-                    .zIndex(hoveredEntryID == segment.entry.id ? 50 : Double(segment.lane + 1))
+                    .zIndex(expanded ? 100 : hoveredEntryID == segment.entry.id ? 50 : Double(segment.lane + 1))
                     .onHover { hoveredEntryID = $0 ? segment.entry.id : nil }
+                    .help(segment.entry.title)
+                    .accessibilityLabel(segment.entry.title)
                 }
             }
             .zIndex(10)
         }
         .frame(height: CGFloat(max(54, 40 + laneCount * 20)))
-        .opacity(isPastWeek ? 0.56 : 1)
+        .opacity(isPastWeek && !segments.contains(where: { $0.id == expandedEntryID }) ? 0.56 : 1)
         .overlay(alignment: .bottom) { Rectangle().fill(SYGMATheme.soft.opacity(0.24)).frame(height: 1) }
+        .animation(.spring(response: 0.34, dampingFraction: 0.84), value: expandedEntryID)
     }
 
     private var calendar: Calendar { Calendar.current }
@@ -409,7 +384,7 @@ private struct CalendarWeekRow: View {
                   let endIndex = dates.firstIndex(where: { $0.dateKey == endKey }) else { continue }
             let lane = lanes.firstIndex(where: { $0 < startIndex }) ?? lanes.count
             if lane == lanes.count { lanes.append(endIndex) } else { lanes[lane] = endIndex }
-            result.append(CalendarWeekSegment(entry: entry, startIndex: startIndex, span: endIndex - startIndex + 1, lane: lane))
+            result.append(CalendarWeekSegment(entry: entry, weekStart: first, startIndex: startIndex, span: endIndex - startIndex + 1, lane: lane))
         }
         return result
     }
@@ -421,10 +396,11 @@ private struct CalendarWeekRow: View {
 
 private struct CalendarWeekSegment: Identifiable {
     let entry: CalendarEntry
+    let weekStart: String
     let startIndex: Int
     let span: Int
     let lane: Int
-    var id: String { "\(entry.id)-\(startIndex)" }
+    var id: String { "\(entry.id)-\(weekStart)-\(startIndex)" }
 }
 
 private struct CalendarAgendaRow: View {
