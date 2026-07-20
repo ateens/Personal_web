@@ -1932,7 +1932,6 @@ function renderCalendar() {
       ${renderViewControls("calendar", { count: combinedEvents.length, total: taskEvents.length + projectEvents.length + visibleGoogleEvents.length })}
       <div class="calendar-layout">
         ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
-        ${renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)}
 
         <div class="panel calendar-week-panel">
           ${panelHeader("This Week", `${formatLongDate(weekStart)}부터`)}
@@ -1944,6 +1943,8 @@ function renderCalendar() {
           ${renderCalendarLegend(combinedEvents, calendarThemes)}
           ${control.mode === "agenda" ? renderCalendarAgenda(combinedEvents, calendarThemes) : renderCombinedCalendar(combinedEvents, calendarThemes)}
         </div>
+
+        ${renderCalendarControls(taskEvents, projectEvents, googleEvents, calendarThemes)}
       </div>
     </section>
   `;
@@ -1979,17 +1980,17 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents, calenda
   const googleCalendars = getGoogleCalendarOptions();
   const googleEventCounts = eventCountsByCalendarId(googleEvents);
   return `
-    <div class="panel calendar-control-panel">
-      <div class="calendar-control-header">
+    <details class="panel calendar-control-panel">
+      <summary class="calendar-control-header">
         <div>
           <h2 class="panel-title">Visible Calendars</h2>
           <span class="calendar-panel-subtitle">${esc(googleCalendarStatusLabel())}</span>
         </div>
-        <div class="calendar-control-actions">
-          ${googleBackendStatus.connected ? `<button class="button secondary" type="button" data-action="fetch-google">Google 새로고침</button>` : ""}
-        </div>
-      </div>
-      <div class="calendar-filter-grid">
+        <span class="calendar-control-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="calendar-control-body">
+        ${googleBackendStatus.connected ? `<div class="calendar-control-actions"><button class="button secondary" type="button" data-action="fetch-google">Google 새로고침</button></div>` : ""}
+        <div class="calendar-filter-grid">
         <div class="calendar-filter-group">
           <strong class="calendar-filter-title">Personal Web</strong>
           <div class="calendar-toggle-list">
@@ -2003,8 +2004,9 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents, calenda
             ${renderGoogleCalendarToggles(googleCalendars, googleEventCounts, calendarThemes)}
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </details>
   `;
 }
 
@@ -4903,20 +4905,25 @@ function captureTargetLabel(type) {
 
 function renderWeekDays(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {
   const start = startOfWeek(new Date());
-  const days = dateRange(start, 7);
+  const days = dateRange(start, 14);
   const today = dateKey(new Date());
   let html = "";
-  for (let index = 0; index < days.length; index += 1) {
-    const day = days[index];
-    const key = dateKey(day);
-    html += `
-      <div class="day ${key === today ? "is-today" : ""}" style="grid-column: ${index + 1};">
-        <div class="day-title"><span>${weekday(day)}</span><span>${key.slice(5)}</span></div>
-        <div class="calendar-week-empty" aria-hidden="true"></div>
-      </div>
-    `;
+  for (let weekIndex = 0; weekIndex < 2; weekIndex += 1) {
+    const weekDays = days.slice(weekIndex * 7, weekIndex * 7 + 7);
+    let dayHtml = "";
+    for (let index = 0; index < weekDays.length; index += 1) {
+      const day = weekDays[index];
+      const key = dateKey(day);
+      dayHtml += `
+        <div class="day ${key === today ? "is-today" : ""}" style="grid-column: ${index + 1};">
+          <div class="day-title"><span>${weekday(day)}</span><span>${key.slice(5)}</span></div>
+          <div class="calendar-week-empty" aria-hidden="true"></div>
+        </div>
+      `;
+    }
+    html += `<div class="calendar-week-row">${dayHtml}${renderCalendarSpanLayer(events, weekDays, { className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER, calendarThemes })}</div>`;
   }
-  return `${html}${renderCalendarSpanLayer(events, days, { className: "calendar-week-span-layer", limit: Number.MAX_SAFE_INTEGER, calendarThemes })}`;
+  return html;
 }
 
 function renderCombinedCalendar(events = getCombinedCalendarEvents(), calendarThemes = googleCalendarThemeAssignments()) {

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CalendarView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var displayedMonth = Date().startOfDay
     @State private var selectedDate = Date().startOfDay
     @State private var selectedTask: SygmaTask?
@@ -22,7 +23,7 @@ struct CalendarView: View {
             }
         ) {
             sourceControls
-            monthPanel
+            twoWeekPanel
             agendaPanel
         }
         .refreshable { await store.refreshFromRemote() }
@@ -58,14 +59,14 @@ struct CalendarView: View {
         }
     }
 
-    private var monthPanel: some View {
-        SYGMAPanel {
+    private var twoWeekPanel: some View {
+        VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Button { moveMonth(-1) } label: {
+                Button { moveWeeks(-2) } label: {
                     Image(systemName: "chevron.left").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("이전 달")
+                .accessibilityLabel("이전 2주")
 
                 Spacer()
                 Text(monthTitle)
@@ -74,41 +75,38 @@ struct CalendarView: View {
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
 
-                Button { moveMonth(1) } label: {
+                Button { moveWeeks(2) } label: {
                     Image(systemName: "chevron.right").frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("다음 달")
+                .accessibilityLabel("다음 2주")
             }
+            .padding(.horizontal, 8)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyVGrid(columns: columns, spacing: 0) {
-                    ForEach(Array(weekdayLabels.enumerated()), id: \.offset) { index, label in
-                        Text(label)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(index == 5 ? SYGMATheme.blue : index == 6 ? SYGMATheme.rose : SYGMATheme.muted)
-                            .frame(maxWidth: .infinity, minHeight: 30)
-                    }
+            LazyVGrid(columns: columns, spacing: 0) {
+                ForEach(Array(weekdayLabels.enumerated()), id: \.offset) { index, label in
+                    Text(label)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(index == 5 ? SYGMATheme.blue : index == 6 ? SYGMATheme.rose : SYGMATheme.muted)
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                }
 
-                    ForEach(monthDays, id: \.self) { date in
-                        CalendarDayCell(
-                            date: date,
-                            isDisplayedMonth: calendar.isDate(date, equalTo: displayedMonth, toGranularity: .month),
-                            isSelected: calendar.isDate(date, inSameDayAs: selectedDate),
-                            entries: visibleEntries.filter { $0.occurs(on: date.dateKey) },
-                            sourceColor: color(for:)
-                        ) {
-                            selectedDate = date
-                            if !calendar.isDate(date, equalTo: displayedMonth, toGranularity: .month) {
-                                displayedMonth = date
-                            }
-                        }
+                ForEach(twoWeekDays, id: \.self) { date in
+                    CalendarDayCell(
+                        date: date,
+                        isSelected: calendar.isDate(date, inSameDayAs: selectedDate),
+                        entries: visibleEntries.filter { $0.occurs(on: date.dateKey) },
+                        sourceColor: color(for:)
+                    ) {
+                        selectedDate = date
                     }
                 }
-                .frame(minWidth: SYGMATheme.minimumTapTarget * 7)
             }
             .padding(.top, 8)
         }
+        .frame(maxWidth: .infinity)
+        .background(Color.white.opacity(0.18))
+        .padding(.horizontal, -screenHorizontalPadding)
     }
 
     private var agendaPanel: some View {
@@ -162,28 +160,28 @@ struct CalendarView: View {
         return value
     }
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(minimum: SYGMATheme.minimumTapTarget), spacing: 0), count: 7)
+        Array(repeating: GridItem(.flexible(minimum: 0), spacing: 0), count: 7)
     }
     private var weekdayLabels: [String] { ["월", "화", "수", "목", "금", "토", "일"] }
     private var monthTitle: String {
-        displayedMonth.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).year().month(.wide))
+        guard let end = twoWeekDays.last else { return "" }
+        return "\(twoWeekDays[0].formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day())) – \(end.formatted(.dateTime.locale(Locale(identifier: "ko_KR")).month().day()))"
     }
-    private var monthDays: [Date] {
-        let components = calendar.dateComponents([.year, .month], from: displayedMonth)
-        guard let first = calendar.date(from: components),
-              let weekday = calendar.dateComponents([.weekday], from: first).weekday else { return [] }
+    private var twoWeekDays: [Date] {
+        let weekday = calendar.component(.weekday, from: displayedMonth)
         let offset = (weekday - calendar.firstWeekday + 7) % 7
-        let gridStart = calendar.date(byAdding: .day, value: -offset, to: first) ?? first
-        return (0..<42).map { calendar.date(byAdding: .day, value: $0, to: gridStart) ?? gridStart }
+        let start = calendar.date(byAdding: .day, value: -offset, to: displayedMonth) ?? displayedMonth
+        return (0..<14).map { calendar.date(byAdding: .day, value: $0, to: start) ?? start }
     }
 
-    private func moveMonth(_ offset: Int) {
-        guard let nextMonth = calendar.date(byAdding: .month, value: offset, to: displayedMonth),
-              let days = calendar.range(of: .day, in: .month, for: nextMonth) else { return }
-        var components = calendar.dateComponents([.year, .month], from: nextMonth)
-        components.day = min(calendar.component(.day, from: selectedDate), days.count)
-        displayedMonth = nextMonth
-        selectedDate = calendar.date(from: components) ?? nextMonth
+    private var screenHorizontalPadding: CGFloat {
+        horizontalSizeClass == .compact ? SYGMATheme.screenCompactHorizontalPadding : SYGMATheme.screenHorizontalPadding
+    }
+
+    private func moveWeeks(_ offset: Int) {
+        guard let next = calendar.date(byAdding: .weekOfYear, value: offset, to: displayedMonth) else { return }
+        displayedMonth = next
+        selectedDate = next
     }
 
     private func open(_ entry: CalendarEntry) {
@@ -208,7 +206,6 @@ struct CalendarView: View {
 
 private struct CalendarDayCell: View {
     let date: Date
-    let isDisplayedMonth: Bool
     let isSelected: Bool
     let entries: [CalendarEntry]
     let sourceColor: (CalendarSource) -> Color
@@ -216,20 +213,28 @@ private struct CalendarDayCell: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(date.formatted(.dateTime.day()))
                     .font(.caption.weight(date.dateKey == Date().dateKey || isSelected ? .heavy : .medium))
                     .monospacedDigit()
-                HStack(spacing: 2) {
-                    ForEach(Array(entries.prefix(3))) { entry in
-                        Circle().fill(sourceColor(entry.source)).frame(width: 4, height: 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(entries) { entry in
+                    HStack(alignment: .top, spacing: 3) {
+                        Rectangle().fill(sourceColor(entry.source)).frame(width: 2)
+                        Text(entry.title)
+                            .font(.system(size: 9, weight: .semibold))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(height: 5)
+                Spacer(minLength: 0)
             }
-            .foregroundStyle(isDisplayedMonth ? (isSelected ? SYGMATheme.ink : SYGMATheme.muted) : SYGMATheme.soft.opacity(0.45))
-            .frame(minWidth: SYGMATheme.minimumTapTarget, maxWidth: .infinity, minHeight: SYGMATheme.minimumTapTarget)
-            .background(isSelected ? Color.white.opacity(0.72) : .clear)
+            .foregroundStyle(isSelected ? SYGMATheme.ink : SYGMATheme.muted)
+            .padding(.horizontal, 3)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, minHeight: SYGMATheme.minimumTapTarget, alignment: .topLeading)
+            .background(isSelected ? Color.black.opacity(0.04) : .clear)
             .overlay(alignment: .bottom) {
                 if isSelected { Rectangle().fill(SYGMATheme.ink).frame(height: 1) }
                 else if date.dateKey == Date().dateKey { Rectangle().fill(SYGMATheme.blue.opacity(0.45)).frame(height: 2) }
