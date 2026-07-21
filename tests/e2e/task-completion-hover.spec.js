@@ -50,16 +50,18 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
       left: getComputedStyle(element, "::before").left,
       top: getComputedStyle(element, "::before").top,
       width: getComputedStyle(element, "::before").width,
+      height: getComputedStyle(element, "::before").height,
     },
     after: {
       color: getComputedStyle(element, "::after").backgroundColor,
       left: getComputedStyle(element, "::after").left,
       top: getComputedStyle(element, "::after").top,
       width: getComputedStyle(element, "::after").width,
+      height: getComputedStyle(element, "::after").height,
     },
   }))).toEqual({
-    before: { color: "rgb(23, 32, 47)", left: "-2.5px", top: "5.75px", width: "11px" },
-    after: { color: "rgb(23, 32, 47)", left: "7.5px", top: "5.75px", width: "11px" },
+    before: { color: "rgb(23, 32, 47)", left: "0px", top: "7px", width: "8.5px", height: "2px" },
+    after: { color: "rgb(23, 32, 47)", left: "7.5px", top: "7px", width: "8.5px", height: "2px" },
   });
 
   const title = cards[0].locator(".card-title");
@@ -72,6 +74,11 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
   await cards[0].locator(".check").click();
   await page.waitForTimeout(80);
   const strikeMidway = await title.evaluate((element) => getComputedStyle(element, "::after").transform);
+  const checkMorph = await firstCheck.evaluate((element) => ({
+    beforeAnimation: getComputedStyle(element, "::before").animationName,
+    afterAnimation: getComputedStyle(element, "::after").animationName,
+  }));
+  expect(checkMorph).toEqual({ beforeAnimation: "none", afterAnimation: "none" });
   const strikeScale = Number(strikeMidway.match(/^matrix\(([^,]+)/)?.[1]);
   expect(strikeScale).toBeGreaterThan(0);
   expect(strikeScale).toBeLessThan(1);
