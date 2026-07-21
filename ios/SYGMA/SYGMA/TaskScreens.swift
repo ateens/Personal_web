@@ -31,7 +31,7 @@ struct TodayView: View {
 
             TaskDropPanel(
                 title: "오늘 할 일", detail: "이름순",
-                tasks: todayTasks + completedToday, lane: .today,
+                tasks: todayTasks + completedForToday, lane: .today,
                 onOpen: { selectedTask = $0 }
             )
 
@@ -61,7 +61,7 @@ struct TodayView: View {
             SYGMAMetricCell(label: "오늘 할 일", value: String(todayTasks.count))
             SYGMAMetricCell(
                 label: "완료",
-                value: String(completedToday.count),
+                value: String(completedTodayCount),
                 showsLeadingDivider: !dynamicTypeSize.isAccessibilitySize
             )
                 .overlay(alignment: .top) {
@@ -90,18 +90,13 @@ struct TodayView: View {
     private var todayTasks: [SygmaTask] { store.snapshot.tasks(in: .today) }
     private var tomorrowTasks: [SygmaTask] { store.snapshot.tasks(in: .tomorrow) }
     private var overdueTasks: [SygmaTask] { store.snapshot.tasks(in: .overdue) }
-    private var completedToday: [SygmaTask] {
+    private var completedForToday: [SygmaTask] {
         let today = Date().dateKey
-        return store.snapshot.tasks
-            .filter { $0.isDone && $0.completedDateKey == today }
-            .sorted {
-                switch ($0.completedInstant, $1.completedInstant) {
-                case let (left?, right?) where left != right: return left > right
-                case (_?, nil): return true
-                case (nil, _?): return false
-                default: return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-                }
-            }
+        return store.snapshot.tasks(in: .completed).filter { $0.isDone && $0.dateKey == today }
+    }
+    private var completedTodayCount: Int {
+        let today = Date().dateKey
+        return store.snapshot.tasks.filter { $0.isDone && $0.completedDateKey == today }.count
     }
     private var activeProjectCount: Int { store.snapshot.projects.filter(\.isActive).count }
     private var tomorrowLabel: String {

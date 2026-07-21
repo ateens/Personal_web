@@ -178,12 +178,13 @@ struct SYGMATaskCheck: View {
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
             SYGMACheckShape(progress: isCompleted ? 1 : 0)
                 .stroke(
-                    isCompleted ? SYGMATheme.ink : SYGMATheme.muted,
+                    isCompleted || isHovered ? SYGMATheme.ink : SYGMATheme.muted,
                     style: StrokeStyle(lineWidth: 1.6, lineCap: .square, lineJoin: .miter)
                 )
                 .frame(width: 16, height: 16)
@@ -191,7 +192,10 @@ struct SYGMATaskCheck: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.78, blendDuration: 0.08), value: isCompleted)
+        .scaleEffect(isHovered ? 1.08 : 1)
+        .animation(reduceMotion ? nil : SYGMATheme.standardAnimation, value: isCompleted)
+        .animation(reduceMotion ? nil : SYGMATheme.standardAnimation, value: isHovered)
+        .onHover { isHovered = $0 }
         .accessibilityLabel(label)
         .accessibilityValue(isCompleted ? "완료" : "미완료")
         .accessibilityHint(isCompleted ? "두 번 탭하여 완료를 취소합니다." : "두 번 탭하여 완료합니다.")

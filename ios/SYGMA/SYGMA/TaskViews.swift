@@ -155,7 +155,7 @@ struct TaskRow: View {
 
     private var displayedCompletion: Bool { pendingCompletion ?? task.isDone }
     private var completionAnimation: Animation {
-        .spring(response: 0.34, dampingFraction: 0.78, blendDuration: 0.08)
+        SYGMATheme.standardAnimation
     }
 
     var body: some View {
