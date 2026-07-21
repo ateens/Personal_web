@@ -40,7 +40,7 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
     long: getComputedStyle(element, "::after").width,
     transform: getComputedStyle(element, "::before").transform,
   }));
-  expect(rest).toEqual({ background: "none", short: "8px", long: "8px", transform: "none" });
+  expect(rest).toEqual({ background: "none", short: "10.5px", long: "10.5px", transform: "none" });
 
   const firstCheck = cards[0].locator(".check");
   await firstCheck.hover();
@@ -60,8 +60,8 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
       height: getComputedStyle(element, "::after").height,
     },
   }))).toEqual({
-    before: { color: "rgb(23, 32, 47)", left: "0px", top: "7px", width: "8.5px", height: "2px" },
-    after: { color: "rgb(23, 32, 47)", left: "7.5px", top: "7px", width: "8.5px", height: "2px" },
+    before: { color: "rgb(23, 32, 47)", left: "10.75px", top: "20.875px", width: "11.25px", height: "2.25px" },
+    after: { color: "rgb(23, 32, 47)", left: "22px", top: "20.875px", width: "11.25px", height: "2.25px" },
   });
 
   const title = cards[0].locator(".card-title");
@@ -92,7 +92,7 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
     longWidth: getComputedStyle(element, "::after").width,
   }));
   expect(mark.short).not.toBe("none");
-  expect(mark.longWidth).toBe("11.5px");
+  expect(mark.longWidth).toBe("13.5px");
 
   await page.mouse.move(1400, 980);
   await expect(panelTitle(cards[0])).toHaveText("완료");
@@ -126,6 +126,16 @@ test("unchecking a Today task does not replay the card refresh animation", async
 
   const card = page.locator(`[data-today-task-id="${taskId}"]`);
   await expect(card).toBeVisible();
+  const controls = await card.evaluate((element) => {
+    const check = element.querySelector(".check").getBoundingClientRect();
+    const chevron = element.querySelector(".task-toggle-hitarea").getBoundingClientRect();
+    return {
+      checkWidth: check.width,
+      checkHeight: check.height,
+      centerDelta: Math.abs((check.top + check.height / 2) - (chevron.top + chevron.height / 2)),
+    };
+  });
+  expect(controls).toEqual({ checkWidth: 44, checkHeight: 44, centerDelta: 0 });
   await card.locator(".check").click();
   await page.mouse.move(1400, 980);
   await expect(card).toHaveClass(/today-done/);

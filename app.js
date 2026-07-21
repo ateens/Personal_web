@@ -5155,15 +5155,75 @@ function renderCalendarSpanEvent(segment, { calendarThemes } = {}) {
   const link = event.htmlLink ? `<a class="calendar-span-open" href="${esc(event.htmlLink)}" target="_blank" rel="noreferrer" aria-label="Google Calendar에서 열기">↗</a>` : "";
   const startClass = segment.start === segment.segmentStart ? "is-span-start" : "";
   const endClass = segment.end === segment.segmentEnd ? "is-span-end" : "";
+  const edgeClass = segment.startIndex >= 5 ? "is-near-end" : "";
+  const eventKey = `${event.source || "local"}:${event.id || event.title || "event"}:${segment.segmentStart}:${segment.startIndex}`;
   const meta = calendarAgendaMetaLabel(event);
   const time = calendarSpanTimeLabel(event) || "종일";
+  const dates = segment.start === segment.end
+    ? compactDateLabel(segment.start)
+    : `${compactDateLabel(segment.start)} – ${compactDateLabel(segment.end)}`;
   return `
-    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)} grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" data-event-title="${esc(event.title || "(제목 없음)")}" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
-      <span class="calendar-span-time">${esc(time)}</span>
-      <strong>${esc(event.title || "(제목 없음)")}</strong>
+    <article class="calendar-span-event ${calendarEventSourceClass(event)} ${startClass} ${endClass} ${edgeClass}" ${attrs} style="${calendarColorDeclarations(event, calendarThemes)} grid-column: ${segment.startIndex + 1} / span ${segment.spanDays}; grid-row: ${segment.lane + 1};" data-calendar-event-key="${esc(eventKey)}">
+      <button class="calendar-span-toggle" type="button" data-calendar-event-toggle="${esc(eventKey)}" aria-expanded="false" aria-label="${esc(`${event.title || "(제목 없음)"}, ${meta}, ${time}`)}">
+        <span class="calendar-span-time">${esc(time)}</span>
+        <span class="calendar-span-copy">
+          <strong>${esc(event.title || "(제목 없음)")}</strong>
+          <span class="calendar-span-detail">${esc(`${dates} · ${meta}`)}</span>
+        </span>
+      </button>
       ${link}
     </article>
   `;
+}
+
+function toggleCalendarSpanEvent(eventElement) {
+  const expand = !eventElement.classList.contains("is-expanded");
+  closeCalendarSpanEvents();
+  if (!expand) return;
+  const bounds = eventElement.getBoundingClientRect();
+  const computed = window.getComputedStyle(eventElement);
+  const horizontalMargin = (Number.parseFloat(computed.marginLeft) || 0) + (Number.parseFloat(computed.marginRight) || 0);
+  const calendarViewport = eventElement.closest(".calendar-combined-panel, .calendar-week-panel, .project-calendar-scroll");
+  const viewportWidth = calendarViewport?.clientWidth || window.innerWidth - 40;
+  const maximumWidth = Math.max(0, Math.min(window.innerWidth - 40, viewportWidth) - horizontalMargin);
+  const expandedWidth = Math.min(Math.max(bounds.width, 300), maximumWidth);
+  const viewportBounds = calendarViewport?.getBoundingClientRect();
+  const rightAnchored = eventElement.classList.contains("is-near-end");
+  let expandedLeft = rightAnchored ? bounds.right - expandedWidth : bounds.left;
+  let horizontalShift = 0;
+  if (viewportBounds) {
+    const leftEdge = viewportBounds.left + horizontalMargin / 2;
+    const rightEdge = viewportBounds.right - horizontalMargin / 2;
+    if (expandedLeft + expandedWidth > rightEdge) horizontalShift = rightEdge - expandedLeft - expandedWidth;
+    if (expandedLeft + horizontalShift < leftEdge) horizontalShift += leftEdge - expandedLeft - horizontalShift;
+  }
+  const clone = eventElement.cloneNode(true);
+  clone.classList.add("is-expanded", "is-measuring");
+  clone.style.position = "fixed";
+  clone.style.left = "-10000px";
+  clone.style.top = "0";
+  clone.style.width = `${expandedWidth}px`;
+  clone.style.height = "auto";
+  clone.style.overflow = "visible";
+  clone.style.margin = "0";
+  clone.style.visibility = "hidden";
+  clone.style.pointerEvents = "none";
+  clone.style.transition = "none";
+  document.body.appendChild(clone);
+  const expandedHeight = Math.max(58, Math.ceil(clone.scrollHeight));
+  clone.remove();
+  eventElement.style.setProperty("--calendar-span-expanded-width", `${expandedWidth}px`);
+  eventElement.style.setProperty("--calendar-span-expanded-height", `${expandedHeight}px`);
+  eventElement.style.setProperty("--calendar-span-shift-x", `${horizontalShift}px`);
+  eventElement.classList.add("is-expanded");
+  eventElement.querySelector("[data-calendar-event-toggle]")?.setAttribute("aria-expanded", "true");
+}
+
+function closeCalendarSpanEvents() {
+  document.querySelectorAll(".calendar-span-event.is-expanded").forEach((entry) => {
+    entry.classList.remove("is-expanded");
+    entry.querySelector("[data-calendar-event-toggle]")?.setAttribute("aria-expanded", "false");
+  });
 }
 
 function calendarSpanTimeLabel(event) {
@@ -9023,6 +9083,17 @@ function handleClick(event) {
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     handleAction(actionButton.dataset.action, actionButton);
+    return;
+  }
+
+  if (event.target.closest(".calendar-span-open")) return;
+
+  const calendarEventToggle = event.target.closest("[data-calendar-event-toggle]");
+  if (calendarEventToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const calendarEvent = calendarEventToggle.closest("[data-calendar-event-key]");
+    if (calendarEvent) toggleCalendarSpanEvent(calendarEvent);
     return;
   }
 
@@ -17039,6 +17110,12 @@ function handleKeydown(event) {
   if (handleInlineColorMenuKeydown(event)) return;
   if (handleSlashMenuDocumentKeydown(event)) return;
   if (handleResourceSearchKeydown(event)) return;
+  if (event.key === "Escape" && document.querySelector(".calendar-span-event.is-expanded")) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeCalendarSpanEvents();
+    return;
+  }
   const resourceSideResize = event.target.closest("[data-resource-side-resize]");
   if (resourceSideResize && resizeResourceSideByKeyboard(event, resourceSideResize)) return;
   const resourcePageMenuItem = event.target.closest(".resource-page-menu [role^='menuitem']");
@@ -18217,6 +18294,8 @@ function handleDocumentClick(event) {
     return;
   }
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
+
+  if (!event.target.closest("[data-calendar-event-key]")) closeCalendarSpanEvents();
 
   if (ui.urlPasteChoice && !event.target.closest("[data-url-paste-choice-menu]")) {
     closeUrlPasteChoice({ restoreFocus: false });

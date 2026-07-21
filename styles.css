@@ -3243,9 +3243,7 @@ button:focus-visible {
 }
 
 .project-calendar-span-layer .calendar-span-event.is-project {
-  --span-bg:
-    linear-gradient(90deg, rgba(17, 24, 39, 0.13), rgba(255, 255, 255, 0.56)),
-    rgba(17, 24, 39, 0.055);
+  --span-bg: rgba(17, 24, 39, 0.075);
   --span-border: rgba(17, 24, 39, 0.12);
   --span-ink: var(--ink);
   grid-template-columns: minmax(0, 1fr);
@@ -3262,21 +3260,21 @@ button:focus-visible {
 
 .project-calendar-span-layer .calendar-span-event.is-project.is-span-start {
   margin-left: 8px;
+  width: calc(100% - 8px);
   border-top-left-radius: 6px;
   border-bottom-left-radius: 6px;
 }
 
 .project-calendar-span-layer .calendar-span-event.is-project.is-span-end {
   margin-right: 8px;
+  width: calc(100% - 8px);
   border-top-right-radius: 6px;
   border-bottom-right-radius: 6px;
 }
 
 .project-calendar-span-layer .calendar-span-event.is-project:hover,
 .project-calendar-span-layer .calendar-span-event.is-project:focus-visible {
-  --span-bg:
-    linear-gradient(90deg, rgba(17, 24, 39, 0.18), rgba(255, 255, 255, 0.66)),
-    rgba(17, 24, 39, 0.07);
+  --span-bg: rgba(17, 24, 39, 0.11);
   --span-border: rgba(17, 24, 39, 0.2);
   box-shadow: none;
 }
@@ -5778,6 +5776,14 @@ button:focus-visible {
   opacity: 0.56;
 }
 
+.calendar-month-week:has(.calendar-span-event.is-expanded) {
+  z-index: 8;
+}
+
+.calendar-month-week.is-past-week:has(.calendar-span-event.is-expanded) {
+  opacity: 1;
+}
+
 .calendar-month-day {
   position: relative;
   grid-row: 1;
@@ -5844,6 +5850,10 @@ button:focus-visible {
   pointer-events: none;
 }
 
+.calendar-span-layer:has(.calendar-span-event.is-expanded) {
+  z-index: 8;
+}
+
 .calendar-week-span-layer {
   grid-template-columns: repeat(7, minmax(0, 1fr));
   grid-auto-rows: 30px;
@@ -5857,6 +5867,7 @@ button:focus-visible {
 
 .calendar-month-span-layer .calendar-span-event {
   margin-inline: 9px;
+  width: calc(100% - 18px);
 }
 
 .calendar-span-event {
@@ -5866,9 +5877,12 @@ button:focus-visible {
   --span-ink: var(--ink);
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
+  justify-self: start;
+  width: 100%;
+  height: 24px;
   min-width: 0;
   min-height: 24px;
   border: 0;
@@ -5876,15 +5890,39 @@ button:focus-visible {
   padding: 0 8px;
   background: var(--span-bg);
   color: var(--span-ink);
-  cursor: default;
+  cursor: pointer;
   overflow: visible;
   pointer-events: auto;
   box-shadow: none;
   transform: translateZ(0);
   transition:
-    border-color 160ms var(--ease),
-    box-shadow 160ms var(--ease),
-    transform 160ms var(--ease);
+    width 420ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    height 420ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    padding 360ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    background 220ms var(--ease),
+    box-shadow 260ms var(--ease),
+    transform 360ms cubic-bezier(0.16, 0.92, 0.22, 1);
+}
+
+.calendar-span-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.calendar-span-toggle:focus-visible {
+  outline: 0;
 }
 
 .calendar-span-event:hover,
@@ -5895,32 +5933,30 @@ button:focus-visible {
   transform: translateY(-1px);
 }
 
-.calendar-span-event:hover::after,
-.calendar-span-event:focus-within::after {
-  content: attr(data-event-title);
-  position: absolute;
-  z-index: 10;
-  left: 8px;
-  bottom: calc(100% + 4px);
-  width: max-content;
-  max-width: min(360px, 80vw);
-  border: 1px solid var(--line-soft);
-  border-radius: 5px;
-  padding: 6px 8px;
-  background: #fff;
-  color: var(--ink);
-  box-shadow: 0 8px 22px -16px rgba(15, 23, 42, 0.38);
-  font-size: 12px;
-  font-weight: 720;
-  line-height: 1.35;
-  white-space: normal;
-  pointer-events: none;
-}
-
 .calendar-span-event:focus-within {
   z-index: 2;
+  outline: 0;
+}
+
+.calendar-span-event:has(.calendar-span-toggle:focus-visible) {
   outline: 2px solid color-mix(in srgb, var(--calendar-color) 72%, var(--ink));
   outline-offset: 1px;
+}
+
+.calendar-span-event.is-expanded {
+  z-index: 20;
+  width: var(--calendar-span-expanded-width, min(max(100%, 300px), calc(100vw - 40px)));
+  height: var(--calendar-span-expanded-height, 58px);
+  border-radius: 7px;
+  padding: 5px 8px 5px 11px;
+  background: color-mix(in srgb, var(--calendar-color) 13%, #fff);
+  overflow: hidden;
+  box-shadow: 0 18px 36px -18px rgba(15, 23, 42, 0.42);
+  transform: translate(var(--calendar-span-shift-x, 0), -4px);
+}
+
+.calendar-span-event.is-expanded.is-near-end {
+  justify-self: end;
 }
 
 .calendar-span-event.is-span-start {
@@ -5987,6 +6023,76 @@ button:focus-visible {
   line-height: 1.18;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.calendar-span-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.calendar-span-detail {
+  max-height: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--calendar-color) 72%, var(--ink));
+  font-size: 9px;
+  font-weight: 720;
+  line-height: 1.25;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition:
+    max-height 300ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    margin 300ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    opacity 220ms var(--ease),
+    transform 320ms cubic-bezier(0.16, 0.92, 0.22, 1);
+}
+
+.calendar-span-event.is-expanded strong {
+  overflow: visible;
+  font-size: 12px;
+  line-height: 1.2;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.calendar-span-event.is-expanded .calendar-span-detail {
+  max-height: 24px;
+  margin-top: 3px;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.calendar-span-event.is-measuring,
+.calendar-span-event.is-measuring * {
+  animation: none !important;
+  transition: none !important;
+}
+
+.calendar-span-event.is-measuring .calendar-span-detail {
+  max-height: none;
+}
+
+.project-calendar-span-layer .calendar-span-event.is-project.is-expanded strong {
+  font-size: 12px;
+}
+
+.project-calendar-span-layer .calendar-span-event.is-project.is-span-start.is-span-end {
+  width: calc(100% - 16px);
+}
+
+.project-calendar-span-layer .calendar-span-event.is-project.is-expanded,
+.project-calendar-span-layer .calendar-span-event.is-project.is-expanded:hover,
+.project-calendar-span-layer .calendar-span-event.is-project.is-expanded:focus-within {
+  width: var(--calendar-span-expanded-width, min(max(100%, 300px), calc(100vw - 40px)));
+  height: var(--calendar-span-expanded-height, 58px);
+  border-radius: 7px;
+  padding: 5px 8px 5px 11px;
+  background: color-mix(in srgb, var(--calendar-color) 13%, #fff);
+  box-shadow: 0 18px 36px -18px rgba(15, 23, 42, 0.42);
+  transform: translate(var(--calendar-span-shift-x, 0), -4px);
+}
+
+.project-calendar-span-layer .calendar-span-event.is-project.is-expanded .calendar-span-time {
+  display: inline;
 }
 
 .calendar-span-open {
@@ -10379,6 +10485,55 @@ body.is-task-placement-open {
   background: transparent;
   box-shadow: none;
   animation: none;
+}
+
+/* Keep the task control visually compact while its full 44px target is centered in the row. */
+.check {
+  align-self: center;
+  width: 44px;
+  height: 44px;
+  margin-inline: -14px;
+  touch-action: manipulation;
+}
+
+.check::before {
+  top: 21.125px;
+  left: 11.5px;
+  width: 10.5px;
+  height: 1.75px;
+}
+
+.check::after {
+  top: 21.125px;
+  left: 22px;
+  width: 10.5px;
+  height: 1.75px;
+}
+
+.check:hover:not(.is-done)::before {
+  top: 20.875px;
+  left: 10.75px;
+  width: 11.25px;
+  height: 2.25px;
+}
+
+.check:hover:not(.is-done)::after {
+  top: 20.875px;
+  left: 22px;
+  width: 11.25px;
+  height: 2.25px;
+}
+
+.check.is-done::before {
+  top: 21px;
+  left: 15.5px;
+  width: 7px;
+}
+
+.check.is-done::after {
+  top: 25.25px;
+  left: 19.75px;
+  width: 13.5px;
 }
 
 .resource-checkbox {
