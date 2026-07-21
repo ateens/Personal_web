@@ -182,7 +182,10 @@ struct SYGMATaskCheck: View {
 
     var body: some View {
         Button(action: action) {
-            SYGMACheckShape(progress: isCompleted ? 1 : 0)
+            SYGMACheckShape(
+                progress: isCompleted ? 1 : 0,
+                hoverProgress: isHovered ? 1 : 0
+            )
                 .stroke(
                     isCompleted || isHovered ? SYGMATheme.ink : SYGMATheme.muted,
                     style: StrokeStyle(lineWidth: 1.6, lineCap: .square, lineJoin: .miter)
@@ -192,7 +195,6 @@ struct SYGMATaskCheck: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.08 : 1)
         .animation(reduceMotion ? nil : SYGMATheme.standardAnimation, value: isCompleted)
         .animation(reduceMotion ? nil : SYGMATheme.standardAnimation, value: isHovered)
         .onHover { isHovered = $0 }
@@ -204,9 +206,13 @@ struct SYGMATaskCheck: View {
 
 private struct SYGMACheckShape: Shape {
     var progress: CGFloat
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
+    var hoverProgress: CGFloat
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(progress, hoverProgress) }
+        set {
+            progress = newValue.first
+            hoverProgress = newValue.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
@@ -215,10 +221,12 @@ private struct SYGMACheckShape: Shape {
         func blend(_ from: CGPoint, _ to: CGPoint) -> CGPoint {
             CGPoint(x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress)
         }
+        let restLeft = point(3 - 2 * hoverProgress, 8)
+        let restRight = point(13 + 2 * hoverProgress, 8)
         var path = Path()
-        path.move(to: blend(point(1, 8), point(1.5, 7)))
+        path.move(to: blend(restLeft, point(1.5, 7)))
         path.addLine(to: blend(point(8, 8), point(6, 11.5)))
-        path.addLine(to: blend(point(15, 8), point(15, 2.5)))
+        path.addLine(to: blend(restRight, point(15, 2.5)))
         return path
     }
 }

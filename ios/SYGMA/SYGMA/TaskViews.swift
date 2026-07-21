@@ -162,7 +162,6 @@ struct TaskRow: View {
         SYGMACard(accent: SYGMATheme.blue) {
             HStack(alignment: .top, spacing: 10) {
                 SYGMATaskCheck(isCompleted: displayedCompletion, label: task.title, action: toggleCompletion)
-                    .allowsHitTesting(pendingCompletion == nil)
 
                 Button(action: onOpen) {
                     VStack(alignment: .leading, spacing: 5) {
