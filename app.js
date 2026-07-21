@@ -19608,22 +19608,21 @@ function toggleTaskDone(taskId, button) {
 
   const card = button?.closest(".card");
   if (card) {
-    card.classList.add("is-updating");
+    card.classList.toggle("is-updating", nextDone);
     card.classList.toggle("done", nextDone);
     button.classList.toggle("is-done", nextDone);
     button.setAttribute("aria-pressed", nextDone ? "true" : "false");
   }
-  if (nextDone) scheduleTaskDoneRender(card);
-  else window.setTimeout(() => renderView({ soft: true, animateCards: ui.view === "today" }), 220);
+  scheduleTaskCompletionRender(card, { animateCards: nextDone && ui.view === "today" });
 }
 
-function scheduleTaskDoneRender(card) {
+function scheduleTaskCompletionRender(card, { animateCards = false } = {}) {
   const version = ++taskDoneRenderVersion;
   window.clearTimeout(taskDoneRenderTimer);
   const queue = () => {
     if (version !== taskDoneRenderVersion) return;
     taskDoneRenderTimer = window.setTimeout(() => {
-      if (version === taskDoneRenderVersion) renderView({ soft: true, animateCards: ui.view === "today" });
+      if (version === taskDoneRenderVersion) renderView({ soft: true, animateCards });
     }, TASK_DONE_REORDER_GRACE_MS);
   };
   if (card && window.matchMedia("(hover: hover)").matches && card.matches(":hover")) {
