@@ -10316,9 +10316,19 @@ body.is-task-placement-open {
   width: 8px;
 }
 
-.check:hover::before,
-.check:hover::after {
-  background: var(--muted);
+.check:hover:not(.is-done)::before {
+  top: 5.75px;
+  left: -2.5px;
+  width: 11px;
+  background: var(--ink);
+  transform: none;
+}
+
+.check:hover:not(.is-done)::after {
+  top: 5.75px;
+  left: 7.5px;
+  width: 11px;
+  background: var(--ink);
   transform: none;
 }
 

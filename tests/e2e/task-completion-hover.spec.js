@@ -42,6 +42,26 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
   }));
   expect(rest).toEqual({ background: "none", short: "8px", long: "8px", transform: "none" });
 
+  const firstCheck = cards[0].locator(".check");
+  await firstCheck.hover();
+  await expect.poll(() => firstCheck.evaluate((element) => ({
+    before: {
+      color: getComputedStyle(element, "::before").backgroundColor,
+      left: getComputedStyle(element, "::before").left,
+      top: getComputedStyle(element, "::before").top,
+      width: getComputedStyle(element, "::before").width,
+    },
+    after: {
+      color: getComputedStyle(element, "::after").backgroundColor,
+      left: getComputedStyle(element, "::after").left,
+      top: getComputedStyle(element, "::after").top,
+      width: getComputedStyle(element, "::after").width,
+    },
+  }))).toEqual({
+    before: { color: "rgb(23, 32, 47)", left: "-2.5px", top: "5.75px", width: "11px" },
+    after: { color: "rgb(23, 32, 47)", left: "7.5px", top: "5.75px", width: "11px" },
+  });
+
   const title = cards[0].locator(".card-title");
   const strikeBefore = await title.evaluate((element) => ({
     transform: getComputedStyle(element, "::after").transform,
@@ -70,4 +90,53 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
   await page.mouse.move(1400, 980);
   await expect(panelTitle(cards[0])).toHaveText("완료");
   await expect(panelTitle(cards[1])).toHaveText("완료");
+
+  const completedCheck = cards[0].locator(".check");
+  await completedCheck.hover();
+  await completedCheck.click();
+  await expect(cards[0]).not.toHaveClass(/is-updating/);
+  await page.waitForTimeout(650);
+  await expect(panelTitle(cards[0])).toHaveText("완료");
+  await expect(cards[0]).not.toHaveClass(/is-reordering/);
+
+  await page.mouse.move(1400, 980);
+  await expect(panelTitle(cards[0])).toHaveText("미계획");
+  await expect(cards[0]).not.toHaveClass(/is-reordering/);
+});
+
+test("unchecking a Today task does not replay the card refresh animation", async ({ page }) => {
+  await page.locator('[data-nav-key="today"]').evaluate((button) => button.click());
+  await expect(page.locator("#viewRoot .view h1")).toContainText("대시보드");
+  const taskId = await page.evaluate(() => {
+    const task = window.createTask("Today refresh guard", {
+      deferCreate: true,
+      initial: { dueDate: window.dateKey(new Date()) },
+    });
+    window.saveState();
+    window.renderView({ soft: true });
+    return task.id;
+  });
+
+  const card = page.locator(`[data-today-task-id="${taskId}"]`);
+  await expect(card).toBeVisible();
+  await card.locator(".check").click();
+  await page.mouse.move(1400, 980);
+  await expect(card).toHaveClass(/today-done/);
+
+  await card.locator(".check").hover();
+  await page.evaluate((id) => {
+    window.__taskCompletionCard = document.querySelector(`[data-today-task-id="${id}"]`);
+  }, taskId);
+  await card.locator(".check").click();
+  await expect(card).not.toHaveClass(/is-updating/);
+  await page.waitForTimeout(650);
+  expect(await page.evaluate((id) => (
+    window.__taskCompletionCard === document.querySelector(`[data-today-task-id="${id}"]`)
+  ), taskId)).toBe(true);
+
+  await page.mouse.move(1400, 980);
+  await expect.poll(() => page.evaluate((id) => (
+    window.__taskCompletionCard !== document.querySelector(`[data-today-task-id="${id}"]`)
+  ), taskId)).toBe(true);
+  await expect(card).not.toHaveClass(/is-reordering/);
 });
