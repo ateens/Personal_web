@@ -405,7 +405,7 @@ const COMMAND_MENU_ITEMS = [
   ["new-journal", "✎", "새 리뷰", "회고"],
   ["new-box", "□", "새 박스", "삶의 영역"],
 ];
-const SCHEDULER_WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
+const SCHEDULER_WEEKDAY_LABELS = ["일", "월", "화", "수", "목", "금", "토"];
 
 const STATUSES = {
   task: {
@@ -1552,7 +1552,7 @@ function animateCardReorder(previousRects) {
       card.style.transform = "";
       window.setTimeout(() => {
         card.classList.remove("is-reordering");
-      }, 420);
+      }, 230);
     });
   }
 }
@@ -4748,10 +4748,12 @@ function renderTaskCaptureFlow(capture, draft) {
     rows += renderTaskCaptureStep(capture.id, draft, steps[index], index);
   }
   const readyToSave = draft.stepIndex >= steps.length;
+  const waitingForProjectEnd = draft.type === "projects" && draft.values?.startDate && !draft.values?.endDate;
   const targetLabel = captureTargetLabel(draft.type);
   return `
     <div class="capture-flow" data-task-flow="${capture.id}" aria-label="${esc(targetLabel)} 속성 선택">
       ${rows}
+      ${readyToSave ? renderCaptureCalendar(capture.id, draft) : ""}
       ${
         readyToSave
           ? `<div class="capture-flow-save" data-flow-index="${steps.length}" style="--flow-index:${steps.length}">
@@ -4761,7 +4763,7 @@ function renderTaskCaptureFlow(capture, draft) {
               </div>
               <div class="capture-flow-save-actions">
                 <button class="button ghost" type="button" data-task-flow-cancel="${capture.id}">취소</button>
-                <button class="button" type="button" data-task-flow-save="${capture.id}">저장</button>
+                <button class="button" type="button" data-task-flow-save="${capture.id}" ${waitingForProjectEnd ? "disabled" : ""}>저장</button>
               </div>
             </div>`
           : ""
@@ -4813,6 +4815,73 @@ function renderTaskCaptureStepOptions(captureId, step, selectedValue) {
     `;
   }
   return options;
+}
+
+function renderCaptureCalendar(captureId, draft) {
+  if (!["tasks", "projects"].includes(draft.type)) return "";
+  const values = draft.values || {};
+  const taskDate = normalizeTaskDate(values.dueDate);
+  const range = normalizedCaptureProjectRange(values);
+  const selectedMonth = values.dateMonth || taskDate.slice(0, 7) || range.startDate.slice(0, 7) || monthKey(new Date());
+  const monthDate = parseMonthKey(selectedMonth);
+  const isProject = draft.type === "projects";
+  const prompt = isProject
+    ? !range.startDate
+      ? "시작일을 선택하세요."
+      : !values.endDate
+        ? `${compactDateLabel(range.startDate)}부터 · 종료일을 선택하세요.`
+        : `${compactDateLabel(range.startDate)} — ${compactDateLabel(range.endDate)}`
+    : taskDate
+      ? `${compactDateLabel(taskDate)}에 배치`
+      : "선택하지 않으면 미계획으로 저장됩니다.";
+  return `
+    <section class="task-scheduler capture-calendar" data-capture-date-picker="${captureId}" aria-label="${isProject ? "Project 기간" : "Task 날짜"} 선택">
+      <div class="task-scheduler-head">
+        <div>
+          <strong>${esc(monthLabel(monthDate))}</strong>
+          <span>${esc(prompt)}</span>
+        </div>
+        <div class="task-scheduler-nav">
+          <button class="task-scheduler-nav-button" type="button" data-capture-calendar-nav="previous" data-capture-calendar-month="${monthKey(addMonths(monthDate, -1))}" data-capture-id="${captureId}" aria-label="이전 달">‹</button>
+          <button class="task-scheduler-nav-button" type="button" data-capture-calendar-nav="today" data-capture-calendar-month="${monthKey(new Date())}" data-capture-id="${captureId}">오늘</button>
+          <button class="task-scheduler-nav-button" type="button" data-capture-calendar-nav="next" data-capture-calendar-month="${monthKey(addMonths(monthDate, 1))}" data-capture-id="${captureId}" aria-label="다음 달">›</button>
+          <button class="task-scheduler-nav-button" type="button" data-capture-calendar-clear data-capture-id="${captureId}" aria-label="${isProject ? "기간 지우기" : "날짜 지우기"}">지우기</button>
+        </div>
+      </div>
+      <div class="task-scheduler-weekdays">
+        ${renderSchedulerWeekdayLabels()}
+      </div>
+      <div class="task-scheduler-grid">
+        ${renderCaptureCalendarDays(captureId, draft, monthDate, taskDate, range)}
+      </div>
+    </section>
+  `;
+}
+
+function renderCaptureCalendarDays(captureId, draft, monthDate, taskDate, range) {
+  const today = dateKey(new Date());
+  const isProject = draft.type === "projects";
+  let html = "";
+  for (const day of monthGridDays(monthDate)) {
+    const key = dateKey(day);
+    const outside = day.getMonth() !== monthDate.getMonth();
+    const rangeEdge = isProject && (key === range.startDate || key === range.endDate);
+    const inRange = isProject && range.startDate && range.endDate && key >= range.startDate && key <= range.endDate;
+    const selected = isProject ? rangeEdge : key === taskDate;
+    html += `
+      <button
+        class="task-scheduler-day ${outside ? "is-outside" : ""} ${key === today ? "is-today" : ""} ${selected ? "is-selected" : ""} ${inRange ? "is-in-range" : ""} ${key === range.startDate ? "is-range-start" : ""} ${key === range.endDate ? "is-range-end" : ""}"
+        type="button"
+        data-capture-calendar-date="${key}"
+        data-capture-id="${captureId}"
+        aria-label="${key}"
+        aria-pressed="${selected || inRange ? "true" : "false"}"
+      >
+        <span>${day.getDate()}</span>
+      </button>
+    `;
+  }
+  return html;
 }
 
 function getCaptureDraft(captureId) {
@@ -4925,6 +4994,14 @@ function taskCaptureSummary(draft) {
   for (const step of steps) {
     const label = `${step.label}: ${taskStepOptionLabel(step, draft.values[step.key] || "")}`;
     summary = summary ? `${summary} · ${label}` : label;
+  }
+  if (draft.type === "tasks") {
+    const dueDate = normalizeTaskDate(draft.values?.dueDate);
+    summary += ` · 날짜: ${dueDate ? compactDateLabel(dueDate) : "미계획"}`;
+  }
+  if (draft.type === "projects") {
+    const range = normalizedCaptureProjectRange(draft.values);
+    summary += ` · 기간: ${range.startDate ? draft.values?.endDate ? `${compactDateLabel(range.startDate)}–${compactDateLabel(range.endDate)}` : "종료일 선택 중" : "미정"}`;
   }
   return summary;
 }
@@ -9828,8 +9905,36 @@ function handleClick(event) {
     return;
   }
 
+  const captureCalendarMonth = event.target.closest("[data-capture-calendar-month]");
+  if (captureCalendarMonth) {
+    event.preventDefault();
+    event.stopPropagation();
+    setCaptureCalendarMonth(
+      captureCalendarMonth.dataset.captureId,
+      captureCalendarMonth.dataset.captureCalendarMonth,
+      captureCalendarMonth.dataset.captureCalendarNav
+    );
+    return;
+  }
+
+  const captureCalendarDate = event.target.closest("[data-capture-calendar-date]");
+  if (captureCalendarDate) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectCaptureCalendarDate(captureCalendarDate.dataset.captureId, captureCalendarDate.dataset.captureCalendarDate);
+    return;
+  }
+
+  const captureCalendarClear = event.target.closest("[data-capture-calendar-clear]");
+  if (captureCalendarClear) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearCaptureCalendar(captureCalendarClear.dataset.captureId);
+    return;
+  }
+
   const taskFlowSurface = event.target.closest("[data-task-flow]");
-  const taskFlowControl = event.target.closest("[data-task-flow-choice], [data-task-flow-jump], [data-task-flow-save], [data-task-flow-cancel]");
+  const taskFlowControl = event.target.closest("[data-task-flow-choice], [data-task-flow-jump], [data-task-flow-save], [data-task-flow-cancel], [data-capture-calendar-month], [data-capture-calendar-date], [data-capture-calendar-clear]");
   if (taskFlowSurface && !taskFlowControl) {
     event.preventDefault();
     event.stopPropagation();
@@ -17312,11 +17417,11 @@ function finishScheduleDrag(event) {
   markScheduleDragEnded();
   stopSchedulerMonthHover();
   if (action) {
-    scheduleTaskActionFromScheduler(action, { animateDrop: true });
+    scheduleTaskActionFromScheduler(action);
     return;
   }
   if (date) {
-    scheduleTaskFromScheduler(date, { animateDrop: true });
+    scheduleTaskFromScheduler(date);
     return;
   }
   closeTaskScheduler();
@@ -19659,6 +19764,10 @@ function startTaskFlow(captureId, targetType = "tasks") {
           projectId: "",
           resourceId: "",
           resourceType: "note",
+          dateMonth: monthKey(new Date()),
+          dueDate: "",
+          startDate: "",
+          endDate: "",
         },
       };
   refreshCaptureCard(captureId, { flowDirection: "forward" });
@@ -19712,6 +19821,61 @@ function jumpTaskFlowStep(captureId, stepKey) {
 function cancelTaskFlow(captureId) {
   delete ui.captureDrafts[captureId];
   refreshCaptureCard(captureId, { flowDirection: "backward" });
+}
+
+function setCaptureCalendarMonth(captureId, value, nav) {
+  const draft = getCaptureDraft(captureId);
+  if (!draft || !/^\d{4}-\d{2}$/.test(value || "")) return;
+  draft.values.dateMonth = value;
+  refreshCaptureCard(captureId, { flowDirection: "steady" });
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-capture-date-picker="${cssEscape(captureId)}"] [data-capture-calendar-nav="${nav}"]`)?.focus();
+  });
+}
+
+function selectCaptureCalendarDate(captureId, value) {
+  const draft = getCaptureDraft(captureId);
+  const date = normalizeTaskDate(value);
+  if (!draft || !date || !["tasks", "projects"].includes(draft.type)) return;
+  if (draft.type === "tasks") {
+    draft.values.dueDate = date;
+  } else {
+    const range = normalizedCaptureProjectRange(draft.values);
+    if (!range.startDate || draft.values.endDate) {
+      draft.values.startDate = date;
+      draft.values.endDate = "";
+    } else {
+      draft.values.startDate = date < range.startDate ? date : range.startDate;
+      draft.values.endDate = date < range.startDate ? range.startDate : date;
+    }
+  }
+  draft.values.dateMonth = date.slice(0, 7);
+  refreshCaptureCard(captureId, { flowDirection: "steady" });
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-capture-date-picker="${cssEscape(captureId)}"] [data-capture-calendar-date="${date}"]`)?.focus();
+  });
+}
+
+function clearCaptureCalendar(captureId) {
+  const draft = getCaptureDraft(captureId);
+  if (!draft) return;
+  draft.values.dueDate = "";
+  draft.values.startDate = "";
+  draft.values.endDate = "";
+  refreshCaptureCard(captureId, { flowDirection: "steady" });
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-capture-date-picker="${cssEscape(captureId)}"] [data-capture-calendar-clear]`)?.focus();
+  });
+}
+
+function normalizedCaptureProjectRange(values = {}) {
+  const startDate = normalizeTaskDate(values.startDate);
+  const endDate = normalizeTaskDate(values.endDate);
+  if (!startDate) return { startDate: "", endDate: "" };
+  if (!endDate) return { startDate, endDate: startDate };
+  return startDate <= endDate
+    ? { startDate, endDate }
+    : { startDate: endDate, endDate: startDate };
 }
 
 function saveTaskFlow(captureId) {
@@ -19771,9 +19935,12 @@ function animateCaptureCardExit(captureId, onComplete) {
 function buildTaskFlowInitialValues(draft, capture = null) {
   const values = draft.values || {};
   if (draft.type === "projects") {
+    const range = normalizedCaptureProjectRange(values);
     return {
       boxId: values.boxId || "",
       goalId: values.goalId || "",
+      startDate: range.startDate,
+      endDate: range.endDate,
     };
   }
   if (draft.type === "goals") {
@@ -19798,6 +19965,7 @@ function buildTaskFlowInitialValues(draft, capture = null) {
     goalId: values.goalId || "",
     projectId: values.projectId || "",
     resourceId: values.resourceId || "",
+    dueDate: normalizeTaskDate(values.dueDate),
   };
 }
 
@@ -20535,10 +20703,6 @@ function scheduleTaskFromScheduler(date, options = {}) {
   if (quickTaskPlacementUsesScheduler(task.id) && transitionQuickTaskPlacementSurface(options.control, commit)) {
     return;
   }
-  if (options.animateDrop) {
-    animateSchedulerDrop(commit);
-    return;
-  }
   commit();
 }
 
@@ -20551,10 +20715,6 @@ function scheduleTaskActionFromScheduler(action, options = {}) {
     if (currentTask) commitTaskScheduleAction(currentTask, action);
   };
   if (quickTaskPlacementUsesScheduler(task.id) && transitionQuickTaskPlacementSurface(options.control, commit)) {
-    return;
-  }
-  if (options.animateDrop) {
-    animateSchedulerDrop(commit);
     return;
   }
   commit();
@@ -20621,30 +20781,6 @@ function commitTaskScheduleAction(task, action) {
     renderDetail();
     renderOverlays();
   }
-}
-
-function animateSchedulerDrop(done) {
-  const ghost = document.querySelector(".schedule-drag-ghost");
-  const target = document.querySelector(".task-scheduler-lane.is-drop-target, .task-scheduler-day.is-drop-target, .task-scheduler-delete-zone.is-drop-target");
-  if (!ghost || !target) {
-    done();
-    return;
-  }
-  const ghostRect = ghost.getBoundingClientRect();
-  const targetRect = target.getBoundingClientRect();
-  const translateX = targetRect.left + targetRect.width / 2 - ghostRect.left - ghostRect.width / 2;
-  const translateY = targetRect.top + targetRect.height / 2 - ghostRect.top - ghostRect.height / 2;
-  ghost.classList.add("is-dropping");
-  ghost.style.left = `${ghostRect.left}px`;
-  ghost.style.top = `${ghostRect.top}px`;
-  ghost.style.width = `${ghostRect.width}px`;
-  ghost.style.transform = `translate(${translateX}px, ${translateY}px) scale(0.58)`;
-  ghost.style.opacity = "0";
-  target.classList.add("is-receiving");
-  window.setTimeout(() => {
-    target.classList.remove("is-receiving");
-    done();
-  }, 260);
 }
 
 function deleteEntity(type, itemId) {

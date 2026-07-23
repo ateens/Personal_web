@@ -1385,6 +1385,55 @@ button:focus-visible {
   background-size: 100% 2px, calc(100% - 4px) 1px;
 }
 
+.capture-calendar {
+  margin: 14px 0;
+  padding: 16px;
+  background: rgba(248, 250, 252, 0.86);
+  box-shadow: none;
+  animation: none;
+}
+
+.capture-calendar .task-scheduler-head {
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.capture-calendar .task-scheduler-head strong {
+  font-size: 17px;
+}
+
+.capture-calendar .task-scheduler-head span {
+  font-size: 12px;
+}
+
+.capture-calendar .task-scheduler-nav-button {
+  min-height: 30px;
+  padding: 4px 7px 6px;
+  font-size: 11px;
+}
+
+.capture-calendar .task-scheduler-weekdays,
+.capture-calendar .task-scheduler-grid {
+  gap: 4px;
+}
+
+.capture-calendar .task-scheduler-day {
+  min-height: 42px;
+  padding: 6px 3px 9px;
+  font-size: 13px;
+  touch-action: manipulation;
+}
+
+.capture-calendar .task-scheduler-day.is-in-range {
+  background-color: rgba(219, 234, 254, 0.72);
+  color: var(--blue);
+}
+
+.capture-calendar .task-scheduler-day.is-range-start,
+.capture-calendar .task-scheduler-day.is-range-end {
+  background-color: rgba(191, 219, 254, 0.9);
+}
+
 .capture-flow-row.is-selecting-choice .capture-flow-option {
   will-change: transform, opacity;
 }
@@ -1463,6 +1512,11 @@ button:focus-visible {
   flex-wrap: wrap;
   gap: 4px;
   justify-content: flex-end;
+}
+
+.capture-flow-save .button:disabled {
+  opacity: 0.42;
+  cursor: default;
 }
 
 @keyframes capture-flow-enter {
@@ -2865,9 +2919,9 @@ button:focus-visible {
 .card.is-reordering {
   pointer-events: none;
   transition:
-    transform 390ms cubic-bezier(0.16, 0.92, 0.22, 1),
-    opacity 260ms var(--ease),
-    padding 240ms var(--ease);
+    transform 190ms cubic-bezier(0.16, 0.92, 0.22, 1),
+    opacity 160ms var(--ease),
+    padding 160ms var(--ease);
   will-change: transform;
   z-index: 1;
 }
@@ -10676,6 +10730,11 @@ body.is-task-placement-open {
     padding: 30px 22px 132px 74px;
   }
 
+  .app:not(.has-docked-nav):has(.capture-card.is-configuring) .main {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
   .app.has-docked-nav .main {
     padding-left: calc(min(var(--docked-nav-width), 74vw) + 18px);
   }
@@ -10696,6 +10755,50 @@ body.is-task-placement-open {
 
   .capture-flow-save-actions {
     justify-content: flex-start;
+  }
+
+  .capture-card.is-configuring,
+  .capture-card.is-configuring:hover {
+    padding-inline: 8px;
+  }
+
+  .capture-calendar {
+    padding: 12px 8px;
+  }
+
+  .capture-calendar .task-scheduler-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    margin-bottom: 12px;
+  }
+
+  .capture-calendar .task-scheduler-head span {
+    max-width: none;
+    white-space: normal;
+  }
+
+  .capture-calendar .task-scheduler-nav {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+  }
+
+  .capture-calendar .task-scheduler-nav-button {
+    flex: 0 0 auto;
+    min-height: 38px;
+    white-space: nowrap;
+  }
+
+  .capture-calendar .task-scheduler-weekdays,
+  .capture-calendar .task-scheduler-grid {
+    gap: 2px;
+  }
+
+  .capture-calendar .task-scheduler-day {
+    min-height: 44px;
+    padding: 5px 2px 8px;
+    font-size: 12px;
   }
 
   .calendar-toggle-list,
