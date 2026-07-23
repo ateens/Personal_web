@@ -1780,6 +1780,11 @@ function normalizeAppStateForStorage(state) {
     nextState.settings.visibleGoogleCalendars = normalizedVisibleGoogleCalendars;
     changed = true;
   }
+  const normalizedVisibleProjectCalendars = normalizeBooleanMap(nextState.settings.visibleProjectCalendars);
+  if (!shallowObjectsEqual(nextState.settings.visibleProjectCalendars, normalizedVisibleProjectCalendars)) {
+    nextState.settings.visibleProjectCalendars = normalizedVisibleProjectCalendars;
+    changed = true;
+  }
   const normalizedViewControls = normalizeViewControls(nextState.settings.viewControls);
   if (!jsonValuesEqual(nextState.settings.viewControls, normalizedViewControls)) {
     changed = true;

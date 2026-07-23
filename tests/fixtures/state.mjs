@@ -181,6 +181,7 @@ export function createFixtureState() {
       lastGoogleFetchAt: "",
       lastGoogleSyncAt: "",
       calendarSources: { tasks: true, projects: true, google: true },
+      visibleProjectCalendars: {},
       visibleGoogleCalendars: {},
       viewControls: viewControls(),
       statsDemoDataSeeded: true,

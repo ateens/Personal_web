@@ -511,7 +511,7 @@ const DB_SCHEMA = [
   {
     key: "settings",
     label: "Settings",
-    fields: ["navOrder", "calendarSources", "visibleGoogleCalendars", "calendarColorAssignments", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
+    fields: ["navOrder", "calendarSources", "visibleProjectCalendars", "visibleGoogleCalendars", "calendarColorAssignments", "googleCalendarId", "googleConnectedAt", "lastGoogleFetchAt", "lastGoogleSyncAt", "statsDemoDataSeeded"],
     relations: ["PWA", "Google Calendar", "PostgreSQL sync"],
   },
 ];
@@ -763,6 +763,7 @@ let ui = {
   calendarMonth: monthKey(new Date()),
   todayTaskPropsOpen: {},
   todayTaskActiveProperty: {},
+  todayBatch: null,
   expandedHabitId: "",
   editingHabitId: "",
   habitDeleteConfirmId: "",
@@ -1327,7 +1328,12 @@ function renderView({ transition = false, soft = false, animateCards = false } =
   if (ui.view === "resources" && soft && patchResourceView()) return;
   const cardRects = animateCards ? captureCardRects() : null;
   const previousChipMeta = captureViewControlChipMeta(ui.view);
+  const calendarControlsOpen = Boolean(els.viewRoot.querySelector(".calendar-control-panel")?.open);
   els.viewRoot.innerHTML = renderers[ui.view]();
+  if (calendarControlsOpen) {
+    const calendarControls = els.viewRoot.querySelector(".calendar-control-panel");
+    if (calendarControls) calendarControls.open = true;
+  }
   decorateButtons(els.viewRoot);
   syncViewControlChipStripState(ui.view, previousChipMeta);
   if (cardRects) animateCardReorder(cardRects);
@@ -1577,7 +1583,9 @@ function renderToday() {
       </div>
       <div class="grid cols-2 today-dashboard-grid">
         <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
-          ${panelHeader("오늘 할 일", "날짜순")}
+          ${panelHeader("오늘 할 일", "날짜순", `
+            <button class="button secondary today-batch-add" type="button" data-action="new-today-batch" aria-label="오늘 할 일 여러 개 추가">+</button>
+          `)}
           <div class="stack">${renderTaskCards(todayTasks, { todayList: true, todayInline: true }, "오늘 할 일이 없습니다.")}</div>
         </div>
         <div class="panel">
@@ -1680,7 +1688,7 @@ function renderProjectCalendarPanel() {
   const mode = ui.projectCalendarMode === "month" ? "month" : "week";
   const anchor = selectedProjectCalendarDate();
   const title = mode === "month" ? monthLabel(anchor) : projectWeekRangeLabel(anchor);
-  const events = getProjectCalendarEvents();
+  const events = getVisibleProjectCalendarEvents();
   return `
     <div class="panel project-calendar-panel">
       <div class="calendar-panel-header project-calendar-header">
@@ -1923,10 +1931,11 @@ function renderCalendar() {
   const selectedMonth = selectedCalendarMonthDate();
   const taskEvents = getTaskCalendarEvents();
   const projectEvents = getProjectCalendarEvents();
+  const visibleProjectEvents = getVisibleProjectCalendarEvents();
   const googleEvents = getGoogleCalendarEvents();
   const visibleGoogleEvents = getVisibleGoogleCalendarEvents();
   const calendarThemes = googleCalendarThemeAssignments();
-  const combinedEvents = controlledItems("calendar", combinedCalendarSourceEvents(taskEvents, projectEvents, visibleGoogleEvents), "calendar");
+  const combinedEvents = controlledItems("calendar", combinedCalendarSourceEvents(taskEvents, visibleProjectEvents, visibleGoogleEvents), "calendar");
   const control = viewControl("calendar");
   const weekStart = startOfWeek(new Date());
   const weekCount = control.mode === "week" ? 1 : 2;
@@ -2004,6 +2013,7 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents, calenda
             ${renderCalendarSourceToggle("tasks", "Tasks", taskEvents.length, calendarThemes)}
             ${renderCalendarSourceToggle("projects", "Projects", projectEvents.length, calendarThemes)}
           </div>
+          ${renderProjectCalendarToggles(projectEvents, calendarThemes)}
         </div>
         <div class="calendar-filter-group">
           <strong class="calendar-filter-title">Google Calendar</strong>
@@ -2015,6 +2025,21 @@ function renderCalendarControls(taskEvents, projectEvents, googleEvents, calenda
       </div>
     </details>
   `;
+}
+
+function renderProjectCalendarToggles(projectEvents, calendarThemes) {
+  if (!projectEvents.length) return "";
+  let html = "";
+  for (const project of projectEvents) {
+    html += `
+      <label class="calendar-toggle calendar-project-toggle" style="${calendarColorDeclarations(project, calendarThemes)}">
+        <input type="checkbox" data-project-calendar-toggle="${esc(project.id)}" ${projectCalendarVisible(project.id) ? "checked" : ""}>
+        <span class="calendar-toggle-mark"></span>
+        <span class="calendar-toggle-text"><strong>${esc(project.title)}</strong></span>
+      </label>
+    `;
+  }
+  return `<div class="calendar-toggle-list calendar-project-toggle-list">${html}</div>`;
 }
 
 function renderGoogleCalendarToggles(calendars, eventCounts, calendarThemes) {
@@ -3367,12 +3392,13 @@ function renderMetric(label, value, sub) {
   `;
 }
 
-function panelHeader(title, subtitle = "") {
+function panelHeader(title, subtitle = "", actions = "") {
   return `
     <div class="panel-header">
       <div>
         <h2 class="panel-title">${esc(title)}</h2>
       </div>
+      ${actions ? `<div class="panel-header-actions">${actions}</div>` : ""}
     </div>
   `;
 }
@@ -5245,7 +5271,7 @@ function calendarEventEndKey(event, fallback = "") {
 function getLocalCalendarEvents() {
   const events = [];
   if (calendarSourceVisible("tasks")) events.push(...getTaskCalendarEvents());
-  if (calendarSourceVisible("projects")) events.push(...getProjectCalendarEvents());
+  if (calendarSourceVisible("projects")) events.push(...getVisibleProjectCalendarEvents());
   return events;
 }
 
@@ -5269,10 +5295,11 @@ function getTaskCalendarEvents() {
   return events;
 }
 
-function getProjectCalendarEvents() {
+function getProjectCalendarEvents({ visibleOnly = false } = {}) {
   const events = [];
   for (const project of state.projects) {
     if (!(project.startDate || project.endDate) || project.status === "canceled") continue;
+    if (visibleOnly && !projectCalendarVisible(project.id)) continue;
     const startDate = project.startDate || project.endDate;
     const rawEndDate = project.endDate || project.startDate;
     const endDate = rawEndDate < startDate ? startDate : rawEndDate;
@@ -5290,6 +5317,10 @@ function getProjectCalendarEvents() {
     });
   }
   return events;
+}
+
+function getVisibleProjectCalendarEvents() {
+  return getProjectCalendarEvents({ visibleOnly: true });
 }
 
 function getGoogleCalendarEvents({ visibleOnly = false } = {}) {
@@ -5442,6 +5473,21 @@ function calendarSourceVisible(source) {
 function setCalendarSourceVisible(source, visible) {
   state.settings.calendarSources = normalizeCalendarSources(state.settings.calendarSources);
   state.settings.calendarSources[source] = Boolean(visible);
+  saveState();
+  renderView({ soft: true });
+}
+
+function projectCalendarVisible(projectId) {
+  if (!projectId) return true;
+  return state.settings.visibleProjectCalendars?.[projectId] !== false;
+}
+
+function setProjectCalendarVisible(projectId, visible) {
+  if (!projectId) return;
+  state.settings.visibleProjectCalendars = {
+    ...(state.settings.visibleProjectCalendars || {}),
+    [projectId]: Boolean(visible),
+  };
   saveState();
   renderView({ soft: true });
 }
@@ -7357,12 +7403,13 @@ function renderOverlays() {
     ${ui.emojiCommand ? renderEmojiMenu() : ""}
     ${ui.scheduler ? renderTaskScheduler() : ""}
     ${ui.taskPlacement && !ui.scheduler ? renderQuickTaskPlacement() : ""}
+    ${ui.todayBatch ? renderTodayBatch() : ""}
     ${ui.deleteDrag ? renderDeleteDragOverlay() : ""}
     ${ui.projectDeleteConfirmId ? renderProjectDeleteConfirm() : ""}
     ${ui.goalDeleteConfirmId ? renderGoalDeleteConfirm() : ""}
     ${ui.boxDeleteConfirmId ? renderBoxDeleteConfirm() : ""}
     ${ui.habitDeleteConfirmId ? renderHabitDeleteConfirm() : ""}
-    ${ui.view === "today" && ui.todayTaskDrag ? renderTodayFloatingDrop() : ""}
+    ${ui.view === "today" && ui.todayTaskDrag && !ui.todayTaskDrag.batch ? renderTodayFloatingDrop() : ""}
     ${ui.blockDrag ? renderBlockDragGhost() : ""}
     ${ui.todayTaskDrag ? renderTodayTaskDragGhost() : ""}
     ${renderServiceWorkerUpdateNotice()}
@@ -7638,17 +7685,19 @@ async function handleResourceConnectionRestored() {
 
 function updateTaskSchedulingMode() {
   const taskPlacementOpen = Boolean(ui.taskPlacement);
+  const todayBatchOpen = Boolean(ui.todayBatch);
+  const modalOpen = taskPlacementOpen || todayBatchOpen;
   const relationPlacementOpen = taskPlacementOpen && Number(ui.taskPlacement?.phaseIndex || 0) > 0;
   app.classList.toggle("is-task-scheduling", Boolean(ui.scheduler?.dragging && ui.view === "tasks"));
   app.classList.toggle("is-task-placement", taskPlacementOpen);
   app.classList.toggle("is-task-placement-date", taskPlacementOpen && !relationPlacementOpen);
-  els.overlayRoot?.classList.toggle("has-task-placement", taskPlacementOpen);
-  els.overlayRoot?.classList.toggle("has-relation-placement", relationPlacementOpen);
-  document.documentElement.classList.toggle("is-task-placement-open", taskPlacementOpen);
-  document.body.classList.toggle("is-task-placement-open", taskPlacementOpen);
-  app.querySelector(".layout")?.toggleAttribute("inert", taskPlacementOpen);
-  els.fab?.toggleAttribute("inert", taskPlacementOpen);
-  els.detailRoot?.toggleAttribute("inert", taskPlacementOpen);
+  els.overlayRoot?.classList.toggle("has-task-placement", modalOpen);
+  els.overlayRoot?.classList.toggle("has-relation-placement", relationPlacementOpen || ui.todayBatch?.phase === "place");
+  document.documentElement.classList.toggle("is-task-placement-open", modalOpen);
+  document.body.classList.toggle("is-task-placement-open", modalOpen);
+  app.querySelector(".layout")?.toggleAttribute("inert", modalOpen);
+  els.fab?.toggleAttribute("inert", modalOpen);
+  els.detailRoot?.toggleAttribute("inert", modalOpen);
   app.classList.toggle("is-delete-dragging", Boolean(ui.deleteDrag));
   app.classList.toggle("is-block-dragging", Boolean(ui.blockDrag?.active));
   app.classList.toggle("is-resource-resizing", Boolean(ui.resourceResize));
@@ -8024,6 +8073,149 @@ function renderTodayDragCard(task) {
         <span class="task-chevron" aria-hidden="true"></span>
       </div>
     </article>
+  `;
+}
+
+function renderTodayBatch() {
+  const batch = ui.todayBatch;
+  if (!batch) return "";
+  if (batch.phase !== "place") {
+    return `
+      <div class="today-batch-backdrop" aria-hidden="true"></div>
+      <section class="today-batch-dialog" data-today-batch-dialog role="dialog" aria-modal="true" aria-labelledby="today-batch-title">
+        <header class="today-batch-head">
+          <div>
+            <span class="today-batch-kicker">Today</span>
+            <h2 id="today-batch-title">오늘 할 일을 한 번에 적어보세요</h2>
+            <p>한 줄이 하나의 할 일이 됩니다. 마지막 항목 뒤 빈 줄에서 Enter를 누르면 배치를 시작합니다.</p>
+          </div>
+          <button class="today-batch-close" type="button" data-action="close-today-batch">닫기</button>
+        </header>
+        <form class="today-batch-form" data-form="today-batch">
+          <label for="today-batch-input">할 일 제목</label>
+          <textarea
+            class="textarea today-batch-input"
+            id="today-batch-input"
+            data-today-batch-input
+            rows="8"
+            autocomplete="off"
+            placeholder="회의 자료 정리&#10;운동 30분&#10;주간 계획 검토"
+          >${esc(batch.draft || "")}</textarea>
+          <footer class="today-batch-form-footer">
+            <span>Enter 줄바꿈 · 빈 줄에서 Enter 또는 ⌘/Ctrl+Enter로 시작</span>
+            <button class="button" type="submit">배치 시작</button>
+          </footer>
+        </form>
+      </section>
+    `;
+  }
+
+  let taskCards = "";
+  for (const taskId of batch.taskIds) {
+    const task = itemById("tasks", taskId);
+    if (!task) continue;
+    const holding = ui.todayTaskDrag?.batch && ui.todayTaskDrag.taskId === task.id;
+    taskCards += `
+      <article
+        class="today-batch-task ${holding ? "is-holding" : ""}"
+        data-today-batch-task="${esc(task.id)}"
+        tabindex="0"
+        aria-label="${esc(task.title)} 배치"
+        aria-grabbed="${holding ? "true" : "false"}"
+      >
+        <span class="today-batch-task-grip" aria-hidden="true">⠿</span>
+        <strong>${esc(task.title)}</strong>
+        <small>끌어서 한 번에 배치</small>
+      </article>
+    `;
+  }
+
+  let projectTargets = "";
+  for (const project of state.projects) {
+    if (project.status === "completed" || project.status === "canceled") continue;
+    projectTargets += `
+      <div
+        class="today-batch-target"
+        data-today-task-action="project:${esc(project.id)}"
+        role="button"
+        aria-label="${esc(project.name)} 프로젝트에 배치"
+      >
+        <strong>${esc(project.name)}</strong>
+        <span>${esc(project.goalId ? nameOf("goals", project.goalId) : "연결 목표 없음")}</span>
+      </div>
+    `;
+  }
+
+  let goalTargets = "";
+  for (const goal of state.goals) {
+    if (goal.status === "completed" || goal.status === "canceled") continue;
+    goalTargets += `
+      <div
+        class="today-batch-target"
+        data-today-task-action="goal:${esc(goal.id)}"
+        role="button"
+        aria-label="${esc(goal.name)} 목표에 배치"
+      >
+        <strong>${esc(goal.name)}</strong>
+        <span>${esc(STATUSES.goal[goal.status] || goal.status)}</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="today-batch-backdrop" aria-hidden="true"></div>
+    <section class="today-batch-stage" data-today-batch-dialog role="dialog" aria-modal="true" aria-labelledby="today-batch-place-title">
+      <header class="today-batch-head">
+        <div>
+          <span class="today-batch-kicker">빠른 배치</span>
+          <h2 id="today-batch-place-title">각 할 일을 한 번씩 배치하세요</h2>
+          <p>프로젝트는 연결된 목표까지 상속하고, 목표는 프로젝트 없이 목표만 연결합니다.</p>
+        </div>
+        <div class="today-batch-head-actions">
+          <span class="today-batch-count">${batch.taskIds.length}개 남음</span>
+          <button class="today-batch-close" type="button" data-action="close-today-batch">남은 항목 미배치로 완료</button>
+        </div>
+      </header>
+      <div class="today-batch-grid">
+        <section class="today-batch-column is-queue" aria-labelledby="today-batch-task-heading">
+          <header>
+            <span>01</span>
+            <h3 id="today-batch-task-heading">새 할 일</h3>
+          </header>
+          <div class="today-batch-list" data-today-batch-list>
+            ${taskCards || '<p class="today-batch-empty">배치할 항목이 없습니다.</p>'}
+          </div>
+        </section>
+        <section class="today-batch-column" aria-labelledby="today-batch-project-heading">
+          <header>
+            <span>02</span>
+            <h3 id="today-batch-project-heading">프로젝트</h3>
+          </header>
+          <div class="today-batch-list">
+            ${projectTargets || '<p class="today-batch-empty">배치할 프로젝트가 없습니다.</p>'}
+          </div>
+        </section>
+        <section class="today-batch-column" aria-labelledby="today-batch-goal-heading">
+          <header>
+            <span>03</span>
+            <h3 id="today-batch-goal-heading">목표</h3>
+          </header>
+          <div class="today-batch-list">
+            ${goalTargets || '<p class="today-batch-empty">배치할 목표가 없습니다.</p>'}
+          </div>
+        </section>
+      </div>
+      <footer class="today-batch-drop-footer">
+        <div class="today-batch-target is-unassigned" data-today-task-action="unassigned" role="button" aria-label="속성 없이 배치">
+          <strong>속성 배치 안 함</strong>
+          <span>오늘 할 일로만 유지</span>
+        </div>
+        <div class="today-batch-target is-delete" data-today-task-action="delete" role="button" aria-label="할 일 삭제">
+          <strong>삭제</strong>
+          <span>이 할 일을 완전히 제거</span>
+        </div>
+      </footer>
+    </section>
   `;
 }
 
@@ -9875,6 +10067,8 @@ function handleAction(action, actionButton = null) {
   ui.commandOpen = false;
   renderOverlays();
 
+  if (action === "new-today-batch") return openTodayBatch(actionButton);
+  if (action === "close-today-batch") return closeTodayBatch({ announce: true });
   if (action === "new-task") return createTaskFromAction(actionButton);
   if (action === "new-project") return createProject();
   if (action === "new-goal") return createGoal();
@@ -9918,6 +10112,121 @@ function createTaskFromAction(actionButton) {
   if (context) context.input.value = "";
   startQuickTaskPlacement(task.id, actionButton);
   return task;
+}
+
+function openTodayBatch(opener) {
+  if (ui.todayBatch) return;
+  ui.commandOpen = false;
+  ui.scheduler = null;
+  ui.taskPlacement = null;
+  ui.todayBatch = {
+    phase: "input",
+    draft: "",
+    taskIds: [],
+    returnFocus: opener instanceof HTMLElement ? opener : null,
+  };
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector("[data-today-batch-input]")?.focus());
+}
+
+function startTodayBatchPlacement(value = ui.todayBatch?.draft || "") {
+  const batch = ui.todayBatch;
+  if (!batch || batch.phase !== "input") return;
+  const titles = String(value || "")
+    .split(/\r?\n/)
+    .map((title) => title.trim())
+    .filter(Boolean);
+  if (!titles.length) {
+    showToast("한 줄 이상 할 일을 입력해주세요.");
+    requestAnimationFrame(() => document.querySelector("[data-today-batch-input]")?.focus());
+    return;
+  }
+  const today = dateKey(new Date());
+  batch.taskIds = titles.map((title) => createTask(title, {
+    deferCreate: true,
+    initial: {
+      status: "todo",
+      dueDate: today,
+      boxId: "",
+      goalId: "",
+      projectId: "",
+      resourceId: "",
+    },
+  }).id);
+  batch.phase = "place";
+  batch.draft = "";
+  saveState();
+  renderView({ soft: true, animateCards: true });
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector("[data-today-batch-task]")?.focus());
+}
+
+function closeTodayBatch({ announce = false } = {}) {
+  const batch = ui.todayBatch;
+  if (!batch) return;
+  const remaining = batch.phase === "place" ? batch.taskIds.length : 0;
+  const returnFocus = batch.returnFocus;
+  if (ui.todayTaskDrag?.batch) clearTodayTaskDragState();
+  ui.pendingTodayTaskDrag = null;
+  ui.todayBatch = null;
+  renderView({ soft: true });
+  renderOverlays();
+  if (announce && remaining) showToast(`남은 ${remaining}개는 속성 없이 오늘 할 일에 남겼습니다.`);
+  requestAnimationFrame(() => {
+    const fallback = document.querySelector('[data-action="new-today-batch"]');
+    const target = returnFocus instanceof HTMLElement && returnFocus.isConnected ? returnFocus : fallback;
+    target?.focus({ preventScroll: true });
+  });
+}
+
+function commitTodayBatchDrop(task, action) {
+  const batch = ui.todayBatch;
+  if (!batch || batch.phase !== "place" || !batch.taskIds.includes(task.id)) return;
+  if (action.startsWith("project:")) {
+    const projectId = action.slice("project:".length);
+    if (!itemById("projects", projectId)) return;
+    task.boxId = "";
+    task.goalId = "";
+    task.projectId = "";
+    task.resourceId = "";
+    applyTaskFieldValue(task, "projectId", projectId);
+  } else if (action.startsWith("goal:")) {
+    const goalId = action.slice("goal:".length);
+    if (!itemById("goals", goalId)) return;
+    task.boxId = "";
+    task.goalId = "";
+    task.projectId = "";
+    task.resourceId = "";
+    applyTaskFieldValue(task, "goalId", goalId);
+  } else if (action === "unassigned") {
+    task.boxId = "";
+    task.goalId = "";
+    task.projectId = "";
+    task.resourceId = "";
+  } else if (action === "delete") {
+    deleteEntity("tasks", task.id);
+  } else {
+    return;
+  }
+
+  batch.taskIds = batch.taskIds.filter((taskId) => taskId !== task.id);
+  saveState();
+  if (!batch.taskIds.length) {
+    const returnFocus = batch.returnFocus;
+    ui.todayBatch = null;
+    renderView({ soft: true, animateCards: true });
+    renderOverlays();
+    showToast("오늘 할 일 배치를 마쳤습니다.");
+    requestAnimationFrame(() => {
+      const fallback = document.querySelector('[data-action="new-today-batch"]');
+      const target = returnFocus instanceof HTMLElement && returnFocus.isConnected ? returnFocus : fallback;
+      target?.focus({ preventScroll: true });
+    });
+    return;
+  }
+  renderView({ soft: true, animateCards: true });
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector("[data-today-batch-task]")?.focus());
 }
 
 function createResourceFromAction(actionButton) {
@@ -9987,6 +10296,10 @@ function handleSubmit(event) {
   const form = event.target.closest("form");
   if (!form) return;
   event.preventDefault();
+  if (form.dataset.form === "today-batch") {
+    startTodayBatchPlacement(form.querySelector("[data-today-batch-input]")?.value || "");
+    return;
+  }
   if (form.matches("[data-inline-link-popover]")) {
     applyInlineLink(form.querySelector("[data-inline-link-input]")?.value || "");
     return;
@@ -10021,6 +10334,12 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const todayBatchInput = event.target.closest("[data-today-batch-input]");
+  if (todayBatchInput && ui.todayBatch?.phase === "input") {
+    ui.todayBatch.draft = todayBatchInput.value;
+    return;
+  }
+
   const selectedBlockMoveQuery = event.target.closest("[data-selected-block-move-query]");
   if (selectedBlockMoveQuery) {
     updateSelectedBlockMoveQuery(selectedBlockMoveQuery.value || "");
@@ -10128,6 +10447,12 @@ function handleChange(event) {
   const calendarSource = event.target.closest("[data-calendar-source]");
   if (calendarSource) {
     setCalendarSourceVisible(calendarSource.dataset.calendarSource, calendarSource.checked);
+    return;
+  }
+
+  const projectCalendarToggle = event.target.closest("[data-project-calendar-toggle]");
+  if (projectCalendarToggle) {
+    setProjectCalendarVisible(projectCalendarToggle.dataset.projectCalendarToggle, projectCalendarToggle.checked);
     return;
   }
 
@@ -16171,6 +16496,23 @@ function resourceNoteIconHoverBlockFromPoint(clientX, clientY) {
 function handlePointerDown(event) {
   if (handleSelectedBlocksMenuOutsidePointerDown(event)) return;
 
+  const todayBatchTask = event.target.closest("[data-today-batch-task]");
+  if (ui.todayBatch?.phase === "place" && todayBatchTask) {
+    if (!canStartCustomPointerDrag(event)) return;
+    const task = itemById("tasks", todayBatchTask.dataset.todayBatchTask);
+    if (!task || !ui.todayBatch.taskIds.includes(task.id)) return;
+    window.getSelection()?.removeAllRanges();
+    ui.pendingTodayTaskDrag = {
+      taskId: task.id,
+      card: todayBatchTask,
+      batch: true,
+      pointerId: event.pointerId ?? "mouse",
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    return;
+  }
+
   if (event.target.closest("[data-inline-mark-toggle], [data-inline-equation-open], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], [data-mention-index], [data-page-command-index], [data-emoji-index]")) {
     event.preventDefault();
     event.stopPropagation();
@@ -16474,16 +16816,18 @@ function maybeStartPendingTodayTaskDrag(event) {
   if (Math.hypot(dx, dy) < POINTER_DRAG_ACTIVATION_DISTANCE) return;
   const card = pending.card instanceof Element && pending.card.isConnected
     ? pending.card
-    : document.querySelector(`[data-today-task-id="${cssEscape(pending.taskId)}"]`);
+    : document.querySelector(pending.batch
+      ? `[data-today-batch-task="${cssEscape(pending.taskId)}"]`
+      : `[data-today-task-id="${cssEscape(pending.taskId)}"]`);
   const task = itemById("tasks", pending.taskId);
   ui.pendingTodayTaskDrag = null;
   if (!card || !task) return;
   event.preventDefault();
   event.stopPropagation();
-  beginTodayTaskDrag(task, card, event);
+  beginTodayTaskDrag(task, card, event, { batch: Boolean(pending.batch) });
 }
 
-function beginTodayTaskDrag(task, card, event) {
+function beginTodayTaskDrag(task, card, event, options = {}) {
   cancelTodayTaskDrag();
   const rect = card.getBoundingClientRect();
   const offsetX = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
@@ -16503,12 +16847,18 @@ function beginTodayTaskDrag(task, card, event) {
     targetAction: "",
     targetElement: null,
     sourceCard: card,
+    batch: Boolean(options.batch),
   };
   ui.suppressTaskClickUntil = Date.now() + 900;
   window.getSelection()?.removeAllRanges();
   app.classList.add("is-today-task-dragging");
   card.classList.add("is-holding");
-  renderOverlays();
+  if (options.batch) {
+    els.overlayRoot.querySelector(".today-drag-ghost")?.remove();
+    els.overlayRoot.insertAdjacentHTML("beforeend", renderTodayTaskDragGhost());
+  } else {
+    renderOverlays();
+  }
   updateTodayTaskDragPosition(event.clientX, event.clientY);
 }
 
@@ -16536,7 +16886,7 @@ function todayTaskTargetFromPoint(clientX, clientY) {
 
 function setTodayTaskDropTarget(target = {}) {
   if (!ui.todayTaskDrag) return;
-  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((entry) => entry.classList.remove("is-over"));
+  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over, .today-batch-target.is-over").forEach((entry) => entry.classList.remove("is-over"));
   if (target.date || target.action) target.element?.classList.add("is-over");
   ui.todayTaskDrag.targetDate = target.date || "";
   ui.todayTaskDrag.targetAction = target.action || "";
@@ -16563,6 +16913,14 @@ function finishTodayTaskDrag(event) {
       : null;
   clearTodayTaskDragState();
   ui.suppressTaskClickUntil = Date.now() + 900;
+  if (drag.batch) {
+    if (!task || !targetAction) {
+      renderOverlays();
+      return;
+    }
+    commitTodayBatchDrop(task, targetAction);
+    return;
+  }
   if (!task || (!targetAction && !targetDate)) {
     renderOverlays();
     return;
@@ -16596,10 +16954,12 @@ function clearTodayTaskDragState() {
   if (ui.todayTaskDrag?.sourceCard?.isConnected) ui.todayTaskDrag.sourceCard.classList.remove("is-holding");
   if (ui.todayTaskDrag?.taskId) {
     document.querySelectorAll(`[data-today-task-id="${cssEscape(ui.todayTaskDrag.taskId)}"]`).forEach((card) => card.classList.remove("is-holding"));
+    document.querySelectorAll(`[data-today-batch-task="${cssEscape(ui.todayTaskDrag.taskId)}"]`).forEach((card) => card.classList.remove("is-holding"));
   }
   ui.todayTaskDrag = null;
   app.classList.remove("is-today-task-dragging");
-  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over").forEach((entry) => entry.classList.remove("is-over"));
+  document.querySelector(".today-drag-ghost")?.remove();
+  document.querySelectorAll(".today-drop-zone.is-over, .today-floating-drop.is-over, .today-batch-target.is-over").forEach((entry) => entry.classList.remove("is-over"));
 }
 
 function isActiveTodayTaskPointer(event) {
@@ -17104,7 +17464,55 @@ function stopSchedulerMonthHover() {
   document.querySelector(".task-scheduler")?.classList.remove("is-edge-prev", "is-edge-next");
 }
 
+function handleTodayBatchKeydown(event) {
+  const batch = ui.todayBatch;
+  if (!batch) return false;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeTodayBatch({ announce: true });
+    return true;
+  }
+  if (event.key === "Tab") {
+    event.stopPropagation();
+    trapTodayBatchFocus(event);
+    return true;
+  }
+  const input = event.target.closest?.("[data-today-batch-input]");
+  if (
+    batch.phase === "input"
+    && input
+    && event.key === "Enter"
+    && !event.isComposing
+    && (
+      ((event.metaKey || event.ctrlKey) && !event.altKey)
+      || (!event.shiftKey && !event.altKey && input.value.endsWith("\n"))
+    )
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    startTodayBatchPlacement(input.value);
+    return true;
+  }
+  return false;
+}
+
+function trapTodayBatchFocus(event) {
+  const surface = document.querySelector("[data-today-batch-dialog]");
+  if (!surface) return;
+  const focusable = [...surface.querySelectorAll("button:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+    .filter((element) => element.getClientRects().length);
+  if (!focusable.length) return;
+  const activeIndex = focusable.indexOf(document.activeElement);
+  const nextIndex = event.shiftKey ? focusable.length - 1 : 0;
+  if (activeIndex < 0 || (event.shiftKey && activeIndex === 0) || (!event.shiftKey && activeIndex === focusable.length - 1)) {
+    event.preventDefault();
+    focusable[nextIndex]?.focus({ preventScroll: true });
+  }
+}
+
 function handleKeydown(event) {
+  if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (handleInlineColorMenuKeydown(event)) return;
@@ -17694,6 +18102,7 @@ function isPrintableBlockReplacementKey(event) {
 
 function handleDocumentKeydown(event) {
   if (app.dataset.workspaceAuthority !== "ready") return;
+  if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (event.key === "Shift" || event.shiftKey) ui.shiftKeyDown = true;
@@ -24587,6 +24996,7 @@ function mergeWorkspaceDraftStates(baseState, draftState) {
     ...cloneForLocalPersistence(baseSettings),
     ...cloneForLocalPersistence(draftSettings),
     calendarSources: { ...(baseSettings.calendarSources || {}), ...(draftSettings.calendarSources || {}) },
+    visibleProjectCalendars: { ...(baseSettings.visibleProjectCalendars || {}), ...(draftSettings.visibleProjectCalendars || {}) },
     visibleGoogleCalendars: { ...(baseSettings.visibleGoogleCalendars || {}), ...(draftSettings.visibleGoogleCalendars || {}) },
     calendarColorAssignments: { ...(baseSettings.calendarColorAssignments || {}), ...(draftSettings.calendarColorAssignments || {}) },
     openPagesIn: { ...(baseSettings.openPagesIn || {}), ...(draftSettings.openPagesIn || {}) },
@@ -26187,7 +26597,8 @@ function normalizeState(next) {
   settings.resourceSideWidth = Number.isFinite(Number(nextSettings.resourceSideWidth)) && Number(nextSettings.resourceSideWidth) > 0
     ? Math.round(Number(nextSettings.resourceSideWidth))
     : 0;
-  settings.visibleGoogleCalendars = isPlainObject(settings.visibleGoogleCalendars) ? { ...settings.visibleGoogleCalendars } : {};
+  settings.visibleProjectCalendars = normalizeBooleanMap(settings.visibleProjectCalendars);
+  settings.visibleGoogleCalendars = normalizeBooleanMap(settings.visibleGoogleCalendars);
   settings.calendarColorAssignments = normalizeCalendarColorAssignments(settings.calendarColorAssignments);
   settings.resourceCommentReadAt = normalizeResourceCommentReadAt(nextSettings.resourceCommentReadAt);
   const resourceMigrationAt = new Date().toISOString();
@@ -26232,6 +26643,7 @@ function createDefaultSettings() {
     lastGoogleFetchAt: "",
     lastGoogleSyncAt: "",
     calendarSources: { ...DEFAULT_CALENDAR_SOURCES },
+    visibleProjectCalendars: {},
     visibleGoogleCalendars: {},
     calendarColorAssignments: {},
     viewControls: defaultViewControls(),
@@ -27365,6 +27777,15 @@ function calendarSourcesValid(sources) {
     count += 1;
   }
   return count === CALENDAR_SOURCE_KEYS.length;
+}
+
+function normalizeBooleanMap(value) {
+  const normalized = {};
+  if (!isPlainObject(value)) return normalized;
+  for (const key in value) {
+    if (Object.prototype.hasOwnProperty.call(value, key) && typeof value[key] === "boolean") normalized[key] = value[key];
+  }
+  return normalized;
 }
 
 function fallbackGoogleCalendar(calendarId = "primary", summary = "") {
