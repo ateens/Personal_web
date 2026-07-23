@@ -19738,13 +19738,34 @@ function saveTaskFlow(captureId) {
   delete ui.captureDrafts[captureId];
   saveState();
   showToast(`${captureTargetLabel(targetType)}로 저장했습니다.`);
-  renderView({ soft: true });
-  if (targetType === "resources") {
-    openResourceNote(created.id);
-  } else {
-    renderDetail();
-  }
-  renderOverlays();
+  const finish = () => {
+    renderView({ soft: true });
+    if (targetType === "resources") {
+      openResourceNote(created.id);
+    } else {
+      renderDetail();
+    }
+    renderOverlays();
+  };
+  if (!animateCaptureCardExit(captureId, finish)) finish();
+}
+
+function animateCaptureCardExit(captureId, onComplete) {
+  const card = document.querySelector(`[data-select-type="captures"][data-select-id="${captureId}"]`);
+  if (!card || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof card.animate !== "function") return false;
+  const style = getComputedStyle(card);
+  card.inert = true;
+  card.setAttribute("aria-hidden", "true");
+  card.style.overflow = "hidden";
+  const exit = card.animate(
+    [
+      { height: `${card.getBoundingClientRect().height}px`, paddingTop: style.paddingTop, paddingBottom: style.paddingBottom, opacity: 1, transform: style.transform },
+      { height: "0px", paddingTop: "0px", paddingBottom: "0px", opacity: 0, transform: "translateY(-10px)" },
+    ],
+    { duration: 360, easing: "cubic-bezier(0.16, 0.92, 0.22, 1)", fill: "forwards" },
+  );
+  exit.finished.then(onComplete, onComplete);
+  return true;
 }
 
 function buildTaskFlowInitialValues(draft, capture = null) {
