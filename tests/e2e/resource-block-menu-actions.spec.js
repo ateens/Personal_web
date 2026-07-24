@@ -105,6 +105,19 @@ test("selected-block menu exposes direct actions and applies visible color and m
   ]);
 });
 
+test("only a direct block-handle click opens the selected-block menu", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 1279 });
+  const todo = block(page, "fixture-block-todo");
+  const checkbox = todo.locator('[data-block-check="fixture-block-todo"]');
+  const rect = await checkbox.evaluate((element) => element.getBoundingClientRect().toJSON());
+
+  await page.mouse.click(Math.floor(rect.left) - 1, rect.top + rect.height / 2);
+  await expect(page.locator(".slash-menu.is-selection-menu")).toHaveCount(0);
+
+  await todo.locator('[data-block-drag="fixture-block-todo"]').click();
+  await expect(page.locator(".slash-menu.is-selection-menu")).toBeVisible();
+});
+
 test("block menu creates a whole-block comment and copies a focusable deep link", async ({ page, context, request }) => {
   let menu = await openBlockMenu(page);
   await menu.locator('[data-selected-block-action="comment"]').click();

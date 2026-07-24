@@ -362,9 +362,6 @@ const INLINE_TOOLBAR_ESTIMATED_HEIGHT = 34;
 const BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE = 6;
 const BLOCK_BODY_DRAG_ACTIVATION_DISTANCE = 10;
 const POINTER_DRAG_ACTIVATION_DISTANCE = 12;
-const BLOCK_DRAG_HANDLE_HIT_PADDING_LEFT = 12;
-const BLOCK_DRAG_HANDLE_HIT_PADDING_RIGHT = 6;
-const BLOCK_DRAG_HANDLE_HIT_PADDING_Y = 10;
 const RESOURCE_NOTE_RANGE_GUTTER_GUARD = 10;
 const BLOCK_TYPE_KEYBOARD_SHORTCUTS = {
   "0": "paragraph",
@@ -16347,39 +16344,14 @@ function canStartEditorMarqueeDrag(resourceNote, event) {
 function blockDragHandleFromEvent(event) {
   if (!(event.target instanceof Element)) return null;
   if (isResourceNoteRangeGutterPoint(event.target, event.clientX)) return null;
-  const direct = event.target.closest("[data-block-drag]");
-  if (direct) return direct;
-  if (event.target.closest("[data-block-toggle], [data-block-check]")) return null;
-  const stacked = typeof document.elementsFromPoint === "function" ? document.elementsFromPoint(event.clientX, event.clientY) : [];
-  for (const element of stacked) {
-    const handle = element.closest?.("[data-block-drag]");
-    if (handle) return handle;
-  }
-  const pointed = document.elementFromPoint(event.clientX, event.clientY);
-  return pointed?.closest?.("[data-block-drag]") || blockDragHandleFromClientPoint(event.clientX, event.clientY);
+  const handle = event.target.closest("[data-block-drag]");
+  return handle?.closest('[aria-hidden="true"], [hidden], [inert]') ? null : handle;
 }
 
 function isResourceNoteRangeGutterPoint(target, clientX) {
   const resourceNote = target?.closest?.("[data-resource-note]");
   const scrollRect = resourceNote?.querySelector(".resource-note-scroll")?.getBoundingClientRect();
   return Boolean(scrollRect && clientX >= scrollRect.left - 1 && clientX <= scrollRect.left + RESOURCE_NOTE_RANGE_GUTTER_GUARD);
-}
-
-function blockDragHandleFromClientPoint(clientX, clientY) {
-  const handles = document.querySelectorAll("[data-block-drag]");
-  for (const handle of handles) {
-    const rect = handle.getBoundingClientRect();
-    if (!rect.width || !rect.height) continue;
-    const noteScrollRect = handle.closest("[data-resource-note]")?.querySelector(".resource-note-scroll")?.getBoundingClientRect();
-    if (noteScrollRect && clientX <= noteScrollRect.left + RESOURCE_NOTE_RANGE_GUTTER_GUARD) continue;
-    const blockRect = handle.closest(".block")?.getBoundingClientRect();
-    const hitLeft = rect.left - BLOCK_DRAG_HANDLE_HIT_PADDING_LEFT;
-    const hitRight = rect.right + BLOCK_DRAG_HANDLE_HIT_PADDING_RIGHT;
-    const hitTop = Math.min(rect.top, blockRect?.top ?? rect.top) - BLOCK_DRAG_HANDLE_HIT_PADDING_Y;
-    const hitBottom = Math.max(rect.bottom, blockRect ? Math.min(blockRect.bottom, blockRect.top + 34) : rect.bottom) + BLOCK_DRAG_HANDLE_HIT_PADDING_Y;
-    if (clientX >= hitLeft && clientX <= hitRight && clientY >= hitTop && clientY <= hitBottom) return handle;
-  }
-  return null;
 }
 
 function canStartEditorMarqueeDragWithinNote(resourceNote, event) {
