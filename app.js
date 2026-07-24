@@ -16368,6 +16368,7 @@ function isResourceNoteRangeGutterPoint(target, clientX) {
 function blockDragHandleFromClientPoint(clientX, clientY) {
   const handles = document.querySelectorAll("[data-block-drag]");
   for (const handle of handles) {
+    if (handle.closest('[aria-hidden="true"], [hidden], [inert]')) continue;
     const rect = handle.getBoundingClientRect();
     if (!rect.width || !rect.height) continue;
     const noteScrollRect = handle.closest("[data-resource-note]")?.querySelector(".resource-note-scroll")?.getBoundingClientRect();

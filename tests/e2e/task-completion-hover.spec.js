@@ -157,3 +157,26 @@ test("unchecking a Today task does not replay the card refresh animation", async
   ), taskId)).toBe(true);
   await expect(card).not.toHaveClass(/is-reordering/);
 });
+
+test("checking a collapsed Today task ignores hidden editor drag handles", async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 1000 });
+  const taskIds = await page.evaluate(() => {
+    const dueDate = window.dateKey(new Date());
+    const ids = Array.from({ length: 3 }, (_, index) => (
+      window.createTask(`Hidden editor guard ${index + 1}`, {
+        deferCreate: true,
+        initial: { dueDate, boxId: "" },
+      }).id
+    ));
+    window.saveState();
+    window.setView("today");
+    return ids;
+  });
+
+  const target = page.locator(`[data-today-task-id="${taskIds[2]}"]`);
+  await expect(target.locator('.task-detail-shell[aria-hidden="true"] [data-block-drag]')).toHaveCount(1);
+  await target.locator(".check").click();
+
+  await expect.poll(() => page.evaluate((taskId) => window.itemById("tasks", taskId)?.status, taskIds[2])).toBe("done");
+  await expect(page.locator(".slash-menu.is-selection-menu")).toHaveCount(0);
+});
