@@ -278,7 +278,6 @@ function legacyV3State(legacyMarker) {
     },
     captures: [],
     boxes: [],
-    goals: [],
     projects: [],
     tasks: [{ id: "legacy-task", kind: "task", title: "Legacy task", resourceId: "legacy-resource" }],
     resources: [{ id: "legacy-resource", title: "Legacy resource", type: "Note", blocks: [] }],
@@ -299,7 +298,7 @@ function unrelatedSentinelState(value) {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     settings: {},
-    captures: [], boxes: [], goals: [], projects: [], tasks: [], resources: [], habits: [], habitInstances: [], journals: [], googleCalendars: [], googleEvents: [], links: [],
+    captures: [], boxes: [], projects: [], tasks: [], resources: [], habits: [], habitInstances: [], journals: [], googleCalendars: [], googleEvents: [], links: [],
   };
 }
 

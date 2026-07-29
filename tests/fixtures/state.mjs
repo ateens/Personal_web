@@ -3,7 +3,6 @@ const FIXED_TIME = "2026-07-11T00:00:00.000Z";
 export const FIXTURE_IDS = Object.freeze({
   appState: "e2e-memory-fixture",
   box: "fixture-box",
-  goal: "fixture-goal",
   project: "fixture-project",
   resource: "fixture-resource-main",
   readOnlyResource: "fixture-resource-read-only",
@@ -22,7 +21,6 @@ const viewControls = () => ({
   inbox: control("recent", "board"),
   tasks: control("date", "board"),
   projects: control("status", "board"),
-  goals: control("target", "cards"),
   boxes: control("activity", "columns"),
   resources: {
     search: "",
@@ -144,7 +142,6 @@ function resource(id, title, overrides = {}) {
     readLater: false,
     url: "",
     boxId: FIXTURE_IDS.box,
-    goalId: FIXTURE_IDS.goal,
     projectId: FIXTURE_IDS.project,
     createdAt: FIXED_TIME,
     updatedAt: FIXED_TIME,
@@ -175,12 +172,13 @@ export function createFixtureState() {
     createdAt: FIXED_TIME,
     updatedAt: FIXED_TIME,
     settings: {
-      navOrder: ["today", "inbox", "tasks", "projects", "goals", "boxes", "resources", "habits", "journal", "calendar", "database"],
+      navOrder: ["today", "inbox", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"],
       googleCalendarId: "primary",
       googleConnectedAt: "",
       lastGoogleFetchAt: "",
       lastGoogleSyncAt: "",
       calendarSources: { tasks: true, projects: true, google: true },
+      visibleProjectCalendars: {},
       visibleGoogleCalendars: {},
       viewControls: viewControls(),
       statsDemoDataSeeded: true,
@@ -192,11 +190,8 @@ export function createFixtureState() {
     boxes: [
       { id: FIXTURE_IDS.box, name: "Fixture Box", visibility: "pinned", color: "blue", blocks: [block("fixture-box-block", "paragraph", "Fixture box")] },
     ],
-    goals: [
-      { id: FIXTURE_IDS.goal, boxId: FIXTURE_IDS.box, name: "Fixture Goal", status: "active", targetDate: "", year: "2026", quarter: "3Q", blocks: [block("fixture-goal-block", "paragraph", "Fixture goal")] },
-    ],
     projects: [
-      { id: FIXTURE_IDS.project, boxId: FIXTURE_IDS.box, goalId: FIXTURE_IDS.goal, name: "Fixture Project", status: "active", startDate: "", endDate: "", blocks: [block("fixture-project-block", "paragraph", "Fixture project")] },
+      { id: FIXTURE_IDS.project, boxId: FIXTURE_IDS.box, name: "Fixture Project", status: "active", startDate: "", endDate: "", blocks: [block("fixture-project-block", "paragraph", "Fixture project")] },
     ],
     tasks: [],
     resources: [

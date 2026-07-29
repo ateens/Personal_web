@@ -12,7 +12,6 @@ test.beforeEach(async ({ page, request }) => {
     title: `Hover completion ${index + 1}`,
     status: "todo",
     boxId: "",
-    goalId: "",
     projectId: "",
     resourceId: "",
     dueDate: "",

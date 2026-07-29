@@ -8,8 +8,9 @@ https://personalweb-production-81a6.up.railway.app
 
 ## Public access boundary
 
-- There is no application-level password, session gate, Sites Worker, proxy bearer, or OAuth handoff ticket.
-- `GET /`, workspace reads, Google Calendar reads, and the mutation APIs are reachable by anyone who can reach the Railway URL.
+- The ordinary workspace has no application-level password, session gate, Sites Worker, proxy bearer, or OAuth handoff ticket.
+- `GET /`, ordinary workspace reads, Google Calendar reads, and the ordinary mutation APIs are reachable by anyone who can reach the Railway URL.
+- `/finance` is isolated behind its own password and HttpOnly session cookie. Anonymous finance-state reads and writes return `401`; the finance state is stored outside `app_state`.
 - Production and every Railway runtime require revision preconditions for state mutations. This prevents stale concurrent writes; it is not authorization.
 - Unsafe requests carrying browser `Origin` or `Sec-Fetch-Site` metadata must be same-origin. Native app requests without browser fetch metadata are accepted. This does not stop a person from using the API directly.
 - API rate limits and the state-write queue remain enabled.
@@ -42,7 +43,10 @@ After `main` is pushed and Railway reports the new deployment healthy:
 5. Confirm the browser and iPhone app can save with the current revision precondition.
 6. Confirm `/api/google/auth/start` redirects to Google and uses the Railway callback URI.
 7. Confirm a Resource deep link reloads through the SPA fallback.
+8. Confirm `GET /finance` renders the locked finance shell and anonymous `GET /api/finance/state` returns `401 FINANCE_AUTH_REQUIRED`.
+9. Sign in with the finance password, confirm `/api/finance/session` reports authenticated, then lock it and confirm the session cookie is cleared.
+10. Confirm an authenticated conditional finance write advances `X-Finance-State-Revision` without adding a `finance` key to `/api/state`.
 
 ## Rollback
 
-Roll back to the previous Railway-only commit through the Railway or GitHub deployment history. Reintroducing an access gate is a separate architecture change and must include its credential lifecycle, session store, browser behavior, tests, and operating documentation together.
+Roll back to the previous Railway-only commit through the Railway or GitHub deployment history. If the finance gate is rolled back, do not enter real finance data until the authenticated finance boundary is restored and verified.

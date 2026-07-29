@@ -1,9 +1,10 @@
-const CACHE_NAME = "sygma-personal-web-v639-realtime-sync";
+const CACHE_NAME = "sygma-personal-web-v645-workspace";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
-  "/styles.css?v=20260718-realtime-sync",
-  "/app.js?v=20260718-realtime-sync",
+  "/styles.css?v=20260724-finance-controls",
+  "/finance-model.js?v=20260724-finance-sygma",
+  "/app.js?v=20260724-finance-controls",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 

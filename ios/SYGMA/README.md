@@ -1,17 +1,9 @@
 # SYGMA for iPhone
 
-Native SwiftUI client for the personal SYGMA workspace. It supports the complete mobile workflow:
-
-- Today dashboard and quick Inbox capture
-- Inbox classification into Task, Project, Goal, or Box
-- Task status, date, Box, Goal, and Project editing
-- Box, Goal, and Project CRUD with relation normalization
-- Habit editing and cadence-aware progress
-- Journal reflection, next action, date, and satisfaction
-- Local Task/Project calendar editing and Google Calendar viewing
-- Offline local persistence, revision-safe Railway sync, and explicit conflict resolution
-
-Resource intentionally has no iPhone UI. The app preserves the full Resource collection, editor blocks, and unknown JSON fields whenever it edits or synchronizes the shared state.
+The iPhone app is a minimal SwiftUI + WKWebView shell for the production SYGMA web app.
+All product UI and behavior live in the web app; the native target only provides web
+storage, browser-based Google authentication, downloads, and WidgetKit refresh bridging.
+The WidgetKit extension remains an independent native target.
 
 ## Run in Xcode
 
@@ -20,18 +12,9 @@ Resource intentionally has no iPhone UI. The app preserves the full Resource col
 3. Select the `SYGMA` scheme and an iPhone simulator.
 4. Run with Command-R.
 
-The default API origin is:
+The app opens:
 
 `https://personalweb-production-81a6.up.railway.app/`
-
-For screenshots and offline UI work, add these launch arguments:
-
-```text
--SYGMAUseSeedState
--SYGMASection projects
-```
-
-Supported section values are `today`, `inbox`, `tasks`, `projects`, `goals`, `boxes`, `habits`, `journal`, `calendar`, and `settings`.
 
 ## Install on a physical iPhone
 
@@ -57,7 +40,8 @@ This repository includes a 1024px app icon and `PrivacyInfo.xcprivacy`. The mani
 
 ## Verification
 
-Build the app and test target:
+Product behavior is tested in the web app with its npm and Playwright suites. Smoke-test
+the iOS web shell and embedded widget by compiling the `SYGMA` scheme:
 
 ```bash
 xcodebuild \
@@ -67,7 +51,5 @@ xcodebuild \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath /private/tmp/SYGMA-Derived \
   CODE_SIGNING_ALLOWED=NO \
-  build-for-testing
+  build
 ```
-
-Run the generated `.xctestrun` with `xcodebuild test-without-building` against an available iPhone simulator. The suite covers lossless state preservation, task scheduling and relations, planning CRUD cleanup, capture conversion, Journal block preservation, calendar time zones, no-cache API requests, local persistence, and both conflict-resolution choices.

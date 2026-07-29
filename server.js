@@ -8,6 +8,14 @@ import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import { deploymentSecurityPolicy, railwayRuntimeDetected } from "./server/deployment-security.js";
+import {
+  createFinanceSession,
+  financePasswordHashConfigured,
+  financeSessionSecretConfigured,
+  validateFinanceState,
+  verifyFinancePassword,
+  verifyFinanceSession,
+} from "./server/finance.js";
 import { mutationOriginAllowed } from "./server/request-security.js";
 import { createStorage } from "./server/storage.js";
 
@@ -16,6 +24,7 @@ const sourceStaticRoot = resolve(root);
 const assetProxyPrefix = "/_sygma/assets/";
 const sourceStaticFiles = new Set([
   "/app.js",
+  "/finance-model.js",
   "/index.html",
   "/manifest.json",
   "/service-worker.js",
@@ -24,6 +33,8 @@ const sourceStaticFiles = new Set([
 ]);
 const STATE_VERSION = 4;
 const STATE_BODY_LIMIT = 5_000_000;
+const FINANCE_BODY_LIMIT = 2_000_000;
+const FINANCE_LOGIN_BODY_LIMIT = 4_096;
 const STATE_EVENT_POLL_INTERVAL_MS = 1_000;
 const STATE_EVENT_HEARTBEAT_MS = 15_000;
 const MAX_STATE_DEPTH = 32;
@@ -46,7 +57,6 @@ const MAX_VALIDATION_ISSUES = 24;
 const REQUIRED_COLLECTION_KEYS = [
   "captures",
   "boxes",
-  "goals",
   "projects",
   "tasks",
   "resources",
@@ -57,8 +67,8 @@ const REQUIRED_COLLECTION_KEYS = [
   "googleEvents",
   "links",
 ];
-const PRIMARY_COLLECTION_KEYS = ["captures", "boxes", "goals", "projects", "tasks", "resources", "habits", "journals"];
-const BLOCK_COLLECTION_KEYS = new Set(["boxes", "goals", "projects", "tasks", "resources", "habits", "journals"]);
+const PRIMARY_COLLECTION_KEYS = ["captures", "boxes", "projects", "tasks", "resources", "habits", "journals"];
+const BLOCK_COLLECTION_KEYS = new Set(["boxes", "projects", "tasks", "resources", "habits", "journals"]);
 const SUPPORTED_BLOCK_TYPES = new Set([
   "paragraph",
   "heading1",
@@ -83,7 +93,6 @@ const SUPPORTED_COMMENT_SCOPES = new Set(["page", "inline"]);
 const RELATION_COLLECTION_ALIASES = new Map([
   ["capture", "captures"],
   ["box", "boxes"],
-  ["goal", "goals"],
   ["project", "projects"],
   ["task", "tasks"],
   ["resource", "resources"],
@@ -91,7 +100,6 @@ const RELATION_COLLECTION_ALIASES = new Map([
   ["journal", "journals"],
   ["captures", "captures"],
   ["boxes", "boxes"],
-  ["goals", "goals"],
   ["projects", "projects"],
   ["tasks", "tasks"],
   ["resources", "resources"],
@@ -140,6 +148,9 @@ const apiRateLimitStateReadMax = envInteger("API_RATE_LIMIT_STATE_READ_MAX", 240
 const apiRateLimitStateWriteMax = envInteger("API_RATE_LIMIT_STATE_WRITE_MAX", 120, 0, 100_000);
 const apiRateLimitGoogleReadMax = envInteger("API_RATE_LIMIT_GOOGLE_READ_MAX", 120, 0, 100_000);
 const apiRateLimitGoogleMutationMax = envInteger("API_RATE_LIMIT_GOOGLE_MUTATION_MAX", 20, 0, 100_000);
+const apiRateLimitFinanceLoginMax = envInteger("API_RATE_LIMIT_FINANCE_LOGIN_MAX", 8, 1, 1_000);
+const apiRateLimitFinanceReadMax = envInteger("API_RATE_LIMIT_FINANCE_READ_MAX", 120, 1, 100_000);
+const apiRateLimitFinanceWriteMax = envInteger("API_RATE_LIMIT_FINANCE_WRITE_MAX", 60, 1, 100_000);
 const apiRateLimitMaxKeys = envInteger("API_RATE_LIMIT_MAX_KEYS", 10_000, 1, 100_000);
 const stateWriteMaxConcurrency = envInteger("STATE_WRITE_MAX_CONCURRENCY", 2, 1, 32);
 const stateWriteMaxQueue = envInteger("STATE_WRITE_MAX_QUEUE", 16, 0, 1_000);
@@ -159,6 +170,9 @@ let lastStateEventHeartbeatAt = 0;
 
 const googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+const financePasswordHash = process.env.FINANCE_PASSWORD_HASH || "";
+const financeSessionSecret = process.env.FINANCE_SESSION_SECRET || "";
+const financeSessionTtlSeconds = envInteger("FINANCE_SESSION_TTL_SECONDS", 43_200, 300, 86_400);
 const googleTokenFile = resolve(process.env.GOOGLE_TOKEN_FILE || join(root, ".data/google-token.json"));
 const googleScopes = [
   "https://www.googleapis.com/auth/calendar.events",
@@ -172,6 +186,7 @@ const oauthStateCookie = "sygma_google_oauth_state";
 const GOOGLE_OAUTH_STATE_AUDIENCE = "google-oauth-state";
 const GOOGLE_OAUTH_STATE_SIGNATURE_PREFIX = "sygma-google-oauth-state-v1.";
 const GOOGLE_OAUTH_STATE_TTL_SECONDS = 600;
+const financeSessionCookie = "sygma_finance_session";
 let storage;
 
 function productionGoogleOAuthConfigurationValid() {
@@ -279,6 +294,11 @@ function apiOperation(request, requestUrl) {
   if (method === "GET" && pathname === "/api/state") return "state.read";
   if ((method === "PUT" || method === "POST") && pathname === "/api/state") return "state.write";
   if (method === "PUT" && /^\/api\/resources\/[^/]+$/.test(pathname)) return "resource.write";
+  if (method === "POST" && pathname === "/api/finance/login") return "finance.login";
+  if (method === "POST" && pathname === "/api/finance/logout") return "finance.logout";
+  if (method === "GET" && pathname === "/api/finance/session") return "finance.session";
+  if (method === "GET" && pathname === "/api/finance/state") return "finance.state.read";
+  if (method === "PUT" && pathname === "/api/finance/state") return "finance.state.write";
   if (method === "GET" && pathname === "/api/google/status") return "google.status";
   if (method === "GET" && pathname === "/api/google/auth/start") return "google.connect.start";
   if (method === "GET" && pathname === "/api/google/oauth/callback") return "google.connect.callback";
@@ -290,6 +310,9 @@ function apiOperation(request, requestUrl) {
 
 function operationRateLimit(operation) {
   if (operation === "state.events" || operation === "state.status" || operation === "state.read") return apiRateLimitStateReadMax;
+  if (operation === "finance.login") return apiRateLimitFinanceLoginMax;
+  if (operation === "finance.session" || operation === "finance.state.read") return apiRateLimitFinanceReadMax;
+  if (operation === "finance.logout" || operation === "finance.state.write") return apiRateLimitFinanceWriteMax;
   if (operation === "google.status" || operation === "google.calendar.read") return apiRateLimitGoogleReadMax;
   if (
     operation === "state.write"
@@ -477,7 +500,12 @@ function sendApiError(response, error) {
   if (exposed && error?.details !== undefined) payload.details = error.details;
   if (Number.isSafeInteger(error?.revision)) payload.revision = error.revision;
   if (Number.isSafeInteger(error?.details?.revision)) payload.revision = error.details.revision;
-  const headers = Number.isSafeInteger(payload.revision) ? stateRevisionHeaders(payload.revision) : {};
+  const financeError = String(payload.code || "").startsWith("FINANCE_") || String(payload.code || "").includes("_FINANCE_");
+  const headers = Number.isSafeInteger(payload.revision)
+    ? financeError
+      ? financeStateRevisionHeaders(payload.revision)
+      : stateRevisionHeaders(payload.revision)
+    : {};
   if (status === 429 && Number.isSafeInteger(error?.retryAfter) && error.retryAfter > 0) {
     headers["Retry-After"] = String(error.retryAfter);
   }
@@ -494,25 +522,29 @@ function parseCookies(request) {
       cookies[part] = "";
       continue;
     }
-    cookies[part.slice(0, index)] = decodeURIComponent(part.slice(index + 1));
+    try {
+      cookies[part.slice(0, index)] = decodeURIComponent(part.slice(index + 1));
+    } catch {
+      cookies[part.slice(0, index)] = "";
+    }
   }
   return cookies;
 }
 
-function setCookie(response, request, name, value, maxAgeSeconds = 600) {
+function setCookie(response, request, name, value, maxAgeSeconds = 600, options = {}) {
   const parts = [
     `${name}=${encodeURIComponent(value)}`,
-    "Path=/",
+    `Path=${options.path || "/"}`,
     "HttpOnly",
-    "SameSite=Lax",
+    `SameSite=${options.sameSite || "Lax"}`,
     `Max-Age=${maxAgeSeconds}`,
   ];
-  if (isSecureRequest(request)) parts.push("Secure");
+  if (isSecureRequest(request) || deploymentSecurity.isProductionTarget) parts.push("Secure");
   response.setHeader("Set-Cookie", parts.join("; "));
 }
 
-function clearCookie(response, request, name) {
-  setCookie(response, request, name, "", 0);
+function clearCookie(response, request, name, options = {}) {
+  setCookie(response, request, name, "", 0, options);
 }
 
 function sendJson(response, status, payload, headers = {}) {
@@ -1229,6 +1261,9 @@ function validateIncomingState(state) {
     throw apiError(422, "INVALID_STATE", "State validation failed.", { issues: [{ path: "state", code: "invalid_root", message: "state must be an object." }] });
   }
   if (state.version !== STATE_VERSION) addValidationIssue(issues, "state.version", "unsupported_version", `State version must be ${STATE_VERSION}.`);
+  if (Object.prototype.hasOwnProperty.call(state, "finance")) {
+    addValidationIssue(issues, "state.finance", "reserved_finance_root", "Finance data must use the authenticated finance state API.");
+  }
   if (!Number.isFinite(Date.parse(state.createdAt || ""))) addValidationIssue(issues, "state.createdAt", "invalid_timestamp", "createdAt must be an ISO-compatible timestamp.");
   if (!Number.isFinite(Date.parse(state.updatedAt || ""))) addValidationIssue(issues, "state.updatedAt", "invalid_timestamp", "updatedAt must be an ISO-compatible timestamp.");
   if (!isPlainObject(state.settings)) addValidationIssue(issues, "state.settings", "invalid_settings", "settings must be an object.");
@@ -1276,16 +1311,14 @@ function validateIncomingState(state) {
   }
 
   const boxes = idSets.get("boxes");
-  const goals = idSets.get("goals");
   const projects = idSets.get("projects");
   const resources = idSets.get("resources");
   const habits = idSets.get("habits");
   const calendars = idSets.get("googleCalendars");
   for (const [key, fields] of Object.entries({
-    goals: [["boxId", boxes]],
-    projects: [["boxId", boxes], ["goalId", goals]],
-    tasks: [["boxId", boxes], ["goalId", goals], ["projectId", projects], ["resourceId", resources]],
-    resources: [["boxId", boxes], ["goalId", goals], ["projectId", projects], ["parentId", resources]],
+    projects: [["boxId", boxes]],
+    tasks: [["boxId", boxes], ["projectId", projects], ["resourceId", resources]],
+    resources: [["boxId", boxes], ["projectId", projects], ["parentId", resources]],
     habits: [["boxId", boxes], ["projectId", projects]],
     habitInstances: [["habitId", habits]],
     googleEvents: [["calendarId", calendars]],
@@ -1347,6 +1380,23 @@ function requestBaseRevision(request, body) {
   return headerRevision ?? bodyRevision;
 }
 
+function requestFinanceBaseRevision(request, body) {
+  let headerRevision = null;
+  const ifMatch = String(request.headers["if-match"] || "").trim();
+  if (ifMatch) {
+    const match = ifMatch.match(/^(?:W\/)?"?finance-state-(\d+)"?$/i);
+    if (!match) throw apiError(400, "INVALID_FINANCE_IF_MATCH", "If-Match must contain a finance state revision ETag.");
+    headerRevision = revisionValue(match[1], "If-Match");
+  }
+  const bodyRevision = body.baseRevision === undefined || body.baseRevision === null || body.baseRevision === ""
+    ? null
+    : revisionValue(body.baseRevision, "baseRevision");
+  if (headerRevision !== null && bodyRevision !== null && headerRevision !== bodyRevision) {
+    throw apiError(400, "FINANCE_REVISION_PRECONDITION_MISMATCH", "If-Match and baseRevision must match.");
+  }
+  return headerRevision ?? bodyRevision;
+}
+
 function resourcePathId(requestUrl) {
   const match = requestUrl.pathname.match(/^\/api\/resources\/([^/]+)$/);
   if (!match) return "";
@@ -1366,6 +1416,15 @@ function stateRevisionHeaders(revision, mode = "conditional") {
     ETag: `"state-${value}"`,
     "X-State-Revision": String(value),
     "X-State-Concurrency": mode,
+  };
+}
+
+function financeStateRevisionHeaders(revision) {
+  const value = Number.isSafeInteger(Number(revision)) && Number(revision) >= 0 ? Number(revision) : 0;
+  return {
+    ETag: `"finance-state-${value}"`,
+    "X-Finance-State-Revision": String(value),
+    "X-Finance-State-Concurrency": "required",
   };
 }
 
@@ -1603,6 +1662,92 @@ async function handleStateWrite(request, response) {
   });
 }
 
+function financeAuthConfigured() {
+  return financePasswordHashConfigured(financePasswordHash)
+    && financeSessionSecretConfigured(financeSessionSecret);
+}
+
+function requireFinanceSession(request) {
+  if (!financeAuthConfigured()) {
+    throw apiError(503, "FINANCE_AUTH_NOT_CONFIGURED", "Finance authentication is not configured.");
+  }
+  const token = parseCookies(request)[financeSessionCookie] || "";
+  const session = verifyFinanceSession(token, financeSessionSecret);
+  if (!session) throw apiError(401, "FINANCE_AUTH_REQUIRED", "Finance authentication is required.");
+  return session;
+}
+
+async function handleFinanceLogin(request, response) {
+  if (!financeAuthConfigured()) {
+    throw apiError(503, "FINANCE_AUTH_NOT_CONFIGURED", "Finance authentication is not configured.");
+  }
+  const body = await readJsonBody(request, FINANCE_LOGIN_BODY_LIMIT);
+  const valid = await verifyFinancePassword(body.password, financePasswordHash);
+  if (!valid) throw apiError(401, "FINANCE_LOGIN_FAILED", "The finance password is incorrect.");
+  const token = createFinanceSession(financeSessionSecret, { ttlSeconds: financeSessionTtlSeconds });
+  const session = verifyFinanceSession(token, financeSessionSecret);
+  setCookie(response, request, financeSessionCookie, token, financeSessionTtlSeconds, {
+    path: "/api/finance",
+    sameSite: "Strict",
+  });
+  sendJson(response, 200, {
+    ok: true,
+    expiresIn: financeSessionTtlSeconds,
+    expiresAt: session ? new Date(session.exp * 1_000).toISOString() : "",
+  });
+  auditEvent(request, "finance.login", { status: 200, outcome: "succeeded" });
+}
+
+async function handleFinanceLogout(request, response) {
+  clearCookie(response, request, financeSessionCookie, {
+    path: "/api/finance",
+    sameSite: "Strict",
+  });
+  sendJson(response, 200, { ok: true });
+  auditEvent(request, "finance.logout", { status: 200, outcome: "succeeded" });
+}
+
+async function handleFinanceSession(request, response) {
+  const configured = financeAuthConfigured();
+  const token = configured ? parseCookies(request)[financeSessionCookie] || "" : "";
+  const session = configured ? verifyFinanceSession(token, financeSessionSecret) : null;
+  sendJson(response, 200, {
+    configured,
+    authenticated: Boolean(session),
+    expiresAt: session ? new Date(session.exp * 1_000).toISOString() : "",
+  });
+}
+
+async function handleFinanceStateRead(request, response) {
+  requireFinanceSession(request);
+  const payload = await storage.readFinanceState();
+  sendJson(response, 200, payload, financeStateRevisionHeaders(payload.revision));
+}
+
+async function handleFinanceStateWrite(request, response) {
+  requireFinanceSession(request);
+  const body = await readJsonBody(request, FINANCE_BODY_LIMIT);
+  if (!isPlainObject(body.state)) throw apiError(400, "FINANCE_STATE_REQUIRED", "Finance state object is required.");
+  const issues = validateFinanceState(body.state);
+  if (issues.length) {
+    throw apiError(422, "INVALID_FINANCE_STATE", "Finance state validation failed.", { issues });
+  }
+  const baseRevision = requestFinanceBaseRevision(request, body);
+  const saved = await storage.writeFinanceState(body.state, {
+    baseRevision,
+    requirePrecondition: true,
+  });
+  sendJson(response, 200, {
+    ok: true,
+    ...saved,
+  }, financeStateRevisionHeaders(saved.revision));
+  auditEvent(request, "finance.state.write", {
+    status: 200,
+    outcome: "succeeded",
+    revision: saved.revision,
+  });
+}
+
 async function handleResourceWrite(request, response, requestUrl) {
   const pathId = resourcePathId(requestUrl);
   const body = await readJsonBody(request, STATE_BODY_LIMIT);
@@ -1800,6 +1945,33 @@ function auditApiFailure(request, error) {
       ? error.details.revision
       : undefined;
 
+  if (operation === "finance.login") {
+    auditEvent(request, "finance.login", {
+      status,
+      code,
+      outcome: status >= 500 ? "failed" : "rejected",
+    });
+    return;
+  }
+  if (operation === "finance.state.read" || operation === "finance.state.write") {
+    const event = operation === "finance.state.write" ? "finance.state.write" : "finance.state.read";
+    auditEvent(request, event, {
+      status,
+      code,
+      revision,
+      outcome: status >= 500 ? "failed" : "rejected",
+    });
+    return;
+  }
+  if (operation === "finance.logout") {
+    auditEvent(request, "finance.logout", {
+      status,
+      code,
+      outcome: status >= 500 ? "failed" : "rejected",
+    });
+    return;
+  }
+
   if (operation === "state.write" || operation === "resource.write") {
     const eventPrefix = operation === "resource.write" ? "resource" : "state";
     if (code === "STATE_REVISION_CONFLICT") {
@@ -1859,6 +2031,11 @@ async function handleApiRequest(request, response, requestUrl) {
   try {
     const operation = apiOperation(request, requestUrl);
     request[apiOperationSymbol] = operation;
+    const financeStateOperation = operation === "finance.state.read" || operation === "finance.state.write";
+    if (financeStateOperation) {
+      if (enforceApiRateLimit(request, response, operation)) return true;
+      requireFinanceSession(request);
+    }
     if (!mutationOriginAllowed(request, requestUrl, requireMutationOrigin)) {
       auditEvent(request, "api.origin_rejected", {
         status: 403,
@@ -1868,7 +2045,7 @@ async function handleApiRequest(request, response, requestUrl) {
       sendJson(response, 403, { error: "Request origin is not allowed.", code: "ORIGIN_NOT_ALLOWED" });
       return true;
     }
-    if (enforceApiRateLimit(request, response, operation)) return true;
+    if (!financeStateOperation && enforceApiRateLimit(request, response, operation)) return true;
     if (request.method === "GET" && requestUrl.pathname === "/api/state/events") {
       await handleStateEvents(request, response);
       return true;
@@ -1887,6 +2064,26 @@ async function handleApiRequest(request, response, requestUrl) {
     }
     if (request.method === "PUT" && /^\/api\/resources\/[^/]+$/.test(requestUrl.pathname)) {
       await handleResourceWrite(request, response, requestUrl);
+      return true;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/api/finance/login") {
+      await handleFinanceLogin(request, response);
+      return true;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/api/finance/logout") {
+      await handleFinanceLogout(request, response);
+      return true;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/api/finance/session") {
+      await handleFinanceSession(request, response);
+      return true;
+    }
+    if (request.method === "GET" && requestUrl.pathname === "/api/finance/state") {
+      await handleFinanceStateRead(request, response);
+      return true;
+    }
+    if (request.method === "PUT" && requestUrl.pathname === "/api/finance/state") {
+      await handleFinanceStateWrite(request, response);
       return true;
     }
     if (request.method === "GET" && requestUrl.pathname === "/api/google/status") {

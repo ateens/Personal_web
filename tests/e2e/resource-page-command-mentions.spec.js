@@ -93,7 +93,6 @@ test("page mentions expose target state and navigate by click or keyboard to eve
 
   const targetCases = [
     { type: "projects", id: FIXTURE_IDS.project, key: "Enter", selector: `[data-project-toggle="${FIXTURE_IDS.project}"]` },
-    { type: "goals", id: FIXTURE_IDS.goal, key: " ", selector: `[data-select-type="goals"][data-select-id="${FIXTURE_IDS.goal}"]` },
     { type: "boxes", id: FIXTURE_IDS.box, key: "Enter", selector: `[data-select-type="boxes"][data-select-id="${FIXTURE_IDS.box}"]` },
     { type: "tasks", id: TASK_ID, key: " ", selector: `[data-task-id="${TASK_ID}"]` },
     { type: "habits", id: HABIT_ID, key: "Enter", selector: `[data-habit-toggle="${HABIT_ID}"]` },
@@ -141,7 +140,6 @@ async function seedMentionTargets(request) {
     title: "Mention Task",
     status: "todo",
     boxId: FIXTURE_IDS.box,
-    goalId: FIXTURE_IDS.goal,
     projectId: FIXTURE_IDS.project,
     resourceId: "",
     dueDate: "",
@@ -160,7 +158,7 @@ async function seedMentionTargets(request) {
     blocks: [{ id: "fixture-habit-mention-block", type: "paragraph", text: "", marks: [], checked: false, indent: 0, collapsed: false }],
   });
 
-  const labels = ["Resource", "Project", "Goal", "Box", "Task", "Habit", "Missing"];
+  const labels = ["Resource", "Project", "Box", "Task", "Habit", "Missing"];
   const text = labels.join(" ");
   const mark = (label, targetType, targetId) => {
     const start = text.indexOf(label);
@@ -174,7 +172,6 @@ async function seedMentionTargets(request) {
     marks: [
       mark("Resource", "resources", FIXTURE_IDS.bodySearchResource),
       mark("Project", "projects", FIXTURE_IDS.project),
-      mark("Goal", "goals", FIXTURE_IDS.goal),
       mark("Box", "boxes", FIXTURE_IDS.box),
       mark("Task", "tasks", TASK_ID),
       mark("Habit", "habits", HABIT_ID),

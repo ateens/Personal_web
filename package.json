@@ -12,13 +12,16 @@
     "test:e2e:baseline": "playwright test tests/e2e/resource-baseline.spec.js tests/e2e/resource-p0.spec.js",
     "test:e2e:p0": "playwright test tests/e2e/resource-p0.spec.js",
     "test:e2e:shell": "playwright test tests/e2e/resource-page-shell.spec.js",
-    "check": "node --check app.js && node --check server.js && node --check server/deployment-security.js && node --check server/request-security.js && node --check server/storage.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-deployment-security.mjs && node --check scripts/check-request-security.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/manage-state-backups.mjs && node --check scripts/check-state-migration-backups.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-deployment-security.mjs && node scripts/check-request-security.mjs",
+    "check": "node --check app.js && node --check finance-model.js && node --check server.js && node --check server/deployment-security.js && node --check server/finance.js && node --check server/request-security.js && node --check server/storage.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-deployment-security.mjs && node --check scripts/check-finance.mjs && node --check scripts/hash-finance-password.mjs && node --check scripts/check-request-security.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/manage-state-backups.mjs && node --check scripts/check-state-migration-backups.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-deployment-security.mjs && node scripts/check-finance.mjs && node scripts/check-request-security.mjs",
     "check:build": "npm run build && node scripts/check-build.mjs",
     "verify": "npm run check && npm run check:build && npm run test:e2e:baseline",
     "check:postgres": "node --env-file-if-exists=.env scripts/check-postgres-state.mjs",
     "check:deployment-security": "node scripts/check-deployment-security.mjs",
     "check:request-security": "node scripts/check-request-security.mjs",
-    "check:backups": "node --env-file-if-exists=.env scripts/check-state-migration-backups.mjs"
+    "check:backups": "node --env-file-if-exists=.env scripts/check-state-migration-backups.mjs",
+    "check:finance": "node scripts/check-finance.mjs",
+    "finance:hash-password": "node scripts/hash-finance-password.mjs",
+    "finance:session-secret": "node -e \"process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url') + '\\n')\""
   },
   "engines": {
     "node": ">=20"

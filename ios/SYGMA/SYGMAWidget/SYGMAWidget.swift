@@ -37,6 +37,58 @@ private struct WidgetStateSnapshot {
     let revision: Int
 }
 
+struct CalendarProjectEntity: AppEntity, Hashable {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "프로젝트"
+    static let defaultQuery = CalendarProjectQuery()
+
+    let id: String
+    let name: String
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: LocalizedStringResource(stringLiteral: name))
+    }
+}
+
+struct CalendarProjectQuery: EntityQuery {
+    func entities(for identifiers: [String]) async throws -> [CalendarProjectEntity] {
+        let entities = await projects()
+        let byID = Dictionary(uniqueKeysWithValues: entities.map { ($0.id, $0) })
+        return identifiers.map { byID[$0] ?? CalendarProjectEntity(id: $0, name: $0) }
+    }
+
+    func suggestedEntities() async throws -> [CalendarProjectEntity] {
+        await projects()
+    }
+
+    private func projects() async -> [CalendarProjectEntity] {
+        guard let snapshot = try? await WidgetStateClient.fetch() else { return [] }
+        return (snapshot.root["projects"] as? [[String: Any]] ?? []).compactMap { project in
+            let id = project["id"] as? String ?? ""
+            let name = project["name"] as? String ?? ""
+            let hasDate = !(project["startDate"] as? String ?? "").isEmpty
+                || !(project["endDate"] as? String ?? "").isEmpty
+            guard !id.isEmpty, !name.isEmpty, hasDate, project["status"] as? String != "canceled" else { return nil }
+            return CalendarProjectEntity(id: id, name: name)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+}
+
+struct CalendarWidgetConfigurationIntent: WidgetConfigurationIntent {
+    static let title: LocalizedStringResource = "캘린더 프로젝트 설정"
+    static let description = IntentDescription("4주 캘린더에 표시할 프로젝트를 선택합니다.")
+
+    @Parameter(title: "웹·앱 설정 따르기", default: true)
+    var followsAppSelection: Bool
+
+    @Parameter(
+        title: "표시할 프로젝트",
+        description: "웹·앱 설정을 따르지 않을 때 선택한 프로젝트만 표시합니다.",
+        size: IntentCollectionSize(min: 0, max: 100),
+        query: CalendarProjectQuery()
+    )
+    var projects: [CalendarProjectEntity]?
+}
+
 private enum WidgetStateError: Error {
     case invalidResponse
     case taskNotFound
@@ -182,40 +234,33 @@ struct ToggleTodayTaskIntent: AppIntent {
     }
 }
 
-private struct CalendarProvider: TimelineProvider {
+private struct CalendarProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> CalendarTimelineEntry {
         CalendarTimelineEntry(date: Date(), items: Self.samples)
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (CalendarTimelineEntry) -> Void) {
-        guard !context.isPreview else {
-            completion(CalendarTimelineEntry(date: Date(), items: Self.samples))
-            return
-        }
-        fetchItems { completion(CalendarTimelineEntry(date: Date(), items: $0)) }
+    func snapshot(for configuration: CalendarWidgetConfigurationIntent, in context: Context) async -> CalendarTimelineEntry {
+        guard !context.isPreview else { return CalendarTimelineEntry(date: Date(), items: Self.samples) }
+        return await entry(for: configuration)
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<CalendarTimelineEntry>) -> Void) {
+    func timeline(for configuration: CalendarWidgetConfigurationIntent, in context: Context) async -> Timeline<CalendarTimelineEntry> {
         let now = Date()
-        fetchItems { items in
-            let refresh = Calendar.current.date(byAdding: .minute, value: 15, to: now) ?? now.addingTimeInterval(900)
-            completion(Timeline(
-                entries: [CalendarTimelineEntry(date: now, items: items)],
-                policy: .after(refresh)
-            ))
-        }
+        let entry = await entry(for: configuration, date: now)
+        let refresh = Calendar.current.date(byAdding: .minute, value: 15, to: now) ?? now.addingTimeInterval(900)
+        return Timeline(entries: [entry], policy: .after(refresh))
     }
 
-    private func fetchItems(completion: @escaping ([CalendarItem]) -> Void) {
-        Task {
-            let snapshot = try? await WidgetStateClient.fetch()
-            completion(Self.decodeItems(snapshot?.root ?? [:]))
-        }
+    private func entry(for configuration: CalendarWidgetConfigurationIntent, date: Date = Date()) async -> CalendarTimelineEntry {
+        let snapshot = try? await WidgetStateClient.fetch()
+        let projectIDs = configuration.followsAppSelection ? nil : Set(configuration.projects?.map(\.id) ?? [])
+        return CalendarTimelineEntry(date: date, items: Self.decodeItems(snapshot?.root ?? [:], projectIDs: projectIDs))
     }
 
-    private static func decodeItems(_ root: [String: Any]) -> [CalendarItem] {
+    private static func decodeItems(_ root: [String: Any], projectIDs: Set<String>? = nil) -> [CalendarItem] {
         let settings = root["settings"] as? [String: Any] ?? [:]
         let sourceSettings = settings["calendarSources"] as? [String: Any] ?? [:]
+        let projectVisibility = settings["visibleProjectCalendars"] as? [String: Any] ?? [:]
         let googleVisibility = settings["visibleGoogleCalendars"] as? [String: Any] ?? [:]
         func sourceVisible(_ key: String) -> Bool { sourceSettings[key] as? Bool != false }
         var items: [CalendarItem] = []
@@ -239,13 +284,16 @@ private struct CalendarProvider: TimelineProvider {
         if sourceVisible("projects") {
             for project in root["projects"] as? [[String: Any]] ?? [] {
                 guard project["status"] as? String != "canceled" else { continue }
+                let projectID = project["id"] as? String ?? ""
+                let visible = projectIDs?.contains(projectID) ?? (projectVisibility[projectID] as? Bool != false)
+                guard visible else { continue }
                 let rawStart = project["startDate"] as? String ?? ""
                 let rawEnd = project["endDate"] as? String ?? ""
                 guard !rawStart.isEmpty || !rawEnd.isEmpty else { continue }
                 let start = rawStart.isEmpty ? rawEnd : rawStart
                 let end = rawEnd.isEmpty ? start : rawEnd
                 items.append(CalendarItem(
-                    id: "project-\(project["id"] as? String ?? UUID().uuidString)",
+                    id: "project-\(projectID.isEmpty ? UUID().uuidString : projectID)",
                     title: project["name"] as? String ?? "(제목 없음)",
                     startDate: start,
                     endDate: max(start, end),
@@ -304,7 +352,7 @@ private struct CalendarProvider: TimelineProvider {
 
 struct SYGMAFourWeekCalendarWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: widgetKind, provider: CalendarProvider()) { entry in
+        AppIntentConfiguration(kind: widgetKind, intent: CalendarWidgetConfigurationIntent.self, provider: CalendarProvider()) { entry in
             FourWeekCalendarView(entry: entry)
                 .containerBackground(Color(red: 0.97, green: 0.975, blue: 0.985), for: .widget)
         }

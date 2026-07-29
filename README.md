@@ -29,13 +29,12 @@ http://127.0.0.1:4180/
 
 Use `npm start` for PostgreSQL persistence and Google Calendar integration. PostgreSQL remains the remote source of truth. The browser also keeps a workspace-scoped IndexedDB snapshot and pending-operation queue so Resource drafts survive reloads and reconnect safely; it never stores Google OAuth tokens. A static Python preview can show the UI, but it cannot run the server-side DB/API paths.
 
-The server creates the `app_state` and `app_private_data` tables automatically. The full app state is still stored as a JSONB document in `app_state` for backup, settings, migration, and client compatibility. Internal private data such as Google OAuth tokens is stored in `app_private_data`. Existing `localStorage` state is only read as a legacy migration source and removed after PostgreSQL sync.
+The server creates the `app_state`, `app_private_data`, `finance_state`, and `finance_state_history` tables automatically. The full public workspace state is still stored as a JSONB document in `app_state` for backup, settings, migration, and client compatibility. Internal private data such as Google OAuth tokens is stored in `app_private_data`. Finance data is isolated in its own authenticated state and revision history; it is never placed in `/api/state`, the workspace IndexedDB snapshot, or legacy `localStorage`. Existing `localStorage` workspace state is only read as a legacy migration source and removed after PostgreSQL sync.
 
-For maintainability, collection data is managed from relational tables. `/api/state` keeps its client-facing shape, but the server reconstructs `tasks`, `resources`, `projects`, `goals`, `habits`, and the other app collections from these tables:
+For maintainability, collection data is managed from relational tables. `/api/state` keeps its client-facing shape, but the server reconstructs `tasks`, `resources`, `projects`, `habits`, and the other app collections from these tables:
 
 ```text
 boxes
-goals
 projects
 tasks
 resources
@@ -49,7 +48,7 @@ google_events
 collection_links
 ```
 
-`tasks` references `boxes`, `goals`, and `projects` as parent context. `resources` also references `boxes`, `goals`, and `projects`. Task-resource relationships are peer relationships, so they are stored in `task_resources` rather than as a parent/child foreign key.
+`tasks` references `boxes` and `projects` as parent context. `resources` also references `boxes` and `projects`. Task-resource relationships are peer relationships, so they are stored in `task_resources` rather than as a parent/child foreign key.
 
 On writes, the server normalizes the incoming state, writes the relational rows, then updates `app_state` as a backup snapshot. On reads, relational rows are the source of truth for app collections. `app_state` is only used for settings, backup, and one-time bootstrap when relational rows do not exist yet.
 
@@ -59,7 +58,7 @@ Verify the PostgreSQL-backed state path with:
 DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web npm run check:postgres
 ```
 
-This starts a temporary app server, writes state through `/api/state`, reads it back, and checks the JSONB tables plus the relational collection tables directly.
+This starts a temporary app server, writes state through `/api/state`, checks the authenticated `/api/finance/*` boundary, reads both stores back, and checks the JSONB, finance-history, and relational collection tables directly.
 
 ## Production Build
 
@@ -83,7 +82,9 @@ The Node server compresses responses when supported, validates conditional reque
 
 Railway is the only production hosting and runtime target. `railway.json` runs `npm run check && npm run check:build` during the image build, then starts the verified bundle with `npm run start:production`. The server listens on Railway's injected `PORT`, serves the optimized client and API from one origin, and exposes `/health` for deployment health checks.
 
-There is no application-level password or login gate. The Railway URL, static app, and PostgreSQL-backed API are directly reachable, while production state writes still require revision preconditions and remain rate-limited. Cross-site browser mutations are rejected; native app requests without browser fetch metadata are accepted. Anyone who can reach the URL can read the workspace and issue valid mutations, so do not treat the deployment as private.
+The ordinary workspace has no application-level password or login gate. The Railway URL, static app, and ordinary PostgreSQL-backed APIs are directly reachable, while production state writes still require revision preconditions and remain rate-limited. Cross-site browser mutations are rejected; native app requests without browser fetch metadata are accepted. Anyone who can reach the URL can read the ordinary workspace and issue valid mutations, so do not treat it as private.
+
+`/finance` is the deliberate exception: its state API uses a separate password-derived credential, short-lived HttpOnly session cookie, PostgreSQL state, revision, and history. This protects finance data from anonymous access but does not make the rest of the workspace private.
 
 The active operating procedure is in [the Railway runbook](docs/railway-runbook.md).
 
@@ -108,7 +109,12 @@ Set these Railway variables for persistence:
 ```text
 DATABASE_URL
 APP_STATE_ID=default
+FINANCE_PASSWORD_HASH
+FINANCE_SESSION_SECRET
+FINANCE_SESSION_TTL_SECONDS=43200
 ```
+
+Generate the two finance secrets locally with `npm run finance:hash-password` and `npm run finance:session-secret`; never place the plain finance password in source or Railway variables.
 
 Recommended production settings are documented in `.env.example`; the limits below use the code defaults, while the state-write precondition is deliberately enabled for production:
 
@@ -119,6 +125,9 @@ API_RATE_LIMIT_STATE_READ_MAX=240
 API_RATE_LIMIT_STATE_WRITE_MAX=120
 API_RATE_LIMIT_GOOGLE_READ_MAX=120
 API_RATE_LIMIT_GOOGLE_MUTATION_MAX=20
+API_RATE_LIMIT_FINANCE_LOGIN_MAX=8
+API_RATE_LIMIT_FINANCE_READ_MAX=120
+API_RATE_LIMIT_FINANCE_WRITE_MAX=60
 API_RATE_LIMIT_MAX_KEYS=10000
 STATE_WRITE_MAX_CONCURRENCY=2
 STATE_WRITE_MAX_QUEUE=16

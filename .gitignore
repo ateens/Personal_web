@@ -6,6 +6,8 @@ output/
 *.log
 .env
 .data/
+.build/
+budget/
 
 # Local security/incident notes are not part of the web app source.
 hci87_security_forensics_report_2026-05-27.md

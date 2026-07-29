@@ -20,6 +20,8 @@ test("Today mouse drag moves a task to the date-free scheduled state", async ({ 
   await page.mouse.move(target.x, target.y, { steps: 8 });
   await expect(scheduledTarget).toHaveClass(/is-over/);
   await page.mouse.up();
+  await expect(page.locator(".today-drag-ghost")).toHaveClass(/is-settling/);
+  await expect(scheduledTarget).toHaveClass(/is-receiving/);
 
   await expectTaskScheduled(page, request, task.id);
 });

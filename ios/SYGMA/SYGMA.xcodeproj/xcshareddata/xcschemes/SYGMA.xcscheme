@@ -21,20 +21,6 @@
                ReferencedContainer = "container:SYGMA.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "0A000000000000000000000F"
-               BuildableName = "SYGMATests.xctest"
-               BlueprintName = "SYGMATests"
-               ReferencedContainer = "container:SYGMA.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -52,19 +38,6 @@
             ReferencedContainer = "container:SYGMA.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
-      <Testables>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "0A000000000000000000000F"
-               BuildableName = "SYGMATests.xctest"
-               BlueprintName = "SYGMATests"
-               ReferencedContainer = "container:SYGMA.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
-      </Testables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

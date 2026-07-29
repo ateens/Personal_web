@@ -83,5 +83,5 @@ async function navigateTo(page, key) {
   await expect(sidebar).toHaveClass(/is-open/);
   await expect(navButton).toBeVisible();
   await navButton.click();
-  await expect(page.locator(`[data-view-controls="${key}"]`)).toBeVisible();
+  await expect(navButton).toHaveAttribute("aria-current", "page");
 }

@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateFinanceState } from "../server/finance.js";
 import { createFixtureState, FIXTURE_IDS } from "./fixtures/state.mjs";
 
 if (process.env.E2E_FIXTURE_SERVER !== "1") {
@@ -19,7 +20,6 @@ const fixtureInlineColorKeys = new Set(["gray", "brown", "orange", "yellow", "gr
 const fixtureCollectionKeys = [
   "captures",
   "boxes",
-  "goals",
   "projects",
   "tasks",
   "resources",
@@ -30,7 +30,7 @@ const fixtureCollectionKeys = [
   "googleEvents",
   "links",
 ];
-const fixtureBlockCollectionKeys = new Set(["boxes", "goals", "projects", "tasks", "resources", "habits", "journals"]);
+const fixtureBlockCollectionKeys = new Set(["boxes", "projects", "tasks", "resources", "habits", "journals"]);
 const guardHeaders = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
@@ -40,6 +40,7 @@ const guardHeaders = {
 const sourceFiles = new Map([
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/finance-model.js", ["finance-model.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/manifest.json", ["manifest.json", "application/manifest+json; charset=utf-8"]],
   ["/service-worker.js", ["service-worker.js", "text/javascript; charset=utf-8"]],
@@ -53,7 +54,12 @@ let externalWrites = [];
 let serverRevision = 1;
 let resetGeneration = 1;
 let serviceWorkerVersion = 1;
+let financeState = null;
+let financeRevision = 0;
+let financeWrites = [];
 const stateEventClients = new Set();
+const financeFixturePassword = "finance-e2e-password";
+const financeFixtureSession = "finance-fixture-session";
 
 const server = createServer(async (request, response) => {
   if (!localRequestHost(request.headers.host)) {
@@ -299,6 +305,93 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, { configured: false, connected: false, tokenStore: "memory" });
       return;
     }
+    if (request.method === "POST" && path === "/api/finance/login") {
+      const body = await readJsonBody(request);
+      if (body.password !== financeFixturePassword) {
+        sendJson(response, 401, { error: "The finance password is incorrect.", code: "FINANCE_LOGIN_FAILED" });
+        return;
+      }
+      sendJson(response, 200, { ok: true, expiresIn: 43_200 }, {
+        "Set-Cookie": `sygma_finance_session=${financeFixtureSession}; Path=/api/finance; HttpOnly; SameSite=Strict; Max-Age=43200`,
+      });
+      return;
+    }
+    if (request.method === "POST" && path === "/api/finance/logout") {
+      sendJson(response, 200, { ok: true }, {
+        "Set-Cookie": "sygma_finance_session=; Path=/api/finance; HttpOnly; SameSite=Strict; Max-Age=0",
+      });
+      return;
+    }
+    if (request.method === "GET" && path === "/api/finance/session") {
+      const authenticated = fixtureFinanceSessionValid(request);
+      sendJson(response, 200, {
+        configured: true,
+        authenticated,
+        expiresAt: authenticated ? new Date(Date.now() + 43_200_000).toISOString() : "",
+      });
+      return;
+    }
+    if (request.method === "GET" && path === "/api/finance/state") {
+      if (!fixtureFinanceSessionValid(request)) {
+        sendJson(response, 401, { error: "Finance authentication is required.", code: "FINANCE_AUTH_REQUIRED" });
+        return;
+      }
+      sendJson(response, 200, {
+        state: structuredClone(financeState),
+        revision: financeRevision,
+        updatedAt: financeWrites.at(-1)?.updatedAt || "",
+      }, financeRevisionHeaders());
+      return;
+    }
+    if (request.method === "PUT" && path === "/api/finance/state") {
+      if (!fixtureFinanceSessionValid(request)) {
+        sendJson(response, 401, { error: "Finance authentication is required.", code: "FINANCE_AUTH_REQUIRED" });
+        return;
+      }
+      const body = await readJsonBody(request);
+      if (!body.state || typeof body.state !== "object" || Array.isArray(body.state)) {
+        sendJson(response, 400, { error: "Finance state object is required.", code: "FINANCE_STATE_REQUIRED" });
+        return;
+      }
+      const issues = validateFinanceState(body.state);
+      if (issues.length) {
+        sendJson(response, 422, {
+          error: "Finance state validation failed.",
+          code: "INVALID_FINANCE_STATE",
+          details: { issues },
+        });
+        return;
+      }
+      const baseRevision = requestFinanceBaseRevision(request, body);
+      if (baseRevision === null) {
+        sendJson(response, 428, {
+          error: "A finance state revision precondition is required.",
+          code: "FINANCE_STATE_PRECONDITION_REQUIRED",
+          revision: financeRevision,
+        }, financeRevisionHeaders());
+        return;
+      }
+      if (baseRevision !== financeRevision) {
+        sendJson(response, 409, {
+          error: "Finance state revision conflict.",
+          code: "FINANCE_STATE_REVISION_CONFLICT",
+          revision: financeRevision,
+        }, financeRevisionHeaders());
+        return;
+      }
+      financeState = structuredClone(body.state);
+      financeRevision += 1;
+      const updatedAt = new Date().toISOString();
+      financeWrites.push({ revision: financeRevision, updatedAt });
+      sendJson(response, 200, {
+        ok: true,
+        state: structuredClone(financeState),
+        revision: financeRevision,
+        updatedAt,
+        bootstrap: financeRevision === 1,
+      }, financeRevisionHeaders());
+      return;
+    }
     if (path.startsWith("/api/")) {
       sendJson(response, 404, { error: "Fixture API route not found." });
       return;
@@ -315,6 +408,9 @@ const server = createServer(async (request, response) => {
       serverRevision = 1;
       resetGeneration += 1;
       serviceWorkerVersion = 1;
+      financeState = null;
+      financeRevision = 0;
+      financeWrites = [];
       sendJson(response, 200, { ok: true, appStateId: FIXTURE_IDS.appState, resetGeneration });
       return;
     }
@@ -366,6 +462,9 @@ const server = createServer(async (request, response) => {
         writeAttempts: structuredClone(writeAttempts),
         externalWrites: structuredClone(externalWrites),
         serviceWorkerVersion,
+        financeState: structuredClone(financeState),
+        financeRevision,
+        financeWrites: structuredClone(financeWrites),
         state: structuredClone(state),
       });
       return;
@@ -582,7 +681,7 @@ function fixtureResourceHierarchyIssues(incomingState) {
 
 function fixtureInlineColorIssues(incomingState) {
   const issues = [];
-  const collections = ["boxes", "goals", "projects", "tasks", "resources", "habits", "journals"];
+  const collections = ["boxes", "projects", "tasks", "resources", "habits", "journals"];
   for (const collection of collections) {
     const items = Array.isArray(incomingState?.[collection]) ? incomingState[collection] : [];
     for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
@@ -785,6 +884,31 @@ function requestBaseRevision(request, body) {
   return headerRevision ?? bodyRevision;
 }
 
+function requestFinanceBaseRevision(request, body) {
+  const ifMatch = String(request.headers["if-match"] || "").trim();
+  const headerMatch = ifMatch.match(/^(?:W\/)?"?finance-state-(\d+)"?$/i);
+  if (ifMatch && !headerMatch) {
+    const error = new Error("If-Match must contain a fixture finance state revision ETag.");
+    error.status = 400;
+    throw error;
+  }
+  const headerRevision = headerMatch ? Number(headerMatch[1]) : null;
+  const bodyRevision = body.baseRevision === undefined || body.baseRevision === null || body.baseRevision === ""
+    ? null
+    : Number(body.baseRevision);
+  if (bodyRevision !== null && (!Number.isSafeInteger(bodyRevision) || bodyRevision < 0)) {
+    const error = new Error("baseRevision must be a non-negative integer.");
+    error.status = 400;
+    throw error;
+  }
+  if (headerRevision !== null && bodyRevision !== null && headerRevision !== bodyRevision) {
+    const error = new Error("If-Match and baseRevision must match.");
+    error.status = 400;
+    throw error;
+  }
+  return headerRevision ?? bodyRevision;
+}
+
 function optionalResetGeneration(body) {
   if (body.e2eFixtureGeneration === undefined || body.e2eFixtureGeneration === null || body.e2eFixtureGeneration === "") return null;
   const generation = Number(body.e2eFixtureGeneration);
@@ -802,6 +926,20 @@ function stateRevisionHeaders(mode = "fixture-optional") {
     "X-State-Revision": String(serverRevision),
     "X-State-Concurrency": mode,
   };
+}
+
+function financeRevisionHeaders() {
+  return {
+    ETag: `"finance-state-${financeRevision}"`,
+    "X-Finance-State-Revision": String(financeRevision),
+    "X-Finance-State-Concurrency": "required",
+  };
+}
+
+function fixtureFinanceSessionValid(request) {
+  return String(request.headers.cookie || "")
+    .split(";")
+    .some((part) => part.trim() === `sygma_finance_session=${financeFixtureSession}`);
 }
 
 function localRequestHost(host = "") {

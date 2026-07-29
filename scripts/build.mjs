@@ -30,38 +30,45 @@ self.addEventListener("fetch",event=>{if(event.request.method!=="GET")return;con
 await rm(dist, { recursive: true, force: true });
 await mkdir(assetDir, { recursive: true });
 
-const [appSource, stylesSource, indexSource, manifestSource] = await Promise.all([
+const [appSource, financeModelSource, stylesSource, indexSource, manifestSource] = await Promise.all([
   readFile(resolve(root, "app.js"), "utf8"),
+  readFile(resolve(root, "finance-model.js"), "utf8"),
   readFile(resolve(root, "styles.css"), "utf8"),
   readFile(resolve(root, "index.html"), "utf8"),
   readFile(resolve(root, "manifest.json"), "utf8"),
 ]);
 
-const [appBuild, stylesBuild] = await Promise.all([
+const [appBuild, financeModelBuild, stylesBuild] = await Promise.all([
   transform(appSource, { loader: "js", minify: true, target: "es2022", charset: "utf8" }),
+  transform(financeModelSource, { loader: "js", minify: true, target: "es2022", charset: "utf8" }),
   transform(stylesSource, { loader: "css", minify: true, target: "es2022", charset: "utf8" }),
 ]);
 
 const appFile = `app.${contentHash(`${assetDeliveryVersion}\0${appBuild.code}`)}.js`;
+const financeModelFile = `finance-model.${contentHash(`${assetDeliveryVersion}\0${financeModelBuild.code}`)}.js`;
 const stylesFile = `styles.${contentHash(`${assetDeliveryVersion}\0${stylesBuild.code}`)}.css`;
 const appPath = `/_sygma/assets/${appFile}`;
+const financeModelPath = `/_sygma/assets/${financeModelFile}`;
 const stylesPath = `/_sygma/assets/${stylesFile}`;
 await Promise.all([
   writeFile(resolve(assetDir, appFile), appBuild.code),
+  writeFile(resolve(assetDir, financeModelFile), financeModelBuild.code),
   writeFile(resolve(assetDir, stylesFile), stylesBuild.code),
 ]);
 
 const builtIndex = indexSource
   .replace(/(?:\.\/|\/)styles\.css\?v=[^"']+/, stylesPath)
+  .replace(/(?:\.\/|\/)finance-model\.js\?v=[^"']+/, financeModelPath)
   .replace(/(?:\.\/|\/)app\.js\?v=[^"']+/, appPath)
-  .replace("</head>", `    <link rel="preload" href="${appPath}" as="script">\n  </head>`);
+  .replace("</head>", `    <link rel="preload" href="${financeModelPath}" as="script">\n    <link rel="preload" href="${appPath}" as="script">\n  </head>`);
 const manifest = JSON.parse(manifestSource);
 manifest.start_url = "/";
 manifest.scope = "/";
-const cacheId = contentHash(`${appPath}\n${stylesPath}`);
+const cacheId = contentHash(`${appPath}\n${financeModelPath}\n${stylesPath}`);
 const precacheAssets = [
   "/index.html",
   stylesPath,
+  financeModelPath,
   appPath,
   "/manifest.json",
   "/icons/app-icon.svg",
@@ -76,6 +83,6 @@ await Promise.all([
   cp(resolve(root, "assets/sygma-social-preview.png"), resolve(clientDir, "assets/sygma-social-preview.png")),
 ]);
 
-const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(stylesSource);
-const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(stylesBuild.code);
+const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(financeModelSource) + Buffer.byteLength(stylesSource);
+const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(financeModelBuild.code) + Buffer.byteLength(stylesBuild.code);
 console.log(`Built SYGMA assets: ${originalBytes} -> ${builtBytes} bytes (${Math.round((builtBytes / originalBytes) * 100)}%).`);

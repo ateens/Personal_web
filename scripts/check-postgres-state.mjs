@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, rm, writeFile } from "node:fs/promises";
 import { Pool } from "pg";
+import { createEmptyFinanceState, hashFinancePassword } from "../server/finance.js";
 import { createStorage } from "../server/storage.js";
 
 const databaseUrl = process.env.DATABASE_URL || "";
@@ -22,11 +23,13 @@ const checkStateIds = [appStateId, resourceAppStateId, operatorResetStateId, tok
 const legacyTokenFile = `/tmp/personal-web-legacy-token-${appStateId}.json`;
 const baseUrl = `http://127.0.0.1:${port}`;
 const resourceBaseUrl = `http://127.0.0.1:${resourcePort}`;
+const financePassword = "finance-check-password";
+const financePasswordHash = await hashFinancePassword(financePassword, Buffer.alloc(16, 11));
+const financeSessionSecret = Buffer.alloc(32, 12).toString("base64url");
 const pool = new Pool({ connectionString: databaseUrl, ssl: databaseSslConfig() });
 const COLLECTION_KEYS = [
   "captures",
   "boxes",
-  "goals",
   "projects",
   "tasks",
   "resources",
@@ -57,6 +60,9 @@ try {
       APP_STATE_ID: appStateId,
       STATIC_ROOT: ".",
       REQUIRE_STATE_PRECONDITION: "1",
+      FINANCE_PASSWORD_HASH: financePasswordHash,
+      FINANCE_SESSION_SECRET: financeSessionSecret,
+      API_RATE_LIMIT_FINANCE_LOGIN_MAX: "4",
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
     },
@@ -162,6 +168,7 @@ try {
   assert(firstRead.payload.state?.tasks?.[0]?.status === "scheduled", "legacy someday task status did not migrate to scheduled during PostgreSQL round trip");
   assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
+  await checkFinanceApi();
 
   await pool.query("UPDATE tasks SET status = 'someday' WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
   const healedSomedayRead = await readState();
@@ -567,12 +574,12 @@ try {
   );
 
   const row = await pool.query(
-    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_array_length(state->'captures') AS capture_count, jsonb_array_length(state->'boxes') AS box_count, jsonb_array_length(state->'goals') AS goal_count, jsonb_array_length(state->'projects') AS project_count, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'resources') AS resource_count, jsonb_array_length(state->'habits') AS habit_count, jsonb_array_length(state->'habitInstances') AS habit_instance_count, jsonb_array_length(state->'journals') AS journal_count, jsonb_array_length(state->'googleCalendars') AS google_calendar_count, jsonb_array_length(state->'googleEvents') AS google_event_count, jsonb_array_length(state->'links') AS link_count FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_array_length(state->'captures') AS capture_count, jsonb_array_length(state->'boxes') AS box_count, jsonb_array_length(state->'projects') AS project_count, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'resources') AS resource_count, jsonb_array_length(state->'habits') AS habit_count, jsonb_array_length(state->'habitInstances') AS habit_instance_count, jsonb_array_length(state->'journals') AS journal_count, jsonb_array_length(state->'googleCalendars') AS google_calendar_count, jsonb_array_length(state->'googleEvents') AS google_event_count, jsonb_array_length(state->'links') AS link_count FROM app_state WHERE id = $1",
     [appStateId]
   );
   assert(Number(row.rows[0]?.revision) === 2 && row.rows[0]?.state_revision === "2", "app_state row did not store workspace revision 2 consistently");
   assert(row.rows[0]?.version === "4", "app_state row did not contain state version 4");
-  for (const field of ["capture_count", "box_count", "goal_count", "project_count", "task_count", "resource_count", "habit_count", "habit_instance_count", "journal_count", "google_calendar_count", "google_event_count", "link_count"]) {
+  for (const field of ["capture_count", "box_count", "project_count", "task_count", "resource_count", "habit_count", "habit_instance_count", "journal_count", "google_calendar_count", "google_event_count", "link_count"]) {
     assert(Number(row.rows[0]?.[field]) === 1, `app_state row did not preserve ${field}`);
   }
 
@@ -580,7 +587,6 @@ try {
     `
       SELECT
         (SELECT count(*)::int FROM boxes WHERE app_state_id = $1) AS boxes,
-        (SELECT count(*)::int FROM goals WHERE app_state_id = $1) AS goals,
         (SELECT count(*)::int FROM projects WHERE app_state_id = $1) AS projects,
         (SELECT count(*)::int FROM tasks WHERE app_state_id = $1) AS tasks,
         (SELECT count(*)::int FROM resources WHERE app_state_id = $1) AS resources,
@@ -596,7 +602,7 @@ try {
     [appStateId]
   );
   const relationalCountRow = relationalCounts.rows[0] || {};
-  for (const tableName of ["boxes", "goals", "projects", "tasks", "resources", "task_resources", "habits", "habit_instances", "captures", "journals", "google_calendars", "google_events", "collection_links"]) {
+  for (const tableName of ["boxes", "projects", "tasks", "resources", "task_resources", "habits", "habit_instances", "captures", "journals", "google_calendars", "google_events", "collection_links"]) {
     assert(Number(relationalCountRow[tableName]) === 1, `relational table ${tableName} did not contain the written row`);
   }
 
@@ -604,10 +610,8 @@ try {
     `
       SELECT
         (SELECT box_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_box_id,
-        (SELECT goal_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_goal_id,
         (SELECT project_id FROM tasks WHERE app_state_id = $1 AND id = 'check-task') AS task_project_id,
         (SELECT box_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_box_id,
-        (SELECT goal_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_goal_id,
         (SELECT project_id FROM resources WHERE app_state_id = $1 AND id = 'check-resource') AS resource_project_id,
         (SELECT task_id FROM task_resources WHERE app_state_id = $1 AND task_id = 'check-task' AND resource_id = 'check-resource') AS task_resource_task_id,
         (SELECT resource_id FROM task_resources WHERE app_state_id = $1 AND task_id = 'check-task' AND resource_id = 'check-resource') AS task_resource_resource_id,
@@ -618,8 +622,8 @@ try {
     [appStateId]
   );
   const refRow = relationalRefs.rows[0] || {};
-  assert(refRow.task_box_id === "check-box" && refRow.task_goal_id === "check-goal" && refRow.task_project_id === "check-project", "relational tasks did not preserve box/goal/project references");
-  assert(refRow.resource_box_id === "check-box" && refRow.resource_goal_id === "check-goal" && refRow.resource_project_id === "check-project", "relational resources did not preserve box/goal/project references");
+  assert(refRow.task_box_id === "check-box" && refRow.task_project_id === "check-project", "relational tasks did not preserve box/project references");
+  assert(refRow.resource_box_id === "check-box" && refRow.resource_project_id === "check-project", "relational resources did not preserve box/project references");
   assert(refRow.task_resource_task_id === "check-task" && refRow.task_resource_resource_id === "check-resource", "task-resource relation was not stored as a separate relationship");
   assert(refRow.habit_project_id === "check-project" && refRow.habit_instance_habit_id === "check-habit", "habit relational references were not stored");
   assert(refRow.google_event_calendar_id === "check-google-calendar", "Google event relational calendar reference was not stored");
@@ -650,7 +654,9 @@ try {
       visibleGoogleCalendars: { primary: "polluted-primary", work: false },
       viewControls: { resources: { mode: "list", filters: ["active", "pinned"], panels: { sort: true }, toggles: { readLater: true }, type: "article" }, today: "polluted-control" },
     },
-    tasks: [null, { id: "polluted-task", kind: "legacy-task-kind" }],
+    goals: [{ id: "removed-parent" }],
+    projects: [{ id: "polluted-project", goalId: "removed-parent" }],
+    tasks: [null, { id: "polluted-task", kind: "legacy-task-kind", goalId: "removed-parent" }],
     journals: [{ id: "polluted-journal", kind: "legacy-journal-kind" }, "polluted-journal"],
   };
   await deleteRelationalRows(appStateId);
@@ -660,24 +666,26 @@ try {
   assert(healedRead.payload.revision === 2 && healedRead.payload.state?.revision === 2, "state read did not reconcile the healed state to the stored revision");
   assert(healedRead.response.headers.get("etag") === '"state-2"', "healed state read did not retain the current ETag");
   assert(healedRead.payload.state?.tasks?.length === 1 && !("kind" in healedRead.payload.state.tasks[0]), "state read did not normalize polluted stored tasks");
+  assert(!("goals" in healedRead.payload.state) && !("goalId" in healedRead.payload.state.tasks[0]) && !("goalId" in healedRead.payload.state.projects[0]), "state read did not remove retired Goal data");
   assert(healedRead.payload.state?.journals?.length === 1 && !("kind" in healedRead.payload.state.journals[0]), "state read did not normalize polluted stored journals");
-  assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
+  assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
   assert(healedRead.payload.state?.settings?.calendarSources?.tasks === true && healedRead.payload.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
   assert(!("primary" in healedRead.payload.state?.settings?.visibleGoogleCalendars) && healedRead.payload.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
   assert(healedRead.payload.state?.settings?.viewControls?.resources?.mode === "list" && healedRead.payload.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedRead.payload.state.settings.viewControls.resources.panels.sort === true && !("type" in healedRead.payload.state.settings.viewControls.resources) && !("toggles" in healedRead.payload.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
   assert(!("appMode" in (healedRead.payload.state?.settings || {})), "state read returned deprecated settings from polluted storage");
 
   const healedRow = await pool.query(
-    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, state ? 'goals' AS has_goals, state->'tasks'->0 ? 'goalId' AS task_has_goal_id, state->'projects'->0 ? 'goalId' AS project_has_goal_id, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
     [appStateId]
   );
   assert(Number(healedRow.rows[0]?.revision) === 2 && healedRow.rows[0]?.state_revision === "2", "state read did not preserve the revision while healing PostgreSQL");
   assert(healedRow.rows[0]?.version === "4", "state read did not heal invalid stored version to v4 in PostgreSQL");
-  assert(healedRow.rows[0]?.tasks_type === "array" && healedRow.rows[0]?.nav_order === "calendar,today,inbox,tasks,projects,goals,boxes,resources,habits,journal,database", "state read did not heal polluted PostgreSQL collections/settings");
+  assert(healedRow.rows[0]?.tasks_type === "array" && healedRow.rows[0]?.nav_order === "calendar,today,inbox,tasks,projects,boxes,resources,habits,journal,database", "state read did not heal polluted PostgreSQL collections/settings");
   assert(healedRow.rows[0]?.calendar_sources?.tasks === true && healedRow.rows[0]?.calendar_sources?.projects === false, "state read did not heal polluted calendar sources in PostgreSQL");
   assert(!("primary" in healedRow.rows[0]?.visible_google_calendars) && healedRow.rows[0]?.visible_google_calendars?.work === false, "state read did not heal polluted visible Google calendars in PostgreSQL");
   assert(Number(healedRow.rows[0]?.task_count) === 1 && Number(healedRow.rows[0]?.journal_count) === 1, "state read did not remove polluted collection items from PostgreSQL");
   assert(healedRow.rows[0]?.task_has_kind === false && healedRow.rows[0]?.journal_has_kind === false, "state read did not remove legacy kind fields from PostgreSQL");
+  assert(healedRow.rows[0]?.has_goals === false && healedRow.rows[0]?.task_has_goal_id === false && healedRow.rows[0]?.project_has_goal_id === false, "state read did not persist Goal removal");
   assert(healedRow.rows[0]?.has_app_mode === false, "state read did not remove deprecated settings from PostgreSQL");
   const healedRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
   assert(Number(healedRelationalRows.rows[0]?.tasks) === 1, "state read did not sync healed PostgreSQL state into relational tables");
@@ -699,11 +707,11 @@ try {
   assert(Number(scalarRelationalRows.rows[0]?.tasks) === 0, "scalar state healing did not clear stale relational task rows");
 
   const tables = await pool.query(
-    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('app_state', 'app_private_data', 'boxes', 'goals', 'projects', 'tasks', 'resources', 'task_resources', 'habits', 'habit_instances', 'captures', 'journals', 'google_calendars', 'google_events', 'collection_links') ORDER BY tablename"
+    "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('app_state', 'app_private_data', 'finance_state', 'finance_state_history', 'boxes', 'goals', 'projects', 'tasks', 'resources', 'task_resources', 'habits', 'habit_instances', 'captures', 'journals', 'google_calendars', 'google_events', 'collection_links') ORDER BY tablename"
   );
   const createdTables = tables.rows.map((tableRow) => tableRow.tablename).join(",");
   assert(
-    createdTables === "app_private_data,app_state,boxes,captures,collection_links,goals,google_calendars,google_events,habit_instances,habits,journals,projects,resources,task_resources,tasks",
+    createdTables === "app_private_data,app_state,boxes,captures,collection_links,finance_state,finance_state_history,google_calendars,google_events,habit_instances,habits,journals,projects,resources,task_resources,tasks",
     "required PostgreSQL tables were not created"
   );
 
@@ -793,16 +801,14 @@ function makeValidState() {
     },
     captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", convertedTo: "resources", convertedId: "check-resource", createdAt }],
     boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
-    goals: [{ id: "check-goal", name: "PostgreSQL check goal", boxId: "check-box" }],
-    projects: [{ id: "check-project", name: "PostgreSQL check project", goalId: "check-goal", boxId: "check-box" }],
-    tasks: [{ id: "check-task", title: "PostgreSQL check task", status: "someday", boxId: "check-box", goalId: "check-goal", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
+    projects: [{ id: "check-project", name: "PostgreSQL check project", boxId: "check-box" }],
+    tasks: [{ id: "check-task", title: "PostgreSQL check task", status: "someday", boxId: "check-box", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
     resources: [{
       id: "check-resource",
       title: "PostgreSQL check resource",
       type: "article",
       importance: "important",
       boxId: "check-box",
-      goalId: "check-goal",
       projectId: "check-project",
       url: "https://example.com/resource",
       pinned: true,
@@ -883,7 +889,6 @@ function makeIncrementalResource(id, title) {
     type: "article",
     importance: "normal",
     boxId: "check-box",
-    goalId: "check-goal",
     projectId: "check-project",
     url: `https://example.com/resources/${encodeURIComponent(id)}`,
     pinned: false,
@@ -903,6 +908,255 @@ function makeIncrementalResource(id, title) {
     commentThreads: [],
     blocks: [{ id: `${id}-block`, type: "paragraph", text: `${title} block`, indent: 0, marks: [] }],
   };
+}
+
+async function checkFinanceApi() {
+  const anonymousSession = await requestJson("/api/finance/session");
+  assert(
+    anonymousSession.response.ok
+      && anonymousSession.payload.configured === true
+      && anonymousSession.payload.authenticated === false,
+    "anonymous finance session status was not configured and locked",
+  );
+
+  const anonymousRead = await requestJson("/api/finance/state");
+  assert(
+    anonymousRead.response.status === 401 && anonymousRead.payload.code === "FINANCE_AUTH_REQUIRED",
+    "anonymous finance state read was not rejected",
+  );
+
+  const anonymousWrite = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: "{malformed finance payload",
+  });
+  assert(
+    anonymousWrite.response.status === 401 && anonymousWrite.payload.code === "FINANCE_AUTH_REQUIRED",
+    "anonymous finance state write was not rejected before payload processing",
+  );
+
+  const wrongLogin = await requestJson("/api/finance/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: "wrong-finance-password" }),
+  });
+  assert(
+    wrongLogin.response.status === 401 && wrongLogin.payload.code === "FINANCE_LOGIN_FAILED",
+    "incorrect finance password was not rejected",
+  );
+
+  const login = await requestJson("/api/finance/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: financePassword }),
+  });
+  const setCookie = login.response.headers.get("set-cookie") || "";
+  const cookie = setCookie.split(";", 1)[0];
+  assert(login.response.ok && login.payload.ok === true && cookie.startsWith("sygma_finance_session="), "finance login did not issue a session cookie");
+  assert(
+    /;\s*HttpOnly/i.test(setCookie)
+      && /;\s*SameSite=Strict/i.test(setCookie)
+      && /;\s*Path=\/api\/finance/i.test(setCookie),
+    "finance session cookie is missing its restricted security attributes",
+  );
+
+  const authenticatedSession = await requestJson("/api/finance/session", {
+    headers: { Cookie: cookie },
+  });
+  assert(
+    authenticatedSession.response.ok
+      && authenticatedSession.payload.authenticated === true
+      && Number.isFinite(Date.parse(authenticatedSession.payload.expiresAt)),
+    "finance session cookie did not authenticate",
+  );
+
+  const initialRead = await requestJson("/api/finance/state", {
+    headers: { Cookie: cookie },
+  });
+  assert(
+    initialRead.response.ok
+      && initialRead.payload.state === null
+      && initialRead.payload.revision === 0
+      && initialRead.response.headers.get("etag") === '"finance-state-0"',
+    "empty finance state did not return revision 0",
+  );
+
+  const missingPrecondition = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({ state: createEmptyFinanceState() }),
+  });
+  assert(
+    missingPrecondition.response.status === 428
+      && missingPrecondition.payload.code === "FINANCE_STATE_PRECONDITION_REQUIRED"
+      && missingPrecondition.payload.revision === 0,
+    "finance write without a precondition did not return revision-aware 428",
+  );
+
+  const emptyState = createEmptyFinanceState();
+  const bootstrap = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"finance-state-0"',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ state: emptyState, baseRevision: 0 }),
+  });
+  assert(
+    bootstrap.response.ok
+      && bootstrap.payload.revision === 1
+      && bootstrap.payload.bootstrap === true
+      && bootstrap.response.headers.get("etag") === '"finance-state-1"',
+    "finance state bootstrap did not commit revision 1",
+  );
+
+  const staleWrite = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"finance-state-0"',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ state: emptyState, baseRevision: 0 }),
+  });
+  assert(
+    staleWrite.response.status === 409
+      && staleWrite.payload.code === "FINANCE_STATE_REVISION_CONFLICT"
+      && staleWrite.payload.revision === 1,
+    "stale finance state write did not return the current revision",
+  );
+
+  const accountState = structuredClone(emptyState);
+  accountState.accounts.push({
+    id: "finance-check-account",
+    name: "PostgreSQL finance check",
+    type: "bank",
+    openingBalanceKrw: 1_000_000,
+    openingOn: "2026-07-01",
+  });
+  const accountWrite = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"finance-state-1"',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ state: accountState, baseRevision: 1 }),
+  });
+  assert(
+    accountWrite.response.ok
+      && accountWrite.payload.revision === 2
+      && accountWrite.payload.state?.accounts?.[0]?.openingBalanceKrw === 1_000_000,
+    "finance account state did not commit at revision 2",
+  );
+
+  const invalidState = structuredClone(accountState);
+  invalidState.currency = "USD";
+  const invalidWrite = await requestJson("/api/finance/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": '"finance-state-2"',
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ state: invalidState, baseRevision: 2 }),
+  });
+  assert(
+    invalidWrite.response.status === 422
+      && invalidWrite.payload.code === "INVALID_FINANCE_STATE"
+      && invalidWrite.payload.details?.issues?.some((issue) => issue.code === "unsupported_currency"),
+    "invalid finance currency was not rejected at the API trust boundary",
+  );
+
+  const stored = await pool.query(
+    "SELECT revision, state FROM finance_state WHERE id = $1",
+    [appStateId],
+  );
+  assert(
+    Number(stored.rows[0]?.revision) === 2
+      && stored.rows[0]?.state?.currency === "KRW"
+      && stored.rows[0]?.state?.accounts?.[0]?.id === "finance-check-account",
+    "rejected finance write changed the stored state",
+  );
+  const history = await pool.query(
+    "SELECT source_revision, state FROM finance_state_history WHERE finance_state_id = $1 ORDER BY created_at, id",
+    [appStateId],
+  );
+  assert(
+    history.rows.length === 1
+      && Number(history.rows[0]?.source_revision) === 1
+      && history.rows[0]?.state?.accounts?.length === 0,
+    "finance history did not preserve the previous committed revision",
+  );
+
+  const publicState = await readState();
+  assert(
+    !Object.prototype.hasOwnProperty.call(publicState.payload.state || {}, "finance"),
+    "finance state leaked into the public workspace state",
+  );
+  const publicStateWithFinance = structuredClone(publicState.payload.state);
+  publicStateWithFinance.finance = accountState;
+  const publicFinanceWrite = await requestJson("/api/state", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": `"state-${publicState.payload.revision}"`,
+    },
+    body: JSON.stringify({
+      state: publicStateWithFinance,
+      baseRevision: publicState.payload.revision,
+    }),
+  });
+  assert(
+    publicFinanceWrite.response.status === 422
+      && publicFinanceWrite.payload.code === "INVALID_STATE"
+      && publicFinanceWrite.payload.details?.issues?.some((issue) => issue.code === "reserved_finance_root"),
+    "public workspace state accepted the reserved finance root",
+  );
+  const publicStateAfterRejection = await readState();
+  assert(
+    publicStateAfterRejection.payload.revision === publicState.payload.revision
+      && !Object.prototype.hasOwnProperty.call(publicStateAfterRejection.payload.state || {}, "finance"),
+    "rejected public finance root changed the public workspace",
+  );
+
+  const logout = await requestJson("/api/finance/logout", {
+    method: "POST",
+    headers: { Cookie: cookie },
+  });
+  const clearedCookie = logout.response.headers.get("set-cookie") || "";
+  assert(
+    logout.response.ok
+      && /^sygma_finance_session=;/i.test(clearedCookie)
+      && /;\s*Path=\/api\/finance/i.test(clearedCookie)
+      && /;\s*HttpOnly/i.test(clearedCookie)
+      && /;\s*SameSite=Strict/i.test(clearedCookie)
+      && /;\s*Max-Age=0/i.test(clearedCookie),
+    "finance logout did not clear the restricted session cookie",
+  );
+  const lockedRead = await requestJson("/api/finance/state");
+  assert(
+    lockedRead.response.status === 401 && lockedRead.payload.code === "FINANCE_AUTH_REQUIRED",
+    "finance state remained readable after logout without a session cookie",
+  );
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const limitedLogin = await requestJson("/api/finance/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "wrong-finance-password" }),
+    });
+    if (attempt < 2) {
+      assert(limitedLogin.response.status === 401, "finance login rate limit activated before its configured threshold");
+      continue;
+    }
+    assert(
+      limitedLogin.response.status === 429
+        && limitedLogin.payload.code === "API_RATE_LIMITED"
+        && Number(limitedLogin.response.headers.get("retry-after")) >= 1,
+      "finance login rate limit did not return a JSON 429 with Retry-After",
+    );
+  }
 }
 
 async function checkIncrementalResourceApi() {
@@ -1373,6 +1627,8 @@ async function readState() {
 }
 
 async function cleanupCheckRows() {
+  await pool.query("DELETE FROM finance_state_history WHERE finance_state_id = ANY($1)", [checkStateIds]);
+  await pool.query("DELETE FROM finance_state WHERE id = ANY($1)", [checkStateIds]);
   await pool.query("DELETE FROM app_private_data WHERE id = ANY($1)", [checkStateIds]);
   await pool.query("DELETE FROM app_state WHERE id = ANY($1)", [checkStateIds]);
 }
@@ -1380,7 +1636,15 @@ async function cleanupCheckRows() {
 async function assertCleanupComplete() {
   const remainingState = await pool.query("SELECT count(*)::int AS count FROM app_state WHERE id = ANY($1)", [checkStateIds]);
   const remainingPrivate = await pool.query("SELECT count(*)::int AS count FROM app_private_data WHERE id = ANY($1)", [checkStateIds]);
-  assert(Number(remainingState.rows[0]?.count) === 0 && Number(remainingPrivate.rows[0]?.count) === 0, "PostgreSQL check rows were not cleaned up");
+  const remainingFinance = await pool.query("SELECT count(*)::int AS count FROM finance_state WHERE id = ANY($1)", [checkStateIds]);
+  const remainingFinanceHistory = await pool.query("SELECT count(*)::int AS count FROM finance_state_history WHERE finance_state_id = ANY($1)", [checkStateIds]);
+  assert(
+    Number(remainingState.rows[0]?.count) === 0
+      && Number(remainingPrivate.rows[0]?.count) === 0
+      && Number(remainingFinance.rows[0]?.count) === 0
+      && Number(remainingFinanceHistory.rows[0]?.count) === 0,
+    "PostgreSQL check rows were not cleaned up",
+  );
 }
 
 async function deleteRelationalRows(stateId) {
@@ -1393,7 +1657,6 @@ async function deleteRelationalRows(stateId) {
     "resources",
     "habits",
     "projects",
-    "goals",
     "boxes",
     "captures",
     "journals",

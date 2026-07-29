@@ -3,7 +3,7 @@ import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
 
 const TOPBAR = "[data-capture-zone]";
 const QUICK_PLACEMENT = "[data-quick-placement]";
-const PLACEMENT_PHASES = ["boxId", "goalId", "projectId", "resourceId"];
+const PLACEMENT_PHASES = ["boxId", "projectId", "resourceId"];
 const IPAD_VIEWPORT = { width: 1024, height: 1366 };
 
 test.beforeEach(async ({ request }) => {
@@ -29,7 +29,6 @@ test("topbar Task uses the entered title, keeps the current view, and completes 
 
   await expectCurrentView(page, startingUrl, startingHeading);
   await selectPlacementChoice(page, "boxId", FIXTURE_IDS.box);
-  await selectPlacementChoice(page, "goalId", FIXTURE_IDS.goal);
   await selectPlacementChoice(page, "projectId", FIXTURE_IDS.project);
   await selectPlacementChoice(page, "resourceId", FIXTURE_IDS.resource);
 
@@ -40,7 +39,6 @@ test("topbar Task uses the entered title, keeps the current view, and completes 
     status: "scheduled",
     dueDate: today,
     boxId: FIXTURE_IDS.box,
-    goalId: FIXTURE_IDS.goal,
     projectId: FIXTURE_IDS.project,
     resourceId: FIXTURE_IDS.resource,
   });
@@ -103,7 +101,6 @@ test("create now keeps one completely unplaced Task and closes the first phase",
         hasTimeFields: ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"].some((field) => Object.hasOwn(task, field)),
         completedAt: task.completedAt,
         boxId: task.boxId,
-        goalId: task.goalId,
         projectId: task.projectId,
         resourceId: task.resourceId,
       },
@@ -117,7 +114,6 @@ test("create now keeps one completely unplaced Task and closes the first phase",
       hasTimeFields: false,
       completedAt: "",
       boxId: "",
-      goalId: "",
       projectId: "",
       resourceId: "",
     },
@@ -170,7 +166,6 @@ test("legacy Task dates normalize to YYYY-MM-DD and drop every time field", asyn
       title: "Legacy timed Task",
       status: "scheduled",
       boxId: "",
-      goalId: "",
       projectId: "",
       resourceId: "",
       dueDate: "",
@@ -227,6 +222,8 @@ test("first phase matches the six-lane calendar and two-action reference composi
 
   const scheduler = page.getByRole("dialog", { name: "Task 날짜 배치" });
   await expect(scheduler).toBeVisible();
+  await expect(scheduler.locator(".quick-placement-progress-step small")).toHaveText(["날짜", "Box", "Project", "Resource"]);
+  await expect(scheduler.locator(".quick-placement-progress-step").first()).toHaveClass(/is-active/);
   const lanes = scheduler.locator("[data-scheduler-lane]");
   await expect(lanes).toHaveCount(6);
   await expect(lanes.locator("strong")).toHaveText(["미계획", "오늘", "내일", "예정", "지연", "완료"]);
@@ -236,7 +233,7 @@ test("first phase matches the six-lane calendar and two-action reference composi
   const days = scheduler.locator(".task-scheduler-grid > [data-scheduler-date]");
   await expect(weekdays).toHaveCount(7);
   await expect(days).toHaveCount(42);
-  await expect(weekdays).toHaveText(["일", "월", "화", "수", "목", "금", "토"]);
+  await expect(weekdays).toHaveText(["월", "화", "수", "목", "금", "토", "일"]);
 
   const actionGroup = scheduler.locator(".quick-placement-first-actions");
   const actions = actionGroup.locator(":scope > [data-placement-create-cancel], :scope > [data-placement-create-now]");
@@ -272,7 +269,6 @@ test("done lane advances through Box and preserves completion after every relati
   await scheduler.locator('[data-scheduler-lane="done"]').click();
   await expectOnlyPlacementPhase(page, "boxId");
   await selectPlacementChoice(page, "boxId", "");
-  await selectPlacementChoice(page, "goalId", "");
   await selectPlacementChoice(page, "projectId", "");
   await selectPlacementChoice(page, "resourceId", "");
 
@@ -284,7 +280,6 @@ test("done lane advances through Box and preserves completion after every relati
       status: task.status,
       hasCompletedAt: Boolean(task.completedAt),
       boxId: task.boxId,
-      goalId: task.goalId,
       projectId: task.projectId,
       resourceId: task.resourceId,
     };
@@ -292,13 +287,12 @@ test("done lane advances through Box and preserves completion after every relati
     status: "done",
     hasCompletedAt: true,
     boxId: "",
-    goalId: "",
     projectId: "",
     resourceId: "",
   });
 });
 
-test("choice hover stays still and large phase surfaces fade and slide without a backdrop flash", async ({ page }) => {
+test("choice hover lifts and large phase surfaces fade, slide, and settle without a backdrop flash", async ({ page }) => {
   await page.goto("/");
   await waitForFixtureWorkspace(page);
   await startTopbarCreate(page, "new-task", "깜빡임 없이 전환할 Task");
@@ -310,7 +304,6 @@ test("choice hover stays still and large phase surfaces fade and slide without a
 
   const choices = [
     ["boxId", FIXTURE_IDS.box],
-    ["goalId", FIXTURE_IDS.goal],
     ["projectId", FIXTURE_IDS.project],
     ["resourceId", FIXTURE_IDS.resource],
   ];
@@ -318,7 +311,7 @@ test("choice hover stays still and large phase surfaces fade and slide without a
     const [phase, value] = choices[index];
     const activePhase = await expectOnlyPlacementPhase(page, phase);
     const choice = activePhase.locator(`[data-placement-choice][data-placement-value="${value}"]`);
-    await expectChoiceDoesNotMoveOnHover(page, choice);
+    await expectChoiceLiftsOnHover(page, choice);
     if (index < choices.length - 1) await clickWithPlacementMotion(choice);
   }
 });
@@ -401,7 +394,6 @@ test("date placement survives an in-flight create save response", async ({ page,
     releaseInitialSave = null;
 
     await selectPlacementChoice(page, "boxId", "");
-    await selectPlacementChoice(page, "goalId", "");
     await selectPlacementChoice(page, "projectId", "");
     await selectPlacementChoice(page, "resourceId", "");
 
@@ -414,63 +406,6 @@ test("date placement survives an in-flight create save response", async ({ page,
     releaseInitialSave?.();
     await page.unroute("**/api/state");
   }
-});
-
-test("Project choices stay inside the selected Goal when a Box has multiple Goals", async ({ page, request }) => {
-  const alternateGoalId = "fixture-goal-alternate";
-  const alternateProjectId = "fixture-project-alternate";
-  const before = await fixtureSnapshot(request);
-  const nextState = structuredClone(before.state);
-  nextState.goals.push({
-    id: alternateGoalId,
-    boxId: FIXTURE_IDS.box,
-    name: "Alternate Fixture Goal",
-    status: "active",
-    targetDate: "",
-    year: "2026",
-    quarter: "3Q",
-    blocks: [],
-  });
-  nextState.projects.push({
-    id: alternateProjectId,
-    boxId: FIXTURE_IDS.box,
-    goalId: alternateGoalId,
-    name: "Alternate Fixture Project",
-    status: "active",
-    startDate: "",
-    endDate: "",
-    blocks: [],
-  });
-  const seeded = await request.put("/api/state", {
-    headers: { "If-Match": `"state-${before.serverRevision}"` },
-    data: {
-      state: nextState,
-      baseRevision: before.serverRevision,
-      e2eFixtureGeneration: before.resetGeneration,
-    },
-  });
-  expect(seeded.ok()).toBeTruthy();
-
-  const title = "Goal에 맞는 Project만 고르는 Task";
-  await page.goto("/");
-  await waitForFixtureWorkspace(page);
-  await startTopbarCreate(page, "new-task", title);
-  await page.getByRole("dialog", { name: "Task 날짜 배치" }).locator('[data-scheduler-lane="unplanned"]').click();
-  await selectPlacementChoice(page, "boxId", FIXTURE_IDS.box);
-  await selectPlacementChoice(page, "goalId", FIXTURE_IDS.goal);
-
-  const projectPhase = await expectOnlyPlacementPhase(page, "projectId");
-  await expect(projectPhase.locator(`[data-placement-value="${FIXTURE_IDS.project}"]`)).toBeVisible();
-  await expect(projectPhase.locator(`[data-placement-value="${alternateProjectId}"]`)).toHaveCount(0);
-  await projectPhase.locator(`[data-placement-value="${FIXTURE_IDS.project}"]`).click();
-  await selectPlacementChoice(page, "resourceId", FIXTURE_IDS.resource);
-
-  await expect.poll(async () => taskByTitle(await fixtureSnapshot(request), title)).toMatchObject({
-    boxId: FIXTURE_IDS.box,
-    goalId: FIXTURE_IDS.goal,
-    projectId: FIXTURE_IDS.project,
-    resourceId: FIXTURE_IDS.resource,
-  });
 });
 
 test("topbar Resource uses the entered title without changing view, URL, or opening a page", async ({ page, request }) => {
@@ -537,7 +472,6 @@ test("iPad touch completes every placement phase inside a bounded floating overl
 
     const choices = [
       ["boxId", FIXTURE_IDS.box],
-      ["goalId", FIXTURE_IDS.goal],
       ["projectId", FIXTURE_IDS.project],
       ["resourceId", FIXTURE_IDS.resource],
     ];
@@ -556,7 +490,6 @@ test("iPad touch completes every placement phase inside a bounded floating overl
       status: "scheduled",
       dueDate: today,
       boxId: FIXTURE_IDS.box,
-      goalId: FIXTURE_IDS.goal,
       projectId: FIXTURE_IDS.project,
       resourceId: FIXTURE_IDS.resource,
     });
@@ -575,12 +508,11 @@ test("placement supports back, empty choices, and cancel without navigating", as
   await startTopbarCreate(page, "new-task", title);
   await page.getByRole("dialog", { name: "Task 날짜 배치" }).locator('[data-scheduler-lane="today"]').click();
   await selectPlacementChoice(page, "boxId", FIXTURE_IDS.box);
-  await expectOnlyPlacementPhase(page, "goalId");
+  await expectOnlyPlacementPhase(page, "projectId");
 
   await clickWithPlacementMotion(page.locator(`${QUICK_PLACEMENT} [data-placement-back]`), -1);
   await expectOnlyPlacementPhase(page, "boxId");
   await selectPlacementChoice(page, "boxId", "");
-  await selectPlacementChoice(page, "goalId", "");
   await expectOnlyPlacementPhase(page, "projectId");
   await page.locator(`${QUICK_PLACEMENT} [data-placement-cancel]`).click();
 
@@ -589,7 +521,6 @@ test("placement supports back, empty choices, and cancel without navigating", as
   await expect.poll(async () => taskByTitle(await fixtureSnapshot(request), title)).toMatchObject({
     title,
     boxId: "",
-    goalId: "",
     projectId: "",
     resourceId: "",
   });
@@ -644,7 +575,7 @@ async function selectPlacementChoice(page, phase, value) {
   await activePhase.locator(`[data-placement-choice][data-placement-value="${value}"]`).click();
 }
 
-async function expectChoiceDoesNotMoveOnHover(page, choice) {
+async function expectChoiceLiftsOnHover(page, choice) {
   await expect(choice).toBeVisible();
   await choice.scrollIntoViewIfNeeded();
   await page.mouse.move(1, 1);
@@ -656,9 +587,10 @@ async function expectChoiceDoesNotMoveOnHover(page, choice) {
   await page.waitForTimeout(200);
   const after = await choice.boundingBox();
   expect(after).not.toBeNull();
-  for (const key of ["x", "y", "width", "height"]) {
-    expect(Math.abs(after[key] - before[key]), `${key} changed while hovering`).toBeLessThanOrEqual(0.25);
-  }
+  expect(Math.abs(after.x - before.x), "x changed while hovering").toBeLessThanOrEqual(0.25);
+  expect(Math.abs(after.width - before.width), "width changed while hovering").toBeLessThanOrEqual(0.25);
+  expect(Math.abs(after.height - before.height), "height changed while hovering").toBeLessThanOrEqual(0.25);
+  expect(after.y).toBeLessThanOrEqual(before.y - 2.5);
 }
 
 async function clickWithPlacementMotion(control, direction = 1) {

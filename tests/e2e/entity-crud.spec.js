@@ -15,53 +15,6 @@ async function openEntityView(page, view, fixtureId) {
   return card;
 }
 
-test("Goal can be edited and deleted without deleting linked entities", async ({ page, request }) => {
-  let card = await openEntityView(page, "goals", FIXTURE_IDS.goal);
-  await card.locator(`[data-goal-edit="${FIXTURE_IDS.goal}"]`).click();
-
-  let editor = page.locator(`[data-inline-owner-type="goals"][data-inline-owner-id="${FIXTURE_IDS.goal}"]`);
-  await expect(editor).toBeVisible();
-  await expect(editor.locator('[data-field="name"]')).toHaveValue("Fixture Goal");
-  await editor.locator('[data-field="name"]').fill("Edited Fixture Goal");
-  await editor.locator('[data-field="name"]').press("Tab");
-
-  card = page.locator(`[data-select-type="goals"][data-select-id="${FIXTURE_IDS.goal}"]`);
-  await expect(card.locator(".card-title")).toHaveText("Edited Fixture Goal");
-  editor = page.locator(`[data-inline-owner-type="goals"][data-inline-owner-id="${FIXTURE_IDS.goal}"]`);
-  await editor.locator('[data-field="status"]').selectOption("completed");
-  await expect.poll(async () => {
-    const snapshot = await fixtureSnapshot(request);
-    const goal = snapshot.state.goals.find((item) => item.id === FIXTURE_IDS.goal);
-    return { name: goal?.name, status: goal?.status };
-  }).toEqual({ name: "Edited Fixture Goal", status: "completed" });
-
-  await card.locator(`[data-goal-delete="${FIXTURE_IDS.goal}"]`).click();
-  const dialog = page.getByRole("dialog", { name: "목표 삭제 확인" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("프로젝트");
-  await dialog.locator("[data-goal-delete-cancel]").click();
-  await expect(dialog).toBeHidden();
-  await expect(card).toBeVisible();
-
-  await card.locator(`[data-goal-delete="${FIXTURE_IDS.goal}"]`).click();
-  await dialog.locator(`[data-goal-delete-confirm="${FIXTURE_IDS.goal}"]`).click();
-  await expect(card).toHaveCount(0);
-  await expect.poll(async () => {
-    const snapshot = await fixtureSnapshot(request);
-    return {
-      goalExists: snapshot.state.goals.some((item) => item.id === FIXTURE_IDS.goal),
-      projectGoalId: snapshot.state.projects.find((item) => item.id === FIXTURE_IDS.project)?.goalId,
-      resourceCount: snapshot.state.resources.length,
-      resourceGoalIds: [...new Set(snapshot.state.resources.map((item) => item.goalId))],
-    };
-  }).toEqual({
-    goalExists: false,
-    projectGoalId: "",
-    resourceCount: 5,
-    resourceGoalIds: [""],
-  });
-});
-
 test("Box can be edited and deleted without deleting linked entities", async ({ page, request }) => {
   let card = await openEntityView(page, "boxes", FIXTURE_IDS.box);
   await card.locator(`[data-box-edit="${FIXTURE_IDS.box}"]`).click();
@@ -86,7 +39,7 @@ test("Box can be edited and deleted without deleting linked entities", async ({ 
   await card.locator(`[data-box-delete="${FIXTURE_IDS.box}"]`).click();
   const dialog = page.getByRole("dialog", { name: "박스 삭제 확인" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("목표");
+  await expect(dialog).toContainText("프로젝트");
   await dialog.locator("[data-box-delete-cancel]").click();
   await expect(dialog).toBeHidden();
   await expect(card).toBeVisible();
@@ -98,7 +51,6 @@ test("Box can be edited and deleted without deleting linked entities", async ({ 
     const snapshot = await fixtureSnapshot(request);
     return {
       boxExists: snapshot.state.boxes.some((item) => item.id === FIXTURE_IDS.box),
-      goalBoxId: snapshot.state.goals.find((item) => item.id === FIXTURE_IDS.goal)?.boxId,
       projectBoxId: snapshot.state.projects.find((item) => item.id === FIXTURE_IDS.project)?.boxId,
       resourceCount: snapshot.state.resources.length,
       resourceBoxIds: [...new Set(snapshot.state.resources.map((item) => item.boxId))],
@@ -107,7 +59,6 @@ test("Box can be edited and deleted without deleting linked entities", async ({ 
     };
   }).toEqual({
     boxExists: false,
-    goalBoxId: "",
     projectBoxId: "",
     resourceCount: 5,
     resourceBoxIds: [""],

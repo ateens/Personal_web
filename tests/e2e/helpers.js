@@ -26,6 +26,11 @@ export async function openResources(page) {
   await page.locator('[data-nav-key="resources"]').click();
   await expect(page.locator('[data-resource-view="library"]')).toBeVisible();
   await expect(page.locator(`[data-select-id="${FIXTURE_IDS.resource}"]`).first()).toBeVisible();
+  const controls = page.locator('[data-view-controls="resources"]');
+  if (!(await controls.isVisible())) {
+    await page.locator("details.view-controls-shell > summary").click();
+    await expect(controls).toBeVisible();
+  }
 }
 
 export async function selectResourceMode(page, mode) {

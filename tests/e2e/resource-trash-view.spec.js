@@ -83,6 +83,11 @@ async function seedTrashedResourceWithReadOnlySibling(request) {
 }
 
 async function selectTrashFilter(page) {
+  const controls = page.locator('[data-view-controls="resources"]');
+  if (!(await controls.isVisible())) {
+    await page.locator("details.view-controls-shell > summary").click();
+    await expect(controls).toBeVisible();
+  }
   await page.locator('[data-view-control-panel-toggle="resources"][data-control-panel="filter"]').click();
   const trash = page.locator(TRASH_FILTER).first();
   await expect(trash).toBeVisible();
