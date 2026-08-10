@@ -5,6 +5,8 @@ SCRIPT_DIR=${0:A:h}
 REPO_ROOT=${SCRIPT_DIR:h:h}
 CONFIGURATION=${1:-release}
 XCODE_CONFIGURATION=${(C)CONFIGURATION}
+APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SCRIPT_DIR/Info.plist")
+APP_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$SCRIPT_DIR/Info.plist")
 SIGNING_IDENTITY=${SYGMA_CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) .*/\1/p' | sed -n '1p')}
 if [[ -z "$SIGNING_IDENTITY" ]]; then
     print -u2 'A valid macOS code-signing identity is required for WidgetKit.'
@@ -35,8 +37,8 @@ xcodebuild -quiet \
     SDKROOT=macosx \
     MACOSX_DEPLOYMENT_TARGET=14.0 \
     PRODUCT_BUNDLE_IDENTIFIER=com.sygma.native.mac.widget \
-    MARKETING_VERSION=2.3 \
-    CURRENT_PROJECT_VERSION=6 \
+    MARKETING_VERSION="$APP_VERSION" \
+    CURRENT_PROJECT_VERSION="$APP_BUILD" \
     CODE_SIGNING_ALLOWED=NO \
     build
 

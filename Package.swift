@@ -21,7 +21,7 @@ let package = Package(
                 "ios/SYGMA/SYGMA/PrivacyInfo.xcprivacy", "ios/SYGMA/SYGMA/SYGMAApp.swift",
                 "macos/SYGMA/Info.plist", "macos/SYGMA/README.md",
                 "macos/SYGMA/SYGMAMac.entitlements", "macos/SYGMA/SYGMAWidget.entitlements",
-                "macos/SYGMA/build-app.sh",
+                "macos/SYGMA/build-app.sh", "macos/SYGMA/Tests",
                 ".DS_Store", ".env", ".env.example", ".gitignore", "README.md", "app.js", "finance-model.js",
                 "error.log", "hci87_security_forensics_report_2026-05-27.md", "index.html",
                 "manifest.json", "package-lock.json", "package.json", "playwright.config.js",
@@ -30,8 +30,14 @@ let package = Package(
             sources: [
                 "ios/SYGMA/SYGMA/WebAppShell.swift",
                 "macos/SYGMA/Sources/SYGMAMac/SYGMAMacApp.swift",
+                "macos/SYGMA/Sources/SYGMAMac/QuickNotes.swift",
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "SYGMAMacTests",
+            dependencies: ["SYGMAMac"],
+            path: "macos/SYGMA/Tests/SYGMAMacTests"
         ),
     ]
 )

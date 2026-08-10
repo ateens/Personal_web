@@ -18,14 +18,21 @@ struct SYGMAMacApp: App {
         }
         .defaultSize(width: 1440, height: 920)
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandMenu("Notes") {
+                Button("Quick Notes 열기/숨기기") { appDelegate.toggleQuickNotes() }
+            }
+        }
     }
 }
 
 @MainActor
 private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
     private var keyWindowObserver: NSObjectProtocol?
+    private let quickNotes = QuickNotesController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        quickNotes.start()
         keyWindowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -39,6 +46,14 @@ private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             NSApp.windows.filter(isMainWindow).forEach(configureMainWindow)
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        quickNotes.flush()
+    }
+
+    func toggleQuickNotes() {
+        quickNotes.toggle()
     }
 
     deinit {

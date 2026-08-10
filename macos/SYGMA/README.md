@@ -8,9 +8,15 @@ The signed app also embeds the native `SYGMA Calendar` WidgetKit extension. It
 provides the large four-week calendar and small, medium, or large Today Tasks widget.
 
 The main window has no visible title bar or traffic-light buttons. Its invisible top
-24-point strip remains draggable, while standard macOS keyboard shortcuts control the
-window. Product UI changes and behavior tests belong to the web app; this target only
-compiles and packages the shell.
+24-point strip remains draggable.
+
+## Quick Notes
+
+Press `⌥⌘N` from any app to show or hide the always-on-top Notes panel. Notes use real
+Markdown files in Application Support, render Markdown with `⌘⇧M` or the `T` button,
+and keep pasted images inline as local PNG assets. Use `⌘N` for a new note, `⌘[` and
+`⌘]` for previous/next, or `⌘1` through `⌘9` for direct selection. `Esc` hides the
+panel. The app's **Notes** menu is the fallback if another app already owns `⌥⌘N`.
 
 ## Build
 
