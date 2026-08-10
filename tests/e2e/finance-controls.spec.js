@@ -7,247 +7,375 @@ test.beforeEach(async ({ page, request }) => {
   await page.getByLabel("가계부 비밀번호").fill("finance-e2e-password");
   await page.getByRole("button", { name: "가계부 열기" }).click();
   await expect(page.locator('[data-finance-screen="dashboard"]')).toBeVisible();
-  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
-  await page.locator('.finance-tabs [data-finance-tab="manage"]').click();
 });
 
-test("finance setup uses custom controls and stores loan schedules and fixed-cost contracts", async ({ page, request }) => {
-  await page.locator('.finance-tabs [data-finance-tab="entries"]').click();
-  await expect(page.locator('.finance-native-form [name="recognitionMonth"]')).toHaveCount(0);
-  await expect(page.getByText(/비용 기준 월|수입 기준 월|환불을 반영할 월/)).toHaveCount(0);
+async function createAccount(page, request, { name = "생활비 통장", balance = "5000000" } = {}) {
   await page.locator('.finance-tabs [data-finance-tab="manage"]').click();
-
-  const accountForm = page.locator('form[data-form="finance-account"]');
-  await expect(accountForm.locator('[name="lastFour"], [name="openingOn"]')).toHaveCount(0);
-  await expect(page.locator(".finance-native-form select:not(.finance-select-native)")).toHaveCount(0);
-  await expect(page.locator('.finance-native-form input[type="date"]:not(.finance-date-native)')).toHaveCount(0);
-
-  await accountForm.locator('[name="name"]').fill("생활비 통장");
-  await accountForm.locator('[name="institution"]').fill("테스트 은행");
-  await accountForm.locator('[name="openingBalanceKrw"]').fill("1000000");
-  await expect(accountForm.locator("[data-finance-select-options]")).toBeHidden();
-  await accountForm.locator("[data-finance-select-trigger]").press("ArrowDown");
-  await expect(accountForm.locator("[data-finance-select-options]")).toBeVisible();
-  await expect(accountForm.getByRole("option", { name: "은행 계좌" })).toBeFocused();
-  await accountForm.getByRole("option", { name: "은행 계좌" }).press("Enter");
-  await expect(accountForm.locator("[data-finance-select-options]")).toBeHidden();
-  await accountForm.getByRole("button", { name: "계좌 저장" }).click();
-
-  const expectedOpeningOn = await page.evaluate(() => {
-    const now = new Date();
-    return [
-      now.getFullYear(),
-      String(now.getMonth() + 1).padStart(2, "0"),
-      String(now.getDate()).padStart(2, "0"),
-    ].join("-");
+  const form = page.locator('form[data-form="finance-account"]').filter({
+    has: page.locator('input[name="entityId"][value=""]'),
   });
+  await form.locator('[name="name"]').fill(name);
+  await form.locator('[name="institution"]').fill("테스트 은행");
+  await form.locator('[name="openingBalanceKrw"]').fill(balance);
+  await form.getByRole("button", { name: "계좌 저장" }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.accounts.some((item) => item.name === name)).toBe(true);
+  await expect(page.locator('[data-finance-screen="dashboard"]')).toHaveAttribute("aria-busy", "false");
+}
+
+async function createCreditCard(page, request, { name = "생활 신용카드", dueDay = "14" } = {}) {
+  const accountId = (await fixtureSnapshot(request)).financeState.accounts[0].id;
+  const form = page.locator('form[data-form="finance-payment-method"]').filter({
+    has: page.locator('input[name="entityId"][value=""]'),
+  });
+  await form.locator('[name="name"]').fill(name);
+  await form.locator('select[name="type"]').selectOption("credit_card");
+  await form.locator('select[name="paymentAccountId"]').selectOption(accountId);
+  await form.locator('[name="dueDay"]').fill(dueDay);
+  await form.getByRole("button", { name: "결제수단 저장" }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.paymentMethods.some((item) => item.name === name)).toBe(true);
+  await expect(page.locator('[data-finance-screen="dashboard"]')).toHaveAttribute("aria-busy", "false");
+}
+
+test("management items edit, fixed costs generate once, and asset-only loans delete", async ({ page, request }) => {
+  await createAccount(page, request);
+  let snapshot = await fixtureSnapshot(request);
+  const accountId = snapshot.financeState.accounts[0].id;
+
+  const accountEdit = page.locator(`[data-finance-edit-account="${accountId}"]`);
+  await accountEdit.locator("summary").click();
+  await accountEdit.locator('[name="name"]').fill("수정한 생활비 통장");
+  await accountEdit.getByRole("button", { name: "계좌 수정 저장" }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.accounts[0].name).toBe("수정한 생활비 통장");
+
+  await createCreditCard(page, request);
+  snapshot = await fixtureSnapshot(request);
+  const cardId = snapshot.financeState.paymentMethods[0].id;
+  const cardEdit = page.locator(`[data-finance-edit-payment-method="${cardId}"]`);
+  await cardEdit.locator("summary").click();
+  await cardEdit.locator('[name="name"]').fill("수정한 생활 신용카드");
+  await cardEdit.locator('[name="dueDay"]').fill("17");
+  await cardEdit.getByRole("button", { name: "결제수단 수정 저장" }).click();
   await expect.poll(async () => {
-    const account = (await fixtureSnapshot(request)).financeState?.accounts?.[0];
-    return account && {
-      name: account.name,
-      openingBalanceKrw: account.openingBalanceKrw,
-      openingOn: account.openingOn,
-      hasLastFour: Object.hasOwn(account, "lastFour"),
-    };
-  }).toEqual({
-    name: "생활비 통장",
-    openingBalanceKrw: 1_000_000,
-    openingOn: expectedOpeningOn,
-    hasLastFour: false,
-  });
-  await expect(accountForm.locator('button[type="submit"]')).toBeEnabled();
+    const card = (await fixtureSnapshot(request)).financeState.paymentMethods[0];
+    return { id: card.id, name: card.name, dueDay: card.dueDay };
+  }).toEqual({ id: cardId, name: "수정한 생활 신용카드", dueDay: 17 });
 
-  const methodForm = page.locator('form[data-form="finance-payment-method"]');
-  await expect(methodForm.locator('[name="lastFour"]')).toHaveCount(0);
-  await methodForm.locator('[name="name"]').fill("생활 신용카드");
-  await methodForm.locator("[data-finance-select-trigger]").first().click();
-  await methodForm.getByRole("option", { name: "신용카드" }).click();
-  await expect(methodForm.locator("[data-finance-linked-fields]")).toBeHidden();
-  await expect(methodForm.locator("[data-finance-credit-fields]")).toBeVisible();
-  await methodForm.locator("[data-finance-credit-fields] [data-finance-select-trigger]").click();
-  await methodForm.getByRole("option", { name: "생활비 통장" }).click();
-  await methodForm.getByRole("button", { name: "결제수단 저장" }).click();
-  await expect.poll(async () => {
-    const method = (await fixtureSnapshot(request)).financeState?.paymentMethods?.[0];
-    return method && {
-      name: method.name,
-      type: method.type,
-      hasLastFour: Object.hasOwn(method, "lastFour"),
-    };
-  }).toEqual({
-    name: "생활 신용카드",
-    type: "credit_card",
-    hasLastFour: false,
+  const loanForm = page.locator('form[data-form="finance-loan"]').filter({
+    has: page.locator('input[name="entityId"][value=""]'),
   });
-  await expect(methodForm.locator('button[type="submit"]')).toBeEnabled();
-
-  const loanForm = page.locator('form[data-form="finance-loan"]');
+  await expect(loanForm.locator('[name="termMonths"], [name="graceMonths"], [name="annualRate"], [name="paymentAccountId"]')).toHaveCount(0);
   await loanForm.locator('[name="name"]').fill("생활 대출");
-  await expect(loanForm.locator('[name="name"]')).toHaveValue("생활 대출");
   await loanForm.locator('[name="openingPrincipalKrw"]').fill("12000000");
-  await loanForm.locator('[name="termMonths"]').fill("24");
-  await loanForm.locator('[name="graceMonths"]').fill("6");
-  await loanForm.locator('[name="annualRate"]').fill("6");
-  await expect(loanForm.locator('[name="monthlyPaymentKrw"]')).toHaveCount(0);
-  const automaticSchedule = loanForm.locator("[data-finance-loan-schedule]");
-  await expect(automaticSchedule).toHaveAttribute("aria-hidden", "false");
-  await expect(automaticSchedule.locator("[data-finance-loan-schedule-row]")).toHaveCount(30);
-  await expect(automaticSchedule.locator("[data-finance-loan-schedule-row]").first()).toContainText("₩60,000");
-  await expect(automaticSchedule.locator("[data-finance-loan-schedule-row]").nth(6)).toContainText("₩531,847");
-  await loanForm.locator("[data-finance-select-trigger]").click();
-  await loanForm.getByRole("option", { name: "생활비 통장" }).click();
-  await expect(loanForm.locator('[name="name"]')).toHaveValue("생활 대출");
-  expect(await loanForm.evaluate((form) => ({
-    valid: form.checkValidity(),
-    invalid: [...form.elements].filter((element) => !element.checkValidity()).map((element) => element.name),
-  }))).toEqual({ valid: true, invalid: [] });
   await loanForm.getByRole("button", { name: "대출 저장" }).click();
-  await expect.poll(async () => {
-    const financeState = (await fixtureSnapshot(request)).financeState;
-    const loan = financeState?.loans?.[0];
-    const payments = financeState?.loanPayments?.filter((payment) => payment.loanId === loan?.id);
-    return loan && {
-      name: loan.name,
-      termMonths: loan.termMonths,
-      graceMonths: loan.graceMonths,
-      scheduleMode: loan.scheduleMode,
-      hasMonthlyPaymentKrw: Object.hasOwn(loan, "monthlyPaymentKrw"),
-      paymentCount: payments.length,
-      firstPayment: payments[0] && {
-        principalKrw: payments[0].principalKrw,
-        interestKrw: payments[0].interestKrw,
-      },
-      firstRepayment: payments[6] && {
-        principalKrw: payments[6].principalKrw,
-        interestKrw: payments[6].interestKrw,
-      },
+  snapshot = await fixtureSnapshot(request);
+  const loan = snapshot.financeState.loans[0];
+  expect(snapshot.financeState.loanPayments).toHaveLength(0);
+  expect(loan).toMatchObject({ name: "생활 대출", openingPrincipalKrw: 12_000_000 });
+  expect(Object.hasOwn(loan, "paymentAccountId")).toBe(false);
+
+  const loanEdit = page.locator(`[data-finance-edit-loan="${loan.id}"]`);
+  await loanEdit.locator("summary").click();
+  await loanEdit.locator('[name="name"]').fill("수정한 생활 대출");
+  await loanEdit.getByRole("button", { name: "대출 수정 저장" }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.loans[0].name).toBe("수정한 생활 대출");
+
+  const today = await page.evaluate(() => {
+    const now = new Date();
+    return {
+      day: String(now.getDate()),
+      month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
     };
-  }).toEqual({
-    name: "생활 대출",
-    termMonths: 24,
-    graceMonths: 6,
-    scheduleMode: "auto",
-    hasMonthlyPaymentKrw: false,
-    paymentCount: 30,
-    firstPayment: { principalKrw: 0, interestKrw: 60_000 },
-    firstRepayment: { principalKrw: 471_847, interestKrw: 60_000 },
   });
-  await expect(page.locator('[data-finance-loan]').filter({ hasText: "생활 대출" })).toBeVisible();
-
-  await page.locator(".finance-manage-details").filter({ has: loanForm }).locator("summary").click();
-  await loanForm.locator('[name="name"]').fill("수동 대출");
-  await loanForm.locator('[name="openingPrincipalKrw"]').fill("1000001");
-  await loanForm.locator('[name="termMonths"]').fill("3");
-  await loanForm.getByText("수동 입력", { exact: true }).click();
-  const manualSchedule = loanForm.locator("[data-finance-loan-schedule]");
-  await expect(manualSchedule.locator("[data-finance-loan-schedule-row]")).toHaveCount(3);
-  await loanForm.getByRole("button", { name: "원금 자동분할" }).click();
-  expect(await manualSchedule.locator('[name="schedulePrincipalKrw"]').evaluateAll((inputs) => inputs.map((input) => input.value))).toEqual(["333334", "333334", "333333"]);
-  await manualSchedule.locator('[name="scheduleInterestKrw"]').nth(1).fill("100");
-  await loanForm.locator("[data-finance-select-trigger]").click();
-  await loanForm.getByRole("option", { name: "생활비 통장" }).click();
-  await loanForm.getByRole("button", { name: "대출 저장" }).click();
-  await expect.poll(async () => {
-    const financeState = (await fixtureSnapshot(request)).financeState;
-    const loan = financeState?.loans?.find((item) => item.name === "수동 대출");
-    const payments = financeState?.loanPayments?.filter((payment) => payment.loanId === loan?.id);
-    return loan && {
-      scheduleMode: loan.scheduleMode,
-      graceMonths: loan.graceMonths,
-      hasAnnualRate: Object.hasOwn(loan, "annualRate"),
-      payments: payments.map((payment) => ({
-        principalKrw: payment.principalKrw,
-        interestKrw: payment.interestKrw,
-      })),
-    };
-  }).toEqual({
-    scheduleMode: "manual",
-    graceMonths: 0,
-    hasAnnualRate: false,
-    payments: [
-      { principalKrw: 333_334, interestKrw: 0 },
-      { principalKrw: 333_334, interestKrw: 100 },
-      { principalKrw: 333_333, interestKrw: 0 },
-    ],
+  const fixedForm = page.locator('form[data-form="finance-recurring-rule"]').filter({
+    has: page.locator('input[name="entityId"][value=""]'),
   });
-
-  const recurringForm = page.locator('form[data-form="finance-recurring-rule"]');
-  await expect(recurringForm.locator('[name="recognitionMonthOffset"]')).toHaveCount(0);
-  await recurringForm.locator('[name="name"]').fill("전기요금");
-  await recurringForm.locator('[name="amountEstimateKrw"]').fill("80000");
-  await recurringForm.locator("[data-finance-select-trigger]").click();
-  await recurringForm.getByRole("option", { name: "생활비 통장" }).click();
-  const activeMonth = expectedOpeningOn.slice(0, 7);
-  await recurringForm.locator("[data-finance-date-trigger]").click();
-  await recurringForm.locator(`[data-finance-date-value="${activeMonth}-01"]`).click();
-  await recurringForm.getByRole("button", { name: "고정비 저장" }).click();
+  await fixedForm.locator('[name="name"]').fill("자동 월세");
+  await fixedForm.locator('[name="amountEstimateKrw"]').fill("600000");
+  await fixedForm.locator('[name="dueDay"]').fill(today.day);
+  await fixedForm.locator('select[name="accountId"]').selectOption(accountId);
+  const creationControl = fixedForm.locator('select[name="creationMode"]').locator("xpath=..");
+  await creationControl.locator("[data-finance-select-trigger]").click();
+  await creationControl.getByRole("option", { name: "자동 생성" }).click();
+  await fixedForm.getByRole("button", { name: "고정비 저장" }).click();
   await expect.poll(async () => {
-    const rule = (await fixtureSnapshot(request)).financeState?.recurringRules?.[0];
-    return rule && {
-      name: rule.name,
-      hasRecognitionMonthOffset: Object.hasOwn(rule, "recognitionMonthOffset"),
-    };
-  }).toEqual({
-    name: "전기요금",
-    hasRecognitionMonthOffset: false,
-  });
-  await page.getByRole("button", { name: `${activeMonth} 일정 만들기` }).click();
+    const state = (await fixtureSnapshot(request)).financeState;
+    return state.entries.filter((entry) => entry.recurringRuleId).length;
+  }).toBe(1);
+
+  const rule = (await fixtureSnapshot(request)).financeState.recurringRules[0];
+  const ruleEdit = page.locator(`[data-finance-edit-recurring-rule="${rule.id}"]`);
+  await ruleEdit.locator("summary").click();
+  await ruleEdit.locator('[name="name"]').fill("수정한 자동 월세");
+  await ruleEdit.getByRole("button", { name: "고정비 수정 저장" }).click();
+  await page.reload();
+  await expect(page.locator('[data-finance-screen="dashboard"]')).toBeVisible();
   await expect.poll(async () => {
-    const entry = (await fixtureSnapshot(request)).financeState?.entries?.find((item) => item.recurringRuleId);
-    return entry?.recognitionMonth;
-  }).toBe(activeMonth);
+    const state = (await fixtureSnapshot(request)).financeState;
+    return state.entries.filter((entry) => entry.recurringRuleId === rule.id && entry.periodKey === today.month).length;
+  }).toBe(1);
 
-  await page.getByText("실제 잔액과 맞추기", { exact: true }).click();
-  const balanceForm = page.locator('form[data-form="finance-balance-check"]');
-  await balanceForm.locator("[data-finance-select-trigger]").click();
-  await balanceForm.getByRole("option", { name: "생활비 통장" }).click();
-
-  const checkedOn = await balanceForm.locator('[name="checkedOn"]').inputValue();
-  await balanceForm.locator("[data-finance-date-trigger]").click();
-  const dateDialog = balanceForm.locator("[data-finance-date-dialog]");
-  await expect(dateDialog).toBeVisible();
-  await expect(dateDialog.locator(".finance-date-weekdays")).toContainText("월");
-  const previousDate = await page.evaluate((value) => {
-    const date = new Date(`${value}T12:00:00`);
-    date.setDate(date.getDate() - 1);
-    return [
-      date.getFullYear(),
-      String(date.getMonth() + 1).padStart(2, "0"),
-      String(date.getDate()).padStart(2, "0"),
-    ].join("-");
-  }, checkedOn);
-  await dateDialog.locator(`[data-finance-date-value="${checkedOn}"]`).first().press("ArrowLeft");
-  await expect(dateDialog.locator(`[data-finance-date-value="${previousDate}"]`)).toBeFocused();
-  await dateDialog.locator(`[data-finance-date-value="${checkedOn}"]`).first().click();
-  await expect(dateDialog).toBeHidden();
-
-  await balanceForm.locator('[name="actualBalanceKrw"]').fill("1050000");
-  await balanceForm.getByRole("button", { name: "잔액 확인 저장" }).click();
+  await page.locator('.finance-tabs [data-finance-tab="schedule"]').click();
+  const paymentForm = page.locator('form[data-form="finance-fixed-cost-payment"]').first();
+  await paymentForm.locator("xpath=..").locator("summary").click();
+  await paymentForm.getByRole("button", { name: "실제 출금 확인" }).click();
   await expect.poll(async () => {
-    const financeState = (await fixtureSnapshot(request)).financeState;
-    const check = financeState?.balanceChecks?.[0];
-    const movement = financeState?.movements?.find((item) => item.id === check?.adjustmentMovementId);
-    return check && {
-      checkedOn: check.checkedOn,
-      actualBalanceKrw: check.actualBalanceKrw,
-      movementOn: movement?.postedOn,
-    };
-  }).toEqual({
-    checkedOn,
-    actualBalanceKrw: 1_050_000,
-    movementOn: checkedOn,
-  });
+    const state = (await fixtureSnapshot(request)).financeState;
+    const settlement = state.settlements.find((item) => item.targetType === "entry" && item.status === "paid");
+    const movement = state.movements.find((item) => item.id === settlement?.movementId);
+    return movement && { kind: movement.kind, fromAccountId: movement.fromAccountId, amountKrw: movement.amountKrw };
+  }).toEqual({ kind: "external", fromAccountId: accountId, amountKrw: 600_000 });
+
+  await page.locator('.finance-tabs [data-finance-tab="manage"]').click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator(`[data-finance-loan="${loan.id}"] [data-finance-delete-loan]`).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.loans.length).toBe(0);
+});
+
+test("credit-card workspace stores starting totals and installments, then pays without another expense", async ({ page, request }) => {
+  await createAccount(page, request);
+  await createCreditCard(page, request, { dueDay: "14" });
+  const initial = await fixtureSnapshot(request);
+  const accountId = initial.financeState.accounts[0].id;
+
+  await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
+  const card = page.locator("[data-finance-card]").first();
+  await expect(card).toContainText("매월 14일 납부");
+  const totalForm = card.locator('form[data-form="finance-card-usage-total"]');
+  await totalForm.locator("xpath=..").locator("summary").click();
+  await totalForm.locator('[name="amountKrw"]').fill("2000000");
+  await totalForm.getByRole("button", { name: "시작 사용액 저장" }).click();
 
   await page.locator('.finance-tabs [data-finance-tab="entries"]').click();
-  await page.getByText("썼어요", { exact: true }).click();
+  await page.getByText("지출", { exact: true }).click();
   const expenseForm = page.locator('form[data-form="finance-expense"]');
-  await expect(expenseForm.locator('input[type="date"]:not(.finance-date-native)')).toHaveCount(0);
-  const optionalDate = expenseForm.locator('[name="scheduledOn"]');
-  await expect(optionalDate).toHaveValue("");
-  await optionalDate.locator("xpath=..").locator("[data-finance-date-trigger]").click();
-  await optionalDate.locator("xpath=..").getByRole("button", { name: "오늘" }).click();
-  await expect(optionalDate).not.toHaveValue("");
-  await optionalDate.locator("xpath=..").locator("[data-finance-date-trigger]").click();
-  await optionalDate.locator("xpath=..").getByRole("button", { name: "선택 안 함" }).click();
-  await expect(optionalDate).toHaveValue("");
+  const cardId = (await fixtureSnapshot(request)).financeState.paymentMethods[0].id;
+  await expenseForm.locator('[name="title"]').fill("추가 생활비");
+  await expenseForm.locator('[name="amountKrw"]').fill("100000");
+  await expenseForm.locator('select[name="paymentMethodId"]').selectOption(cardId);
+  await expenseForm.getByRole("button", { name: "쓴 기록 저장" }).click();
+
+  await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
+  await expect(page.locator("[data-finance-card]").first()).toContainText("₩2,100,000");
+  const installmentForm = page.locator('form[data-form="finance-card-installment"]');
+  await installmentForm.locator("xpath=..").locator("summary").click();
+  await installmentForm.locator('[name="label"]').fill("기존 노트북");
+  await installmentForm.locator('[name="totalAmountKrw"]').fill("600000");
+  await installmentForm.locator('[name="installmentCount"]').fill("3");
+  await installmentForm.getByRole("button", { name: "할부 일정 저장" }).click();
+
+  await expect.poll(async () => {
+    const state = (await fixtureSnapshot(request)).financeState;
+    return {
+      entries: state.entries.length,
+      installments: state.cardStatements.filter((item) => item.source === "opening_installment").map((item) => item.statementAmountKrw),
+    };
+  }).toEqual({ entries: 2, installments: [200_000, 200_000, 200_000] });
+
+  const beforePay = await fixtureSnapshot(request);
+  const entriesBefore = beforePay.financeState.entries.length;
+  const movementsBefore = beforePay.financeState.movements.length;
+  const cardPaymentForm = page.locator('form[data-form="finance-card-payment"]').first();
+  await cardPaymentForm.locator("xpath=..").locator("summary").click();
+  await cardPaymentForm.getByRole("button", { name: "전액 출금 확인" }).click();
+  await expect.poll(async () => {
+    const state = (await fixtureSnapshot(request)).financeState;
+    const movement = state.movements.find((item) => item.kind === "card_payment");
+    return {
+      entries: state.entries.length,
+      movements: state.movements.length,
+      amountKrw: movement?.amountKrw,
+      fromAccountId: movement?.fromAccountId,
+    };
+  }).toEqual({
+    entries: entriesBefore,
+    movements: movementsBefore + 1,
+    amountKrw: 200_000,
+    fromAccountId: accountId,
+  });
+});
+
+test("statistics calendar follows occurrence dates and keeps finance headings concise", async ({ page }) => {
+  const seeded = await page.evaluate(async (state) => {
+    const currentResponse = await fetch("/api/finance/state");
+    const current = await currentResponse.json();
+    const response = await fetch("/api/finance/state", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": `"finance-state-${current.revision}"`,
+      },
+      body: JSON.stringify({ state, baseRevision: current.revision }),
+    });
+    return { ok: response.ok, status: response.status, body: await response.json() };
+  }, {
+    schemaVersion: 1,
+    currency: "KRW",
+    accounts: [{
+      id: "account-calendar",
+      name: "달력 계좌",
+      type: "bank",
+      openingBalanceKrw: 1_000_000,
+      openingOn: "2026-01-01",
+    }],
+    paymentMethods: [{
+      id: "card-calendar",
+      name: "달력 카드",
+      type: "credit_card",
+      paymentAccountId: "account-calendar",
+      cycleEndDay: 31,
+      dueDay: 14,
+      dueMonthOffset: 1,
+    }],
+    entries: [
+      {
+        id: "entry-expense-calendar",
+        kind: "expense",
+        title: "식비",
+        amountKrw: 12_000,
+        occurredOn: "2026-07-04",
+        recognitionMonth: "2026-07",
+        category: "식비",
+        status: "confirmed",
+      },
+      {
+        id: "entry-refund-calendar",
+        kind: "refund",
+        title: "환불",
+        amountKrw: 2_000,
+        occurredOn: "2026-07-05",
+        recognitionMonth: "2026-07",
+        originalEntryId: "entry-fixed-calendar",
+        status: "confirmed",
+      },
+      {
+        id: "entry-income-calendar",
+        kind: "income",
+        title: "수입",
+        amountKrw: 100_000,
+        occurredOn: "2026-07-06",
+        recognitionMonth: "2026-07",
+        status: "confirmed",
+      },
+      {
+        id: "entry-draft-calendar",
+        kind: "expense",
+        title: "미확정 소비",
+        amountKrw: 7_000,
+        occurredOn: "2026-07-06",
+        recognitionMonth: "2026-07",
+        status: "draft",
+      },
+      {
+        id: "entry-fixed-calendar",
+        kind: "expense",
+        title: "월세",
+        amountKrw: 600_000,
+        occurredOn: "2026-07-07",
+        recognitionMonth: "2026-07",
+        category: "고정비",
+        recurringRuleId: "rule-fixed-calendar",
+        periodKey: "2026-07",
+        status: "confirmed",
+      },
+      {
+        id: "entry-boundary-calendar",
+        kind: "expense",
+        title: "경계 소비",
+        amountKrw: 3_000,
+        occurredOn: "2026-07-31",
+        recognitionMonth: "2026-08",
+        status: "confirmed",
+      },
+      {
+        id: "entry-short-calendar",
+        kind: "expense",
+        title: "물",
+        amountKrw: 1_000,
+        occurredOn: "2026-08-01",
+        recognitionMonth: "2026-08",
+        status: "confirmed",
+      },
+    ],
+    movements: [
+      {
+        id: "movement-card-calendar",
+        kind: "card_payment",
+        amountKrw: 99_000,
+        postedOn: "2026-07-08",
+        fromAccountId: "account-calendar",
+        counterpartyType: "card",
+        counterpartyId: "card-calendar",
+        status: "confirmed",
+      },
+      {
+        id: "movement-external-calendar",
+        kind: "external",
+        amountKrw: 8_000,
+        postedOn: "2026-07-09",
+        fromAccountId: "account-calendar",
+        status: "confirmed",
+      },
+    ],
+    settlements: [],
+    cardStatements: [],
+    loans: [],
+    loanPayments: [],
+    recurringRules: [{
+      id: "rule-fixed-calendar",
+      kind: "fixed_expense",
+      name: "월세",
+      amountEstimateKrw: 600_000,
+      creationMode: "manual",
+      dueDay: 7,
+      accountId: "account-calendar",
+      activeFrom: "2026-01-01",
+      status: "active",
+    }],
+    balanceChecks: [],
+  });
+  expect(seeded, JSON.stringify(seeded.body)).toMatchObject({ ok: true, status: 200 });
+
+  await page.reload();
+  await expect(page.locator('[data-finance-screen="dashboard"]')).toBeVisible();
+  const monthInput = page.locator("[data-finance-month]");
+  await monthInput.fill("2026-07");
+  await monthInput.dispatchEvent("change");
+
+  for (const [tab, title] of [
+    ["entries", "수입·지출"],
+    ["schedule", "결제 예정"],
+    ["cards", "신용카드"],
+    ["manage", "관리"],
+    ["stats", "통계"],
+  ]) {
+    await page.locator(`.finance-tabs [data-finance-tab="${tab}"]`).click();
+    await expect(page.locator(".finance-section-heading h2").first()).toHaveText(title);
+  }
+
+  const calendar = page.locator("[data-finance-consumption-calendar]");
+  await expect(calendar.locator('[data-finance-consumption-date="2026-07-04"] [data-finance-consumption-entry="entry-expense-calendar"]')).toContainText("식비");
+  const refundEntry = calendar.locator('[data-finance-consumption-date="2026-07-05"] [data-finance-consumption-entry="entry-refund-calendar"]');
+  await expect(refundEntry).toContainText("환불");
+  await expect(refundEntry).toContainText(/[−-]₩2,000/);
+  await expect(refundEntry).toHaveClass(/is-fixed/);
+  await expect(calendar.locator('[data-finance-consumption-entry="entry-income-calendar"]')).toHaveCount(0);
+  await expect(calendar.locator('[data-finance-consumption-entry="entry-draft-calendar"]')).toHaveCount(0);
+  await expect(calendar.locator('[data-finance-consumption-entry="entry-fixed-calendar"]')).toHaveClass(/is-fixed/);
+  await expect(calendar.locator('[data-finance-consumption-date="2026-07-31"] [data-finance-consumption-entry="entry-boundary-calendar"]')).toContainText("경계 소비");
+  await expect(calendar.locator('[data-finance-consumption-entry="movement-card-calendar"]')).toHaveCount(0);
+  await expect(calendar.locator('[data-finance-consumption-entry="movement-external-calendar"]')).toHaveCount(0);
+  await expect(calendar).not.toContainText("카드대금 출금");
+  await expect(calendar.locator("[data-finance-consumption-entry]")).toHaveCount(4);
+
+  await calendar.locator('[data-finance-month-shift="1"]').click();
+  await expect(monthInput).toHaveValue("2026-08");
+  const augustCalendar = page.locator("[data-finance-consumption-calendar]");
+  await expect(augustCalendar.locator('[data-finance-consumption-entry="entry-boundary-calendar"]')).toHaveCount(0);
+  const shortDay = augustCalendar.locator('[data-finance-consumption-date="2026-08-01"]');
+  await expect(shortDay.locator("[data-finance-consumption-entry]")).toHaveCount(1);
+  await expect(shortDay.locator('[data-finance-consumption-entry="entry-short-calendar"]')).toContainText("물");
+
+  await augustCalendar.locator('[data-finance-month-shift="-1"]').click();
+  await expect(monthInput).toHaveValue("2026-07");
+  await expect(page.locator('[data-finance-consumption-entry="entry-expense-calendar"]')).toContainText("식비");
 });

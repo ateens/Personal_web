@@ -169,7 +169,7 @@ export function validateFinanceState(state) {
 
   validateAccounts(state.accounts, issues);
   validatePaymentMethods(state.paymentMethods, accountIds, issues);
-  validateEntries(state.entries, entryIds, paymentMethodIds, recurringRuleIds, issues);
+  validateEntries(state.entries, entryIds, state.paymentMethods, recurringRuleIds, issues);
   validateMovements(state.movements, accountIds, issues);
   validateSettlements(
     state.settlements,
@@ -178,11 +178,12 @@ export function validateFinanceState(state) {
     state.loanPayments,
     state.paymentMethods,
     state.loans,
+    accountIds,
     movementIds,
     state.movements,
     issues,
   );
-  validateCardStatements(state.cardStatements, state.paymentMethods, state.entries, state.settlements, issues);
+  validateCardStatements(state.cardStatements, state.paymentMethods, state.entries, state.settlements, accountIds, issues);
   validateLoans(state.loans, accountIds, issues);
   validateLoanPayments(
     state.loanPayments,
@@ -307,9 +308,12 @@ function validatePaymentMethods(methods, accountIds, issues) {
   });
 }
 
-function validateEntries(entries, entryIds, paymentMethodIds, recurringRuleIds, issues) {
+function validateEntries(entries, entryIds, paymentMethods, recurringRuleIds, issues) {
+  const paymentMethodIds = collectionIdSet(paymentMethods);
+  const paymentMethodById = new Map(paymentMethods.map((method) => [method.id, method]));
   const entryById = new Map(entries.map((entry) => [entry.id, entry]));
   const refundTotals = new Map();
+  const cardMonthTotals = new Set();
   entries.forEach((entry, index) => {
     const path = `state.entries[${index}]`;
     requireEnum(entry.kind, ["expense", "income", "refund"], `${path}.kind`, issues);
@@ -321,6 +325,15 @@ function validateEntries(entries, entryIds, paymentMethodIds, recurringRuleIds, 
     optionalReference(entry.paymentMethodId, paymentMethodIds, `${path}.paymentMethodId`, issues);
     optionalReference(entry.originalEntryId, entryIds, `${path}.originalEntryId`, issues);
     optionalReference(entry.recurringRuleId, recurringRuleIds, `${path}.recurringRuleId`, issues);
+    if (entry.source !== undefined) requireEnum(entry.source, ["card_month_total"], `${path}.source`, issues);
+    if (entry.source === "card_month_total") {
+      if (entry.kind !== "expense" || entry.status !== "confirmed" || paymentMethodById.get(entry.paymentMethodId)?.type !== "credit_card") {
+        addIssue(issues, path, "invalid_card_month_total", "Card starting totals must be confirmed credit-card expenses.");
+      }
+      const key = `${entry.paymentMethodId}:${entry.recognitionMonth}`;
+      if (cardMonthTotals.has(key)) addIssue(issues, path, "duplicate_card_month_total", "A card may have only one starting total per month.");
+      cardMonthTotals.add(key);
+    }
     if (entry.kind === "refund") {
       const original = entryById.get(entry.originalEntryId);
       if (!entry.originalEntryId) {
@@ -379,7 +392,7 @@ function validateMovements(movements, accountIds, issues) {
   });
 }
 
-function validateSettlements(settlements, entries, statements, loanPayments, paymentMethods, loans, movementIds, movements, issues) {
+function validateSettlements(settlements, entries, statements, loanPayments, paymentMethods, loans, accountIds, movementIds, movements, issues) {
   const entryIds = collectionIdSet(entries);
   const statementIds = collectionIdSet(statements);
   const loanPaymentIds = collectionIdSet(loanPayments);
@@ -405,6 +418,10 @@ function validateSettlements(settlements, entries, statements, loanPayments, pay
     requirePositiveMoney(settlement.expectedAmountKrw, `${path}.expectedAmountKrw`, issues);
     requireDate(settlement.scheduledOn, `${path}.scheduledOn`, issues);
     requireEnum(settlement.status, ["estimated", "confirmed", "paid", "canceled"], `${path}.status`, issues);
+    optionalReference(settlement.accountId, accountIds, `${path}.accountId`, issues);
+    if (settlement.accountId && settlement.targetType !== "entry") {
+      addIssue(issues, `${path}.accountId`, "account_snapshot_not_allowed", "Only direct entry settlements may store an account snapshot.");
+    }
     optionalReference(settlement.movementId, movementIds, `${path}.movementId`, issues);
     if (settlement.status !== "paid") {
       if (settlement.movementId) addIssue(issues, `${path}.movementId`, "movement_not_allowed", "Only paid settlements may reference a movement.");
@@ -442,6 +459,9 @@ function validateSettlements(settlements, entries, statements, loanPayments, pay
       if (movement && method?.type === "credit_card") {
         addIssue(issues, `${path}.targetId`, "card_statement_required", "Credit-card entries must be paid through a card statement.");
       }
+      if (movement && settlement.accountId && entry?.kind === "expense" && movement.fromAccountId !== settlement.accountId) {
+        addIssue(issues, `${path}.movementId`, "payment_account_mismatch", "Expense payment must leave the stored payment account.");
+      }
       if (
         movement
         && method?.type !== "credit_card"
@@ -464,10 +484,11 @@ function validateSettlements(settlements, entries, statements, loanPayments, pay
     if (settlement.targetType === "card_statement") {
       const statement = statementById.get(settlement.targetId);
       const method = paymentMethodById.get(statement?.paymentMethodId);
+      const paymentAccountId = statement?.paymentAccountId || method?.paymentAccountId;
       if (statement?.status !== "paid") {
         addIssue(issues, `${path}.targetId`, "target_status_mismatch", "A paid card settlement requires a paid statement.");
       }
-      if (movement && method?.paymentAccountId && movement.fromAccountId !== method.paymentAccountId) {
+      if (movement && paymentAccountId && movement.fromAccountId !== paymentAccountId) {
         addIssue(issues, `${path}.movementId`, "payment_account_mismatch", "Card payment must leave the configured payment account.");
       }
       paidStatementIds.add(settlement.targetId);
@@ -513,7 +534,7 @@ function validateSettlements(settlements, entries, statements, loanPayments, pay
   }
 }
 
-function validateCardStatements(statements, paymentMethods, entries, settlements, issues) {
+function validateCardStatements(statements, paymentMethods, entries, settlements, accountIds, issues) {
   const paymentMethodIds = collectionIdSet(paymentMethods);
   const entryIds = collectionIdSet(entries);
   const paymentMethodById = new Map(paymentMethods.map((method) => [method.id, method]));
@@ -535,8 +556,26 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
   statements.forEach((statement, index) => {
     const path = `state.cardStatements[${index}]`;
     requireReference(statement.paymentMethodId, paymentMethodIds, `${path}.paymentMethodId`, issues);
+    optionalReference(statement.paymentAccountId, accountIds, `${path}.paymentAccountId`, issues);
     if (paymentMethodById.get(statement.paymentMethodId)?.type !== "credit_card") {
       addIssue(issues, `${path}.paymentMethodId`, "credit_card_required", "Card statements require a credit-card payment method.");
+    }
+    if (statement.source !== undefined) requireEnum(statement.source, ["opening_installment"], `${path}.source`, issues);
+    if (statement.source === "opening_installment") {
+      requireText(statement.planId, `${path}.planId`, issues);
+      requireText(statement.label, `${path}.label`, issues);
+      requirePositiveInteger(statement.installmentNumber, `${path}.installmentNumber`, issues);
+      requirePositiveInteger(statement.installmentCount, `${path}.installmentCount`, issues);
+      if (Number.isSafeInteger(statement.installmentCount) && statement.installmentCount > 120) {
+        addIssue(issues, `${path}.installmentCount`, "installment_count_too_large", "Installment count must not exceed 120.");
+      }
+      if (
+        Number.isSafeInteger(statement.installmentNumber)
+        && Number.isSafeInteger(statement.installmentCount)
+        && statement.installmentNumber > statement.installmentCount
+      ) {
+        addIssue(issues, path, "invalid_installment", "Installment number cannot exceed installment count.");
+      }
     }
     requireDate(statement.periodStart, `${path}.periodStart`, issues);
     requireDate(statement.periodEnd, `${path}.periodEnd`, issues);
@@ -564,6 +603,9 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
     if (!Array.isArray(statement.items)) {
       addIssue(issues, `${path}.items`, "invalid_collection", "Card statement items must be an array.");
       return;
+    }
+    if (statement.source === "opening_installment" && statement.items.length) {
+      addIssue(issues, `${path}.items`, "opening_installment_items_not_allowed", "Opening installment schedules do not link new expense entries.");
     }
     statement.items.forEach((item, itemIndex) => {
       const itemPath = `${path}.items[${itemIndex}]`;
@@ -635,13 +677,13 @@ function validateLoans(loans, accountIds, issues) {
     requireText(loan.name, `${path}.name`, issues);
     requireDate(loan.openedOn, `${path}.openedOn`, issues);
     requirePositiveMoney(loan.openingPrincipalKrw, `${path}.openingPrincipalKrw`, issues);
-    if (!Number.isSafeInteger(loan.termMonths) || loan.termMonths < 1 || loan.termMonths > 1_200) {
-      addIssue(issues, `${path}.termMonths`, "bounded_integer_required", "Loan term must be between 1 and 1200 months.");
-    }
-    requireReference(loan.paymentAccountId, accountIds, `${path}.paymentAccountId`, issues);
     const generatedSchedule = loan.scheduleMode !== undefined;
     if (generatedSchedule) {
       requireEnum(loan.scheduleMode, ["auto", "manual"], `${path}.scheduleMode`, issues);
+      if (!Number.isSafeInteger(loan.termMonths) || loan.termMonths < 1 || loan.termMonths > 1_200) {
+        addIssue(issues, `${path}.termMonths`, "bounded_integer_required", "Loan term must be between 1 and 1200 months.");
+      }
+      requireReference(loan.paymentAccountId, accountIds, `${path}.paymentAccountId`, issues);
       if (!Number.isSafeInteger(loan.graceMonths) || loan.graceMonths < 0 || loan.graceMonths > 1_200) {
         addIssue(issues, `${path}.graceMonths`, "bounded_integer_required", "Loan grace period must be between 0 and 1200 months.");
       } else if (
@@ -656,7 +698,17 @@ function validateLoans(loans, accountIds, issues) {
       if (loan.scheduleMode === "auto" && loan.annualRate === undefined) {
         addIssue(issues, `${path}.annualRate`, "rate_required", "Automatically calculated loans require an annual rate.");
       }
-    } else {
+    } else if (
+      loan.termMonths !== undefined
+      || loan.monthlyPaymentKrw !== undefined
+      || loan.paymentAccountId !== undefined
+      || loan.annualRate !== undefined
+      || loan.graceMonths !== undefined
+    ) {
+      if (!Number.isSafeInteger(loan.termMonths) || loan.termMonths < 1 || loan.termMonths > 1_200) {
+        addIssue(issues, `${path}.termMonths`, "bounded_integer_required", "Loan term must be between 1 and 1200 months.");
+      }
+      requireReference(loan.paymentAccountId, accountIds, `${path}.paymentAccountId`, issues);
       requirePositiveMoney(loan.monthlyPaymentKrw, `${path}.monthlyPaymentKrw`, issues);
     }
     if (loan.annualRate !== undefined && (!Number.isFinite(loan.annualRate) || loan.annualRate < 0 || loan.annualRate > 100)) {
@@ -785,6 +837,7 @@ function validateRecurringRules(rules, paymentMethodIds, accountIds, loanIds, is
     requireEnum(rule.kind, ["fixed_expense", "fixed_income", "loan_payment"], `${path}.kind`, issues);
     requireText(rule.name, `${path}.name`, issues);
     requirePositiveMoney(rule.amountEstimateKrw, `${path}.amountEstimateKrw`, issues);
+    if (rule.creationMode !== undefined) requireEnum(rule.creationMode, ["auto", "manual"], `${path}.creationMode`, issues);
     if (!Number.isInteger(rule.dueDay) || rule.dueDay < 1 || rule.dueDay > 31) {
       addIssue(issues, `${path}.dueDay`, "invalid_due_day", "Due day must be between 1 and 31.");
     }

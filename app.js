@@ -70,8 +70,9 @@ const NAV_ITEMS = [
 const FINANCE_NAV_ITEM = ["finance", "가계부", "₩"];
 const FINANCE_TABS = [
   ["overview", "현황"],
-  ["entries", "내역"],
+  ["entries", "수입·지출"],
   ["schedule", "결제 예정"],
+  ["cards", "신용카드"],
   ["manage", "관리"],
   ["stats", "통계"],
 ];
@@ -1982,12 +1983,10 @@ function renderFinanceAccessScreen(screen) {
 function renderFinanceDashboard() {
   const state = financeWorkspace.state || emptyFinanceState();
   return `
-    <section class="view finance-view" data-finance-screen="dashboard" aria-busy="${financeWorkspace.saving ? "true" : "false"}">
+    <section class="view finance-view ${financeWorkspace.tab === "stats" ? "finance-view-stats" : ""}" data-finance-screen="dashboard" aria-busy="${financeWorkspace.saving ? "true" : "false"}">
       <header class="finance-header view-header">
         <div class="finance-heading view-heading">
-          <span class="finance-eyebrow eyebrow">Private finance</span>
           <h1 class="view-title">가계부</h1>
-          <p class="view-copy">쓴 날과 실제로 빠져나간 날을 분리해 관리합니다.</p>
         </div>
         <div class="finance-header-actions toolbar">
           <div class="finance-month-control" aria-label="조회 월">
@@ -2038,6 +2037,7 @@ function renderFinanceTab(state) {
   }
   if (financeWorkspace.tab === "entries") return renderFinanceEntries(state);
   if (financeWorkspace.tab === "schedule") return renderFinanceSchedule(state);
+  if (financeWorkspace.tab === "cards") return renderFinanceCards(state);
   if (financeWorkspace.tab === "manage") return renderFinanceManage(state);
   if (financeWorkspace.tab === "stats") return renderFinanceStats(state);
   return renderFinanceOverview(state);
@@ -2054,15 +2054,14 @@ function renderFinanceOverview(state) {
   const upcomingKrw = Math.max(0, upcoming.reduce((total, item) => total + item.amountKrw, 0));
   return `
     <div class="finance-metric-grid metric-grid" aria-label="${esc(financeWorkspace.month)} 가계부 요약">
-      ${renderFinanceMetric("현재 은행 잔액", formatFinanceKrw(bankBalanceKrw), balances.length ? `${balances.length}개 보유 계좌 · 오늘 기준` : "계좌를 먼저 등록하세요", "balance")}
-      ${renderFinanceMetric("이번 달 쓴 돈", formatFinanceKrw(summary.spentKrw), "사용일 기준", "spent")}
-      ${renderFinanceMetric("이번 달 실제로 빠진 돈", formatFinanceKrw(summary.cashOutKrw), "실제 출금일 기준", "cash")}
-      ${renderFinanceMetric("앞으로 30일간 빠질 돈", formatFinanceKrw(upcomingKrw), "아직 출금되지 않은 예정", "scheduled")}
+      ${renderFinanceMetric("은행 잔액", formatFinanceKrw(bankBalanceKrw), "", "balance")}
+      ${renderFinanceMetric("지출", formatFinanceKrw(summary.spentKrw), "", "spent")}
+      ${renderFinanceMetric("실제 출금", formatFinanceKrw(summary.cashOutKrw), "", "cash")}
+      ${renderFinanceMetric("결제 예정", formatFinanceKrw(upcomingKrw), "", "scheduled")}
     </div>
     <div class="finance-overview-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-account-summary-title">
-        <span class="finance-stage-index">계좌별 현재 잔액</span>
-        <h2 id="finance-account-summary-title">${balances.length ? "실제로 확인된 돈의 흐름" : "첫 계좌를 등록해주세요"}</h2>
+        <h2 id="finance-account-summary-title">계좌</h2>
         ${balances.length ? `
           <div class="finance-record-list">
             ${balances.map(({ account, balanceKrw }) => `
@@ -2081,8 +2080,7 @@ function renderFinanceOverview(state) {
         `}
       </section>
       <section class="finance-stage-panel panel" aria-labelledby="finance-upcoming-title">
-        <span class="finance-stage-index">가까운 출금 예정</span>
-        <h2 id="finance-upcoming-title">${upcoming.length ? `${upcoming.length}건을 확인하세요` : "30일 안의 예정이 없습니다"}</h2>
+        <h2 id="finance-upcoming-title">결제 예정</h2>
         ${upcoming.length ? `
           <div class="finance-record-list">
             ${upcoming.slice(0, 5).map(({ settlement, amountKrw }) => `
@@ -2095,14 +2093,9 @@ function renderFinanceOverview(state) {
               </article>
             `).join("")}
           </div>
-        ` : "<p>신용카드 사용처럼 나중에 빠질 돈은 사용 기록과 실제 출금을 분리해 여기에 표시합니다.</p>"}
+        ` : '<p class="finance-empty-copy">항목이 없습니다.</p>'}
       </section>
     </div>
-    <section class="finance-stage-panel panel finance-rule-card finance-overview-rule" aria-labelledby="finance-rule-title">
-      <span class="finance-stage-index">집계 원칙</span>
-      <h2 id="finance-rule-title">카드값을 낸 날에는 지출로 다시 세지 않습니다</h2>
-      <p>카드를 사용한 날에는 ‘쓴 돈’, 계좌에서 카드값이 나간 날에는 ‘실제로 빠진 돈’에만 한 번씩 표시합니다. 내 계좌끼리 옮긴 돈도 수입이나 지출에 넣지 않습니다.</p>
-    </section>
   `;
 }
 
@@ -2117,7 +2110,7 @@ function renderFinanceMetric(label, value, meta, tone) {
     <article class="finance-metric metric ${toneClass}" data-finance-metric="${esc(tone)}">
       <span class="metric-label">${esc(label)}</span>
       <strong class="metric-value">${esc(value)}</strong>
-      <small class="metric-sub">${esc(meta)}</small>
+      ${meta ? `<small class="metric-sub">${esc(meta)}</small>` : ""}
     </article>
   `;
 }
@@ -2139,11 +2132,7 @@ function renderFinanceEntries(state) {
   ));
   return `
     <section class="finance-section-heading">
-      <div>
-        <span class="finance-stage-index">기록 추가</span>
-        <h2>쓴 기록과 실제 돈의 이동을 함께, 그러나 따로 저장합니다</h2>
-      </div>
-      <p>신용카드는 사용 기록과 출금 예정만 만들고 계좌 잔액은 바꾸지 않습니다.</p>
+      <h2>수입·지출</h2>
     </section>
     ${!accounts.length || !paymentMethods.length ? `
       <section class="finance-inline-notice">
@@ -2153,7 +2142,7 @@ function renderFinanceEntries(state) {
     ` : ""}
     <div class="finance-form-grid">
       <details class="finance-entry-form-card" ${paymentMethods.length ? "" : "open"}>
-        <summary>썼어요</summary>
+        <summary>지출</summary>
         <form data-form="finance-expense" class="finance-native-form">
           <div class="field-grid">
             ${financeTextInput("내용", "title", { placeholder: "예: 장보기", required: true })}
@@ -2167,7 +2156,7 @@ function renderFinanceEntries(state) {
         </form>
       </details>
       <details class="finance-entry-form-card">
-        <summary>받았어요</summary>
+        <summary>수입</summary>
         <form data-form="finance-income" class="finance-native-form">
           <div class="field-grid">
             ${financeTextInput("내용", "title", { placeholder: "예: 급여", required: true })}
@@ -2181,7 +2170,7 @@ function renderFinanceEntries(state) {
         </form>
       </details>
       <details class="finance-entry-form-card">
-        <summary>환불됐어요</summary>
+        <summary>환불</summary>
         <form data-form="finance-refund" class="finance-native-form">
           <div class="field-grid">
             ${financeSelectInput("원래 쓴 기록", "originalEntryId", financeOriginalEntryOptions(state, refundableEntries), { required: true })}
@@ -2194,7 +2183,7 @@ function renderFinanceEntries(state) {
         </form>
       </details>
       <details class="finance-entry-form-card">
-        <summary>옮겼어요</summary>
+        <summary>계좌 이동</summary>
         <form data-form="finance-transfer" class="finance-native-form">
           <div class="field-grid">
             ${financeMoneyInput("금액", "amountKrw")}
@@ -2209,8 +2198,7 @@ function renderFinanceEntries(state) {
     </div>
     <div class="finance-ledger-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-entry-list-title">
-        <span class="finance-stage-index">쓴 돈·받은 돈</span>
-        <h2 id="finance-entry-list-title">${financeWorkspace.month} 사용 기록</h2>
+        <h2 id="finance-entry-list-title">수입·지출</h2>
         ${entries.length ? `
           <div class="finance-record-list">
             ${entries.map((entry) => renderFinanceEntryRecord(state, entry)).join("")}
@@ -2218,8 +2206,7 @@ function renderFinanceEntries(state) {
         ` : '<p class="finance-empty-copy">이 달의 사용·수입 기록이 없습니다.</p>'}
       </section>
       <section class="finance-stage-panel panel" aria-labelledby="finance-movement-list-title">
-        <span class="finance-stage-index">실제 계좌 입출금</span>
-        <h2 id="finance-movement-list-title">${financeWorkspace.month} 돈의 이동</h2>
+        <h2 id="finance-movement-list-title">계좌 이동</h2>
         ${movements.length ? `
           <div class="finance-record-list">
             ${movements.map((movement) => renderFinanceMovementRecord(state, movement)).join("")}
@@ -2238,27 +2225,14 @@ function renderFinanceSchedule(state) {
     ))
     .sort((left, right) => left.scheduledOn.localeCompare(right.scheduledOn) || left.id.localeCompare(right.id));
   const summary = financeModel.financeMonthSummary(state, financeWorkspace.month);
-  const cards = state.paymentMethods.filter((method) => method.type === "credit_card");
-  const unpaidStatements = state.cardStatements.filter((statement) => (
-    statement.status === "confirmed"
-    && statement.scheduledOn.slice(0, 7) === financeWorkspace.month
-  ));
-  const unpaidLoanPayments = state.loanPayments.filter((payment) => (
-    payment.status === "confirmed"
-    && payment.dueOn.slice(0, 7) === financeWorkspace.month
-  ));
   const unpaidFixedCosts = financePendingFixedCosts(state, financeWorkspace.month);
   return `
     <section class="finance-section-heading">
-      <div>
-        <span class="finance-stage-index">결제 예정</span>
-        <h2>${financeWorkspace.month}에 계좌에서 빠질 일정</h2>
-      </div>
-      <p>쓴 달과 출금될 달이 달라도 각각의 달에서 따로 보입니다.</p>
+      <h2>결제 예정</h2>
     </section>
     <div class="finance-metric-grid metric-grid finance-metric-grid-compact">
-      ${renderFinanceMetric("아직 빠지지 않은 돈", formatFinanceKrw(summary.pendingKrw), "예상·확정 일정", "scheduled")}
-      ${renderFinanceMetric("실제로 빠진 돈", formatFinanceKrw(summary.cashOutKrw), "실제 출금 확인", "cash")}
+      ${renderFinanceMetric("미납", formatFinanceKrw(summary.pendingKrw), "", "scheduled")}
+      ${renderFinanceMetric("출금", formatFinanceKrw(summary.cashOutKrw), "", "cash")}
     </div>
     <section class="finance-stage-panel panel finance-schedule-panel">
       ${renderFinanceSettlementCalendar(state, settlements, financeWorkspace.month)}
@@ -2281,21 +2255,13 @@ function renderFinanceSchedule(state) {
       ` : '<p class="finance-empty-copy">이 달의 출금 예정이 없습니다.</p>'}
     </section>
     <section class="finance-section-heading finance-schedule-actions-heading">
-      <div>
-        <span class="finance-stage-index">일정 확정과 실제 출금</span>
-        <h2>예정은 먼저 확정하고, 통장에서 빠진 뒤 따로 확인합니다</h2>
-      </div>
-      <p>명세서나 납부 계획을 저장해도 잔액은 바뀌지 않습니다. 실제 출금 확인을 해야 잔액에 반영됩니다.</p>
+      <h2>고정비</h2>
     </section>
     <div class="finance-form-grid finance-schedule-form-grid">
-      ${cards.map((method) => renderFinanceCardStatementForm(state, method)).join("")}
-      ${state.loans.filter((loan) => !loan.scheduleMode).map((loan) => renderFinanceLoanPlanForm(state, loan)).join("")}
-      ${unpaidStatements.map((statement) => renderFinanceCardPaymentForm(state, statement)).join("")}
-      ${unpaidLoanPayments.map((payment) => renderFinanceLoanPaymentForm(state, payment)).join("")}
       ${unpaidFixedCosts.map(({ entry, settlement, rule }) => renderFinanceFixedCostPaymentForm(state, entry, settlement, rule)).join("")}
-      ${!cards.length && !state.loans.length && !unpaidFixedCosts.length ? `
+      ${!unpaidFixedCosts.length ? `
         <section class="finance-inline-notice">
-          <strong>관리 탭에서 신용카드, 대출, 고정비를 등록하면 이곳에서 일정을 확정할 수 있습니다.</strong>
+          <strong>이 달에 납부할 고정비가 없습니다.</strong>
           <button class="button secondary" type="button" data-finance-tab="manage">관리로 이동</button>
         </section>
       ` : ""}
@@ -2335,6 +2301,97 @@ function renderFinanceSettlementCalendar(state, settlements, month) {
   `;
 }
 
+function renderFinanceSpendingCalendar(state, month) {
+  const entryById = new Map(state.entries.map((entry) => [entry.id, entry]));
+  const ruleById = new Map(state.recurringRules.map((rule) => [rule.id, rule]));
+  const methodById = new Map(state.paymentMethods.map((method) => [method.id, method]));
+  const byDay = new Map();
+  const entries = state.entries
+    .filter((entry) => (
+      entry.status === "confirmed"
+      && ["expense", "refund"].includes(entry.kind)
+      && entry.occurredOn.slice(0, 7) === month
+    ))
+    .map((entry) => {
+      const original = entry.kind === "refund" ? entryById.get(entry.originalEntryId) : entry;
+      const fixed = ruleById.get(original?.recurringRuleId)?.kind === "fixed_expense";
+      const method = methodById.get(entry.paymentMethodId || original?.paymentMethodId);
+      return {
+        entry,
+        fixed,
+        method,
+        category: entry.source === "card_month_total" ? "월 합계" : entry.category || original?.category || "기타",
+        signedAmountKrw: entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw,
+      };
+    })
+    .sort((left, right) => left.entry.title.localeCompare(right.entry.title, "ko") || left.entry.id.localeCompare(right.entry.id));
+  for (const item of entries) {
+    const day = Number(item.entry.occurredOn.slice(8, 10));
+    const items = byDay.get(day) || [];
+    items.push(item);
+    byDay.set(day, items);
+  }
+  const today = dateKey(new Date());
+  return `
+    <section class="finance-stage-panel panel finance-spending-calendar-panel" data-finance-consumption-calendar aria-labelledby="finance-spending-calendar-title">
+      <header class="finance-spending-calendar-header">
+        <h2 id="finance-spending-calendar-title">지출 캘린더</h2>
+        <div class="finance-calendar-month-control" aria-label="지출 캘린더 월">
+          <button type="button" data-finance-month-shift="-1" data-finance-month-origin="calendar" aria-label="이전 달">‹</button>
+          <strong>${esc(financePickerMonthLabel(month))}</strong>
+          <button type="button" data-finance-month-shift="1" data-finance-month-origin="calendar" aria-label="다음 달">›</button>
+        </div>
+      </header>
+      <div class="finance-consumption-legend" aria-label="지출 종류">
+        <span>일반 지출</span><span>고정비</span><span>환불</span>
+      </div>
+      <div class="finance-spending-calendar-scroll">
+        <div class="finance-calendar finance-spending-calendar" aria-label="${esc(month)} 지출 달력">
+          ${FINANCE_WEEKDAY_LABELS.map((label) => `<span class="finance-calendar-weekday">${label}</span>`).join("")}
+          ${financeCalendarDays(month).map((day) => {
+            if (!day) return '<span class="finance-calendar-day finance-calendar-day-empty finance-spending-day" aria-hidden="true"></span>';
+            const date = `${month}-${String(day).padStart(2, "0")}`;
+            const items = byDay.get(day) || [];
+            const totalKrw = items.reduce((total, item) => total + item.signedAmountKrw, 0);
+            const fixedKrw = items.filter((item) => item.fixed).reduce((total, item) => total + item.signedAmountKrw, 0);
+            const hasFixed = items.some((item) => item.fixed);
+            const hasRegular = items.some((item) => !item.fixed && item.entry.kind === "expense");
+            const hasRefund = items.some((item) => item.entry.kind === "refund");
+            const weekday = parseDateOnly(date).getDay();
+            const label = items.length
+              ? `${date}, ${items.length}건, 합계 ${totalKrw < 0 ? "마이너스 " : ""}${formatFinanceKrw(Math.abs(totalKrw))}${hasFixed ? `, 고정비 ${formatFinanceKrw(Math.abs(fixedKrw))}` : ""}`
+              : `${date}, 지출 없음`;
+            return `
+              <section
+                class="finance-calendar-day finance-spending-day ${items.length ? "has-spending" : ""} ${hasRegular ? "has-regular-spending" : ""} ${hasFixed ? "has-fixed-cost" : ""} ${hasRefund ? "has-refund" : ""} ${date === today ? "is-today" : ""} ${weekday === 0 ? "is-sunday" : weekday === 6 ? "is-saturday" : ""}"
+                data-finance-consumption-date="${esc(date)}"
+                aria-label="${esc(label)}"
+              >
+                <header>
+                  <time datetime="${esc(date)}">${day}</time>
+                  ${items.length ? `<span class="finance-consumption-day-total">${totalKrw < 0 ? "−" : ""}${esc(formatFinanceKrw(Math.abs(totalKrw)))}</span>` : ""}
+                </header>
+                <div class="finance-consumption-items">
+                  ${items.map(({ entry, fixed, method, category, signedAmountKrw }) => `
+                    <article
+                      class="finance-consumption-entry ${fixed ? "is-fixed" : ""} ${entry.kind === "refund" ? "is-refund" : ""}"
+                      data-finance-consumption-entry="${esc(entry.id)}"
+                    >
+                      <span class="finance-consumption-entry-title">${esc(entry.title)}</span>
+                      <span class="finance-consumption-entry-amount">${signedAmountKrw < 0 ? "−" : ""}${esc(formatFinanceKrw(Math.abs(signedAmountKrw)))}</span>
+                      <small>${esc([fixed ? "고정비" : category, method?.name].filter(Boolean).join(" · "))}</small>
+                    </article>
+                  `).join("")}
+                </div>
+              </section>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function financeCalendarDays(month) {
   const match = String(month || "").match(/^(\d{4})-(\d{2})$/);
   if (!match) return [];
@@ -2352,6 +2409,7 @@ function renderFinanceCardStatementForm(state, method) {
   const candidates = financeCardStatementCandidates(state, method.id, financeWorkspace.month);
   const existingStatement = state.cardStatements.find((statement) => (
     statement.paymentMethodId === method.id
+    && statement.source !== "opening_installment"
     && statement.scheduledOn.slice(0, 7) === financeWorkspace.month
   ));
   const candidateTotal = candidates.reduce((total, entry) => (
@@ -2398,7 +2456,7 @@ function renderFinanceCardStatementForm(state, method) {
 
 function renderFinanceCardPaymentForm(state, statement) {
   const method = state.paymentMethods.find((item) => item.id === statement.paymentMethodId);
-  const account = state.accounts.find((item) => item.id === method?.paymentAccountId);
+  const account = state.accounts.find((item) => item.id === (statement.paymentAccountId || method?.paymentAccountId));
   return `
     <details class="finance-entry-form-card finance-payment-confirm-card">
       <summary>${esc(method?.name || "신용카드")} 실제 출금 확인</summary>
@@ -2478,56 +2536,235 @@ function renderFinanceFixedCostPaymentForm(state, entry, settlement, rule) {
   `;
 }
 
+function renderFinanceCards(state) {
+  const cards = state.paymentMethods.filter((method) => method.type === "credit_card");
+  if (!cards.length) {
+    return `
+      <section class="finance-inline-notice panel">
+        <strong>관리 탭에서 신용카드를 먼저 등록해주세요.</strong>
+        <button class="button secondary" type="button" data-finance-tab="manage">신용카드 등록하기</button>
+      </section>
+    `;
+  }
+  return `
+    <section class="finance-section-heading">
+      <h2>신용카드</h2>
+    </section>
+    <div class="finance-card-workspaces">
+      ${cards.map((method, index) => renderFinanceCardWorkspace(state, method, index === 0)).join("")}
+    </div>
+  `;
+}
 
+function renderFinanceCardWorkspace(state, method, open) {
+  const month = financeWorkspace.month;
+  const previousMonth = financeModel.shiftMonthKey(month, -1);
+  const entries = financeCardUsageEntries(state, method.id, month);
+  const statements = state.cardStatements
+    .filter((statement) => (
+      statement.paymentMethodId === method.id
+      && (statement.status === "confirmed" || statement.scheduledOn.slice(0, 7) === month)
+    ))
+    .sort((left, right) => left.scheduledOn.localeCompare(right.scheduledOn) || left.id.localeCompare(right.id));
+  const account = state.accounts.find((item) => item.id === method.paymentAccountId);
+  return `
+    <details class="finance-stage-panel panel finance-card-workspace" data-finance-card="${esc(method.id)}" ${open ? "open" : ""}>
+      <summary>
+        <span><strong>${esc(method.name)}</strong><small>매월 ${esc(method.dueDay || 1)}일 납부 · ${esc(account?.name || "출금 계좌 확인 필요")}</small></span>
+        <span>${esc(formatFinanceKrw(financeCardUsageKrw(state, method.id, month)))}</span>
+      </summary>
+      <div class="finance-card-workspace-body">
+        <div class="finance-metric-grid metric-grid finance-metric-grid-compact">
+          ${renderFinanceMetric(`${month} 사용액`, formatFinanceKrw(financeCardUsageKrw(state, method.id, month)), `${entries.length}개 기록`, "spent")}
+          ${renderFinanceMetric(`${previousMonth} 사용액`, formatFinanceKrw(financeCardUsageKrw(state, method.id, previousMonth)), "이전 달", "scheduled")}
+        </div>
+        <div class="finance-form-grid">
+          ${renderFinanceCardUsageTotalForm(state, method)}
+          ${renderFinanceCardInstallmentForm(method)}
+          ${renderFinanceCardStatementForm(state, method)}
+        </div>
+        <section class="finance-card-section" aria-labelledby="finance-card-records-${esc(method.id)}">
+          <h3 id="finance-card-records-${esc(method.id)}">사용 내역</h3>
+          <div class="finance-record-list">
+            ${entries.map((entry) => renderFinanceEntryRecord(state, entry)).join("") || '<p class="finance-empty-copy">이 달의 카드 사용 기록이 없습니다.</p>'}
+          </div>
+        </section>
+        <section class="finance-card-section" aria-labelledby="finance-card-schedule-${esc(method.id)}">
+          <h3 id="finance-card-schedule-${esc(method.id)}">할부 일정</h3>
+          <div class="finance-record-list">
+            ${statements.map((statement) => `
+              <article class="finance-record" data-finance-card-statement="${esc(statement.id)}">
+                <div>
+                  <strong>${esc(statement.source === "opening_installment" ? `${statement.label || "기존 할부"} ${statement.installmentNumber}/${statement.installmentCount}` : `${statement.scheduledOn.slice(0, 7)} 명세서`)}</strong>
+                  <small>${esc(statement.scheduledOn)} 납부 · ${esc(financeSettlementStatusLabel(statement.status))}</small>
+                </div>
+                <span class="finance-record-amount">${esc(formatFinanceKrw(statement.statementAmountKrw))}</span>
+              </article>
+              ${statement.status === "confirmed" ? renderFinanceCardPaymentForm(state, statement) : ""}
+            `).join("") || '<p class="finance-empty-copy">등록된 납부 일정이 없습니다.</p>'}
+          </div>
+        </section>
+      </div>
+    </details>
+  `;
+}
 
+function renderFinanceCardUsageTotalForm(state, method) {
+  const month = financeWorkspace.month;
+  const previousMonth = financeModel.shiftMonthKey(month, -1);
+  const existing = state.entries.find((entry) => (
+    entry.source === "card_month_total"
+    && entry.paymentMethodId === method.id
+    && entry.recognitionMonth === month
+  ));
+  return `
+    <details class="finance-entry-form-card">
+      <summary>시작 사용액 설정</summary>
+      <form data-form="finance-card-usage-total" class="finance-native-form">
+        <input type="hidden" name="paymentMethodId" value="${esc(method.id)}">
+        <p class="finance-form-note">처음 시작할 때 카드사 앱의 월 전체 사용액을 한 건으로 넣습니다. 같은 월을 다시 저장하면 그 시작값만 수정됩니다.</p>
+        <div class="field-grid">
+          ${financeSelectInput("기준 월", "usageMonth", [
+            [month, `${financePickerMonthLabel(month)} · 조회 월`],
+            [previousMonth, `${financePickerMonthLabel(previousMonth)} · 이전 월`],
+          ], { required: true, allowEmpty: false, value: month })}
+          ${financeMoneyInput("시작 사용액", "amountKrw", { value: existing?.amountKrw || "" })}
+        </div>
+        <button class="button" type="submit">시작 사용액 저장</button>
+      </form>
+    </details>
+  `;
+}
 
+function renderFinanceCardInstallmentForm(method) {
+  return `
+    <details class="finance-entry-form-card">
+      <summary>기존 할부 일정 등록</summary>
+      <form data-form="finance-card-installment" class="finance-native-form">
+        <input type="hidden" name="paymentMethodId" value="${esc(method.id)}">
+        <p class="finance-form-note">이미 결제한 할부의 남은 총액과 횟수를 입력하면 ${esc(method.dueDay || 1)}일 기준으로 월별 납부액을 나눕니다.</p>
+        <div class="field-grid">
+          ${financeTextInput("할부 이름", "label", { placeholder: "예: 노트북", required: true })}
+          ${financeMoneyInput("남은 총액", "totalAmountKrw")}
+          ${financeNumberInput("남은 횟수", "installmentCount", "", 1, 120)}
+          ${financeSelectInput("첫 납부 월", "firstPaymentMonth", financeMonthOptions(financeWorkspace.month, 0, 60), { required: true, allowEmpty: false, value: financeWorkspace.month })}
+        </div>
+        <button class="button" type="submit">할부 일정 저장</button>
+      </form>
+    </details>
+  `;
+}
 
+function financeCardUsageEntries(state, methodId, month) {
+  return state.entries
+    .filter((entry) => (
+      entry.paymentMethodId === methodId
+      && entry.recognitionMonth === month
+      && entry.status === "confirmed"
+      && ["expense", "refund"].includes(entry.kind)
+    ))
+    .sort((left, right) => right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id));
+}
 
+function financeCardUsageKrw(state, methodId, month) {
+  return financeCardUsageEntries(state, methodId, month).reduce((total, entry) => (
+    total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
+  ), 0);
+}
 
+function financeMonthOptions(centerMonth, before, after) {
+  return Array.from({ length: before + after + 1 }, (_, index) => {
+    const value = financeModel.shiftMonthKey(centerMonth, index - before);
+    return [value, financePickerMonthLabel(value)];
+  });
+}
 
+function renderFinanceAccountForm(state, account = null) {
+  return `
+    <form data-form="finance-account" class="finance-native-form">
+      <input type="hidden" name="entityId" value="${esc(account?.id || "")}">
+      ${account ? '<p class="finance-form-note">등록 직전 잔액을 바꾸면 과거부터 현재까지 계산된 잔액도 함께 바뀝니다.</p>' : ""}
+      <div class="field-grid">
+        ${financeTextInput("이름", "name", { placeholder: "예: 생활비 통장", required: true, value: account?.name })}
+        ${financeSelectInput("종류", "type", [["bank", "은행 계좌"], ["cash", "현금"], ["e_money", "간편결제 잔액"]], { required: true, value: account?.type || "bank" })}
+        ${financeTextInput("금융기관", "institution", { placeholder: "선택 입력", value: account?.institution })}
+        ${financeMoneyInput("등록 직전 잔액", "openingBalanceKrw", { allowNegative: true, value: account?.openingBalanceKrw ?? 0 })}
+      </div>
+      <button class="button" type="submit">${account ? "계좌 수정 저장" : "계좌 저장"}</button>
+    </form>
+  `;
+}
 
+function renderFinancePaymentMethodForm(state, method = null) {
+  const isCredit = method?.type === "credit_card";
+  return `
+    <form data-form="finance-payment-method" class="finance-native-form">
+      <input type="hidden" name="entityId" value="${esc(method?.id || "")}">
+      <div class="field-grid">
+        ${financeTextInput("이름", "name", { placeholder: "예: 생활 체크카드", required: true, value: method?.name })}
+        ${financeSelectInput("종류", "type", [["debit_card", "체크카드"], ["credit_card", "신용카드"], ["cash", "현금"], ["bank_transfer", "계좌이체"], ["other", "기타 수단"]], { required: true, value: method?.type || "debit_card", attributes: 'data-finance-payment-type="true"' })}
+      </div>
+      <fieldset data-finance-linked-fields ${isCredit ? "hidden disabled" : ""}>
+        <legend>바로 빠지는 수단</legend>
+        ${financeSelectInput("연결 계좌", "linkedAccountId", financeAccountOptions(state.accounts), { required: true, value: method?.linkedAccountId })}
+      </fieldset>
+      <fieldset data-finance-credit-fields ${isCredit ? "" : "hidden disabled"}>
+        <legend>신용카드 청구 설정</legend>
+        <div class="field-grid">
+          ${financeSelectInput("카드대금 출금 계좌", "paymentAccountId", financeAccountOptions(state.accounts), { required: true, value: method?.paymentAccountId })}
+          ${financeNumberInput("사용 내역 마감일", "cycleEndDay", method?.cycleEndDay ?? 31, 1, 31)}
+          ${financeNumberInput("계좌 출금 예정일", "dueDay", method?.dueDay ?? 14, 1, 31)}
+          ${financeNumberInput("마감 후 몇 달 뒤 출금", "dueMonthOffset", method?.dueMonthOffset ?? 1, 0, 3)}
+        </div>
+      </fieldset>
+      <button class="button" type="submit" ${state.accounts.length ? "" : "disabled"}>${method ? "결제수단 수정 저장" : "결제수단 저장"}</button>
+    </form>
+  `;
+}
 
+function renderFinanceLoanForm(loan = null) {
+  return `
+    <form data-form="finance-loan" class="finance-native-form">
+      <input type="hidden" name="entityId" value="${esc(loan?.id || "")}">
+      <p class="finance-form-note">남은 대출 규모를 확인하기 위한 항목입니다. 실제 납입은 고정비에서 관리합니다.</p>
+      <div class="field-grid">
+        ${financeTextInput("이름", "name", { placeholder: "예: 주택 대출", required: true, value: loan?.name })}
+        ${financeMoneyInput("현재 남은 원금", "openingPrincipalKrw", { value: loan?.openingPrincipalKrw || "" })}
+        ${financeDateInput("잔액 확인일", "openedOn", loan?.openedOn || dateKey(new Date()))}
+      </div>
+      <button class="button" type="submit">${loan ? "대출 수정 저장" : "대출 저장"}</button>
+    </form>
+  `;
+}
 
-
-
-
-
-
-
-
-
-
-
-
+function renderFinanceRecurringRuleForm(state, rule = null) {
+  return `
+    <form data-form="finance-recurring-rule" class="finance-native-form">
+      <input type="hidden" name="entityId" value="${esc(rule?.id || "")}">
+      <div class="field-grid">
+        ${financeTextInput("이름", "name", { placeholder: "예: 전기요금", required: true, value: rule?.name })}
+        ${financeMoneyInput("예상 금액", "amountEstimateKrw", { value: rule?.amountEstimateKrw || "" })}
+        ${financeNumberInput("계좌 출금 예정일", "dueDay", rule?.dueDay ?? 15, 1, 31)}
+        ${financeSelectInput("출금 계좌", "accountId", financeAccountOptions(state.accounts), { required: true, value: rule?.accountId })}
+        ${financeSelectInput("월별 항목 만들기", "creationMode", [["auto", "자동 생성"], ["manual", "수동 생성"]], { required: true, allowEmpty: false, value: rule?.creationMode || "manual" })}
+        ${financeDateInput("반복 시작일", "activeFrom", rule?.activeFrom || dateKey(new Date()))}
+      </div>
+      <button class="button" type="submit" ${state.accounts.length ? "" : "disabled"}>${rule ? "고정비 수정 저장" : "고정비 저장"}</button>
+    </form>
+  `;
+}
 
 function renderFinanceManage(state) {
   return `
     <section class="finance-section-heading">
-      <div>
-        <span class="finance-stage-index">관리</span>
-        <h2>계좌와 돈을 쓰는 수단을 먼저 연결합니다</h2>
-      </div>
-      <p>계좌번호와 카드번호는 저장하지 않고, 이름과 연결 관계만 관리합니다.</p>
+      <h2>관리</h2>
     </section>
     <div class="finance-ledger-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-account-manage-title">
-        <span class="finance-stage-index">계좌</span>
-        <h2 id="finance-account-manage-title">${state.accounts.length ? `${state.accounts.length}개 계좌` : "첫 계좌 등록"}</h2>
+        <h2 id="finance-account-manage-title">계좌</h2>
         <details class="finance-manage-details" ${state.accounts.length ? "" : "open"}>
           <summary>계좌 추가</summary>
-          <form data-form="finance-account" class="finance-native-form">
-            <div class="field-grid">
-              ${financeTextInput("이름", "name", { placeholder: "예: 생활비 통장", required: true })}
-              ${financeSelectInput("종류", "type", [
-                ["bank", "은행 계좌"],
-                ["cash", "현금"],
-                ["e_money", "간편결제 잔액"],
-              ], { required: true })}
-              ${financeTextInput("금융기관", "institution", { placeholder: "선택 입력" })}
-              ${financeMoneyInput("등록 직전 잔액", "openingBalanceKrw", { allowNegative: true, value: 0 })}
-            </div>
-            <button class="button" type="submit">계좌 저장</button>
-          </form>
+          ${renderFinanceAccountForm(state)}
         </details>
         <div class="finance-record-list finance-manage-list">
           ${state.accounts.map((account) => {
@@ -2547,6 +2784,10 @@ function renderFinanceManage(state) {
                   <button type="button" data-finance-delete-account="${esc(account.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
                 </div>
               </article>
+              <details class="finance-manage-details finance-record-edit" data-finance-edit-account="${esc(account.id)}">
+                <summary>${esc(account.name)} 수정</summary>
+                ${renderFinanceAccountForm(state, account)}
+              </details>
             `;
           }).join("") || '<p class="finance-empty-copy">등록된 계좌가 없습니다.</p>'}
         </div>
@@ -2564,36 +2805,10 @@ function renderFinanceManage(state) {
         </details>
       </section>
       <section class="finance-stage-panel panel" aria-labelledby="finance-method-manage-title">
-        <span class="finance-stage-index">결제수단</span>
-        <h2 id="finance-method-manage-title">${state.paymentMethods.length ? `${state.paymentMethods.length}개 수단` : "결제수단 등록"}</h2>
+        <h2 id="finance-method-manage-title">결제수단</h2>
         <details class="finance-manage-details" ${state.paymentMethods.length ? "" : "open"}>
           <summary>결제수단 추가</summary>
-          <form data-form="finance-payment-method" class="finance-native-form">
-            <div class="field-grid">
-              ${financeTextInput("이름", "name", { placeholder: "예: 생활 체크카드", required: true })}
-              ${financeSelectInput("종류", "type", [
-                ["debit_card", "체크카드"],
-                ["credit_card", "신용카드"],
-                ["cash", "현금"],
-                ["bank_transfer", "계좌이체"],
-                ["other", "기타 수단"],
-              ], { required: true, attributes: 'data-finance-payment-type="true"' })}
-            </div>
-            <fieldset data-finance-linked-fields>
-              <legend>바로 빠지는 수단</legend>
-              ${financeSelectInput("연결 계좌", "linkedAccountId", financeAccountOptions(state.accounts), { required: true })}
-            </fieldset>
-            <fieldset data-finance-credit-fields hidden disabled>
-              <legend>신용카드 청구 설정</legend>
-              <div class="field-grid">
-                ${financeSelectInput("카드대금 출금 계좌", "paymentAccountId", financeAccountOptions(state.accounts), { required: true })}
-                ${financeNumberInput("사용 내역 마감일", "cycleEndDay", 31, 1, 31)}
-                ${financeNumberInput("계좌 출금 예정일", "dueDay", 14, 1, 31)}
-                ${financeNumberInput("마감 후 몇 달 뒤 출금", "dueMonthOffset", 1, 0, 3)}
-              </div>
-            </fieldset>
-            <button class="button" type="submit" ${state.accounts.length ? "" : "disabled"}>결제수단 저장</button>
-          </form>
+          ${renderFinancePaymentMethodForm(state)}
         </details>
         <div class="finance-record-list finance-manage-list">
           ${state.paymentMethods.map((method) => {
@@ -2604,12 +2819,16 @@ function renderFinanceManage(state) {
               <article class="finance-record" data-finance-payment-method="${esc(method.id)}">
                 <div>
                   <strong>${esc(method.name)}</strong>
-                  <small>${esc(financePaymentMethodTypeLabel(method.type))}${account ? ` · ${esc(account.name)}` : ""}</small>
+                  <small>${esc(financePaymentMethodTypeLabel(method.type))}${method.type === "credit_card" ? ` · 매월 ${esc(method.dueDay || 1)}일 납부` : ""}${account ? ` · ${esc(account.name)}` : ""}</small>
                 </div>
                 <div class="finance-record-actions">
                   <button type="button" data-finance-delete-payment-method="${esc(method.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
                 </div>
               </article>
+              <details class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
+                <summary>${esc(method.name)} 수정</summary>
+                ${renderFinancePaymentMethodForm(state, method)}
+              </details>
             `;
           }).join("") || '<p class="finance-empty-copy">등록된 결제수단이 없습니다.</p>'}
         </div>
@@ -2625,83 +2844,28 @@ function renderFinanceManage(state) {
 function renderFinanceLoanManage(state) {
   return `
     <section class="finance-stage-panel panel" aria-labelledby="finance-loan-manage-title">
-      <span class="finance-stage-index">대출</span>
-      <h2 id="finance-loan-manage-title">${state.loans.length ? `${state.loans.length}개 대출` : "대출 등록"}</h2>
+      <h2 id="finance-loan-manage-title">대출</h2>
       <details class="finance-manage-details" ${state.loans.length ? "" : "open"}>
         <summary>대출 추가</summary>
-        <form data-form="finance-loan" class="finance-native-form">
-          <div class="field-grid">
-            ${financeTextInput("이름", "name", { placeholder: "예: 주택 대출", required: true })}
-            ${financeMoneyInput("시작 원금", "openingPrincipalKrw")}
-            ${financeNumberInput("상환 기간(개월)", "termMonths", "", 1, 1200)}
-            ${financeNumberInput("거치 기간(개월)", "graceMonths", 0, 0, 1200)}
-            ${financeDateInput("첫 납부일", "openedOn", dateKey(new Date()))}
-            ${financeSelectInput("납부 계좌", "paymentAccountId", financeAccountOptions(state.accounts), { required: true })}
-          </div>
-          <fieldset class="finance-loan-mode-fieldset">
-            <legend>계산 방식</legend>
-            <div class="finance-loan-mode-switch">
-              <label>
-                <input type="radio" name="scheduleMode" value="auto" data-finance-loan-mode checked>
-                <span><strong>자동 계산</strong><small>이율과 기간으로 원리금균등 계산</small></span>
-              </label>
-              <label>
-                <input type="radio" name="scheduleMode" value="manual" data-finance-loan-mode>
-                <span><strong>수동 입력</strong><small>매달 원금과 이자를 직접 입력</small></span>
-              </label>
-            </div>
-          </fieldset>
-          <fieldset data-finance-loan-auto-fields>
-            <legend>자동 계산 조건</legend>
-            <div class="field-grid">
-              ${financeDecimalInput("연 이율(%)", "annualRate", { min: 0, max: 100, step: 0.001, value: 0, required: true })}
-            </div>
-          </fieldset>
-          <section
-            class="finance-loan-schedule"
-            data-finance-loan-schedule
-            aria-hidden="true"
-            inert
-          >
-            <div class="finance-loan-schedule-inner">
-              <header>
-                <div>
-                  <span class="finance-stage-index">월별 납부 계획</span>
-                  <strong data-finance-loan-schedule-summary>기간을 입력하면 월별 계획이 열립니다.</strong>
-                </div>
-                <button type="button" data-finance-loan-distribute hidden>원금 자동분할</button>
-              </header>
-              <p class="finance-form-note" data-finance-loan-schedule-note></p>
-              <div
-                class="finance-loan-schedule-scroll"
-                data-finance-loan-schedule-scroll
-                role="region"
-                aria-label="월별 대출 납부 계획"
-                tabindex="0"
-              ></div>
-            </div>
-          </section>
-          <button class="button" type="submit" ${state.accounts.length ? "" : "disabled"}>대출 저장</button>
-        </form>
+        ${renderFinanceLoanForm()}
       </details>
       <div class="finance-record-list finance-manage-list">
         ${state.loans.map((loan) => {
-          const account = state.accounts.find((item) => item.id === loan.paymentAccountId);
-          const references = financeLoanReferenceCount(state, loan.id);
-          const scheduleCopy = loan.scheduleMode
-            ? `${loan.scheduleMode === "auto" ? "자동 계산" : "수동 입력"} · 상환 ${loan.termMonths}개월${loan.graceMonths ? ` · 거치 ${loan.graceMonths}개월` : ""}`
-            : `${loan.termMonths}개월 · 월 ${formatFinanceKrw(loan.monthlyPaymentKrw)}`;
           return `
             <article class="finance-record" data-finance-loan="${esc(loan.id)}">
               <div>
                 <strong>${esc(loan.name)}</strong>
-                <small>${account ? `${esc(account.name)} · ` : ""}${esc(scheduleCopy)}${loan.annualRate !== undefined ? ` · ${esc(loan.annualRate)}%` : ""} · 첫 납부 ${esc(loan.openedOn)}</small>
+                <small>${esc(loan.openedOn)} 기준 남은 원금</small>
               </div>
               <div class="finance-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(financeModel.loanPrincipalKrw(state, loan, dateKey(new Date()))))}</span>
-                <button type="button" data-finance-delete-loan="${esc(loan.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+                <button type="button" data-finance-delete-loan="${esc(loan.id)}">삭제</button>
               </div>
             </article>
+            <details class="finance-manage-details finance-record-edit" data-finance-edit-loan="${esc(loan.id)}">
+              <summary>${esc(loan.name)} 수정</summary>
+              ${renderFinanceLoanForm(loan)}
+            </details>
           `;
         }).join("") || '<p class="finance-empty-copy">등록된 대출이 없습니다.</p>'}
       </div>
@@ -2713,20 +2877,10 @@ function renderFinanceRecurringManage(state) {
   const rules = state.recurringRules.filter((rule) => rule.kind === "fixed_expense" && rule.status !== "archived");
   return `
     <section class="finance-stage-panel panel" aria-labelledby="finance-recurring-manage-title">
-      <span class="finance-stage-index">고정비</span>
-      <h2 id="finance-recurring-manage-title">${rules.length ? `${rules.length}개 고정비` : "고정비 등록"}</h2>
+      <h2 id="finance-recurring-manage-title">고정비</h2>
       <details class="finance-manage-details" ${rules.length ? "" : "open"}>
         <summary>고정비 추가</summary>
-        <form data-form="finance-recurring-rule" class="finance-native-form">
-          <div class="field-grid">
-            ${financeTextInput("이름", "name", { placeholder: "예: 전기요금", required: true })}
-            ${financeMoneyInput("예상 금액", "amountEstimateKrw")}
-            ${financeNumberInput("계좌 출금 예정일", "dueDay", 15, 1, 31)}
-            ${financeSelectInput("출금 계좌", "accountId", financeAccountOptions(state.accounts), { required: true })}
-            ${financeDateInput("반복 시작일", "activeFrom", dateKey(new Date()))}
-          </div>
-          <button class="button" type="submit" ${state.accounts.length ? "" : "disabled"}>고정비 저장</button>
-        </form>
+        ${renderFinanceRecurringRuleForm(state)}
       </details>
       <div class="finance-record-list finance-manage-list">
         ${rules.map((rule) => {
@@ -2738,17 +2892,21 @@ function renderFinanceRecurringManage(state) {
             <article class="finance-record finance-recurring-record" data-finance-recurring-rule="${esc(rule.id)}">
               <div>
                 <strong>${esc(rule.name)}</strong>
-                <small>${paused ? "일시정지 · " : ""}매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}</small>
+                <small>${paused ? "일시정지 · " : ""}${rule.creationMode === "auto" ? "자동 생성" : "수동 생성"} · 매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}</small>
               </div>
               <div class="finance-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(rule.amountEstimateKrw))}</span>
-                <button type="button" data-finance-create-recurring-period="${esc(rule.id)}" ${created || paused ? "disabled" : ""}>${created ? "일정 생성됨" : paused ? "정지 중" : `${esc(financeWorkspace.month)} 일정 만들기`}</button>
+                ${rule.creationMode === "auto" ? `<span>${created ? "납부 항목 생성됨" : `${esc(rule.dueDay)}일 자동 생성`}</span>` : `<button type="button" data-finance-create-recurring-period="${esc(rule.id)}" ${created || paused ? "disabled" : ""}>${created ? "납부 항목 생성됨" : paused ? "정지 중" : `${esc(financeWorkspace.month)} 납부 항목 만들기`}</button>`}
                 <button type="button" data-finance-recurring-status="${paused ? "active" : "paused"}" data-finance-recurring-rule-id="${esc(rule.id)}">${paused ? "다시 시작" : "일시정지"}</button>
                 ${references
                   ? `<button type="button" data-finance-recurring-status="archived" data-finance-recurring-rule-id="${esc(rule.id)}">보관</button>`
                   : `<button type="button" data-finance-delete-recurring-rule="${esc(rule.id)}">삭제</button>`}
               </div>
             </article>
+            <details class="finance-manage-details finance-record-edit" data-finance-edit-recurring-rule="${esc(rule.id)}">
+              <summary>${esc(rule.name)} 수정</summary>
+              ${renderFinanceRecurringRuleForm(state, rule)}
+            </details>
           `;
         }).join("") || '<p class="finance-empty-copy">등록된 고정비가 없습니다.</p>'}
       </div>
@@ -2766,16 +2924,13 @@ function renderFinanceStats(state) {
   });
   return `
     <section class="finance-section-heading">
-      <div>
-        <span class="finance-stage-index">통계</span>
-        <h2>같은 달도 두 기준으로 나눠 봅니다</h2>
-      </div>
-      <p>쓴 돈은 사용일, 실제 입출금은 계좌에서 확인된 날짜 기준입니다.</p>
+      <h2>통계</h2>
     </section>
+    ${renderFinanceSpendingCalendar(state, financeWorkspace.month)}
     <div class="finance-basis-grid">
       <section class="finance-stage-panel panel finance-basis-card">
-        <span class="finance-stage-index">쓴 돈 기준</span>
-        <h2>${esc(formatFinanceKrw(summary.spentKrw))}</h2>
+        <h2>지출</h2>
+        <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.spentKrw))}</strong>
         <dl>
           <div><dt>소비</dt><dd>${esc(formatFinanceKrw(summary.expenseKrw))}</dd></div>
           <div><dt>환불</dt><dd>−${esc(formatFinanceKrw(summary.refundKrw))}</dd></div>
@@ -2784,8 +2939,8 @@ function renderFinanceStats(state) {
         </dl>
       </section>
       <section class="finance-stage-panel panel finance-basis-card">
-        <span class="finance-stage-index">실제 계좌 기준</span>
-        <h2>${esc(formatFinanceKrw(summary.cashOutKrw))} 출금</h2>
+        <h2>실제 출금</h2>
+        <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.cashOutKrw))}</strong>
         <dl>
           <div><dt>실제 입금</dt><dd>${esc(formatFinanceKrw(summary.cashInKrw))}</dd></div>
           <div><dt>실제 출금</dt><dd>−${esc(formatFinanceKrw(summary.cashOutKrw))}</dd></div>
@@ -2796,19 +2951,16 @@ function renderFinanceStats(state) {
     </div>
     <div class="finance-ledger-grid finance-stats-detail-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-category-stats-title">
-        <span class="finance-stage-index">쓴 돈 구성</span>
-        <h2 id="finance-category-stats-title">${esc(financeWorkspace.month)} 분류별 금액</h2>
+        <h2 id="finance-category-stats-title">카테고리</h2>
         ${renderFinanceStatBars(categories)}
       </section>
       <section class="finance-stage-panel panel" aria-labelledby="finance-cashout-stats-title">
-        <span class="finance-stage-index">실제 출금 구성</span>
-        <h2 id="finance-cashout-stats-title">${esc(financeWorkspace.month)} 통장에서 빠진 종류</h2>
+        <h2 id="finance-cashout-stats-title">출금 유형</h2>
         ${renderFinanceStatBars(cashOutKinds)}
       </section>
     </div>
     <section class="finance-stage-panel panel finance-trend-panel" aria-labelledby="finance-trend-title">
-      <span class="finance-stage-index">최근 6개월</span>
-      <h2 id="finance-trend-title">쓴 돈과 실제 출금의 월별 차이</h2>
+      <h2 id="finance-trend-title">월별 추이</h2>
       ${renderFinanceTrend(trend)}
     </section>
   `;
@@ -3236,6 +3388,8 @@ function financeSelectInput(label, name, options, fieldOptions = {}) {
 
 function financeAccountReferenceCount(state, accountId) {
   return state.paymentMethods.filter((item) => item.linkedAccountId === accountId || item.paymentAccountId === accountId).length
+    + state.cardStatements.filter((item) => item.paymentAccountId === accountId).length
+    + state.settlements.filter((item) => item.accountId === accountId).length
     + state.movements.filter((item) => item.fromAccountId === accountId || item.toAccountId === accountId).length
     + state.loans.filter((item) => item.paymentAccountId === accountId).length
     + state.recurringRules.filter((item) => item.accountId === accountId).length
@@ -3408,7 +3562,7 @@ async function loadFinanceWorkspace() {
       if (!scheduleFinanceExpiry(session.expiresAt)) return null;
       return apiJson("/api/finance/state");
     })
-    .then((payload) => {
+    .then(async (payload) => {
       if (!payload || checkFinanceSessionExpiry()) return;
       const nextState = normalizeFinanceState(payload.state);
       if (!nextState) throw new Error("저장된 가계부 형식을 확인할 수 없습니다.");
@@ -3417,6 +3571,7 @@ async function loadFinanceWorkspace() {
       financeWorkspace.updatedAt = typeof payload.updatedAt === "string" ? payload.updatedAt : "";
       financeWorkspace.status = "ready";
       scheduleFinanceSessionRecheck();
+      await materializeFinanceAutomaticFixedCosts();
     })
     .catch((error) => {
       if (error.code === "FINANCE_AUTH_REQUIRED" || error.status === 401) {
@@ -3537,23 +3692,38 @@ async function saveFinanceState(nextState, successMessage) {
 
 async function submitFinanceAccount(form) {
   return runFinanceFormMutation(form, (nextState) => {
+    const entityId = financeFormText(form, "entityId");
+    const account = entityId ? nextState.accounts.find((item) => item.id === entityId) : null;
+    if (entityId && !account) throw new Error("수정할 계좌를 다시 확인해주세요.");
     const openingBalanceKrw = financeFormInteger(form, "openingBalanceKrw");
-    nextState.accounts.push(compactFinanceEntity({
-      id: financeEntityId("account"),
+    const values = compactFinanceEntity({
+      id: account?.id || financeEntityId("account"),
       name: financeFormText(form, "name"),
       type: financeFormText(form, "type"),
       institution: financeFormText(form, "institution"),
       openingBalanceKrw,
-      openingOn: dateKey(new Date()),
-    }));
-  }, "계좌를 저장했습니다.");
+      openingOn: account?.openingOn || dateKey(new Date()),
+    });
+    if (account) {
+      delete account.institution;
+      Object.assign(account, values);
+    } else {
+      nextState.accounts.push(values);
+    }
+  }, financeFormText(form, "entityId") ? "계좌를 수정했습니다." : "계좌를 저장했습니다.");
 }
 
 async function submitFinancePaymentMethod(form) {
   return runFinanceFormMutation(form, (nextState) => {
+    const entityId = financeFormText(form, "entityId");
+    const existing = entityId ? nextState.paymentMethods.find((item) => item.id === entityId) : null;
+    if (entityId && !existing) throw new Error("수정할 결제수단을 다시 확인해주세요.");
     const type = financeFormText(form, "type");
+    if (existing && existing.type !== type && financePaymentMethodReferenceCount(nextState, existing.id)) {
+      throw new Error("사용 기록이 있는 결제수단은 종류를 바꿀 수 없습니다. 이름과 연결 계좌 등은 수정할 수 있습니다.");
+    }
     const method = compactFinanceEntity({
-      id: financeEntityId("method"),
+      id: existing?.id || financeEntityId("method"),
       name: financeFormText(form, "name"),
       type,
     });
@@ -3565,8 +3735,20 @@ async function submitFinancePaymentMethod(form) {
     } else {
       method.linkedAccountId = financeFormText(form, "linkedAccountId");
     }
-    nextState.paymentMethods.push(method);
-  }, "결제수단을 저장했습니다.");
+    if (existing) {
+      if (existing.type === "credit_card") {
+        for (const statement of nextState.cardStatements.filter((item) => item.paymentMethodId === existing.id)) {
+          statement.paymentAccountId = statement.status === "paid"
+            ? statement.paymentAccountId || existing.paymentAccountId
+            : method.paymentAccountId;
+        }
+      }
+      for (const key of ["linkedAccountId", "paymentAccountId", "cycleEndDay", "dueDay", "dueMonthOffset"]) delete existing[key];
+      Object.assign(existing, method);
+    } else {
+      nextState.paymentMethods.push(method);
+    }
+  }, financeFormText(form, "entityId") ? "결제수단을 수정했습니다." : "결제수단을 저장했습니다.");
 }
 
 async function submitFinanceExpense(form) {
@@ -3728,6 +3910,7 @@ async function submitFinanceCardStatement(form) {
     const scheduledOn = financeFormText(form, "scheduledOn");
     if (nextState.cardStatements.some((statement) => (
       statement.paymentMethodId === method.id
+      && statement.source !== "opening_installment"
       && statement.scheduledOn.slice(0, 7) === scheduledOn.slice(0, 7)
     ))) {
       throw new Error("이 카드의 같은 달 명세서가 이미 확정되어 있습니다.");
@@ -3770,6 +3953,7 @@ async function submitFinanceCardStatement(form) {
     const statement = {
       id: financeEntityId("statement"),
       paymentMethodId: method.id,
+      paymentAccountId: method.paymentAccountId,
       periodStart,
       periodEnd,
       statementOn: financeFormText(form, "statementOn"),
@@ -3809,7 +3993,8 @@ async function submitFinanceCardPayment(form) {
     const statement = nextState.cardStatements.find((item) => item.id === financeFormText(form, "statementId"));
     if (!statement || statement.status !== "confirmed") throw new Error("아직 납부할 수 있는 카드 명세서가 아닙니다.");
     const method = nextState.paymentMethods.find((item) => item.id === statement.paymentMethodId);
-    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("카드대금 출금 계좌를 확인해주세요.");
+    const paymentAccountId = statement.paymentAccountId || method?.paymentAccountId;
+    if (method?.type !== "credit_card" || !paymentAccountId) throw new Error("카드대금 출금 계좌를 확인해주세요.");
     const settlement = nextState.settlements.find((item) => (
       item.targetType === "card_statement"
       && item.targetId === statement.id
@@ -3821,7 +4006,7 @@ async function submitFinanceCardPayment(form) {
       kind: "card_payment",
       amountKrw: statement.statementAmountKrw,
       postedOn: financeFormText(form, "postedOn"),
-      fromAccountId: method.paymentAccountId,
+      fromAccountId: paymentAccountId,
       counterpartyType: "card",
       counterpartyId: method.id,
       status: "confirmed",
@@ -3834,83 +4019,135 @@ async function submitFinanceCardPayment(form) {
   }, "카드대금 실제 출금을 확인했습니다. 사용 지출은 다시 세지 않습니다.");
 }
 
+async function submitFinanceCardUsageTotal(form) {
+  return runFinanceFormMutation(form, (nextState) => {
+    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
+    if (method?.type !== "credit_card") throw new Error("신용카드를 다시 확인해주세요.");
+    const usageMonth = financeFormText(form, "usageMonth");
+    const existing = nextState.entries.find((entry) => (
+      entry.source === "card_month_total"
+      && entry.paymentMethodId === method.id
+      && entry.recognitionMonth === usageMonth
+    ));
+    const ordinaryEntries = nextState.entries.filter((entry) => (
+      entry.paymentMethodId === method.id
+      && entry.recognitionMonth === usageMonth
+      && entry.status !== "void"
+      && entry.source !== "card_month_total"
+    ));
+    if (!existing && ordinaryEntries.length) {
+      throw new Error("이미 개별 사용 기록이 있는 달에는 시작 사용액을 추가할 수 없습니다.");
+    }
+    if (existing && nextState.cardStatements.some((statement) => statement.items.some((item) => item.entryId === existing.id))) {
+      throw new Error("명세서에 포함된 시작 사용액은 수정할 수 없습니다.");
+    }
+    const amountKrw = financeFormPositiveMoney(form, "amountKrw");
+    const occurredOn = financeModel.dateForMonthDay(usageMonth, method.cycleEndDay || 31);
+    const scheduledOn = financeModel.scheduledCardPaymentOn(method, occurredOn);
+    if (!scheduledOn) throw new Error("카드 납부일 설정을 확인해주세요.");
+    if (existing) {
+      Object.assign(existing, { title: `${method.name} 시작 사용액`, amountKrw, occurredOn });
+      const settlement = nextState.settlements.find((item) => (
+        item.targetType === "entry"
+        && item.targetId === existing.id
+        && ["estimated", "confirmed"].includes(item.status)
+      ));
+      if (!settlement) throw new Error("시작 사용액의 납부 일정을 찾을 수 없습니다.");
+      settlement.expectedAmountKrw = amountKrw;
+      settlement.scheduledOn = scheduledOn;
+      return;
+    }
+    const entry = {
+      id: financeEntityId("entry"),
+      kind: "expense",
+      title: `${method.name} 시작 사용액`,
+      amountKrw,
+      occurredOn,
+      recognitionMonth: usageMonth,
+      category: "신용카드 시작 금액",
+      paymentMethodId: method.id,
+      source: "card_month_total",
+      status: "confirmed",
+    };
+    nextState.entries.push(entry);
+    nextState.settlements.push({
+      id: financeEntityId("settlement"),
+      targetType: "entry",
+      targetId: entry.id,
+      expectedAmountKrw: amountKrw,
+      scheduledOn,
+      status: "estimated",
+    });
+  }, "카드 시작 사용액을 저장했습니다.");
+}
 
-
-
+async function submitFinanceCardInstallment(form) {
+  return runFinanceFormMutation(form, (nextState) => {
+    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
+    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("신용카드와 출금 계좌를 다시 확인해주세요.");
+    const totalAmountKrw = financeFormPositiveMoney(form, "totalAmountKrw");
+    const installmentCount = financeFormInteger(form, "installmentCount");
+    if (installmentCount < 1 || installmentCount > 120 || totalAmountKrw < installmentCount) {
+      throw new Error("남은 횟수는 1~120회이며 각 회차는 1원 이상이어야 합니다.");
+    }
+    const firstPaymentMonth = financeFormText(form, "firstPaymentMonth");
+    if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(firstPaymentMonth)) throw new Error("첫 납부 월을 다시 선택해주세요.");
+    const label = financeFormText(form, "label");
+    const planId = financeEntityId("installment-plan");
+    const amounts = financeModel.splitKrw(totalAmountKrw, installmentCount);
+    for (let index = 0; index < installmentCount; index += 1) {
+      const scheduledMonth = financeModel.shiftMonthKey(firstPaymentMonth, index);
+      const scheduledOn = financeModel.dateForMonthDay(scheduledMonth, method.dueDay || 1);
+      const statement = {
+        id: financeEntityId("statement"),
+        paymentMethodId: method.id,
+        paymentAccountId: method.paymentAccountId,
+        periodStart: `${firstPaymentMonth}-01`,
+        periodEnd: financeModel.dateForMonthDay(firstPaymentMonth, 31),
+        statementOn: dateKey(new Date()),
+        scheduledOn,
+        statementAmountKrw: amounts[index],
+        status: "confirmed",
+        source: "opening_installment",
+        planId,
+        label,
+        installmentNumber: index + 1,
+        installmentCount,
+        items: [],
+      };
+      nextState.cardStatements.push(statement);
+      nextState.settlements.push({
+        id: financeEntityId("settlement"),
+        targetType: "card_statement",
+        targetId: statement.id,
+        expectedAmountKrw: statement.statementAmountKrw,
+        scheduledOn,
+        status: "confirmed",
+      });
+    }
+  }, "기존 할부의 남은 납부 일정을 저장했습니다.");
+}
 
 
 
 async function submitFinanceLoan(form) {
   return runFinanceFormMutation(form, (nextState) => {
-    const values = financeLoanScheduleValues(form);
-    if (!values.valid) throw new Error("대출 기간과 계산 조건을 확인해주세요.");
-    const rows = values.scheduleMode === "auto"
-      ? financeModel.loanSchedule(values)
-      : [...form.querySelectorAll("[data-finance-loan-schedule-row]")].map((row, index) => {
-          const principalKrw = Number(row.querySelector('[name="schedulePrincipalKrw"]')?.value);
-          const interestKrw = Number(row.querySelector('[name="scheduleInterestKrw"]')?.value);
-          const amountKrw = principalKrw + interestKrw;
-          if (
-            !Number.isSafeInteger(principalKrw)
-            || principalKrw < 0
-            || !Number.isSafeInteger(interestKrw)
-            || interestKrw < 0
-            || !Number.isSafeInteger(amountKrw)
-          ) {
-            throw new Error(`${index + 1}회차 원금과 이자를 원 단위로 확인해주세요.`);
-          }
-          return {
-            amountKrw,
-            dueOn: row.dataset.dueOn,
-            interestKrw,
-            phase: index < values.graceMonths ? "grace" : "repayment",
-            principalKrw,
-            recognitionMonth: row.dataset.dueOn.slice(0, 7),
-          };
-        });
-    if (rows.length !== values.totalMonths) throw new Error("월별 납부 계획을 다시 확인해주세요.");
-    const principalTotalKrw = rows.reduce((total, row) => total + row.principalKrw, 0);
-    if (!Number.isSafeInteger(principalTotalKrw) || principalTotalKrw !== values.openingPrincipalKrw) {
-      throw new Error("월별 원금 합계가 시작 원금과 같아야 합니다.");
-    }
-
-    const loanId = financeEntityId("loan");
+    const entityId = financeFormText(form, "entityId");
+    const existing = entityId ? nextState.loans.find((item) => item.id === entityId) : null;
+    if (entityId && !existing) throw new Error("수정할 대출을 다시 확인해주세요.");
     const loan = {
-      id: loanId,
+      id: existing?.id || financeEntityId("loan"),
       name: financeFormText(form, "name"),
-      openedOn: values.openedOn,
-      openingPrincipalKrw: values.openingPrincipalKrw,
-      termMonths: values.termMonths,
-      graceMonths: values.graceMonths,
-      scheduleMode: values.scheduleMode,
-      paymentAccountId: financeFormText(form, "paymentAccountId"),
+      openedOn: financeFormText(form, "openedOn"),
+      openingPrincipalKrw: financeFormPositiveMoney(form, "openingPrincipalKrw"),
     };
-    if (values.scheduleMode === "auto") loan.annualRate = values.annualRate;
-    nextState.loans.push(loan);
-
-    for (const row of rows) {
-      if (row.amountKrw === 0) continue;
-      const payment = {
-        id: financeEntityId("loan-payment"),
-        loanId,
-        dueOn: row.dueOn,
-        recognitionMonth: row.dueOn.slice(0, 7),
-        principalKrw: row.principalKrw,
-        interestKrw: row.interestKrw,
-        feeKrw: 0,
-        status: "confirmed",
-      };
-      nextState.loanPayments.push(payment);
-      nextState.settlements.push({
-        id: financeEntityId("settlement"),
-        targetType: "loan_payment",
-        targetId: payment.id,
-        expectedAmountKrw: row.amountKrw,
-        scheduledOn: row.dueOn,
-        status: "confirmed",
-      });
+    if (existing) {
+      removeFinanceLoanSchedules(nextState, existing.id);
+      nextState.loans[nextState.loans.findIndex((item) => item.id === existing.id)] = loan;
+    } else {
+      nextState.loans.push(loan);
     }
-  }, "대출과 전체 월별 납부 계획을 저장했습니다.");
+  }, financeFormText(form, "entityId") ? "대출을 수정했습니다." : "자산 확인용 대출을 저장했습니다.");
 }
 
 async function submitFinanceLoanPlan(form) {
@@ -4003,17 +4240,36 @@ async function submitFinanceLoanPayment(form) {
 
 async function submitFinanceRecurringRule(form) {
   return runFinanceFormMutation(form, (nextState) => {
-    nextState.recurringRules.push({
-      id: financeEntityId("rule"),
+    const entityId = financeFormText(form, "entityId");
+    const existing = entityId ? nextState.recurringRules.find((item) => item.id === entityId) : null;
+    if (entityId && !existing) throw new Error("수정할 고정비를 다시 확인해주세요.");
+    const rule = {
+      id: existing?.id || financeEntityId("rule"),
       kind: "fixed_expense",
       name: financeFormText(form, "name"),
       amountEstimateKrw: financeFormPositiveMoney(form, "amountEstimateKrw"),
       dueDay: financeFormInteger(form, "dueDay"),
       accountId: financeFormText(form, "accountId"),
+      creationMode: financeFormText(form, "creationMode"),
       activeFrom: financeFormText(form, "activeFrom"),
-      status: "active",
-    });
-  }, "고정비 규칙을 저장했습니다. 월별 일정은 직접 확정할 때만 생깁니다.");
+      status: existing?.status || "active",
+    };
+    if (existing) {
+      for (const entry of nextState.entries.filter((item) => item.recurringRuleId === existing.id)) {
+        for (const settlement of nextState.settlements.filter((item) => item.targetType === "entry" && item.targetId === entry.id)) {
+          settlement.accountId = settlement.status === "paid"
+            ? settlement.accountId || existing.accountId
+            : rule.accountId;
+        }
+      }
+      Object.assign(existing, rule);
+    } else {
+      nextState.recurringRules.push(rule);
+    }
+    if (rule.creationMode === "auto" && financeModel.dateForMonthDay(monthKey(new Date()), rule.dueDay) <= dateKey(new Date())) {
+      appendFinanceRecurringPeriod(nextState, rule, monthKey(new Date()));
+    }
+  }, financeFormText(form, "entityId") ? "고정비를 수정했습니다." : "고정비 규칙을 저장했습니다.");
 }
 
 async function submitFinanceBalanceCheck(form) {
@@ -4060,8 +4316,18 @@ async function createFinanceRecurringPeriod(ruleId) {
     showToast("이 달은 고정비 반복 기간에 포함되지 않습니다.");
     return;
   }
-  if (state.entries.some((entry) => entry.recurringRuleId === rule.id && entry.periodKey === periodKey)) return;
   const nextState = structuredClone(state);
+  if (!appendFinanceRecurringPeriod(nextState, rule, periodKey)) return;
+  await saveFinanceState(nextState, `${periodKey} 고정비 납부 항목을 만들었습니다. 아직 실제 출금은 아닙니다.`);
+}
+
+function appendFinanceRecurringPeriod(nextState, rule, periodKey) {
+  const dueOn = financeModel.dateForMonthDay(periodKey, rule.dueDay);
+  if (
+    dueOn < rule.activeFrom
+    || (rule.activeUntil && dueOn > rule.activeUntil)
+    || nextState.entries.some((entry) => entry.recurringRuleId === rule.id && entry.periodKey === periodKey)
+  ) return false;
   const entry = {
     id: financeEntityId("entry"),
     kind: "expense",
@@ -4081,14 +4347,35 @@ async function createFinanceRecurringPeriod(ruleId) {
     targetId: entry.id,
     expectedAmountKrw: entry.amountKrw,
     scheduledOn: dueOn,
+    accountId: rule.accountId,
     status: "confirmed",
   });
-  await saveFinanceState(nextState, `${periodKey} 고정비 일정을 확정했습니다. 아직 실제 출금은 아닙니다.`);
+  return true;
 }
 
-
-
-
+async function materializeFinanceAutomaticFixedCosts() {
+  const state = financeWorkspace.state;
+  if (!state || financeWorkspace.status !== "ready") return false;
+  const today = dateKey(new Date());
+  const currentMonth = today.slice(0, 7);
+  const nextState = structuredClone(state);
+  let created = 0;
+  for (const rule of nextState.recurringRules.filter((item) => (
+    item.kind === "fixed_expense"
+    && item.status === "active"
+    && item.creationMode === "auto"
+  ))) {
+    let periodKey = rule.activeFrom.slice(0, 7);
+    while (periodKey <= currentMonth) {
+      const dueOn = financeModel.dateForMonthDay(periodKey, rule.dueDay);
+      if (dueOn > today) break;
+      if (appendFinanceRecurringPeriod(nextState, rule, periodKey)) created += 1;
+      periodKey = financeModel.shiftMonthKey(periodKey, 1);
+    }
+  }
+  if (!created) return false;
+  return saveFinanceState(nextState, `${created}개의 자동 고정비 납부 항목을 만들었습니다.`);
+}
 
 async function submitFinanceFixedCostPayment(form) {
   return runFinanceFormMutation(form, (nextState) => {
@@ -4098,7 +4385,7 @@ async function submitFinanceFixedCostPayment(form) {
     if (
       entry?.kind !== "expense"
       || rule?.kind !== "fixed_expense"
-      || !rule.accountId
+      || !(settlement?.accountId || rule.accountId)
       || settlement?.targetType !== "entry"
       || settlement.targetId !== entry.id
       || !["estimated", "confirmed"].includes(settlement.status)
@@ -4112,7 +4399,7 @@ async function submitFinanceFixedCostPayment(form) {
       kind: "external",
       amountKrw,
       postedOn,
-      fromAccountId: rule.accountId,
+      fromAccountId: settlement.accountId || rule.accountId,
       status: "confirmed",
     };
     entry.amountKrw = amountKrw;
@@ -4224,14 +4511,25 @@ async function deleteFinancePaymentMethod(methodId) {
 async function deleteFinanceLoan(loanId) {
   const state = financeWorkspace.state;
   const loan = state?.loans.find((item) => item.id === loanId);
-  if (!loan || financeLoanReferenceCount(state, loanId)) return;
-  if (!window.confirm(`‘${loan.name}’ 대출을 삭제할까요?`)) return;
+  if (!loan) return;
+  if (!window.confirm(`‘${loan.name}’ 대출을 삭제할까요? 기존 납부 일정은 지우되 이미 확인한 계좌 출금 기록은 유지합니다.`)) return;
   const nextState = structuredClone(state);
+  removeFinanceLoanSchedules(nextState, loanId);
   nextState.loans = nextState.loans.filter((item) => item.id !== loanId);
-  await saveFinanceState(nextState, "사용하지 않는 대출을 삭제했습니다.");
+  await saveFinanceState(nextState, "대출과 연결된 납부 일정을 삭제했습니다.");
 }
 
-
+function removeFinanceLoanSchedules(state, loanId) {
+  const ruleIds = new Set(state.recurringRules.filter((rule) => rule.loanId === loanId).map((rule) => rule.id));
+  const paymentIds = new Set(state.loanPayments
+    .filter((payment) => payment.loanId === loanId || ruleIds.has(payment.recurringRuleId))
+    .map((payment) => payment.id));
+  state.settlements = state.settlements.filter((settlement) => (
+    settlement.targetType !== "loan_payment" || !paymentIds.has(settlement.targetId)
+  ));
+  state.loanPayments = state.loanPayments.filter((payment) => !paymentIds.has(payment.id));
+  state.recurringRules = state.recurringRules.filter((rule) => !ruleIds.has(rule.id));
+}
 
 async function deleteFinanceRecurringRule(ruleId) {
   const state = financeWorkspace.state;
@@ -9476,8 +9774,11 @@ function handleClick(event) {
   if (financeMonthShift) {
     event.preventDefault();
     const offset = Number(financeMonthShift.dataset.financeMonthShift) || 0;
+    const origin = financeMonthShift.dataset.financeMonthOrigin;
     shiftFinanceMonth(offset);
-    requestAnimationFrame(() => els.viewRoot.querySelector(`[data-finance-month-shift="${offset}"]`)?.focus());
+    requestAnimationFrame(() => els.viewRoot.querySelector(
+      `[data-finance-month-shift="${offset}"]${origin ? `[data-finance-month-origin="${origin}"]` : ":not([data-finance-month-origin])"}`,
+    )?.focus());
     return;
   }
   const financeAccountDelete = event.target.closest("[data-finance-delete-account]");
@@ -10570,6 +10871,14 @@ function handleSubmit(event) {
   }
   if (form.dataset.form === "finance-card-payment") {
     submitFinanceCardPayment(form);
+    return;
+  }
+  if (form.dataset.form === "finance-card-usage-total") {
+    submitFinanceCardUsageTotal(form);
+    return;
+  }
+  if (form.dataset.form === "finance-card-installment") {
+    submitFinanceCardInstallment(form);
     return;
   }
   if (form.dataset.form === "finance-loan-plan") {

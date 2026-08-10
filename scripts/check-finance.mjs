@@ -553,6 +553,7 @@ paidCardState.settlements.push({
   status: "paid",
 });
 assert.deepEqual(validateFinanceState(paidCardState), []);
+assert.equal(paidCardState.entries.length, phaseOneState.entries.length, "paying a card must not create another expense entry");
 assert.deepEqual(financeMonthSummary(paidCardState, "2026-02"), {
   expenseKrw: 0,
   refundKrw: 0,
@@ -779,5 +780,114 @@ assert.ok(validateFinanceState(recurringKindMismatch).some((issue) => issue.code
 const invalidRecurringPeriod = structuredClone(phaseTwoState);
 invalidRecurringPeriod.recurringRules.find((rule) => rule.id === "rule-fixed-phase-two").activeUntil = "2025-12-31";
 assert.ok(validateFinanceState(invalidRecurringPeriod).some((issue) => issue.code === "invalid_active_period"));
+
+const simpleManagementState = {
+  ...createEmptyFinanceState(),
+  accounts: [{
+    id: "account-simple",
+    name: "주 계좌",
+    type: "bank",
+    openingBalanceKrw: 5_000_000,
+    openingOn: "2026-08-01",
+  }],
+  paymentMethods: [{
+    id: "card-simple",
+    name: "시작 카드",
+    type: "credit_card",
+    paymentAccountId: "account-simple",
+    cycleEndDay: 31,
+    dueDay: 14,
+    dueMonthOffset: 1,
+  }],
+  entries: [{
+    id: "entry-card-total",
+    kind: "expense",
+    title: "시작 카드 시작 사용액",
+    amountKrw: 2_000_000,
+    occurredOn: "2026-08-31",
+    recognitionMonth: "2026-08",
+    paymentMethodId: "card-simple",
+    source: "card_month_total",
+    status: "confirmed",
+  }],
+  settlements: [
+    {
+      id: "settlement-card-total",
+      targetType: "entry",
+      targetId: "entry-card-total",
+      expectedAmountKrw: 2_000_000,
+      scheduledOn: "2026-09-14",
+      status: "estimated",
+    },
+    {
+      id: "settlement-opening-installment",
+      targetType: "card_statement",
+      targetId: "statement-opening-installment",
+      expectedAmountKrw: 500_000,
+      scheduledOn: "2026-08-14",
+      status: "confirmed",
+    },
+  ],
+  cardStatements: [{
+    id: "statement-opening-installment",
+    paymentMethodId: "card-simple",
+    paymentAccountId: "account-simple",
+    periodStart: "2026-08-01",
+    periodEnd: "2026-08-31",
+    statementOn: "2026-08-01",
+    scheduledOn: "2026-08-14",
+    statementAmountKrw: 500_000,
+    status: "confirmed",
+    source: "opening_installment",
+    planId: "installment-plan-simple",
+    label: "기존 노트북",
+    installmentNumber: 1,
+    installmentCount: 4,
+    items: [],
+  }],
+  loans: [{
+    id: "loan-simple",
+    name: "자산 확인용 대출",
+    openedOn: "2026-08-01",
+    openingPrincipalKrw: 12_000_000,
+  }],
+  recurringRules: [
+    {
+      id: "rule-auto",
+      kind: "fixed_expense",
+      name: "자동 월세",
+      amountEstimateKrw: 600_000,
+      dueDay: 1,
+      accountId: "account-simple",
+      creationMode: "auto",
+      activeFrom: "2026-08-01",
+      status: "active",
+    },
+    {
+      id: "rule-manual",
+      kind: "fixed_expense",
+      name: "수동 회비",
+      amountEstimateKrw: 30_000,
+      dueDay: 20,
+      accountId: "account-simple",
+      creationMode: "manual",
+      activeFrom: "2026-08-01",
+      status: "active",
+    },
+  ],
+};
+assert.deepEqual(validateFinanceState(simpleManagementState), []);
+
+const invalidCreationMode = structuredClone(simpleManagementState);
+invalidCreationMode.recurringRules[0].creationMode = "sometimes";
+assert.ok(validateFinanceState(invalidCreationMode).some((issue) => issue.path.endsWith("creationMode")));
+
+const duplicateCardTotal = structuredClone(simpleManagementState);
+duplicateCardTotal.entries.push({ ...structuredClone(duplicateCardTotal.entries[0]), id: "entry-card-total-duplicate" });
+assert.ok(validateFinanceState(duplicateCardTotal).some((issue) => issue.code === "duplicate_card_month_total"));
+
+const excessiveInstallments = structuredClone(simpleManagementState);
+excessiveInstallments.cardStatements[0].installmentCount = 121;
+assert.ok(validateFinanceState(excessiveInstallments).some((issue) => issue.code === "installment_count_too_large"));
 
 console.log("Finance auth, validation, balances, card, loan, fixed-cost, and month-boundary checks passed.");
