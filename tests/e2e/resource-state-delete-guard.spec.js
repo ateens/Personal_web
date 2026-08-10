@@ -103,6 +103,7 @@ test("the UI supplements example data without deleting existing Resources or ent
   const existingResources = structuredClone(before.state.resources);
 
   await page.goto("/");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
   const navToggle = page.locator('[data-action="toggle-nav"]');
   if (await navToggle.isVisible()) await navToggle.click();
   await page.locator('[data-nav-key="database"]').click();

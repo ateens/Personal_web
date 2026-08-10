@@ -9,9 +9,7 @@
     "start:production": "NODE_ENV=production STATIC_ROOT=dist/client node server.js",
     "preview": "STATIC_ROOT=dist/client node server.js",
     "test:e2e": "playwright test",
-    "test:e2e:baseline": "playwright test tests/e2e/resource-baseline.spec.js tests/e2e/resource-p0.spec.js",
-    "test:e2e:p0": "playwright test tests/e2e/resource-p0.spec.js",
-    "test:e2e:shell": "playwright test tests/e2e/resource-page-shell.spec.js",
+    "test:e2e:baseline": "playwright test tests/e2e/resource-baseline.spec.js tests/e2e/resource-shell.spec.js tests/e2e/resource-state-delete-guard.spec.js",
     "check": "node --check app.js && node --check finance-model.js && node --check server.js && node --check server/deployment-security.js && node --check server/finance.js && node --check server/request-security.js && node --check server/storage.js && node --check scripts/build.mjs && node --check scripts/check-build.mjs && node --check scripts/check-deployment-security.mjs && node --check scripts/check-finance.mjs && node --check scripts/hash-finance-password.mjs && node --check scripts/check-request-security.mjs && node --check scripts/check-postgres-state.mjs && node --check scripts/manage-state-backups.mjs && node --check scripts/check-state-migration-backups.mjs && node --check scripts/audit-source.mjs && node scripts/audit-source.mjs && node scripts/check-deployment-security.mjs && node scripts/check-finance.mjs && node scripts/check-request-security.mjs",
     "check:build": "npm run build && node scripts/check-build.mjs",
     "verify": "npm run check && npm run check:build && npm run test:e2e:baseline",
@@ -30,7 +28,6 @@
     "pg": "^8.22.0"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.61.1",
     "esbuild": "^0.28.1"
   }

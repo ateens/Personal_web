@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { FIXTURE_IDS, fixtureSnapshot, openResources, resetFixture } from "./helpers.js";
+import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
 
 const LOCAL_DATABASE_NAME = "sygma-resource-local-v1";
 const SNAPSHOT_STORE = "snapshots";
 const OPERATION_STORE = "operations";
-const ORIGINAL_TITLE = "E2E Notion Parity Resource";
+const ORIGINAL_NAME = "Fixture Project";
 
 test.beforeEach(async ({ request }) => {
   await resetFixture(request);
@@ -15,15 +15,15 @@ test("two active clients converge through state events without focus or reload",
   const ipadContext = await newAppContext(browser, testInfo, { width: 1024, height: 1366, hasTouch: true, isMobile: true });
   const macPage = await macContext.newPage();
   const ipadPage = await ipadContext.newPage();
-  const changedTitle = "Synced live without a wake event";
+  const changedName = "Synced live without a wake event";
 
   try {
     const macEventStream = waitForStateEventStream(macPage);
     const ipadEventStream = waitForStateEventStream(ipadPage);
     await Promise.all([macPage.goto("/"), ipadPage.goto("/"), macEventStream, ipadEventStream]);
-    await openResources(macPage);
-    await openResources(ipadPage);
-    await expectResourceTitle(ipadPage, ORIGINAL_TITLE);
+    await openProjects(macPage);
+    await openProjects(ipadPage);
+    await expectProjectName(ipadPage, ORIGINAL_NAME);
     await expect.poll(() => localSnapshotRevision(macPage)).toBe(1);
     await expect.poll(() => localSnapshotRevision(ipadPage)).toBe(1);
 
@@ -32,18 +32,19 @@ test("two active clients converge through state events without focus or reload",
       return window.__e2eDocumentIdentity;
     });
 
-    await macPage.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
-    const macTitle = macPage.locator(`[data-resource-title="${FIXTURE_IDS.resource}"]`);
-    await expect(macTitle).toBeVisible();
-    await macTitle.fill(changedTitle);
+    await macPage.locator(`[data-project-edit="${FIXTURE_IDS.project}"]`).click();
+    const macName = macPage.locator(
+      `[data-inline-owner-type="projects"][data-inline-owner-id="${FIXTURE_IDS.project}"] [data-field="name"]`,
+    );
+    await expect(macName).toBeVisible();
+    await macName.fill(changedName);
+    await macName.press("Tab");
     await expect.poll(async () => {
       const snapshot = await fixtureSnapshot(request);
-      return { revision: snapshot.serverRevision, title: resourceTitle(snapshot.state) };
-    }).toEqual({ revision: 2, title: changedTitle });
+      return { revision: snapshot.serverRevision, name: projectName(snapshot.state) };
+    }).toEqual({ revision: 2, name: changedName });
 
-    await expect(
-      ipadPage.locator(`[data-resource-title-display="${FIXTURE_IDS.resource}"]`).first()
-    ).toHaveText(changedTitle, { timeout: 5_000 });
+    await expectProjectName(ipadPage, changedName, { timeout: 5_000 });
     await expect.poll(() => localSnapshotRevision(ipadPage), { timeout: 5_000 }).toBe(2);
     expect(await ipadPage.evaluate(() => window.__e2eDocumentIdentity)).toBe(ipadDocumentIdentity);
   } finally {
@@ -57,13 +58,13 @@ for (const wakeEvent of ["focus", "pageshow"]) {
     const ipadContext = await newAppContext(browser, testInfo, { width: 1024, height: 1366, hasTouch: true, isMobile: true });
     const macPage = await macContext.newPage();
     const ipadPage = await ipadContext.newPage();
-    const changedTitle = `Synced from Mac after ${wakeEvent}`;
+    const changedName = `Synced from Mac after ${wakeEvent}`;
 
     try {
       await Promise.all([macPage.goto("/"), ipadPage.goto("/")]);
-      await openResources(macPage);
-      await openResources(ipadPage);
-      await expectResourceTitle(ipadPage, ORIGINAL_TITLE);
+      await openProjects(macPage);
+      await openProjects(ipadPage);
+      await expectProjectName(ipadPage, ORIGINAL_NAME);
       await expect.poll(() => localSnapshotRevision(macPage)).toBe(1);
       await expect.poll(() => localSnapshotRevision(ipadPage)).toBe(1);
 
@@ -72,20 +73,23 @@ for (const wakeEvent of ["focus", "pageshow"]) {
         return window.__e2eDocumentIdentity;
       });
 
-      await macPage.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).first().click();
-      const macTitle = macPage.locator(`[data-resource-title="${FIXTURE_IDS.resource}"]`);
-      await expect(macTitle).toBeVisible();
-      await macTitle.fill(changedTitle);
+      await macPage.locator(`[data-project-edit="${FIXTURE_IDS.project}"]`).click();
+      const macName = macPage.locator(
+        `[data-inline-owner-type="projects"][data-inline-owner-id="${FIXTURE_IDS.project}"] [data-field="name"]`,
+      );
+      await expect(macName).toBeVisible();
+      await macName.fill(changedName);
+      await macName.press("Tab");
       await expect.poll(async () => {
         const snapshot = await fixtureSnapshot(request);
         return {
           revision: snapshot.serverRevision,
-          title: resourceTitle(snapshot.state),
+          name: projectName(snapshot.state),
         };
-      }).toEqual({ revision: 2, title: changedTitle });
+      }).toEqual({ revision: 2, name: changedName });
 
       await dispatchWakeEvent(ipadPage, wakeEvent);
-      await expectResourceTitle(ipadPage, changedTitle);
+      await expectProjectName(ipadPage, changedName);
       await expect.poll(() => localSnapshotRevision(ipadPage)).toBe(2);
       expect(await ipadPage.evaluate(() => window.__e2eDocumentIdentity)).toBe(ipadDocumentIdentity);
 
@@ -93,7 +97,6 @@ for (const wakeEvent of ["focus", "pageshow"]) {
       expect(remote.serverRevision).toBe(2);
       expect(remote.writeAttempts).toEqual([
         expect.objectContaining({
-          resourceId: FIXTURE_IDS.resource,
           baseRevision: 1,
           serverRevision: 1,
           outcome: "saved",
@@ -108,26 +111,26 @@ for (const wakeEvent of ["focus", "pageshow"]) {
 test("a future-dated stale IndexedDB snapshot cannot overwrite the remote workspace", async ({ browser, request }, testInfo) => {
   const context = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
   const page = await context.newPage();
-  const staleTitle = "Future-dated stale local title";
+  const staleName = "Future-dated stale local name";
 
   try {
     await page.goto("/");
-    await openResources(page);
-    await expectResourceTitle(page, ORIGINAL_TITLE);
+    await openProjects(page);
+    await expectProjectName(page, ORIGINAL_NAME);
     await expect.poll(() => localSnapshotRevision(page)).toBe(1);
 
-    await overwriteLocalSnapshot(page, staleTitle);
-    expect(await localSnapshotTitle(page)).toBe(staleTitle);
+    await overwriteLocalSnapshot(page, staleName);
+    expect(await localSnapshotName(page)).toBe(staleName);
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect.poll(() => localSnapshotTitle(page)).toBe(ORIGINAL_TITLE);
+    await expect.poll(() => localSnapshotName(page)).toBe(ORIGINAL_NAME);
     await expect.poll(() => localSnapshotRevision(page)).toBe(1);
-    await openResources(page);
-    await expectResourceTitle(page, ORIGINAL_TITLE);
+    await openProjects(page);
+    await expectProjectName(page, ORIGINAL_NAME);
 
     const remote = await fixtureSnapshot(request);
     expect(remote.serverRevision).toBe(1);
-    expect(resourceTitle(remote.state)).toBe(ORIGINAL_TITLE);
+    expect(projectName(remote.state)).toBe(ORIGINAL_NAME);
     expect(remote.writes).toEqual([]);
     expect(remote.writeAttempts).toEqual([]);
   } finally {
@@ -138,27 +141,27 @@ test("a future-dated stale IndexedDB snapshot cannot overwrite the remote worksp
 test("an online restart discards even a same-revision pending workspace operation and shows the remote workspace", async ({ browser, request }, testInfo) => {
   const context = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
   const setupPage = await context.newPage();
-  const staleTitle = "Stale pending workspace title";
+  const staleName = "Stale pending workspace name";
 
   try {
     await setupPage.goto("/");
     await expect.poll(() => localSnapshotRevision(setupPage)).toBe(1);
-    await installStaleWorkspaceDraft(setupPage, staleTitle);
-    expect(await localSnapshotTitle(setupPage)).toBe(staleTitle);
+    await installStaleWorkspaceDraft(setupPage, staleName);
+    expect(await localSnapshotName(setupPage)).toBe(staleName);
     expect(await localWorkspaceOperationCount(setupPage)).toBe(1);
     await setupPage.close();
 
     const restartPage = await context.newPage();
     await restartPage.goto("/");
-    await openResources(restartPage);
-    await expectResourceTitle(restartPage, ORIGINAL_TITLE);
-    await expect.poll(() => localSnapshotTitle(restartPage)).toBe(ORIGINAL_TITLE);
+    await openProjects(restartPage);
+    await expectProjectName(restartPage, ORIGINAL_NAME);
+    await expect.poll(() => localSnapshotName(restartPage)).toBe(ORIGINAL_NAME);
     await expect.poll(() => localSnapshotRevision(restartPage)).toBe(1);
     await expect.poll(() => localWorkspaceOperationCount(restartPage)).toBe(0);
 
     const remote = await fixtureSnapshot(request);
     expect(remote.serverRevision).toBe(1);
-    expect(resourceTitle(remote.state)).toBe(ORIGINAL_TITLE);
+    expect(projectName(remote.state)).toBe(ORIGINAL_NAME);
     expect(remote.writes).toEqual([]);
     expect(remote.writeAttempts).toEqual([]);
   } finally {
@@ -226,8 +229,22 @@ async function newAppContext(browser, testInfo, viewport) {
   });
 }
 
-async function expectResourceTitle(page, title) {
-  await expect(page.locator(`[data-resource-title-display="${FIXTURE_IDS.resource}"]`).first()).toHaveText(title);
+async function openProjects(page) {
+  const navToggle = page.locator('[data-action="toggle-nav"]');
+  if (await navToggle.isVisible()) {
+    await navToggle.click();
+    await expect(page.locator("[data-sidebar]")).toHaveClass(/is-open/);
+  }
+  await page.locator('[data-nav-key="projects"]').click();
+  await expect(projectCard(page)).toBeVisible();
+}
+
+function projectCard(page) {
+  return page.locator(`[data-project-item="${FIXTURE_IDS.project}"]`);
+}
+
+async function expectProjectName(page, name, options = {}) {
+  await expect(projectCard(page).locator(`[data-project-toggle="${FIXTURE_IDS.project}"] h3`)).toHaveText(name, options);
 }
 
 function waitForStateEventStream(page) {
@@ -244,19 +261,18 @@ async function dispatchWakeEvent(page, eventName) {
   }, eventName);
 }
 
-async function overwriteLocalSnapshot(page, staleTitle) {
-  await page.evaluate(async ({ databaseName, snapshotStore, workspaceId, title }) => {
+async function overwriteLocalSnapshot(page, staleName) {
+  await page.evaluate(async ({ databaseName, snapshotStore, workspaceId, name }) => {
     const database = await openDatabase(databaseName);
     const transaction = database.transaction(snapshotStore, "readwrite");
     const store = transaction.objectStore(snapshotStore);
     const snapshot = await requestResult(store.get(workspaceId));
     if (!snapshot) throw new Error(`Missing local snapshot for ${workspaceId}.`);
 
-    const resource = snapshot.state.resources.find((entry) => entry.id === "fixture-resource-main");
-    if (!resource) throw new Error("Missing fixture Resource in local snapshot.");
+    const project = snapshot.state.projects.find((entry) => entry.id === "fixture-project");
+    if (!project) throw new Error("Missing fixture Project in local snapshot.");
     const futureTimestamp = "2099-12-31T23:59:59.999Z";
-    resource.title = title;
-    resource.updatedAt = futureTimestamp;
+    project.name = name;
     snapshot.state.updatedAt = futureTimestamp;
     snapshot.savedAt = futureTimestamp;
     store.put(snapshot);
@@ -290,12 +306,12 @@ async function overwriteLocalSnapshot(page, staleTitle) {
     databaseName: LOCAL_DATABASE_NAME,
     snapshotStore: SNAPSHOT_STORE,
     workspaceId: FIXTURE_IDS.appState,
-    title: staleTitle,
+    name: staleName,
   });
 }
 
-async function installStaleWorkspaceDraft(page, staleTitle) {
-  await page.evaluate(async ({ databaseName, snapshotStore, operationStore, workspaceId, title }) => {
+async function installStaleWorkspaceDraft(page, staleName) {
+  await page.evaluate(async ({ databaseName, snapshotStore, operationStore, workspaceId, name }) => {
     const database = await openDatabase(databaseName);
     const transaction = database.transaction([snapshotStore, operationStore], "readwrite");
     const snapshots = transaction.objectStore(snapshotStore);
@@ -304,11 +320,10 @@ async function installStaleWorkspaceDraft(page, staleTitle) {
     if (!snapshot) throw new Error(`Missing local snapshot for ${workspaceId}.`);
 
     const staleState = structuredClone(snapshot.state);
-    const resource = staleState.resources.find((entry) => entry.id === "fixture-resource-main");
-    if (!resource) throw new Error("Missing fixture Resource in local snapshot.");
+    const project = staleState.projects.find((entry) => entry.id === "fixture-project");
+    if (!project) throw new Error("Missing fixture Project in local snapshot.");
     const staleTimestamp = "2020-01-01T00:00:00.000Z";
-    resource.title = title;
-    resource.updatedAt = staleTimestamp;
+    project.name = name;
     staleState.updatedAt = staleTimestamp;
     staleState.revision = snapshot.baseRevision;
 
@@ -363,7 +378,7 @@ async function installStaleWorkspaceDraft(page, staleTitle) {
     snapshotStore: SNAPSHOT_STORE,
     operationStore: OPERATION_STORE,
     workspaceId: FIXTURE_IDS.appState,
-    title: staleTitle,
+    name: staleName,
   });
 }
 
@@ -371,8 +386,8 @@ async function localSnapshotRevision(page) {
   return readLocalSnapshot(page).then((snapshot) => snapshot?.baseRevision ?? null);
 }
 
-async function localSnapshotTitle(page) {
-  return readLocalSnapshot(page).then((snapshot) => resourceTitle(snapshot?.state));
+async function localSnapshotName(page) {
+  return readLocalSnapshot(page).then((snapshot) => projectName(snapshot?.state));
 }
 
 async function localWorkspaceOperationCount(page) {
@@ -419,6 +434,6 @@ async function readLocalSnapshot(page) {
   });
 }
 
-function resourceTitle(state) {
-  return state?.resources?.find((resource) => resource.id === FIXTURE_IDS.resource)?.title || "";
+function projectName(state) {
+  return state?.projects?.find((project) => project.id === FIXTURE_IDS.project)?.name || "";
 }

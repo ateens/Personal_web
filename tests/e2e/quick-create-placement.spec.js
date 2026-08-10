@@ -3,7 +3,7 @@ import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
 
 const TOPBAR = "[data-capture-zone]";
 const QUICK_PLACEMENT = "[data-quick-placement]";
-const PLACEMENT_PHASES = ["boxId", "projectId", "resourceId"];
+const PLACEMENT_PHASES = ["boxId", "projectId"];
 const IPAD_VIEWPORT = { width: 1024, height: 1366 };
 
 test.beforeEach(async ({ request }) => {
@@ -30,7 +30,6 @@ test("topbar Task uses the entered title, keeps the current view, and completes 
   await expectCurrentView(page, startingUrl, startingHeading);
   await selectPlacementChoice(page, "boxId", FIXTURE_IDS.box);
   await selectPlacementChoice(page, "projectId", FIXTURE_IDS.project);
-  await selectPlacementChoice(page, "resourceId", FIXTURE_IDS.resource);
 
   await expect(page.locator(QUICK_PLACEMENT)).toBeHidden();
   await expectCurrentView(page, startingUrl, startingHeading);
@@ -40,7 +39,7 @@ test("topbar Task uses the entered title, keeps the current view, and completes 
     dueDate: today,
     boxId: FIXTURE_IDS.box,
     projectId: FIXTURE_IDS.project,
-    resourceId: FIXTURE_IDS.resource,
+    resourceId: "",
   });
 });
 
@@ -222,7 +221,7 @@ test("first phase matches the six-lane calendar and two-action reference composi
 
   const scheduler = page.getByRole("dialog", { name: "Task 날짜 배치" });
   await expect(scheduler).toBeVisible();
-  await expect(scheduler.locator(".quick-placement-progress-step small")).toHaveText(["날짜", "Box", "Project", "Resource"]);
+  await expect(scheduler.locator(".quick-placement-progress-step small")).toHaveText(["날짜", "Box", "Project"]);
   await expect(scheduler.locator(".quick-placement-progress-step").first()).toHaveClass(/is-active/);
   const lanes = scheduler.locator("[data-scheduler-lane]");
   await expect(lanes).toHaveCount(6);
@@ -270,7 +269,6 @@ test("done lane advances through Box and preserves completion after every relati
   await expectOnlyPlacementPhase(page, "boxId");
   await selectPlacementChoice(page, "boxId", "");
   await selectPlacementChoice(page, "projectId", "");
-  await selectPlacementChoice(page, "resourceId", "");
 
   await expect(page.locator(QUICK_PLACEMENT)).toBeHidden();
   await expectPlacementScrollUnlocked(page);
@@ -305,7 +303,6 @@ test("choice hover lifts and large phase surfaces fade, slide, and settle withou
   const choices = [
     ["boxId", FIXTURE_IDS.box],
     ["projectId", FIXTURE_IDS.project],
-    ["resourceId", FIXTURE_IDS.resource],
   ];
   for (let index = 0; index < choices.length; index += 1) {
     const [phase, value] = choices[index];
@@ -367,6 +364,10 @@ test("date placement survives an in-flight create save response", async ({ page,
   let heldInitialSave = false;
   let releaseInitialSave = null;
 
+  await page.goto("/");
+  await waitForFixtureWorkspace(page);
+  const today = await localDateKey(page);
+
   await page.route("**/api/state", async (route) => {
     if (!heldInitialSave && route.request().method() === "PUT") {
       const response = await route.fetch();
@@ -381,9 +382,6 @@ test("date placement survives an in-flight create save response", async ({ page,
   });
 
   try {
-    await page.goto("/");
-    await waitForFixtureWorkspace(page);
-    const today = await localDateKey(page);
     await startTopbarCreate(page, "new-task", title);
     const scheduler = page.getByRole("dialog", { name: "Task 날짜 배치" });
     await expect(scheduler).toBeVisible();
@@ -395,7 +393,6 @@ test("date placement survives an in-flight create save response", async ({ page,
 
     await selectPlacementChoice(page, "boxId", "");
     await selectPlacementChoice(page, "projectId", "");
-    await selectPlacementChoice(page, "resourceId", "");
 
     await expect.poll(async () => taskByTitle(await fixtureSnapshot(request), title)).toMatchObject({
       title,
@@ -406,45 +403,6 @@ test("date placement survives an in-flight create save response", async ({ page,
     releaseInitialSave?.();
     await page.unroute("**/api/state");
   }
-});
-
-test("topbar Resource uses the entered title without changing view, URL, or opening a page", async ({ page, request }) => {
-  const title = "현재 화면에 남는 새 자료";
-  await page.goto("/");
-  await waitForFixtureWorkspace(page);
-  const startingUrl = page.url();
-  const startingHeading = await currentViewHeading(page);
-  const before = await fixtureSnapshot(request);
-
-  await startTopbarCreate(page, "new-resource", title);
-
-  await expectCurrentView(page, startingUrl, startingHeading);
-  await expect(topbarTitle(page)).toHaveValue("");
-  await expect(page.locator("[data-resource-note]")).toHaveCount(0);
-  await expect(page.locator(QUICK_PLACEMENT)).toBeHidden();
-  await expect(page.getByRole("dialog", { name: "Task 날짜 배치" })).toBeHidden();
-  await expect.poll(async () => {
-    const snapshot = await fixtureSnapshot(request);
-    return {
-      count: snapshot.state.resources.length,
-      resource: snapshot.state.resources.find((resource) => resource.title === title) || null,
-    };
-  }).toMatchObject({
-    count: before.state.resources.length + 1,
-    resource: { title },
-  });
-});
-
-test("the Resources view create button keeps its existing editor-opening behavior", async ({ page }) => {
-  await page.goto("/");
-  await waitForFixtureWorkspace(page);
-  const navToggle = page.locator('[data-action="toggle-nav"]');
-  if (await navToggle.isVisible()) await navToggle.click();
-  await page.locator('[data-nav-key="resources"]').click();
-  await page.locator('#viewRoot [data-action="new-resource"]').click();
-
-  await expect(page.locator("[data-resource-note]")).toBeVisible();
-  await expect(page).toHaveURL(/\/resources\//);
 });
 
 test("iPad touch completes every placement phase inside a bounded floating overlay", async ({ browser, request }, testInfo) => {
@@ -473,7 +431,6 @@ test("iPad touch completes every placement phase inside a bounded floating overl
     const choices = [
       ["boxId", FIXTURE_IDS.box],
       ["projectId", FIXTURE_IDS.project],
-      ["resourceId", FIXTURE_IDS.resource],
     ];
     for (const [phase, value] of choices) {
       const activePhase = await expectOnlyPlacementPhase(page, phase);
@@ -491,7 +448,7 @@ test("iPad touch completes every placement phase inside a bounded floating overl
       dueDate: today,
       boxId: FIXTURE_IDS.box,
       projectId: FIXTURE_IDS.project,
-      resourceId: FIXTURE_IDS.resource,
+      resourceId: "",
     });
   } finally {
     await context.close();
@@ -531,7 +488,7 @@ function topbarTitle(page) {
 }
 
 async function waitForFixtureWorkspace(page) {
-  await expect(page.locator(`[data-select-id="${FIXTURE_IDS.resource}"]`).first()).toBeVisible();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
 }
 
 function topbarAction(page, action) {

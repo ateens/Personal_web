@@ -16,33 +16,3 @@ export async function fixtureSnapshot(request) {
   expect(response.ok()).toBeTruthy();
   return response.json();
 }
-
-export async function openResources(page) {
-  const navToggle = page.locator('[data-action="toggle-nav"]');
-  if (await navToggle.isVisible()) {
-    await navToggle.click();
-    await expect(page.locator("[data-sidebar]")).toHaveClass(/is-open/);
-  }
-  await page.locator('[data-nav-key="resources"]').click();
-  await expect(page.locator('[data-resource-view="library"]')).toBeVisible();
-  await expect(page.locator(`[data-select-id="${FIXTURE_IDS.resource}"]`).first()).toBeVisible();
-  const controls = page.locator('[data-view-controls="resources"]');
-  if (!(await controls.isVisible())) {
-    await page.locator("details.view-controls-shell > summary").click();
-    await expect(controls).toBeVisible();
-  }
-}
-
-export async function selectResourceMode(page, mode) {
-  await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).click();
-  await expect(page.locator(`[data-resource-view="${mode}"]`)).toBeVisible();
-}
-
-export async function openMainResourceFromList(page) {
-  await openResources(page);
-  await selectResourceMode(page, "list");
-  await page.locator(`[data-open-resource="${FIXTURE_IDS.resource}"]`).click();
-  const note = page.locator(`[data-resource-note="${FIXTURE_IDS.resource}"]`);
-  await expect(note).toBeVisible();
-  return note;
-}
