@@ -1,0 +1,90 @@
+#!/bin/sh
+
+set -u
+
+[ "${SKIP_RAILWAY_DEPLOY:-0}" = "1" ] && exit 0
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 1
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || exit 0
+[ "$branch" = "main" ] || exit 0
+
+fail() {
+  printf '%s\n' "[deploy] $1" >&2
+  printf '%s\n' "[deploy] commit은 남아 있습니다. 문제 해결 후 .githooks/post-commit 을 다시 실행하세요." >&2
+  exit 1
+}
+
+command -v railway >/dev/null 2>&1 || fail "Railway CLI를 찾을 수 없습니다."
+command -v jq >/dev/null 2>&1 || fail "jq를 찾을 수 없습니다."
+command -v curl >/dev/null 2>&1 || fail "curl을 찾을 수 없습니다."
+
+git fetch --quiet origin main || fail "origin/main을 확인하지 못했습니다."
+git merge-base --is-ancestor refs/remotes/origin/main HEAD \
+  || fail "origin/main과 현재 main이 갈라져 있어 자동 push를 중단했습니다."
+
+if git diff --quiet refs/remotes/origin/main HEAD -- \
+  app.js finance-model.js styles.css index.html manifest.json assets icons \
+  server.js server package.json package-lock.json railway.json scripts
+then
+  exit 0
+fi
+
+railway status --json >/dev/null 2>&1 \
+  || fail "Railway 프로젝트 연결 또는 로그인을 확인하지 못했습니다."
+
+expected=$(git rev-parse HEAD) || fail "현재 commit을 확인하지 못했습니다."
+origin_url=$(git remote get-url origin) || fail "origin URL을 확인하지 못했습니다."
+
+case "$origin_url" in
+  https://github.com/*)
+    repository_path=${origin_url#https://github.com/}
+    repository_path=${repository_path%.git}
+    push_url="git@github.com:${repository_path}.git"
+    GIT_TERMINAL_PROMPT=0 git -c "remote.origin.pushurl=$push_url" \
+      push --porcelain origin HEAD:refs/heads/main \
+      || fail "GitHub main push에 실패했습니다."
+    ;;
+  *)
+    GIT_TERMINAL_PROMPT=0 git push --porcelain origin HEAD:refs/heads/main \
+      || fail "GitHub main push에 실패했습니다."
+    ;;
+esac
+
+attempt=0
+deployment_id=""
+while [ "$attempt" -lt 120 ]; do
+  deployment=$(railway deployment list \
+    --service Personal_web \
+    --environment production \
+    --limit 1 \
+    --json 2>/dev/null) || deployment=""
+
+  deployed_sha=$(printf '%s' "$deployment" | jq -r '.[0].meta.commitHash // empty' 2>/dev/null) || deployed_sha=""
+  status=$(printf '%s' "$deployment" | jq -r '.[0].status // empty' 2>/dev/null) || status=""
+  deployment_id=$(printf '%s' "$deployment" | jq -r '.[0].id // empty' 2>/dev/null) || deployment_id=""
+
+  if [ "$deployed_sha" = "$expected" ]; then
+    [ "$status" = "SUCCESS" ] && break
+    case "$status" in
+      FAILED|CRASHED|REMOVED|CANCELED|CANCELLED)
+        fail "Railway deployment $deployment_id 상태가 $status 입니다."
+        ;;
+    esac
+  fi
+
+  attempt=$((attempt + 1))
+  sleep 5
+done
+
+[ "$deployed_sha" = "$expected" ] && [ "$status" = "SUCCESS" ] \
+  || fail "10분 안에 현재 commit의 Railway 배포 성공을 확인하지 못했습니다."
+
+health=$(curl -fsS --retry 8 --max-time 20 \
+  "https://personalweb-production-81a6.up.railway.app/health") \
+  || fail "운영 /health 확인에 실패했습니다."
+printf '%s' "$health" | jq -e '.ok == true and .database == "postgresql"' >/dev/null \
+  || fail "운영 /health 응답이 올바르지 않습니다."
+
+printf '[deploy] Railway SUCCESS · %.7s · %s\n' "$expected" "$deployment_id"

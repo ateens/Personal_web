@@ -47,6 +47,18 @@ After `main` is pushed and Railway reports the new deployment healthy:
 9. Sign in with the finance password, confirm `/api/finance/session` reports authenticated, then lock it and confirm the session cookie is cleared.
 10. Confirm an authenticated conditional finance write advances `X-Finance-State-Revision` without adding a `finance` key to `/api/state`.
 
+## Automatic web deployment hook
+
+This checkout uses the tracked `.githooks/post-commit` hook. Enable it once with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+On `main`, a commit that changes production web paths pushes the unpushed commits to `origin/main`, waits for Railway to report `SUCCESS` for the exact commit, and checks the production `/health` response. Commits limited to docs, tests, iOS, or macOS skip deployment. Railway continues to run `npm run check && npm run check:build` against the exact pushed commit.
+
+Run `.githooks/post-commit` to retry a failed deployment. Use `SKIP_RAILWAY_DEPLOY=1 git commit ...` only when a web commit must deliberately remain local.
+
 ## Rollback
 
 Roll back to the previous Railway-only commit through the Railway or GitHub deployment history. If the finance gate is rolled back, do not enter real finance data until the authenticated finance boundary is restored and verified.
