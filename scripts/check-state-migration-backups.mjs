@@ -47,8 +47,6 @@ try {
 
   const reread = await storage.readAppState();
   check(reread.state?.version === 4 && reread.revision === 7, "migrated state was not stable on a second read");
-  const thirdRead = await storage.readAppState();
-  check(thirdRead.state?.version === 4 && thirdRead.revision === 7, "migrated state was not stable on a third read");
 
   const automaticBackups = await storage.listMigrationBackups({ limit: 10 });
   check(

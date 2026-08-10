@@ -990,12 +990,6 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       : null;
   }
 
-  async function deleteOAuthTransactions() {
-    await ensureOAuthTransactionsTable();
-    const result = await dbPool.query("DELETE FROM app_oauth_transactions WHERE app_state_id = $1", [appStateId]);
-    return result.rowCount;
-  }
-
   async function readTokenFile() {
     if (!googleTokenFile) return null;
     try {
@@ -1044,14 +1038,11 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     claimOAuthTransaction,
     consumeOAuthTransaction,
     createMigrationBackup,
-    deletePrivateData,
-    deleteOAuthTransactions,
     deleteToken,
     end,
     listMigrationBackups,
     readAppState,
     readFinanceState,
-    readPrivateData,
     readToken,
     ready,
     restoreMigrationBackup,
@@ -1059,7 +1050,6 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     writeAppState,
     writeFinanceState,
     writeResource,
-    writePrivateData,
     writeToken,
   };
 
@@ -1106,7 +1096,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     return normalize ? normalizeAppStateForStorage(relationalState).state : relationalState;
   }
 
-  async function readRows(client, table, columns = "*") {
+  async function readRows(client, table, columns) {
     const result = await client.query(`SELECT ${columns} FROM ${table} WHERE app_state_id = $1 ORDER BY position ASC, id ASC`, [appStateId]);
     return result.rows;
   }

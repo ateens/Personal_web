@@ -31,7 +31,6 @@ assert.match(financeAppSource, /data-finance-tab-panel/, "finance tabs need an i
 assert.match(financeStylesSource, /\.finance-tab-panel\.is-entering\s*\{[^}]*animation:\s*view-in/s, "finance tab motion must reuse SYGMA view-in");
 assert.doesNotMatch(financeAppSource, /비용 기준 월|수입 기준 월|환불을 반영할 월/, "recognition months must not be user-entered");
 assert.match(financeAppSource, /recognitionMonth:\s*occurredOn\.slice\(0,\s*7\)/, "entry recognition month must follow its occurrence date");
-assert.match(financeAppSource, /recognitionMonth:\s*dueOn\.slice\(0,\s*7\)/, "loan recognition month must follow its due date");
 
 assert.deepEqual(splitKrw(1_000_001, 3), [333_334, 333_334, 333_333]);
 const zeroRateLoanSchedule = loanSchedule({

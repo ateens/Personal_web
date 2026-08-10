@@ -8,9 +8,9 @@ const client = resolve(root, "dist/client");
 const index = await readFile(resolve(client, "index.html"), "utf8");
 const serviceWorker = await readFile(resolve(client, "service-worker.js"), "utf8");
 assert.doesNotThrow(() => new Function(serviceWorker), "built service worker is not valid JavaScript");
-const appPath = index.match(/src="(\/_sygma\/assets\/app\.[a-f0-9]{12}\.js)"/)?.[1];
-const financeModelPath = index.match(/src="(\/_sygma\/assets\/finance-model\.[a-f0-9]{12}\.js)"/)?.[1];
-const stylesPath = index.match(/href="(\/_sygma\/assets\/styles\.[a-f0-9]{12}\.css)"/)?.[1];
+const appPath = index.match(/src="(\/assets\/app\.[a-f0-9]{12}\.js)"/)?.[1];
+const financeModelPath = index.match(/src="(\/assets\/finance-model\.[a-f0-9]{12}\.js)"/)?.[1];
+const stylesPath = index.match(/href="(\/assets\/styles\.[a-f0-9]{12}\.css)"/)?.[1];
 assert(appPath, "built index is missing a content-hashed app asset");
 assert(financeModelPath, "built index is missing a content-hashed finance calculation asset");
 assert(stylesPath, "built index is missing a content-hashed stylesheet");
@@ -35,7 +35,10 @@ assert(
   serviceWorker.includes(appPath) && serviceWorker.includes(financeModelPath) && serviceWorker.includes(stylesPath),
   "service worker does not precache built assets",
 );
-assert(serviceWorker.includes('url.pathname.startsWith("/_sygma/assets/")'), "service worker is missing hashed-asset cache-first delivery");
+assert(serviceWorker.includes("cache.addAll(ASSETS.slice(0,4))"), "built app assets are not all required during service-worker install");
+assert(serviceWorker.includes('/^\\/assets\\/[^/]+\\.[a-f0-9]{10,}\\./'), "service worker is missing hashed-asset cache-first delivery");
+assert(!serviceWorker.includes("/_sygma/assets/"), "legacy Sites asset proxy remains in the Railway build");
+assert(!serviceWorker.includes('url.pathname.startsWith("/assets/")'), "service worker cache-first must not include unhashed assets");
 assert(!serviceWorker.includes('url.pathname.startsWith("/icons/")'), "service worker cache-first must not include unhashed icons");
 
 const builtBytes = appStat.size + financeModelStat.size + stylesStat.size;

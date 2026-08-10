@@ -61,7 +61,6 @@ codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$SCRIPT_DIR/SYGMAMac
 codesign --verify --deep --strict "$STAGED_APP"
 
 mkdir -p "$REPO_ROOT/.build"
-rm -rf "$REPO_ROOT/.build/SYGMA.app"
 rm -f "$ARCHIVE"
 COPYFILE_DISABLE=1 ditto -c -k --keepParent "$STAGED_APP" "$ARCHIVE"
 

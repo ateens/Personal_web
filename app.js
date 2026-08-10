@@ -1,6 +1,5 @@
 const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
 const APP_STATE_VERSION = 4;
-const BASE_DOCUMENT_TITLE = "SYGMA Personal Web";
 const VIEW_HISTORY_STATE_KEY = "sygmaView";
 const TASK_DONE_REORDER_GRACE_MS = 520;
 const EDITOR_TEXT_HISTORY_IDLE_MS = 720;
@@ -69,11 +68,11 @@ const NAV_ITEMS = [
 ];
 const FINANCE_NAV_ITEM = ["finance", "가계부", "₩"];
 const FINANCE_TABS = [
-  ["overview", "현황"],
-  ["entries", "수입·지출"],
-  ["schedule", "결제 예정"],
+  ["overview", "대시보드"],
+  ["entries", "수입 지출 관리"],
+  ["accounts", "계좌"],
   ["cards", "신용카드"],
-  ["manage", "관리"],
+  ["fixed", "고정비"],
   ["stats", "통계"],
 ];
 const FINANCE_TAB_KEYS = new Set(FINANCE_TABS.map(([key]) => key));
@@ -496,7 +495,6 @@ const CAPTURE_CONVERT_TYPES = [
   ["projects", "Project"],
   ["boxes", "Box"],
 ];
-let localStateHadStoredState = false;
 const LOCAL_RESOURCE_DATABASE_NAME = "sygma-resource-local-v1";
 const LOCAL_RESOURCE_DATABASE_VERSION = 2;
 const LOCAL_RESOURCE_SNAPSHOT_STORE = "snapshots";
@@ -521,8 +519,6 @@ let localResourcePersistence = {
   operations: [],
   pending: false,
   error: "",
-  conflictRemoteState: null,
-  conflictResourceId: "",
 };
 let waitingServiceWorkerRegistration = null;
 let activeServiceWorkerRegistration = null;
@@ -802,7 +798,7 @@ function init() {
   if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
   initializeLocalResourcePersistence({ applySnapshot: false }).then(initializeDatabaseState).finally(() => {
-    finalizeInitialRoute();
+    replaceViewHistoryState(ui.view, { replace: true });
     refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
   });
 }
@@ -983,10 +979,6 @@ function orderedNavItems() {
   return items;
 }
 
-function renderedNavItems() {
-  return [...orderedNavItems(), FINANCE_NAV_ITEM];
-}
-
 function renderTopbar() {
   return `
     <div class="topbar" data-capture-zone>
@@ -1143,7 +1135,7 @@ function closeNav(target = null) {
 }
 
 function updateNav() {
-  const activeIndex = Math.max(0, renderedNavItems().findIndex(([key]) => key === ui.view));
+  const activeIndex = Math.max(0, [...orderedNavItems(), FINANCE_NAV_ITEM].findIndex(([key]) => key === ui.view));
   els.navTrack?.style.setProperty("--active-index", String(activeIndex));
   app.querySelectorAll("[data-nav-key]").forEach((button) => {
     const active = button.dataset.navKey === ui.view;
@@ -1492,7 +1484,7 @@ function renderProjectCalendarPanel() {
         </div>
       </div>
       <div class="project-calendar-scroll">
-        <div class="project-calendar-body" data-project-calendar-body="${mode}">
+        <div class="project-calendar-body">
           ${mode === "month" ? renderProjectCalendarMonth(anchor, events) : renderProjectCalendarWeek(anchor, events)}
         </div>
       </div>
@@ -1692,7 +1684,7 @@ function renderCalendar() {
       ${renderViewControls("calendar", { count: combinedEvents.length, total: taskEvents.length + projectEvents.length + visibleGoogleEvents.length })}
       <div class="calendar-view-switcher">${renderViewModeButtons("calendar", VIEW_MODE_OPTIONS.calendar, control.mode)}</div>
       <div class="calendar-layout">
-        ${googleCalendarSessionConnected() ? "" : renderGoogleConnectPanel()}
+        ${googleBackendStatus.connected ? "" : renderGoogleConnectPanel()}
 
         ${control.mode === "week" || control.mode === "twoWeeks" ? `
           <div class="panel calendar-week-panel">
@@ -1854,7 +1846,7 @@ function renderCalendarLegendItem(label, count, calendar, calendarThemes) {
 }
 
 function renderCalendarMonthPanelHeader(selectedMonth, eventCount) {
-  const label = monthLabelEnglish(selectedMonth);
+  const label = ENGLISH_MONTH_FORMATTER.format(selectedMonth);
   return `
     <div class="calendar-panel-header">
       <div>
@@ -1991,7 +1983,12 @@ function renderFinanceDashboard() {
         <div class="finance-header-actions toolbar">
           <div class="finance-month-control" aria-label="조회 월">
             <button type="button" data-finance-month-shift="-1" aria-label="이전 달">‹</button>
-            <input type="month" data-finance-month value="${esc(financeWorkspace.month)}" aria-label="조회 월 선택">
+            ${financeSelectInput("조회 월", "financeMonth", financeMonthOptions(financeWorkspace.month, 12, 12), {
+              required: true,
+              allowEmpty: false,
+              value: financeWorkspace.month,
+              attributes: "data-finance-month",
+            })}
             <button type="button" data-finance-month-shift="1" aria-label="다음 달">›</button>
           </div>
           <button class="button secondary" type="button" data-action="finance-logout">잠그기</button>
@@ -2036,9 +2033,9 @@ function renderFinanceTab(state) {
     `;
   }
   if (financeWorkspace.tab === "entries") return renderFinanceEntries(state);
-  if (financeWorkspace.tab === "schedule") return renderFinanceSchedule(state);
+  if (financeWorkspace.tab === "accounts") return renderFinanceAccounts(state);
   if (financeWorkspace.tab === "cards") return renderFinanceCards(state);
-  if (financeWorkspace.tab === "manage") return renderFinanceManage(state);
+  if (financeWorkspace.tab === "fixed") return renderFinanceFixedCosts(state);
   if (financeWorkspace.tab === "stats") return renderFinanceStats(state);
   return renderFinanceOverview(state);
 }
@@ -2050,14 +2047,13 @@ function renderFinanceOverview(state) {
   const bankBalanceKrw = balances
     .filter(({ account }) => account.type === "bank")
     .reduce((total, item) => total + item.balanceKrw, 0);
-  const upcoming = financeModel.upcomingSettlements(state, today, dateKey(addDays(new Date(), 30)));
-  const upcomingKrw = Math.max(0, upcoming.reduce((total, item) => total + item.amountKrw, 0));
+  const cards = state.paymentMethods.filter((method) => method.type === "credit_card");
   return `
     <div class="finance-metric-grid metric-grid" aria-label="${esc(financeWorkspace.month)} 가계부 요약">
       ${renderFinanceMetric("은행 잔액", formatFinanceKrw(bankBalanceKrw), "", "balance")}
+      ${renderFinanceMetric("수입", formatFinanceKrw(summary.incomeKrw), "", "balance")}
       ${renderFinanceMetric("지출", formatFinanceKrw(summary.spentKrw), "", "spent")}
       ${renderFinanceMetric("실제 출금", formatFinanceKrw(summary.cashOutKrw), "", "cash")}
-      ${renderFinanceMetric("결제 예정", formatFinanceKrw(upcomingKrw), "", "scheduled")}
     </div>
     <div class="finance-overview-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-account-summary-title">
@@ -2075,25 +2071,28 @@ function renderFinanceOverview(state) {
             `).join("")}
           </div>
         ` : `
-          <p>관리 탭에서 시작 잔액과 기준일을 입력하면 이후 실제 입출금만 더하고 빼서 보여 줍니다.</p>
-          <button class="button" type="button" data-finance-tab="manage">계좌 등록하기</button>
+          <p>계좌를 등록하면 실제 입출금을 반영한 잔액을 보여 줍니다.</p>
+          <button class="button" type="button" data-finance-tab="accounts">계좌 등록</button>
         `}
       </section>
-      <section class="finance-stage-panel panel" aria-labelledby="finance-upcoming-title">
-        <h2 id="finance-upcoming-title">결제 예정</h2>
-        ${upcoming.length ? `
+      <section class="finance-stage-panel panel" aria-labelledby="finance-card-summary-title">
+        <h2 id="finance-card-summary-title">신용카드</h2>
+        ${cards.length ? `
           <div class="finance-record-list">
-            ${upcoming.slice(0, 5).map(({ settlement, amountKrw }) => `
+            ${cards.map((card) => `
               <article class="finance-record">
                 <div>
-                  <strong>${esc(financeSettlementTitle(state, settlement))}</strong>
-                  <small>${esc(settlement.scheduledOn)} · ${esc(financeSettlementStatusLabel(settlement.status))}</small>
+                  <strong>${esc(card.name)}</strong>
+                  <small>이번 달 사용액</small>
                 </div>
-                <span class="finance-record-amount">${amountKrw < 0 ? "−" : ""}${esc(formatFinanceKrw(Math.abs(amountKrw)))}</span>
+                <span class="finance-record-amount">${esc(formatFinanceKrw(financeCardUsageKrw(state, card.id, financeWorkspace.month)))}</span>
               </article>
             `).join("")}
           </div>
-        ` : '<p class="finance-empty-copy">항목이 없습니다.</p>'}
+        ` : `
+          <p class="finance-empty-copy">등록된 신용카드가 없습니다.</p>
+          <button class="button" type="button" data-finance-tab="cards">신용카드 등록</button>
+        `}
       </section>
     </div>
   `;
@@ -2107,7 +2106,7 @@ function renderFinanceMetric(label, value, meta, tone) {
     scheduled: "finance-metric-scheduled",
   }[tone] || "";
   return `
-    <article class="finance-metric metric ${toneClass}" data-finance-metric="${esc(tone)}">
+    <article class="finance-metric metric ${toneClass}">
       <span class="metric-label">${esc(label)}</span>
       <strong class="metric-value">${esc(value)}</strong>
       ${meta ? `<small class="metric-sub">${esc(meta)}</small>` : ""}
@@ -2132,12 +2131,12 @@ function renderFinanceEntries(state) {
   ));
   return `
     <section class="finance-section-heading">
-      <h2>수입·지출</h2>
+      <h2>수입 지출 관리</h2>
     </section>
     ${!accounts.length || !paymentMethods.length ? `
       <section class="finance-inline-notice">
         <strong>기록 전에 계좌와 결제수단이 필요합니다.</strong>
-        <button class="button secondary" type="button" data-finance-tab="manage">관리에서 등록</button>
+        <button class="button secondary" type="button" data-finance-tab="accounts">계좌에서 등록</button>
       </section>
     ` : ""}
     <div class="finance-form-grid">
@@ -2217,90 +2216,6 @@ function renderFinanceEntries(state) {
   `;
 }
 
-function renderFinanceSchedule(state) {
-  const settlements = [...state.settlements]
-    .filter((settlement) => (
-      settlement.scheduledOn.slice(0, 7) === financeWorkspace.month
-      && settlement.status !== "canceled"
-    ))
-    .sort((left, right) => left.scheduledOn.localeCompare(right.scheduledOn) || left.id.localeCompare(right.id));
-  const summary = financeModel.financeMonthSummary(state, financeWorkspace.month);
-  const unpaidFixedCosts = financePendingFixedCosts(state, financeWorkspace.month);
-  return `
-    <section class="finance-section-heading">
-      <h2>결제 예정</h2>
-    </section>
-    <div class="finance-metric-grid metric-grid finance-metric-grid-compact">
-      ${renderFinanceMetric("미납", formatFinanceKrw(summary.pendingKrw), "", "scheduled")}
-      ${renderFinanceMetric("출금", formatFinanceKrw(summary.cashOutKrw), "", "cash")}
-    </div>
-    <section class="finance-stage-panel panel finance-schedule-panel">
-      ${renderFinanceSettlementCalendar(state, settlements, financeWorkspace.month)}
-      ${settlements.length ? `
-        <div class="finance-schedule-list">
-          ${settlements.map((settlement) => {
-            const direction = financeSettlementDirection(state, settlement);
-            return `
-              <article class="finance-schedule-row">
-                <time datetime="${esc(settlement.scheduledOn)}">${esc(settlement.scheduledOn.slice(8, 10))}일</time>
-                <div>
-                  <strong>${esc(financeSettlementTitle(state, settlement))}</strong>
-                  <small>${esc(financeSettlementStatusLabel(settlement.status))}${direction < 0 ? " · 청구액 차감" : ""}</small>
-                </div>
-                <span>${direction < 0 ? "−" : ""}${esc(formatFinanceKrw(settlement.expectedAmountKrw))}</span>
-              </article>
-            `;
-          }).join("")}
-        </div>
-      ` : '<p class="finance-empty-copy">이 달의 출금 예정이 없습니다.</p>'}
-    </section>
-    <section class="finance-section-heading finance-schedule-actions-heading">
-      <h2>고정비</h2>
-    </section>
-    <div class="finance-form-grid finance-schedule-form-grid">
-      ${unpaidFixedCosts.map(({ entry, settlement, rule }) => renderFinanceFixedCostPaymentForm(state, entry, settlement, rule)).join("")}
-      ${!unpaidFixedCosts.length ? `
-        <section class="finance-inline-notice">
-          <strong>이 달에 납부할 고정비가 없습니다.</strong>
-          <button class="button secondary" type="button" data-finance-tab="manage">관리로 이동</button>
-        </section>
-      ` : ""}
-    </div>
-  `;
-}
-
-function renderFinanceSettlementCalendar(state, settlements, month) {
-  const byDay = new Map();
-  for (const settlement of settlements) {
-    const day = Number(settlement.scheduledOn.slice(8, 10));
-    const items = byDay.get(day) || [];
-    items.push(settlement);
-    byDay.set(day, items);
-  }
-  return `
-    <div class="finance-calendar" aria-label="${esc(month)} 결제 일정 달력">
-      ${FINANCE_WEEKDAY_LABELS.map((label) => `<span class="finance-calendar-weekday">${label}</span>`).join("")}
-      ${financeCalendarDays(month).map((day) => {
-        if (!day) return '<span class="finance-calendar-day finance-calendar-day-empty" aria-hidden="true"></span>';
-        const items = byDay.get(day) || [];
-        const amountKrw = items.reduce((total, settlement) => (
-          total + settlement.expectedAmountKrw * financeSettlementDirection(state, settlement)
-        ), 0);
-        const paid = items.length && items.every((settlement) => settlement.status === "paid");
-        const label = items.length
-          ? `${month}-${String(day).padStart(2, "0")}, ${items.length}건, ${formatFinanceKrw(Math.abs(amountKrw))}${paid ? ", 출금 확인" : ", 출금 예정"}`
-          : `${month}-${String(day).padStart(2, "0")}, 일정 없음`;
-        return `
-          <span class="finance-calendar-day ${items.length ? "has-settlement" : ""} ${paid ? "is-paid" : ""}" aria-label="${esc(label)}">
-            <time datetime="${esc(`${month}-${String(day).padStart(2, "0")}`)}">${day}</time>
-            ${items.length ? `<strong>${amountKrw < 0 ? "−" : ""}${esc(formatFinanceKrw(Math.abs(amountKrw)))}</strong><small>${paid ? "출금 확인" : `${items.length}건 예정`}</small>` : ""}
-          </span>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
 function renderFinanceSpendingCalendar(state, month) {
   const entryById = new Map(state.entries.map((entry) => [entry.id, entry]));
   const ruleById = new Map(state.recurringRules.map((rule) => [rule.id, rule]));
@@ -2333,7 +2248,7 @@ function renderFinanceSpendingCalendar(state, month) {
   }
   const today = dateKey(new Date());
   return `
-    <section class="finance-stage-panel panel finance-spending-calendar-panel" data-finance-consumption-calendar aria-labelledby="finance-spending-calendar-title">
+    <section class="finance-spending-calendar-panel" data-finance-consumption-calendar aria-labelledby="finance-spending-calendar-title">
       <header class="finance-spending-calendar-header">
         <h2 id="finance-spending-calendar-title">지출 캘린더</h2>
         <div class="finance-calendar-month-control" aria-label="지출 캘린더 월">
@@ -2471,52 +2386,6 @@ function renderFinanceCardPaymentForm(state, statement) {
   `;
 }
 
-function renderFinanceLoanPlanForm(state, loan) {
-  const account = state.accounts.find((item) => item.id === loan.paymentAccountId);
-  const scheduled = state.loanPayments.some((payment) => (
-    payment.loanId === loan.id
-    && payment.dueOn.slice(0, 7) === financeWorkspace.month
-    && payment.status !== "canceled"
-  ));
-  return `
-    <details class="finance-entry-form-card">
-      <summary>${esc(loan.name)} 납부 계획</summary>
-      <form data-form="finance-loan-plan" class="finance-native-form">
-        <input type="hidden" name="loanId" value="${esc(loan.id)}">
-        <p class="finance-form-note">남은 원금 ${esc(formatFinanceKrw(financeModel.loanPrincipalKrw(state, loan, `${financeWorkspace.month}-31`)))} · 등록 월 납부액 ${esc(formatFinanceKrw(loan.monthlyPaymentKrw))} · ${esc(account?.name || "납부 계좌 확인 필요")}</p>
-        <div class="field-grid">
-          ${financeDateInput("납부 예정일", "dueOn", financeModel.dateForMonthDay(financeWorkspace.month, Number(loan.openedOn?.slice(8, 10)) || 1))}
-          ${financeNonNegativeMoneyInput("예정 원금", "principalKrw")}
-          ${financeNonNegativeMoneyInput("예정 이자", "interestKrw")}
-          ${financeNonNegativeMoneyInput("예정 수수료", "feeKrw", { value: 0 })}
-        </div>
-        <button class="button" type="submit" ${scheduled ? "disabled" : ""}>${scheduled ? "이 달의 계획 저장됨" : "납부 계획 확정"}</button>
-      </form>
-    </details>
-  `;
-}
-
-function renderFinanceLoanPaymentForm(state, payment) {
-  const loan = state.loans.find((item) => item.id === payment.loanId);
-  const account = state.accounts.find((item) => item.id === loan?.paymentAccountId);
-  return `
-    <details class="finance-entry-form-card finance-payment-confirm-card">
-      <summary>${esc(loan?.name || "대출")} 실제 출금 확인</summary>
-      <form data-form="finance-loan-payment" class="finance-native-form">
-        <input type="hidden" name="loanPaymentId" value="${esc(payment.id)}">
-        <p class="finance-form-note">출금 계좌 ${esc(account?.name || "설정 확인 필요")} · 실제 청구액이 달랐다면 아래 금액만 고쳐서 확인합니다.</p>
-        <div class="field-grid">
-          ${financeDateInput("실제 출금일", "paidOn", payment.dueOn)}
-          ${financeNonNegativeMoneyInput("실제 원금", "principalKrw", { value: payment.principalKrw })}
-          ${financeNonNegativeMoneyInput("실제 이자", "interestKrw", { value: payment.interestKrw })}
-          ${financeNonNegativeMoneyInput("실제 수수료", "feeKrw", { value: payment.feeKrw })}
-        </div>
-        <button class="button" type="submit">실제 출금 확인</button>
-      </form>
-    </details>
-  `;
-}
-
 function renderFinanceFixedCostPaymentForm(state, entry, settlement, rule) {
   const account = state.accounts.find((item) => item.id === rule.accountId);
   return `
@@ -2538,21 +2407,16 @@ function renderFinanceFixedCostPaymentForm(state, entry, settlement, rule) {
 
 function renderFinanceCards(state) {
   const cards = state.paymentMethods.filter((method) => method.type === "credit_card");
-  if (!cards.length) {
-    return `
-      <section class="finance-inline-notice panel">
-        <strong>관리 탭에서 신용카드를 먼저 등록해주세요.</strong>
-        <button class="button secondary" type="button" data-finance-tab="manage">신용카드 등록하기</button>
-      </section>
-    `;
-  }
   return `
     <section class="finance-section-heading">
       <h2>신용카드</h2>
     </section>
-    <div class="finance-card-workspaces">
-      ${cards.map((method, index) => renderFinanceCardWorkspace(state, method, index === 0)).join("")}
-    </div>
+    ${renderFinancePaymentMethodManage(state, "credit")}
+    ${cards.length ? `
+      <div class="finance-card-workspaces">
+        ${cards.map((method, index) => renderFinanceCardWorkspace(state, method, index === 0)).join("")}
+      </div>
+    ` : ""}
   `;
 }
 
@@ -2593,7 +2457,7 @@ function renderFinanceCardWorkspace(state, method, open) {
           <h3 id="finance-card-schedule-${esc(method.id)}">할부 일정</h3>
           <div class="finance-record-list">
             ${statements.map((statement) => `
-              <article class="finance-record" data-finance-card-statement="${esc(statement.id)}">
+              <article class="finance-record">
                 <div>
                   <strong>${esc(statement.source === "opening_installment" ? `${statement.label || "기존 할부"} ${statement.installmentNumber}/${statement.installmentCount}` : `${statement.scheduledOn.slice(0, 7)} 명세서`)}</strong>
                   <small>${esc(statement.scheduledOn)} 납부 · ${esc(financeSettlementStatusLabel(statement.status))}</small>
@@ -2695,14 +2559,17 @@ function renderFinanceAccountForm(state, account = null) {
   `;
 }
 
-function renderFinancePaymentMethodForm(state, method = null) {
-  const isCredit = method?.type === "credit_card";
+function renderFinancePaymentMethodForm(state, method = null, group = "direct") {
+  const isCredit = group === "credit";
+  const typeOptions = isCredit
+    ? [["credit_card", "신용카드"]]
+    : [["debit_card", "체크카드"], ["cash", "현금"], ["bank_transfer", "계좌이체"], ["other", "기타 수단"]];
   return `
     <form data-form="finance-payment-method" class="finance-native-form">
       <input type="hidden" name="entityId" value="${esc(method?.id || "")}">
       <div class="field-grid">
-        ${financeTextInput("이름", "name", { placeholder: "예: 생활 체크카드", required: true, value: method?.name })}
-        ${financeSelectInput("종류", "type", [["debit_card", "체크카드"], ["credit_card", "신용카드"], ["cash", "현금"], ["bank_transfer", "계좌이체"], ["other", "기타 수단"]], { required: true, value: method?.type || "debit_card", attributes: 'data-finance-payment-type="true"' })}
+        ${financeTextInput("이름", "name", { placeholder: isCredit ? "예: 생활 신용카드" : "예: 생활 체크카드", required: true, value: method?.name })}
+        ${financeSelectInput("종류", "type", typeOptions, { required: true, allowEmpty: false, value: method?.type || typeOptions[0][0], attributes: 'data-finance-payment-type="true"' })}
       </div>
       <fieldset data-finance-linked-fields ${isCredit ? "hidden disabled" : ""}>
         <legend>바로 빠지는 수단</legend>
@@ -2754,10 +2621,10 @@ function renderFinanceRecurringRuleForm(state, rule = null) {
   `;
 }
 
-function renderFinanceManage(state) {
+function renderFinanceAccounts(state) {
   return `
     <section class="finance-section-heading">
-      <h2>관리</h2>
+      <h2>계좌</h2>
     </section>
     <div class="finance-ledger-grid">
       <section class="finance-stage-panel panel" aria-labelledby="finance-account-manage-title">
@@ -2774,7 +2641,7 @@ function renderFinanceManage(state) {
               .filter((check) => check.accountId === account.id)
               .sort((left, right) => right.checkedOn.localeCompare(left.checkedOn))[0];
             return `
-              <article class="finance-record" data-finance-account="${esc(account.id)}">
+              <article class="finance-record">
                 <div>
                   <strong>${esc(account.name)}</strong>
                   <small>${esc(financeAccountTypeLabel(account.type))}${lastCheck ? ` · ${esc(lastCheck.checkedOn)} 잔액 확인` : ""}</small>
@@ -2804,40 +2671,49 @@ function renderFinanceManage(state) {
           </form>
         </details>
       </section>
-      <section class="finance-stage-panel panel" aria-labelledby="finance-method-manage-title">
-        <h2 id="finance-method-manage-title">결제수단</h2>
-        <details class="finance-manage-details" ${state.paymentMethods.length ? "" : "open"}>
-          <summary>결제수단 추가</summary>
-          ${renderFinancePaymentMethodForm(state)}
-        </details>
-        <div class="finance-record-list finance-manage-list">
-          ${state.paymentMethods.map((method) => {
-            const accountId = method.type === "credit_card" ? method.paymentAccountId : method.linkedAccountId;
-            const account = state.accounts.find((item) => item.id === accountId);
-            const references = financePaymentMethodReferenceCount(state, method.id);
-            return `
-              <article class="finance-record" data-finance-payment-method="${esc(method.id)}">
-                <div>
-                  <strong>${esc(method.name)}</strong>
-                  <small>${esc(financePaymentMethodTypeLabel(method.type))}${method.type === "credit_card" ? ` · 매월 ${esc(method.dueDay || 1)}일 납부` : ""}${account ? ` · ${esc(account.name)}` : ""}</small>
-                </div>
-                <div class="finance-record-actions">
-                  <button type="button" data-finance-delete-payment-method="${esc(method.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
-                </div>
-              </article>
-              <details class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
-                <summary>${esc(method.name)} 수정</summary>
-                ${renderFinancePaymentMethodForm(state, method)}
-              </details>
-            `;
-          }).join("") || '<p class="finance-empty-copy">등록된 결제수단이 없습니다.</p>'}
-        </div>
-      </section>
+      ${renderFinancePaymentMethodManage(state, "direct")}
     </div>
-    <div class="finance-ledger-grid finance-secondary-manage-grid">
+    <div class="finance-account-secondary">
       ${renderFinanceLoanManage(state)}
-      ${renderFinanceRecurringManage(state)}
     </div>
+  `;
+}
+
+function renderFinancePaymentMethodManage(state, group) {
+  const credit = group === "credit";
+  const methods = state.paymentMethods.filter((method) => (method.type === "credit_card") === credit);
+  const title = credit ? "신용카드 관리" : "결제수단";
+  const id = credit ? "finance-card-manage-title" : "finance-method-manage-title";
+  return `
+    <section class="finance-stage-panel panel" aria-labelledby="${id}">
+      <h2 id="${id}">${title}</h2>
+      <details class="finance-manage-details" ${methods.length ? "" : "open"}>
+        <summary>${credit ? "신용카드 추가" : "결제수단 추가"}</summary>
+        ${renderFinancePaymentMethodForm(state, null, group)}
+      </details>
+      <div class="finance-record-list finance-manage-list">
+        ${methods.map((method) => {
+          const accountId = credit ? method.paymentAccountId : method.linkedAccountId;
+          const account = state.accounts.find((item) => item.id === accountId);
+          const references = financePaymentMethodReferenceCount(state, method.id);
+          return `
+            <article class="finance-record">
+              <div>
+                <strong>${esc(method.name)}</strong>
+                <small>${esc(financePaymentMethodTypeLabel(method.type))}${credit ? ` · 매월 ${esc(method.dueDay || 1)}일 납부` : ""}${account ? ` · ${esc(account.name)}` : ""}</small>
+              </div>
+              <div class="finance-record-actions">
+                <button type="button" data-finance-delete-payment-method="${esc(method.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+              </div>
+            </article>
+            <details class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
+              <summary>${esc(method.name)} 수정</summary>
+              ${renderFinancePaymentMethodForm(state, method, group)}
+            </details>
+          `;
+        }).join("") || `<p class="finance-empty-copy">${credit ? "등록된 신용카드가" : "등록된 결제수단이"} 없습니다.</p>`}
+      </div>
+    </section>
   `;
 }
 
@@ -2877,7 +2753,7 @@ function renderFinanceRecurringManage(state) {
   const rules = state.recurringRules.filter((rule) => rule.kind === "fixed_expense" && rule.status !== "archived");
   return `
     <section class="finance-stage-panel panel" aria-labelledby="finance-recurring-manage-title">
-      <h2 id="finance-recurring-manage-title">고정비</h2>
+      <h2 id="finance-recurring-manage-title">고정비 설정</h2>
       <details class="finance-manage-details" ${rules.length ? "" : "open"}>
         <summary>고정비 추가</summary>
         ${renderFinanceRecurringRuleForm(state)}
@@ -2889,7 +2765,7 @@ function renderFinanceRecurringManage(state) {
           const references = financeRecurringRuleReferenceCount(state, rule.id);
           const paused = rule.status === "paused";
           return `
-            <article class="finance-record finance-recurring-record" data-finance-recurring-rule="${esc(rule.id)}">
+            <article class="finance-record finance-recurring-record">
               <div>
                 <strong>${esc(rule.name)}</strong>
                 <small>${paused ? "일시정지 · " : ""}${rule.creationMode === "auto" ? "자동 생성" : "수동 생성"} · 매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}</small>
@@ -2914,6 +2790,25 @@ function renderFinanceRecurringManage(state) {
   `;
 }
 
+function renderFinanceFixedCosts(state) {
+  const unpaid = financePendingFixedCosts(state, financeWorkspace.month);
+  return `
+    <section class="finance-section-heading">
+      <h2>고정비</h2>
+    </section>
+    <div class="finance-ledger-grid finance-fixed-grid">
+      ${renderFinanceRecurringManage(state)}
+      <section class="finance-stage-panel panel" aria-labelledby="finance-fixed-payment-title">
+        <h2 id="finance-fixed-payment-title">납부</h2>
+        <div class="finance-fixed-payment-list">
+          ${unpaid.map(({ entry, settlement, rule }) => renderFinanceFixedCostPaymentForm(state, entry, settlement, rule)).join("")}
+          ${unpaid.length ? "" : '<p class="finance-empty-copy">이 달의 미납 고정비가 없습니다.</p>'}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderFinanceStats(state) {
   const summary = financeModel.financeMonthSummary(state, financeWorkspace.month);
   const categories = financeCategoryStats(state, financeWorkspace.month);
@@ -2923,46 +2818,50 @@ function renderFinanceStats(state) {
     return { month, ...financeModel.financeMonthSummary(state, month) };
   });
   return `
-    <section class="finance-section-heading">
-      <h2>통계</h2>
-    </section>
+    <div class="finance-stats-contained">
+      <section class="finance-section-heading">
+        <h2>통계</h2>
+      </section>
+    </div>
     ${renderFinanceSpendingCalendar(state, financeWorkspace.month)}
-    <div class="finance-basis-grid">
-      <section class="finance-stage-panel panel finance-basis-card">
-        <h2>지출</h2>
-        <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.spentKrw))}</strong>
-        <dl>
-          <div><dt>소비</dt><dd>${esc(formatFinanceKrw(summary.expenseKrw))}</dd></div>
-          <div><dt>환불</dt><dd>−${esc(formatFinanceKrw(summary.refundKrw))}</dd></div>
-          <div><dt>대출 이자·수수료</dt><dd>${esc(formatFinanceKrw(summary.loanCostKrw))}</dd></div>
-          <div><dt>수입</dt><dd>${esc(formatFinanceKrw(summary.incomeKrw))}</dd></div>
-        </dl>
-      </section>
-      <section class="finance-stage-panel panel finance-basis-card">
-        <h2>실제 출금</h2>
-        <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.cashOutKrw))}</strong>
-        <dl>
-          <div><dt>실제 입금</dt><dd>${esc(formatFinanceKrw(summary.cashInKrw))}</dd></div>
-          <div><dt>실제 출금</dt><dd>−${esc(formatFinanceKrw(summary.cashOutKrw))}</dd></div>
-          <div><dt>순현금 변화</dt><dd>${summary.netCashKrw < 0 ? "−" : "+"}${esc(formatFinanceKrw(Math.abs(summary.netCashKrw)))}</dd></div>
-          <div><dt>계좌 간 이동</dt><dd>통계 제외</dd></div>
-        </dl>
+    <div class="finance-stats-contained">
+      <div class="finance-basis-grid">
+        <section class="finance-stage-panel panel finance-basis-card">
+          <h2>지출</h2>
+          <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.spentKrw))}</strong>
+          <dl>
+            <div><dt>소비</dt><dd>${esc(formatFinanceKrw(summary.expenseKrw))}</dd></div>
+            <div><dt>환불</dt><dd>−${esc(formatFinanceKrw(summary.refundKrw))}</dd></div>
+            <div><dt>대출 이자·수수료</dt><dd>${esc(formatFinanceKrw(summary.loanCostKrw))}</dd></div>
+            <div><dt>수입</dt><dd>${esc(formatFinanceKrw(summary.incomeKrw))}</dd></div>
+          </dl>
+        </section>
+        <section class="finance-stage-panel panel finance-basis-card">
+          <h2>실제 출금</h2>
+          <strong class="finance-basis-value">${esc(formatFinanceKrw(summary.cashOutKrw))}</strong>
+          <dl>
+            <div><dt>실제 입금</dt><dd>${esc(formatFinanceKrw(summary.cashInKrw))}</dd></div>
+            <div><dt>실제 출금</dt><dd>−${esc(formatFinanceKrw(summary.cashOutKrw))}</dd></div>
+            <div><dt>순현금 변화</dt><dd>${summary.netCashKrw < 0 ? "−" : "+"}${esc(formatFinanceKrw(Math.abs(summary.netCashKrw)))}</dd></div>
+            <div><dt>계좌 간 이동</dt><dd>통계 제외</dd></div>
+          </dl>
+        </section>
+      </div>
+      <div class="finance-ledger-grid finance-stats-detail-grid">
+        <section class="finance-stage-panel panel" aria-labelledby="finance-category-stats-title">
+          <h2 id="finance-category-stats-title">카테고리</h2>
+          ${renderFinanceStatBars(categories)}
+        </section>
+        <section class="finance-stage-panel panel" aria-labelledby="finance-cashout-stats-title">
+          <h2 id="finance-cashout-stats-title">출금 유형</h2>
+          ${renderFinanceStatBars(cashOutKinds)}
+        </section>
+      </div>
+      <section class="finance-stage-panel panel finance-trend-panel" aria-labelledby="finance-trend-title">
+        <h2 id="finance-trend-title">월별 추이</h2>
+        ${renderFinanceTrend(trend)}
       </section>
     </div>
-    <div class="finance-ledger-grid finance-stats-detail-grid">
-      <section class="finance-stage-panel panel" aria-labelledby="finance-category-stats-title">
-        <h2 id="finance-category-stats-title">카테고리</h2>
-        ${renderFinanceStatBars(categories)}
-      </section>
-      <section class="finance-stage-panel panel" aria-labelledby="finance-cashout-stats-title">
-        <h2 id="finance-cashout-stats-title">출금 유형</h2>
-        ${renderFinanceStatBars(cashOutKinds)}
-      </section>
-    </div>
-    <section class="finance-stage-panel panel finance-trend-panel" aria-labelledby="finance-trend-title">
-      <h2 id="finance-trend-title">월별 추이</h2>
-      ${renderFinanceTrend(trend)}
-    </section>
   `;
 }
 
@@ -3061,7 +2960,7 @@ function renderFinanceEntryRecord(state, entry) {
       ? "청구 차감"
       : "입금";
   return `
-    <article class="finance-record" data-finance-entry="${esc(entry.id)}">
+    <article class="finance-record">
       <div>
         <strong>${esc(entry.title)}</strong>
         <small>${esc(financeEntryKindLabel(entry.kind))} · ${esc(occurredLabel)} ${esc(entry.occurredOn)}${method ? ` · ${esc(method.name)}` : ""}${settlement ? ` · ${esc(settlementLabel)} ${esc(settlement.scheduledOn)}` : ""}</small>
@@ -3077,7 +2976,7 @@ function renderFinanceMovementRecord(state, movement) {
   const route = from && to ? `${from.name} → ${to.name}` : from ? `${from.name}에서 출금` : `${to?.name || "계좌"}에 입금`;
   const sign = from && !to ? "−" : to && !from ? "+" : "";
   return `
-    <article class="finance-record" data-finance-movement="${esc(movement.id)}">
+    <article class="finance-record">
       <div>
         <strong>${esc(financeMovementKindLabel(movement.kind))}</strong>
         <small>${esc(movement.postedOn)} · ${esc(route)}${movement.memo ? ` · ${esc(movement.memo)}` : ""}</small>
@@ -3126,23 +3025,6 @@ function financeMovementKindLabel(kind) {
 
 function financeSettlementStatusLabel(status) {
   return { estimated: "예상", confirmed: "확정", paid: "출금 확인", canceled: "취소" }[status] || status;
-}
-
-function financeSettlementTitle(state, settlement) {
-  if (settlement.targetType === "entry") {
-    return state.entries.find((entry) => entry.id === settlement.targetId)?.title || "사용 기록";
-  }
-  if (settlement.targetType === "card_statement") {
-    const statement = state.cardStatements.find((item) => item.id === settlement.targetId);
-    return state.paymentMethods.find((item) => item.id === statement?.paymentMethodId)?.name || "카드대금";
-  }
-  const payment = state.loanPayments.find((item) => item.id === settlement.targetId);
-  return state.loans.find((item) => item.id === payment?.loanId)?.name || "대출 납부";
-}
-
-function financeSettlementDirection(state, settlement) {
-  if (settlement.targetType !== "entry") return 1;
-  return state.entries.find((entry) => entry.id === settlement.targetId)?.kind === "refund" ? -1 : 1;
 }
 
 function financeAccountOptions(accounts) {
@@ -3225,30 +3107,6 @@ function financeMoneyInput(label, name, options = {}) {
     <label class="field">
       <span>${esc(label)}</span>
       <input class="input" type="number" name="${esc(name)}" value="${esc(options.value ?? "")}" min="${options.allowNegative ? "-9007199254740991" : "1"}" max="9007199254740991" step="1" inputmode="numeric" required>
-    </label>
-  `;
-}
-
-function financeNonNegativeMoneyInput(label, name, options = {}) {
-  return `
-    <label class="field">
-      <span>${esc(label)}</span>
-      <input class="input" type="number" name="${esc(name)}" value="${esc(options.value ?? "")}" min="0" max="9007199254740991" step="1" inputmode="numeric" required>
-    </label>
-  `;
-}
-
-function financeDecimalInput(label, name, options = {}) {
-  const attributes = [
-    options.min !== undefined ? `min="${esc(options.min)}"` : "",
-    options.max !== undefined ? `max="${esc(options.max)}"` : "",
-    options.step !== undefined ? `step="${esc(options.step)}"` : "",
-    options.required ? "required" : "",
-  ].filter(Boolean).join(" ");
-  return `
-    <label class="field">
-      <span>${esc(label)}</span>
-      <input class="input" type="number" name="${esc(name)}" value="${esc(options.value ?? "")}" placeholder="${esc(options.placeholder || "")}" inputmode="decimal" ${attributes}>
     </label>
   `;
 }
@@ -3400,11 +3258,6 @@ function financePaymentMethodReferenceCount(state, methodId) {
   return state.entries.filter((item) => item.paymentMethodId === methodId).length
     + state.cardStatements.filter((item) => item.paymentMethodId === methodId).length
     + state.recurringRules.filter((item) => item.paymentMethodId === methodId).length;
-}
-
-function financeLoanReferenceCount(state, loanId) {
-  return state.loanPayments.filter((item) => item.loanId === loanId).length
-    + state.recurringRules.filter((item) => item.loanId === loanId).length;
 }
 
 function financeRecurringRuleReferenceCount(state, ruleId) {
@@ -4150,94 +4003,6 @@ async function submitFinanceLoan(form) {
   }, financeFormText(form, "entityId") ? "대출을 수정했습니다." : "자산 확인용 대출을 저장했습니다.");
 }
 
-async function submitFinanceLoanPlan(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const loan = nextState.loans.find((item) => item.id === financeFormText(form, "loanId"));
-    if (!loan) throw new Error("대출을 다시 선택해주세요.");
-    const dueOn = financeFormText(form, "dueOn");
-    const duplicate = nextState.loanPayments.some((payment) => (
-      payment.loanId === loan.id
-      && payment.dueOn.slice(0, 7) === dueOn.slice(0, 7)
-      && payment.status !== "canceled"
-    ));
-    if (duplicate) throw new Error("이 대출의 같은 달 납부 계획이 이미 있습니다.");
-    const principalKrw = financeFormNonNegativeMoney(form, "principalKrw");
-    const interestKrw = financeFormNonNegativeMoney(form, "interestKrw");
-    const feeKrw = financeFormNonNegativeMoney(form, "feeKrw");
-    const amountKrw = principalKrw + interestKrw + feeKrw;
-    if (!Number.isSafeInteger(amountKrw) || amountKrw <= 0) throw new Error("원금·이자·수수료 합계는 1원 이상이어야 합니다.");
-    if (principalKrw > financeModel.loanPrincipalKrw(nextState, loan, dueOn)) {
-      throw new Error("예정 원금이 현재 남은 원금보다 큽니다.");
-    }
-    const payment = {
-      id: financeEntityId("loan-payment"),
-      loanId: loan.id,
-      dueOn,
-      recognitionMonth: dueOn.slice(0, 7),
-      principalKrw,
-      interestKrw,
-      feeKrw,
-      status: "confirmed",
-    };
-    nextState.loanPayments.push(payment);
-    nextState.settlements.push({
-      id: financeEntityId("settlement"),
-      targetType: "loan_payment",
-      targetId: payment.id,
-      expectedAmountKrw: amountKrw,
-      scheduledOn: dueOn,
-      status: "confirmed",
-    });
-  }, "대출 납부 계획을 확정했습니다. 실제 출금 전까지 잔액은 바뀌지 않습니다.");
-}
-
-async function submitFinanceLoanPayment(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const payment = nextState.loanPayments.find((item) => item.id === financeFormText(form, "loanPaymentId"));
-    if (!payment || payment.status !== "confirmed") throw new Error("실제 출금을 확인할 수 있는 대출 납부가 아닙니다.");
-    const loan = nextState.loans.find((item) => item.id === payment.loanId);
-    if (!loan?.paymentAccountId) throw new Error("대출 납부 계좌를 확인해주세요.");
-    const principalKrw = financeFormNonNegativeMoney(form, "principalKrw");
-    const interestKrw = financeFormNonNegativeMoney(form, "interestKrw");
-    const feeKrw = financeFormNonNegativeMoney(form, "feeKrw");
-    const amountKrw = principalKrw + interestKrw + feeKrw;
-    if (!Number.isSafeInteger(amountKrw) || amountKrw <= 0) throw new Error("실제 납부 합계는 1원 이상이어야 합니다.");
-    if (principalKrw > financeModel.loanPrincipalKrw(nextState, loan)) {
-      throw new Error("실제 납부 원금이 현재 남은 원금보다 큽니다.");
-    }
-    const settlement = nextState.settlements.find((item) => (
-      item.targetType === "loan_payment"
-      && item.targetId === payment.id
-      && item.status === "confirmed"
-    ));
-    if (!settlement) throw new Error("확정된 대출 출금 일정을 찾을 수 없습니다.");
-    const paidOn = financeFormText(form, "paidOn");
-    const movement = {
-      id: financeEntityId("movement"),
-      kind: "loan_payment",
-      amountKrw,
-      postedOn: paidOn,
-      fromAccountId: loan.paymentAccountId,
-      status: "confirmed",
-    };
-    nextState.movements.push(movement);
-    Object.assign(payment, {
-      principalKrw,
-      interestKrw,
-      feeKrw,
-      paidOn,
-      movementId: movement.id,
-      status: "paid",
-    });
-    Object.assign(settlement, {
-      expectedAmountKrw: amountKrw,
-      movementId: movement.id,
-      settledAmountKrw: amountKrw,
-      status: "paid",
-    });
-  }, "대출 실제 출금을 확인했습니다. 원금은 잔액이 아니라 남은 대출에서만 줄었습니다.");
-}
-
 async function submitFinanceRecurringRule(form) {
   return runFinanceFormMutation(form, (nextState) => {
     const entityId = financeFormText(form, "entityId");
@@ -4474,20 +4239,6 @@ function financeFormPositiveMoney(form, name) {
   return value;
 }
 
-function financeFormNonNegativeMoney(form, name) {
-  const value = financeFormInteger(form, name);
-  if (value < 0) throw new Error("금액은 0원 이상이어야 합니다.");
-  return value;
-}
-
-function financeFormOptionalNumber(form, name) {
-  const raw = financeFormText(form, name);
-  if (!raw) return undefined;
-  const value = Number(raw);
-  if (!Number.isFinite(value)) throw new Error("숫자 값을 확인해주세요.");
-  return value;
-}
-
 async function deleteFinanceAccount(accountId) {
   const state = financeWorkspace.state;
   const account = state?.accounts.find((item) => item.id === accountId);
@@ -4570,230 +4321,6 @@ function syncFinancePaymentMethodFields(form) {
   }
 }
 
-function financeLoanScheduleInput(eventTarget) {
-  return eventTarget.closest?.(
-    'form[data-form="finance-loan"] [name="openingPrincipalKrw"], '
-    + 'form[data-form="finance-loan"] [name="termMonths"], '
-    + 'form[data-form="finance-loan"] [name="graceMonths"], '
-    + 'form[data-form="finance-loan"] [name="openedOn"], '
-    + 'form[data-form="finance-loan"] [name="annualRate"]',
-  );
-}
-
-function financeLoanScheduleValues(form) {
-  const openingPrincipalKrw = Number(form.elements.openingPrincipalKrw?.value);
-  const termMonths = Number(form.elements.termMonths?.value);
-  const graceMonths = Number(form.elements.graceMonths?.value);
-  const annualRate = Number(form.elements.annualRate?.value);
-  const openedOn = String(form.elements.openedOn?.value || "");
-  const scheduleMode = String(form.elements.scheduleMode?.value || "auto");
-  const totalMonths = termMonths + graceMonths;
-  const totalMonthsValid = Number.isInteger(totalMonths) && totalMonths >= 1 && totalMonths <= 1_200;
-  const validityMessage = Number.isInteger(totalMonths) && totalMonths > 1_200
-    ? "거치 기간과 상환 기간의 합은 1,200개월 이하여야 합니다."
-    : "";
-  form.elements.termMonths?.setCustomValidity(validityMessage);
-  form.elements.graceMonths?.setCustomValidity(validityMessage);
-  const valid = (
-    Number.isSafeInteger(openingPrincipalKrw)
-    && openingPrincipalKrw > 0
-    && Number.isInteger(termMonths)
-    && termMonths >= 1
-    && Number.isInteger(graceMonths)
-    && graceMonths >= 0
-    && totalMonthsValid
-    && /^\d{4}-\d{2}-\d{2}$/.test(openedOn)
-    && (scheduleMode !== "auto" || (Number.isFinite(annualRate) && annualRate >= 0 && annualRate <= 100))
-  );
-  return {
-    annualRate,
-    graceMonths,
-    openedOn,
-    openingPrincipalKrw,
-    scheduleMode,
-    termMonths,
-    totalMonths,
-    valid,
-  };
-}
-
-function financeLoanDueOn(openedOn, offset) {
-  const month = financeModel.shiftMonthKey(openedOn.slice(0, 7), offset);
-  return financeModel.dateForMonthDay(month, Number(openedOn.slice(8, 10)));
-}
-
-function financeLoanScheduleTable(rows, mode) {
-  return `
-    <table class="finance-loan-schedule-table">
-      <thead>
-        <tr>
-          <th scope="col">납부 월</th>
-          <th scope="col">구분</th>
-          <th scope="col">원금</th>
-          <th scope="col">이자</th>
-          <th scope="col">합계</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${rows.map((row, index) => {
-          const label = financePickerMonthLabel(row.dueOn.slice(0, 7));
-          const phase = row.phase === "grace" ? "거치" : "상환";
-          const yearBreak = index === 0 || row.dueOn.slice(0, 4) !== rows[index - 1]?.dueOn.slice(0, 4);
-          return `
-            <tr
-              data-finance-loan-schedule-row
-              data-finance-loan-schedule-index="${index}"
-              data-due-on="${esc(row.dueOn)}"
-              class="${yearBreak ? "is-year-start" : ""}"
-            >
-              <th scope="row"><span>${esc(label)}</span><small>${index + 1}회</small></th>
-              <td><span class="finance-loan-phase ${row.phase === "grace" ? "is-grace" : ""}">${phase}</span></td>
-              <td>
-                ${mode === "manual"
-                  ? `<input class="input" type="number" name="schedulePrincipalKrw" value="${esc(row.principalKrw)}" min="0" max="9007199254740991" step="1" inputmode="numeric" aria-label="${esc(`${label} 원금`)}" required>`
-                  : `<strong>${esc(formatFinanceKrw(row.principalKrw))}</strong>`}
-              </td>
-              <td>
-                ${mode === "manual"
-                  ? `<input class="input" type="number" name="scheduleInterestKrw" value="${esc(row.interestKrw)}" min="0" max="9007199254740991" step="1" inputmode="numeric" aria-label="${esc(`${label} 이자`)}" required>`
-                  : `<strong>${esc(formatFinanceKrw(row.interestKrw))}</strong>`}
-              </td>
-              <td><output data-finance-loan-schedule-total>${esc(formatFinanceKrw(row.amountKrw))}</output></td>
-            </tr>
-          `;
-        }).join("")}
-      </tbody>
-    </table>
-  `;
-}
-
-function rememberFinanceManualLoanSchedule(form) {
-  const rows = [...form.querySelectorAll("[data-finance-loan-schedule-row]")];
-  if (!rows.length || form.elements.scheduleMode?.value !== "manual") return;
-  form._financeManualLoanSchedule = rows.map((row) => ({
-    principalKrw: Number(row.querySelector('[name="schedulePrincipalKrw"]')?.value || 0),
-    interestKrw: Number(row.querySelector('[name="scheduleInterestKrw"]')?.value || 0),
-  }));
-}
-
-function updateFinanceManualLoanSchedule(form) {
-  if (!(form instanceof HTMLFormElement) || form.elements.scheduleMode?.value !== "manual") return;
-  const values = financeLoanScheduleValues(form);
-  const rows = [...form.querySelectorAll("[data-finance-loan-schedule-row]")];
-  let principalKrw = 0;
-  let interestKrw = 0;
-  for (const row of rows) {
-    const principal = Number(row.querySelector('[name="schedulePrincipalKrw"]')?.value);
-    const interest = Number(row.querySelector('[name="scheduleInterestKrw"]')?.value);
-    const safePrincipal = Number.isSafeInteger(principal) && principal >= 0 ? principal : 0;
-    const safeInterest = Number.isSafeInteger(interest) && interest >= 0 ? interest : 0;
-    principalKrw += safePrincipal;
-    interestKrw += safeInterest;
-    row.querySelector("[data-finance-loan-schedule-total]").textContent = formatFinanceKrw(safePrincipal + safeInterest);
-  }
-  rememberFinanceManualLoanSchedule(form);
-  const firstPrincipal = form.querySelector('[name="schedulePrincipalKrw"]');
-  const mismatch = principalKrw !== values.openingPrincipalKrw;
-  firstPrincipal?.setCustomValidity(mismatch ? "월별 원금 합계가 시작 원금과 같아야 합니다." : "");
-  const summary = form.querySelector("[data-finance-loan-schedule-summary]");
-  if (summary) {
-    summary.textContent = `총 ${values.totalMonths}개월 · 원금 ${formatFinanceKrw(principalKrw)} · 이자 ${formatFinanceKrw(interestKrw)}`;
-    summary.classList.toggle("is-mismatch", mismatch);
-  }
-}
-
-function syncFinanceLoanSchedule(form) {
-  if (!(form instanceof HTMLFormElement)) return;
-  rememberFinanceManualLoanSchedule(form);
-  const values = financeLoanScheduleValues(form);
-  const autoFields = form.querySelector("[data-finance-loan-auto-fields]");
-  const rateInput = form.elements.annualRate;
-  const manual = values.scheduleMode === "manual";
-  if (autoFields) {
-    autoFields.hidden = manual;
-    autoFields.disabled = manual;
-  }
-  if (rateInput) {
-    rateInput.disabled = manual;
-    rateInput.required = !manual;
-  }
-
-  const schedule = form.querySelector("[data-finance-loan-schedule]");
-  const scroll = form.querySelector("[data-finance-loan-schedule-scroll]");
-  const distribute = form.querySelector("[data-finance-loan-distribute]");
-  const note = form.querySelector("[data-finance-loan-schedule-note]");
-  if (!schedule || !scroll || !distribute || !note) return;
-
-  if (!values.valid) {
-    schedule.classList.remove("is-open");
-    schedule.setAttribute("aria-hidden", "true");
-    schedule.inert = true;
-    return;
-  }
-
-  let rows;
-  if (manual) {
-    const split = financeModel.splitKrw(values.openingPrincipalKrw, values.termMonths);
-    const draft = Array.isArray(form._financeManualLoanSchedule) ? form._financeManualLoanSchedule : [];
-    rows = Array.from({ length: values.totalMonths }, (_, index) => {
-      const saved = draft[index];
-      const phase = index < values.graceMonths ? "grace" : "repayment";
-      const principalKrw = Number.isSafeInteger(saved?.principalKrw) && saved.principalKrw >= 0
-        ? saved.principalKrw
-        : phase === "grace" ? 0 : split[index - values.graceMonths];
-      const interestKrw = Number.isSafeInteger(saved?.interestKrw) && saved.interestKrw >= 0 ? saved.interestKrw : 0;
-      return {
-        amountKrw: principalKrw + interestKrw,
-        dueOn: financeLoanDueOn(values.openedOn, index),
-        interestKrw,
-        phase,
-        principalKrw,
-      };
-    });
-    distribute.hidden = false;
-    note.textContent = "원금 자동분할로 전체 상환월을 한 번에 채운 뒤, 각 달의 원금과 이자를 따로 수정할 수 있습니다.";
-  } else {
-    rows = financeModel.loanSchedule(values);
-    distribute.hidden = true;
-    note.textContent = "거치 기간에는 이자만, 이후에는 원리금균등으로 계산합니다. 실제 청구액은 출금 확인 때 수정할 수 있습니다.";
-  }
-  if (!rows.length) {
-    schedule.classList.remove("is-open");
-    schedule.setAttribute("aria-hidden", "true");
-    schedule.inert = true;
-    return;
-  }
-
-  scroll.innerHTML = financeLoanScheduleTable(rows, values.scheduleMode);
-  schedule.removeAttribute("inert");
-  schedule.setAttribute("aria-hidden", "false");
-  if (!schedule.classList.contains("is-open")) {
-    requestAnimationFrame(() => schedule.classList.add("is-open"));
-  }
-  if (manual) {
-    updateFinanceManualLoanSchedule(form);
-  } else {
-    const principalKrw = rows.reduce((total, row) => total + row.principalKrw, 0);
-    const interestKrw = rows.reduce((total, row) => total + row.interestKrw, 0);
-    const summary = form.querySelector("[data-finance-loan-schedule-summary]");
-    if (summary) summary.textContent = `총 ${values.totalMonths}개월 · 원금 ${formatFinanceKrw(principalKrw)} · 예상 이자 ${formatFinanceKrw(interestKrw)}`;
-  }
-}
-
-function distributeFinanceLoanPrincipal(button) {
-  const form = button.closest('form[data-form="finance-loan"]');
-  if (!(form instanceof HTMLFormElement) || form.elements.scheduleMode?.value !== "manual") return;
-  const values = financeLoanScheduleValues(form);
-  const split = financeModel.splitKrw(values.openingPrincipalKrw, values.termMonths);
-  const rows = [...form.querySelectorAll("[data-finance-loan-schedule-row]")];
-  rows.forEach((row, index) => {
-    const input = row.querySelector('[name="schedulePrincipalKrw"]');
-    if (input) input.value = index < values.graceMonths ? "0" : String(split[index - values.graceMonths]);
-  });
-  updateFinanceManualLoanSchedule(form);
-  showToast("상환 기간 전체에 원금을 자동분할했습니다.");
-}
-
 function toggleFinanceSelect(control) {
   if (!(control instanceof HTMLElement)) return;
   if (control.classList.contains("is-open")) closeFinanceSelect(control);
@@ -4811,6 +4338,7 @@ function openFinanceSelect(control, focusTarget = "") {
   control.classList.add("is-open");
   placeFinanceSelectOptions(control, list);
   trigger.setAttribute("aria-expanded", "true");
+  options.find((option) => option.getAttribute("aria-selected") === "true")?.scrollIntoView({ block: "nearest" });
   if (!focusTarget) return;
   const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
   const target = focusTarget === "last" ? options.at(-1) : selected || options[0];
@@ -5052,7 +4580,7 @@ function renderDatabase() {
         ${renderDatabaseModelGrid(visibleModels)}
       </div>
       <div class="grid cols-2" style="margin-top:46px">
-        <div class="panel" data-database-sync-panel>
+        <div class="panel">
           ${panelHeader("PostgreSQL 저장소", databaseStatusLabel())}
           <div class="stack">
             ${renderMetric("Tasks", state.tasks.length, "할 일")}
@@ -5241,7 +4769,7 @@ function renderActiveViewControlChips(view, control, defaultControl, filterOptio
 
 function renderViewControlChip(view, field, value, label, valueLabel, index = 0) {
   return `
-    <button class="view-control-chip" style="--chip-index:${index}" type="button" data-view-control-choice="${view}" data-control-field="${field}" data-control-value="${esc(value)}" data-control-chip="true">
+    <button class="view-control-chip" style="--chip-index:${index}" type="button" data-view-control-choice="${view}" data-control-field="${field}" data-control-value="${esc(value)}">
       <span>${esc(label)}</span>
       <strong>${esc(valueLabel)}</strong>
       <em aria-hidden="true">×</em>
@@ -5389,10 +4917,6 @@ function prepareInitialRoute() {
   replaceViewHistoryState(ui.view, { replace: true });
 }
 
-function finalizeInitialRoute() {
-  replaceViewHistoryState(ui.view, { replace: true });
-}
-
 function handleRoutePopState(event) {
   const viewState = viewHistoryState(event.state);
   const view = financeViewFromLocation()
@@ -5468,10 +4992,6 @@ function syncViewControlPanelState(view) {
     }
   }
   root.classList.toggle("is-panel-open", anyOpen);
-}
-
-function chooseViewControlOption(view, field, value) {
-  updateViewControl(view, field, value);
 }
 
 function resetViewControlOptions(view) {
@@ -6765,7 +6285,7 @@ function renderCalendarAgenda(events = getCombinedCalendarEvents(), calendarThem
       currentDate = item.groupDate;
       html += `
         <div class="calendar-agenda-date">
-          <strong>${esc(calendarAgendaDateLabel(currentDate))}</strong>
+          <strong>${esc(compactDateLabel(currentDate))}</strong>
           <span>${esc(weekday(parseDateOnly(currentDate)))}</span>
         </div>
       `;
@@ -6816,10 +6336,6 @@ function renderCalendarAgendaItem(item, calendarThemes) {
       ${link}
     </article>
   `;
-}
-
-function calendarAgendaDateLabel(key) {
-  return compactDateLabel(key);
 }
 
 function calendarAgendaMetaLabel(event) {
@@ -6954,7 +6470,7 @@ function renderCalendarSpanEvent(segment, { calendarThemes } = {}) {
   const edgeClass = segment.startIndex >= 5 ? "is-near-end" : "";
   const eventKey = `${event.source || "local"}:${event.id || event.title || "event"}:${segment.segmentStart}:${segment.startIndex}`;
   const meta = calendarAgendaMetaLabel(event);
-  const time = calendarSpanTimeLabel(event) || "종일";
+  const time = calendarEventTimeLabel(event) || "종일";
   const dates = segment.start === segment.end
     ? compactDateLabel(segment.start)
     : `${compactDateLabel(segment.start)} – ${compactDateLabel(segment.end)}`;
@@ -7020,10 +6536,6 @@ function closeCalendarSpanEvents() {
     entry.classList.remove("is-expanded");
     entry.querySelector("[data-calendar-event-toggle]")?.setAttribute("aria-expanded", "false");
   });
-}
-
-function calendarSpanTimeLabel(event) {
-  return calendarEventTimeLabel(event);
 }
 
 function calendarEventStartKey(event) {
@@ -7231,10 +6743,6 @@ function changeCalendarMonth(direction) {
   }
   renderView({ soft: true });
   if (googleBackendStatus.connected) fetchGoogleCalendarEvents({ silent: true });
-}
-
-function googleCalendarSessionConnected() {
-  return Boolean(googleBackendStatus.connected);
 }
 
 function calendarSourceVisible(source) {
@@ -7540,10 +7048,10 @@ function renderDetailFields(type, item) {
   if (type === "projects") {
     return `
       <div class="field-grid">
-        ${selectField("상태", "status", item.status, STATUSES.project, { picker: true })}
-        ${relationField("박스", "boxId", item.boxId, state.boxes, "name", { picker: true })}
-        ${dateField("시작일", "startDate", item.startDate, { picker: true })}
-        ${dateField("종료일", "endDate", item.endDate, { picker: true })}
+        ${selectField("상태", "status", item.status, STATUSES.project)}
+        ${relationField("박스", "boxId", item.boxId, state.boxes, "name")}
+        ${dateField("시작일", "startDate", item.startDate)}
+        ${dateField("종료일", "endDate", item.endDate)}
       </div>
     `;
   }
@@ -7627,7 +7135,7 @@ function renderBlocks(blocksList, ownerType, ownerId) {
       if (openListType) html += "</div>";
       if (listType) {
         const label = listType === "numbered" ? "번호 목록" : "글머리 기호 목록";
-        html += `<div class="block-list" role="list" data-list-type="${listType}" aria-label="${label}">`;
+        html += `<div class="block-list" role="list" aria-label="${label}">`;
       }
       openListType = listType;
     }
@@ -7638,14 +7146,13 @@ function renderBlocks(blocksList, ownerType, ownerId) {
     const listMarker = numberedListMarkerForBlock(block, indent, numberedCounters);
     html += renderBlock(block, ownerType, ownerId, {
       hidden: stackHasCollapsedToggle(toggleStack),
-      parentToggleId: toggleStack.length ? toggleStack[toggleStack.length - 1].id : "",
       indent,
       listMarker,
       listItem: Boolean(listType),
       hasToggleChildren: blockHasToggleChildren(blocksList, index),
     });
     if (block.type === "toggle") {
-      toggleStack.push({ id: block.id, indent, collapsed: block.collapsed === true });
+      toggleStack.push({ indent, collapsed: block.collapsed === true });
     }
   }
   if (openListType) html += "</div>";
@@ -7691,7 +7198,6 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const blockColor = normalizeBlockColorValue(block.color);
   const blockBackgroundColor = normalizeBlockColorValue(block.backgroundColor);
   const hiddenAttr = meta.hidden ? ` data-hidden-by-toggle="true" hidden aria-hidden="true"` : ` data-hidden-by-toggle="false"`;
-  const parentToggleAttr = meta.parentToggleId ? ` data-parent-toggle="${meta.parentToggleId}"` : "";
   const listMarkerAttr = meta.listMarker ? ` data-list-marker="${esc(meta.listMarker)}"` : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
   const backgroundColorAttr = blockBackgroundColor ? ` data-block-background="${blockBackgroundColor}"` : "";
@@ -7699,7 +7205,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor);
   if (block.type === "divider") {
     return `
-      <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
+      <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${hiddenAttr}${blockStyle}>
         ${renderBlockDragHandle(block.id)}
         <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
         <div class="block-divider" role="separator"></div>
@@ -7712,15 +7218,13 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
       indent,
       colorAttr,
       backgroundColorAttr,
-      parentToggleAttr,
       hiddenAttr,
       blockStyle,
     });
   }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
-  const routeTemporarilyExpandedAttr = meta.routeTemporarilyExpanded ? ` data-route-temporarily-expanded="true"` : "";
   return `
-    <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${routeTemporarilyExpandedAttr}${parentToggleAttr}${hiddenAttr}${blockStyle}>
+    <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
       ${renderBlockDragHandle(block.id)}
       <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
       ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}"></button>` : ""}
@@ -7746,7 +7250,7 @@ function renderUrlPreviewBlock(block, meta = {}) {
     ? "외부 콘텐츠는 자동 실행하지 않습니다. 원본은 새 탭에서만 열립니다."
     : "원격 메타데이터를 가져오지 않는 안전한 북마크입니다.";
   return `
-    <div class="block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="false" data-indent="${meta.indent}"${meta.colorAttr || ""}${meta.backgroundColorAttr || ""}${meta.parentToggleAttr || ""}${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
+    <div class="block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="false" data-indent="${meta.indent}"${meta.colorAttr || ""}${meta.backgroundColorAttr || ""}${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
       ${renderBlockDragHandle(block.id)}
       <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
       <div
@@ -7763,7 +7267,7 @@ function renderUrlPreviewBlock(block, meta = {}) {
           <span title="${esc(safeUrl)}">${esc(preview.display || "지원하지 않는 URL")}</span>
           <small>${description}</small>
         </span>
-        ${safeUrl ? `<a class="block-url-preview-open" data-url-block-open href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow" aria-label="${esc(label)} 원본을 새 탭에서 열기">열기</a>` : ""}
+        ${safeUrl ? `<a class="block-url-preview-open" href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow" aria-label="${esc(label)} 원본을 새 탭에서 열기">열기</a>` : ""}
       </div>
     </div>
   `;
@@ -7792,7 +7296,7 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
   if (block.type === "heading3") return `<h3 class="block-semantic-wrap">${editable}</h3>`;
   if (block.type === "quote") return `<blockquote class="block-semantic-wrap">${editable}</blockquote>`;
   if (block.type === "code") {
-    return `<pre class="block-semantic-wrap" aria-label="Plain text code block"><code class="block-content ${block.text ? "" : "is-empty"}" data-language="plain-text" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="코드 블록 편집 (plain text)" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</code></pre>`;
+    return `<pre class="block-semantic-wrap" aria-label="Plain text code block"><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="코드 블록 편집 (plain text)" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</code></pre>`;
   }
   return editable;
 }
@@ -8455,10 +7959,6 @@ function setWaitingServiceWorkerRegistration(registration) {
   renderServiceWorkerUpdateNoticeIfNeeded();
 }
 
-function checkForServiceWorkerUpdate() {
-  activeServiceWorkerRegistration?.update().catch(() => {});
-}
-
 function hasUnsavedResourceWork() {
   return Boolean(
     localResourcePersistence.pending ||
@@ -8497,7 +7997,7 @@ function renderServiceWorkerUpdateNotice() {
   if (!serviceWorkerUpdateAvailable) return "";
   const blocked = hasUnsavedResourceWork();
   return `
-    <section class="service-worker-update" data-service-worker-update data-update-state="${blocked ? "blocked" : "ready"}" role="status">
+    <section class="service-worker-update" role="status">
       <div><strong>새 앱 버전 준비됨</strong><span>${blocked ? "pending 저장을 마친 뒤 적용할 수 있습니다." : "저장된 상태입니다. 준비가 되면 업데이트하세요."}</span></div>
       <button class="button" type="button" data-action="apply-app-update" ${blocked ? "disabled" : ""}>업데이트 적용</button>
     </section>
@@ -9045,7 +8545,7 @@ function renderTodayBatch() {
             <span>01</span>
             <h3 id="today-batch-task-heading">새 할 일</h3>
           </header>
-          <div class="today-batch-list" data-today-batch-list>
+          <div class="today-batch-list">
             ${taskCards || '<p class="today-batch-empty">배치할 항목이 없습니다.</p>'}
           </div>
         </section>
@@ -9200,7 +8700,7 @@ function renderLinkPopover() {
   return `
     <form class="inline-link-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-link-popover>
       <input class="inline-link-input" data-inline-link-input value="${esc(popover.href || "")}" placeholder="https://example.com" aria-label="링크 URL">
-      <button class="inline-link-action" type="submit" data-inline-link-apply>적용</button>
+      <button class="inline-link-action" type="submit">적용</button>
       <button class="inline-link-action secondary" type="button" data-inline-link-remove>제거</button>
     </form>
   `;
@@ -9213,7 +8713,7 @@ function renderCommentPopover() {
     <form class="inline-comment-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-comment-popover>
       <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" placeholder="댓글 추가" aria-label="댓글">${esc(popover.body || "")}</textarea>
       <div class="inline-comment-actions">
-        <button class="inline-comment-action" type="submit" data-inline-comment-apply>저장</button>
+        <button class="inline-comment-action" type="submit">저장</button>
         <button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>
       </div>
     </form>
@@ -9226,7 +8726,7 @@ function renderEquationPopover() {
   return `
     <form class="inline-equation-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-equation-popover>
       <input class="inline-equation-input" data-inline-equation-input value="${esc(popover.formula || "")}" placeholder="E = mc^2" aria-label="TeX 수식">
-      <button class="inline-equation-action" type="submit" data-inline-equation-apply>적용</button>
+      <button class="inline-equation-action" type="submit">적용</button>
       <button class="inline-equation-action secondary" type="button" data-inline-equation-remove>제거</button>
     </form>
   `;
@@ -9245,7 +8745,7 @@ function renderSlashMenuItems(ownerType, ownerId, blockId, selectedIndex, entrie
       ? `data-slash-action="${type}"`
       : `data-block-type="${type}" data-owner-type="${ownerType}" data-owner-id="${ownerId}" data-block-id="${blockId}"`;
     items += `
-      <button class="menu-item${actionClass} ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("slash", blockId, index))}" type="button" role="menuitem" data-slash-index="${index}" ${dataset} ${index === selectedIndex ? `aria-current="true"` : ""}>
+      <button class="menu-item${actionClass} ${index === selectedIndex ? "is-active" : ""}" id="${esc(editorCommandMenuItemId("slash", blockId, index))}" type="button" role="menuitem" ${dataset} ${index === selectedIndex ? `aria-current="true"` : ""}>
         <span class="menu-icon">${icon}</span>
         <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(slashMenuEntryHint(type))}</span></span>
       </button>
@@ -9630,80 +9130,35 @@ function numberField(label, field, value) {
   return `<label class="field"><span>${esc(label)}</span><input class="input" type="number" data-field="${field}" value="${Number(value) || 0}"></label>`;
 }
 
-function dateField(label, field, value, options = {}) {
-  if (options.picker) {
-    return financeDatePickerInput(label, field, value, {
-      attributes: `data-field="${esc(field)}"`,
-      month: String(value || "").slice(0, 7) || monthKey(new Date()),
-      required: false,
-    });
-  }
-  return `<label class="field"><span>${esc(label)}</span><input class="input" type="date" data-field="${field}" value="${esc(value || "")}"></label>`;
+function dateField(label, field, value) {
+  return financeDatePickerInput(label, field, value, {
+    attributes: `data-field="${esc(field)}"`,
+    month: String(value || "").slice(0, 7) || monthKey(new Date()),
+    required: false,
+  });
 }
 
-
-
-
-function selectField(label, field, value, options, fieldOptions = {}) {
-  if (fieldOptions.picker) {
-    const pickerOptions = [];
-    for (const key in options) {
-      if (Object.prototype.hasOwnProperty.call(options, key)) pickerOptions.push([key, options[key]]);
-    }
-    return financeSelectInput(label, field, pickerOptions, {
-      value,
-      attributes: `data-field="${esc(field)}"`,
-      allowEmpty: false,
-      required: true,
-    });
-  }
-  const disabled = fieldOptions.disabled === true ? 'disabled aria-disabled="true"' : "";
-  return `
-    <label class="field">
-      <span>${esc(label)}</span>
-      <select class="select" data-field="${field}" ${disabled}>
-        ${renderSelectOptions(options, value)}
-      </select>
-    </label>
-  `;
-}
-
-function relationField(label, field, value, items, nameField, options = {}) {
-  if (options.picker) {
-    const pickerOptions = [["", "없음"]];
-    for (const item of items) pickerOptions.push([item.id, item[nameField]]);
-    return financeSelectInput(label, field, pickerOptions, {
-      value,
-      attributes: `data-field="${esc(field)}"`,
-      allowEmpty: false,
-    });
-  }
-  const disabled = options.disabled === true ? 'disabled aria-disabled="true"' : "";
-  return `
-    <label class="field">
-      <span>${esc(label)}</span>
-      <select class="select" data-field="${field}" ${disabled}>
-        ${renderRelationOptions(items, value, nameField)}
-      </select>
-    </label>
-  `;
-}
-
-function renderSelectOptions(options, value) {
-  let html = "";
+function selectField(label, field, value, options) {
+  const pickerOptions = [];
   for (const key in options) {
-    if (!Object.prototype.hasOwnProperty.call(options, key)) continue;
-    html += `<option value="${esc(key)}" ${value === key ? "selected" : ""}>${esc(options[key])}</option>`;
+    if (Object.prototype.hasOwnProperty.call(options, key)) pickerOptions.push([key, options[key]]);
   }
-  return html;
+  return financeSelectInput(label, field, pickerOptions, {
+    value,
+    attributes: `data-field="${esc(field)}"`,
+    allowEmpty: false,
+    required: true,
+  });
 }
 
-function renderRelationOptions(items, value, nameField) {
-  let html = `<option value="">없음</option>`;
-  for (const item of items) {
-    html += `<option value="${item.id}" ${value === item.id ? "selected" : ""}>${esc(item[nameField])}</option>`;
-  }
-  return html;
+function relationField(label, field, value, items, nameField) {
+  const pickerOptions = [["", "없음"]];
+  for (const item of items) pickerOptions.push([item.id, item[nameField]]);
+  return financeSelectInput(label, field, pickerOptions, {
+    value,
+    attributes: `data-field="${esc(field)}"`,
+    allowEmpty: false,
+  });
 }
 
 function handleClick(event) {
@@ -9711,12 +9166,6 @@ function handleClick(event) {
   if (workspaceRetry) {
     event.preventDefault();
     handleResourceConnectionRestored();
-    return;
-  }
-  const financeLoanDistribute = event.target.closest("[data-finance-loan-distribute]");
-  if (financeLoanDistribute) {
-    event.preventDefault();
-    distributeFinanceLoanPrincipal(financeLoanDistribute);
     return;
   }
   const financeSelectTrigger = event.target.closest("[data-finance-select-trigger]");
@@ -10088,7 +9537,7 @@ function handleClick(event) {
   const viewControlChoice = event.target.closest("[data-view-control-choice]");
   if (viewControlChoice) {
     event.preventDefault();
-    chooseViewControlOption(viewControlChoice.dataset.viewControlChoice, viewControlChoice.dataset.controlField || "", viewControlChoice.dataset.controlValue || "");
+    updateViewControl(viewControlChoice.dataset.viewControlChoice, viewControlChoice.dataset.controlField || "", viewControlChoice.dataset.controlValue || "");
     return;
   }
 
@@ -10881,14 +10330,6 @@ function handleSubmit(event) {
     submitFinanceCardInstallment(form);
     return;
   }
-  if (form.dataset.form === "finance-loan-plan") {
-    submitFinanceLoanPlan(form);
-    return;
-  }
-  if (form.dataset.form === "finance-loan-payment") {
-    submitFinanceLoanPayment(form);
-    return;
-  }
   if (form.dataset.form === "finance-fixed-cost-payment") {
     submitFinanceFixedCostPayment(form);
     return;
@@ -10916,7 +10357,7 @@ function handleSubmit(event) {
     state.captures.push({
       id: id(),
       title,
-      url: extractUrl(title),
+      url: title.match(/https?:\/\/\S+/)?.[0] || "",
       status: "inbox",
       convertedTo: "",
       convertedId: "",
@@ -10931,19 +10372,6 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
-  const financeLoanManualAmount = event.target.closest(
-    'form[data-form="finance-loan"] [name="schedulePrincipalKrw"], '
-    + 'form[data-form="finance-loan"] [name="scheduleInterestKrw"]',
-  );
-  if (financeLoanManualAmount) {
-    updateFinanceManualLoanSchedule(financeLoanManualAmount.form);
-    return;
-  }
-  const financeLoanScheduleField = financeLoanScheduleInput(event.target);
-  if (financeLoanScheduleField) {
-    syncFinanceLoanSchedule(financeLoanScheduleField.form);
-    return;
-  }
   const todayBatchInput = event.target.closest("[data-today-batch-input]");
   if (todayBatchInput && ui.todayBatch?.phase === "input") {
     ui.todayBatch.draft = todayBatchInput.value;
@@ -11002,16 +10430,6 @@ function handleInput(event) {
 }
 
 function handleChange(event) {
-  const financeLoanMode = event.target.closest("[data-finance-loan-mode]");
-  if (financeLoanMode) {
-    syncFinanceLoanSchedule(financeLoanMode.form);
-    return;
-  }
-  const financeLoanScheduleField = financeLoanScheduleInput(event.target);
-  if (financeLoanScheduleField) {
-    syncFinanceLoanSchedule(financeLoanScheduleField.form);
-    return;
-  }
   const financePaymentType = event.target.closest("[data-finance-payment-type]");
   if (financePaymentType) {
     syncFinancePaymentMethodFields(financePaymentType.closest("form"));
@@ -11021,17 +10439,15 @@ function handleChange(event) {
   if (financeMonth) {
     if (/^\d{4}-(?:0[1-9]|1[0-2])$/.test(financeMonth.value)) financeWorkspace.month = financeMonth.value;
     if (ui.view === "finance") renderView({ soft: true, transition: true });
-    requestAnimationFrame(() => els.viewRoot.querySelector("[data-finance-month]")?.focus());
+    requestAnimationFrame(() => els.viewRoot
+      .querySelector("[data-finance-month]")
+      ?.closest("[data-finance-select]")
+      ?.querySelector("[data-finance-select-trigger]")
+      ?.focus({ preventScroll: true }));
     return;
   }
 
 
-
-  const viewControlField = event.target.closest("[data-view-control-field]");
-  if (viewControlField) {
-    updateViewControl(viewControlField.dataset.viewControlField, viewControlField.dataset.controlField || "", viewControlField.value);
-    return;
-  }
 
   const calendarSource = event.target.closest("[data-calendar-source]");
   if (calendarSource) {
@@ -12152,7 +11568,7 @@ function cancelEditorMarqueeDrag(event) {
   if (event && ui.editorMarquee.pointerId !== pointerId) return;
   const wasActive = ui.editorMarquee.active === true;
   stopDragAutoScroll("marquee");
-  removeEditorMarqueeElement();
+  document.querySelector(".editor-marquee")?.remove();
   ui.editorMarquee = null;
   if (wasActive) {
     clearBlockSelection();
@@ -12174,14 +11590,6 @@ function stopDragAutoScroll(mode = "") {
   cancelAnimationFrame(ui.dragAutoScroll.frame);
   ui.dragAutoScroll = null;
 }
-
-
-
-
-function removeEditorMarqueeElement() {
-  document.querySelector(".editor-marquee")?.remove();
-}
-
 
 
 
@@ -18923,7 +18331,7 @@ function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType
   saveState();
   renderEditorMutation(ownerType, ownerId);
   if (start === end) {
-    focusBlockContentAfterInlineMarkdown(block.id, start);
+    focusBlockContentAfterRender(block.id, { range: { start, end: start } });
   } else {
     focusBlockContentAfterRender(block.id, { range: { start, end } });
   }
@@ -18956,10 +18364,6 @@ function inlineMarksForContentUpdate(block, blockContent, rawText) {
     return normalizeInlineMarks(rawText, previousMarks);
   }
   return inlineMarksFromContent(blockContent, rawText);
-}
-
-function focusBlockContentAfterInlineMarkdown(blockId, offset) {
-  return focusBlockContentAfterRender(blockId, { range: { start: offset, end: offset } });
 }
 
 function insertParagraphAfterDividerShortcut(item, block) {
@@ -21974,7 +21378,6 @@ async function initializeLocalResourcePersistence(options = {}) {
       localState.revision = normalizedWorkspaceRevision(local.snapshot.baseRevision, localState.revision);
       state = localState;
       databaseBackendStatus.revision = localState.revision;
-      localStateHadStoredState = true;
       localStateChangedBeforeDatabaseReady = local.operations.length > 0;
       rerenderAfterStateReplace();
     }
@@ -22022,7 +21425,6 @@ async function applyLocalResourceFallback(local = null) {
   state = normalizeState(cloneForLocalPersistence(fallback.snapshot.state));
   state.revision = normalizedWorkspaceRevision(fallback.snapshot.baseRevision, state.revision);
   databaseBackendStatus.revision = state.revision;
-  localStateHadStoredState = true;
   localStateChangedBeforeDatabaseReady = fallback.operations?.length > 0;
 ;
   rerenderAfterStateReplace();
@@ -22316,8 +21718,6 @@ async function persistCommittedLocalResourceState(revision, options = {}) {
   localResourcePersistence.snapshot = snapshot;
   if (options.clearOperations !== false) localResourcePersistence.operations = [];
   localResourcePersistence.pending = localResourcePersistence.operations.length > 0;
-  localResourcePersistence.conflictRemoteState = null;
-  localResourcePersistence.conflictResourceId = "";
   dirtyResourceIds.clear();
   pendingResourceOperationGroups = [];
   localWorkspaceOperationRequired = false;
@@ -22359,8 +21759,6 @@ async function resetLocalWorkspacePersistenceToRemote(workspaceId, revision) {
     localResourcePersistence.operations = [];
     localResourcePersistence.pending = newerDraftExists;
     localResourcePersistence.error = "";
-    localResourcePersistence.conflictRemoteState = null;
-    localResourcePersistence.conflictResourceId = "";
     if (!newerDraftExists) {
       dirtyResourceIds.clear();
       pendingResourceOperationGroups = [];
@@ -22488,7 +21886,7 @@ function handleRemoteStateWakeRefresh() {
     return;
   }
   if (ui.view === "finance" && !checkFinanceSessionExpiry()) revalidateFinanceSession();
-  checkForServiceWorkerUpdate();
+  activeServiceWorkerRegistration?.update().catch(() => {});
   connectRemoteStateEvents();
   refreshRemoteStateIfNewer();
 }
@@ -23137,11 +22535,9 @@ async function saveStateRemoteNow(options = {}) {
         await reloadRemoteStateAfterConflict({ force: true, silent: true });
         return null;
       }
-      localResourcePersistence.conflictResourceId = operation?.entityId || "";
       await markLocalResourceOperations("conflict", {
         remoteRevision: normalizedWorkspaceRevision(error.revision, baseRevision),
       });
-      await loadRemoteResourceConflictPreview();
     } else if (terminalFailure && operation && !localOperationWasSuperseded(operation)) {
       await markLocalResourceOperation(operation, "failed", { lastError });
     } else {
@@ -23218,9 +22614,7 @@ async function saveQueuedResourceOperations(options = {}) {
           : terminalFailure ? null : databaseBackendStatus.conflict,
       };
       if (terminalConflict) {
-        localResourcePersistence.conflictResourceId = operation.entityId;
         await markLocalResourceOperations("conflict", { remoteRevision });
-        await loadRemoteResourceConflictPreview();
       } else if (terminalFailure && !localOperationWasSuperseded(operation)) {
         await markLocalResourceOperation(operation, "failed", { lastError });
       } else {
@@ -23284,28 +22678,9 @@ async function commitLocalResourceOperationSuccess(operation, outgoingResource, 
   localResourcePersistence.operations = remaining;
   localResourcePersistence.snapshot = snapshot;
   localResourcePersistence.pending = remaining.length > 0;
-  localResourcePersistence.conflictRemoteState = null;
-  localResourcePersistence.conflictResourceId = "";
 ;
   renderServiceWorkerUpdateNoticeIfNeeded();
 }
-
-async function loadRemoteResourceConflictPreview() {
-  if (!databaseBackendStatus.conflict) return null;
-  try {
-    const payload = await apiJson("/api/state");
-    if (!payload.state) return null;
-    const remoteState = normalizeState(payload.state);
-    remoteState.revision = workspaceRevisionFromPayload(payload, databaseBackendStatus.conflict.remoteRevision);
-    localResourcePersistence.conflictRemoteState = remoteState;
-;
-    return remoteState;
-  } catch {
-    return null;
-  }
-}
-
-
 
 async function reloadRemoteStateAfterConflict(options = {}) {
   if (!databaseBackendStatus.connected || (!databaseBackendStatus.conflict && options.force !== true) || databaseBackendStatus.loading) return false;
@@ -24560,10 +23935,6 @@ function monthLabel(date) {
   return KOREAN_MONTH_FORMATTER.format(date);
 }
 
-function monthLabelEnglish(date) {
-  return ENGLISH_MONTH_FORMATTER.format(date);
-}
-
 function monthGridDays(date) {
   const first = new Date(date.getFullYear(), date.getMonth(), 1);
   const start = startOfWeek(first);
@@ -24778,10 +24149,6 @@ function normalizeGoogleApiEvents(entries = []) {
     if (normalized) events.push(normalized);
   }
   return events;
-}
-
-function extractUrl(text) {
-  return text.match(/https?:\/\/\S+/)?.[0] || "";
 }
 
 function esc(value = "") {

@@ -10,7 +10,7 @@ test.beforeEach(async ({ page, request }) => {
 });
 
 async function createAccount(page, request, { name = "생활비 통장", balance = "5000000" } = {}) {
-  await page.locator('.finance-tabs [data-finance-tab="manage"]').click();
+  await page.locator('.finance-tabs [data-finance-tab="accounts"]').click();
   const form = page.locator('form[data-form="finance-account"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
@@ -24,6 +24,7 @@ async function createAccount(page, request, { name = "생활비 통장", balance
 
 async function createCreditCard(page, request, { name = "생활 신용카드", dueDay = "14" } = {}) {
   const accountId = (await fixtureSnapshot(request)).financeState.accounts[0].id;
+  await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
   const form = page.locator('form[data-form="finance-payment-method"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
@@ -60,6 +61,7 @@ test("management items edit, fixed costs generate once, and asset-only loans del
     return { id: card.id, name: card.name, dueDay: card.dueDay };
   }).toEqual({ id: cardId, name: "수정한 생활 신용카드", dueDay: 17 });
 
+  await page.locator('.finance-tabs [data-finance-tab="accounts"]').click();
   const loanForm = page.locator('form[data-form="finance-loan"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
@@ -86,6 +88,7 @@ test("management items edit, fixed costs generate once, and asset-only loans del
       month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
     };
   });
+  await page.locator('.finance-tabs [data-finance-tab="fixed"]').click();
   const fixedForm = page.locator('form[data-form="finance-recurring-rule"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
@@ -114,7 +117,7 @@ test("management items edit, fixed costs generate once, and asset-only loans del
     return state.entries.filter((entry) => entry.recurringRuleId === rule.id && entry.periodKey === today.month).length;
   }).toBe(1);
 
-  await page.locator('.finance-tabs [data-finance-tab="schedule"]').click();
+  await page.locator('.finance-tabs [data-finance-tab="fixed"]').click();
   const paymentForm = page.locator('form[data-form="finance-fixed-cost-payment"]').first();
   await paymentForm.locator("xpath=..").locator("summary").click();
   await paymentForm.getByRole("button", { name: "실제 출금 확인" }).click();
@@ -125,7 +128,7 @@ test("management items edit, fixed costs generate once, and asset-only loans del
     return movement && { kind: movement.kind, fromAccountId: movement.fromAccountId, amountKrw: movement.amountKrw };
   }).toEqual({ kind: "external", fromAccountId: accountId, amountKrw: 600_000 });
 
-  await page.locator('.finance-tabs [data-finance-tab="manage"]').click();
+  await page.locator('.finance-tabs [data-finance-tab="accounts"]').click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.locator(`[data-finance-loan="${loan.id}"] [data-finance-delete-loan]`).click();
   await expect.poll(async () => (await fixtureSnapshot(request)).financeState.loans.length).toBe(0);
@@ -337,22 +340,62 @@ test("statistics calendar follows occurrence dates and keeps finance headings co
 
   await page.reload();
   await expect(page.locator('[data-finance-screen="dashboard"]')).toBeVisible();
-  const monthInput = page.locator("[data-finance-month]");
-  await monthInput.fill("2026-07");
-  await monthInput.dispatchEvent("change");
+  const monthPicker = page.locator(".finance-month-control [data-finance-select]");
+  const monthLabel = monthPicker.locator("[data-finance-select-value]");
+  await monthPicker.locator("[data-finance-select-trigger]").click();
+  await monthPicker.locator('[data-finance-select-option="2026-07"]').click();
+  await expect(monthLabel).toHaveText("2026년 7월");
 
-  for (const [tab, title] of [
-    ["entries", "수입·지출"],
-    ["schedule", "결제 예정"],
+  const tabContract = [
+    ["overview", "대시보드"],
+    ["entries", "수입 지출 관리"],
+    ["accounts", "계좌"],
     ["cards", "신용카드"],
-    ["manage", "관리"],
+    ["fixed", "고정비"],
     ["stats", "통계"],
-  ]) {
+  ];
+  const tabs = page.locator(".finance-tabs [data-finance-tab]");
+  await expect(tabs).toHaveCount(6);
+  await expect(tabs).toHaveText(tabContract.map(([, label]) => label));
+  expect(await tabs.evaluateAll((items) => items.map((item) => item.dataset.financeTab))).toEqual(tabContract.map(([key]) => key));
+  await expect(page.locator('.finance-tabs [data-finance-tab="schedule"], .finance-tabs [data-finance-tab="manage"]')).toHaveCount(0);
+
+  for (const [tab] of tabContract) {
     await page.locator(`.finance-tabs [data-finance-tab="${tab}"]`).click();
-    await expect(page.locator(".finance-section-heading h2").first()).toHaveText(title);
+    await expect(page.locator("[data-finance-tab-panel]")).toHaveAttribute("data-finance-tab-panel", tab);
   }
+  await expect(page.locator("[data-finance-tab-panel]")).not.toHaveClass(/is-entering/);
 
   const calendar = page.locator("[data-finance-consumption-calendar]");
+  const basisGrid = page.locator(".finance-basis-grid");
+  const [calendarBox, basisGridBox] = await Promise.all([calendar.boundingBox(), basisGrid.boundingBox()]);
+  expect(calendarBox).not.toBeNull();
+  expect(basisGridBox).not.toBeNull();
+  expect(calendarBox.x).toBeLessThan(basisGridBox.x);
+  expect(calendarBox.x + calendarBox.width).toBeGreaterThan(basisGridBox.x + basisGridBox.width);
+
+  await calendar.hover();
+  await page.waitForTimeout(300);
+  const calendarHoverBox = await calendar.boundingBox();
+  expect(calendarHoverBox).not.toBeNull();
+  expect(Math.abs(calendarHoverBox.x - calendarBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(calendarHoverBox.width - calendarBox.width)).toBeLessThanOrEqual(1);
+
+  const basisCard = page.locator(".finance-basis-card").first();
+  await basisCard.scrollIntoViewIfNeeded();
+  await page.mouse.move(1, 1);
+  await page.waitForTimeout(300);
+  const basisCardBox = await basisCard.boundingBox();
+  expect(basisCardBox).not.toBeNull();
+  await basisCard.hover();
+  await expect.poll(async () => {
+    const hovered = await basisCard.boundingBox();
+    return hovered && {
+      expandsLeft: hovered.x < basisCardBox.x - 1,
+      expandsRight: hovered.x + hovered.width > basisCardBox.x + basisCardBox.width + 1,
+    };
+  }).toEqual({ expandsLeft: true, expandsRight: true });
+
   await expect(calendar.locator('[data-finance-consumption-date="2026-07-04"] [data-finance-consumption-entry="entry-expense-calendar"]')).toContainText("식비");
   const refundEntry = calendar.locator('[data-finance-consumption-date="2026-07-05"] [data-finance-consumption-entry="entry-refund-calendar"]');
   await expect(refundEntry).toContainText("환불");
@@ -368,7 +411,7 @@ test("statistics calendar follows occurrence dates and keeps finance headings co
   await expect(calendar.locator("[data-finance-consumption-entry]")).toHaveCount(4);
 
   await calendar.locator('[data-finance-month-shift="1"]').click();
-  await expect(monthInput).toHaveValue("2026-08");
+  await expect(monthLabel).toHaveText("2026년 8월");
   const augustCalendar = page.locator("[data-finance-consumption-calendar]");
   await expect(augustCalendar.locator('[data-finance-consumption-entry="entry-boundary-calendar"]')).toHaveCount(0);
   const shortDay = augustCalendar.locator('[data-finance-consumption-date="2026-08-01"]');
@@ -376,6 +419,6 @@ test("statistics calendar follows occurrence dates and keeps finance headings co
   await expect(shortDay.locator('[data-finance-consumption-entry="entry-short-calendar"]')).toContainText("물");
 
   await augustCalendar.locator('[data-finance-month-shift="-1"]').click();
-  await expect(monthInput).toHaveValue("2026-07");
+  await expect(monthLabel).toHaveText("2026년 7월");
   await expect(page.locator('[data-finance-consumption-entry="entry-expense-calendar"]')).toContainText("식비");
 });

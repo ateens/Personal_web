@@ -21,7 +21,6 @@ import { createStorage } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const sourceStaticRoot = resolve(root);
-const assetProxyPrefix = "/_sygma/assets/";
 const sourceStaticFiles = new Set([
   "/app.js",
   "/finance-model.js",
@@ -623,11 +622,9 @@ function validTimedOAuthPayload(value, audience, maxTtlSeconds) {
   return validReturnTo(value.returnTo);
 }
 
-async function createGoogleOAuthState(returnTo, subject = "") {
+async function createGoogleOAuthState(returnTo) {
   const issuedAt = Math.floor(Date.now() / 1_000);
-  const normalizedSubject = /^[A-Za-z0-9_-]{43}$/.test(subject)
-    ? subject
-    : createHmac("sha256", googleClientSecret).update("sygma-google-oauth-local-user-v1", "utf8").digest("base64url");
+  const subject = createHmac("sha256", googleClientSecret).update("sygma-google-oauth-local-user-v1", "utf8").digest("base64url");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const nonce = randomBytes(24).toString("base64url");
     const payload = {
@@ -636,13 +633,13 @@ async function createGoogleOAuthState(returnTo, subject = "") {
       iat: issuedAt,
       exp: issuedAt + GOOGLE_OAUTH_STATE_TTL_SECONDS,
       nonce,
-      sub: normalizedSubject,
+      sub: subject,
       returnTo,
     };
     const claimed = await storage.claimOAuthTransaction(
       "google_oauth_state",
       nonce,
-      { version: 1, returnTo, subject: normalizedSubject },
+      { version: 1, returnTo, subject },
       new Date(payload.exp * 1_000),
     );
     if (!claimed) continue;
@@ -1576,7 +1573,7 @@ async function handleGoogleStatus(response) {
 }
 
 async function handleStateEvents(request, response) {
-  await storage.stateStatus();
+  const current = await storage.stateStatus();
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-store, no-transform",
@@ -1599,7 +1596,6 @@ async function handleStateEvents(request, response) {
   response.once("close", cleanup);
   response.once("error", cleanup);
 
-  const current = await storage.stateStatus();
   latestStateEventRevision = Math.max(latestStateEventRevision, current.revision);
   writeStateEvent(response, current.revision, current.updatedAt);
 }
@@ -1722,14 +1718,12 @@ async function handleFinanceSession(request, response) {
   });
 }
 
-async function handleFinanceStateRead(request, response) {
-  requireFinanceSession(request);
+async function handleFinanceStateRead(response) {
   const payload = await storage.readFinanceState();
   sendJson(response, 200, payload, financeStateRevisionHeaders(payload.revision));
 }
 
 async function handleFinanceStateWrite(request, response) {
-  requireFinanceSession(request);
   const body = await readJsonBody(request, FINANCE_BODY_LIMIT);
   if (!isPlainObject(body.state)) throw apiError(400, "FINANCE_STATE_REQUIRED", "Finance state object is required.");
   const issues = validateFinanceState(body.state);
@@ -2083,7 +2077,7 @@ async function handleApiRequest(request, response, requestUrl) {
       return true;
     }
     if (request.method === "GET" && requestUrl.pathname === "/api/finance/state") {
-      await handleFinanceStateRead(request, response);
+      await handleFinanceStateRead(response);
       return true;
     }
     if (request.method === "PUT" && requestUrl.pathname === "/api/finance/state") {
@@ -2134,11 +2128,7 @@ function resolveRequestPath(url) {
   } catch {
     return "";
   }
-  const requested = decoded === "/"
-    ? "/index.html"
-    : decoded.startsWith(assetProxyPrefix)
-      ? `/assets/${decoded.slice(assetProxyPrefix.length)}`
-      : decoded;
+  const requested = decoded === "/" ? "/index.html" : decoded;
   const normalizedRequest = normalize(requested).replaceAll("\\", "/");
   if (staticRoot === sourceStaticRoot && !sourceStaticFiles.has(normalizedRequest) && !normalizedRequest.startsWith("/icons/")) return "";
   const absolute = resolve(join(staticRoot, normalizedRequest));
@@ -2166,7 +2156,7 @@ function isSpaNavigationRequest(request, requestUrl) {
   if (hasForbiddenRequestPath(request.url || "/")) return false;
   const pathname = requestUrl.pathname;
   if (pathname === "/api" || pathname.startsWith("/api/") || pathname === "/health") return false;
-  if (pathname.startsWith(assetProxyPrefix) || pathname.startsWith("/assets/") || pathname.startsWith("/icons/") || pathname.startsWith("/.")) return false;
+  if (pathname.startsWith("/assets/") || pathname.startsWith("/icons/") || pathname.startsWith("/.")) return false;
   if (extname(pathname)) return false;
   return true;
 }
@@ -2197,7 +2187,7 @@ async function compressedStaticFile(filePath, fileStat, encoding) {
   return compressed;
 }
 
-async function sendFile(request, response, requestUrl, filePath) {
+async function sendFile(request, response, filePath) {
   const fileStat = await stat(filePath);
   if (!fileStat.isFile()) throw new Error("Not a file");
   const extension = extname(filePath);
@@ -2277,7 +2267,7 @@ async function handleRequest(request, response) {
   if (!filePath) {
     if (spaNavigation) {
       try {
-        await sendFile(request, response, requestUrl, indexPath);
+        await sendFile(request, response, indexPath);
       } catch {
         response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
         response.end("Not found");
@@ -2290,11 +2280,11 @@ async function handleRequest(request, response) {
   }
 
   try {
-    await sendFile(request, response, requestUrl, filePath);
+    await sendFile(request, response, filePath);
   } catch {
     if (spaNavigation && filePath !== indexPath) {
       try {
-        await sendFile(request, response, requestUrl, indexPath);
+        await sendFile(request, response, indexPath);
         return;
       } catch {}
     }

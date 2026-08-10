@@ -6,7 +6,7 @@ private let widgetKind = "SYGMAFourWeekCalendar"
 private let todayWidgetKind = "SYGMATodayTasks"
 private let stateURL = URL(string: "https://personalweb-production-81a6.up.railway.app/api/state")!
 
-private struct CalendarItem: Codable, Identifiable {
+private struct CalendarItem {
     let id: String
     let title: String
     let startDate: String
@@ -20,7 +20,7 @@ private struct CalendarTimelineEntry: TimelineEntry {
     let items: [CalendarItem]
 }
 
-private struct TodayTaskItem: Identifiable {
+private struct TodayTaskItem {
     let id: String
     let title: String
     let isCompleted: Bool
@@ -37,7 +37,7 @@ private struct WidgetStateSnapshot {
     let revision: Int
 }
 
-struct CalendarProjectEntity: AppEntity, Hashable {
+struct CalendarProjectEntity: AppEntity {
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "프로젝트"
     static let defaultQuery = CalendarProjectQuery()
 
@@ -92,7 +92,7 @@ struct CalendarWidgetConfigurationIntent: WidgetConfigurationIntent {
 private enum WidgetStateError: Error {
     case invalidResponse
     case taskNotFound
-    case server(Int)
+    case server
 }
 
 private struct OptimisticTaskOverride: Codable {
@@ -189,7 +189,7 @@ private enum WidgetStateClient {
             }
             if (200..<300).contains(response.statusCode) { return }
             if response.statusCode == 409, attempt == 0 { continue }
-            throw WidgetStateError.server(response.statusCode)
+            throw WidgetStateError.server
         }
     }
 
@@ -354,7 +354,7 @@ struct SYGMAFourWeekCalendarWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: widgetKind, intent: CalendarWidgetConfigurationIntent.self, provider: CalendarProvider()) { entry in
             FourWeekCalendarView(entry: entry)
-                .containerBackground(Color(red: 0.97, green: 0.975, blue: 0.985), for: .widget)
+                .containerBackground(Palette.canvas, for: .widget)
         }
         .configurationDisplayName("4주 캘린더")
         .description("현재 주부터 4주간의 일정을 한눈에 봅니다.")
@@ -432,7 +432,7 @@ struct SYGMATodayTasksWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: todayWidgetKind, provider: TodayTasksProvider()) { entry in
             TodayTasksWidgetView(entry: entry)
-                .containerBackground(Color(red: 0.97, green: 0.975, blue: 0.985), for: .widget)
+                .containerBackground(Palette.canvas, for: .widget)
         }
         .configurationDisplayName("오늘 할 일")
         .description("오늘 할 일을 확인하고 위젯에서 바로 완료하거나 해제합니다.")
@@ -735,6 +735,7 @@ private struct WeekSegment: Identifiable {
 }
 
 private enum Palette {
+    static let canvas = Color(red: 247 / 255, green: 248 / 255, blue: 251 / 255)
     static let ink = Color(red: 23 / 255, green: 32 / 255, blue: 47 / 255)
     static let muted = Color(red: 105 / 255, green: 115 / 255, blue: 134 / 255)
     static let blue = Color(red: 37 / 255, green: 99 / 255, blue: 235 / 255)

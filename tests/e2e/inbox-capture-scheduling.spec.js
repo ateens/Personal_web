@@ -23,7 +23,7 @@ test("Inbox dates persist and Task drag placement commits immediately", async ({
 
   const taskCapture = page.locator('[data-select-id="capture-task-date"]');
   await taskCapture.locator('[data-convert="tasks"]').click();
-  await completeCaptureRelations(taskCapture, 3);
+  await completeCaptureRelations(taskCapture, 2);
   await expect(taskCapture.locator('[data-capture-date-picker="capture-task-date"]')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   const mobileDay = taskCapture.locator(".task-scheduler-day:not(.is-outside)").first();
@@ -87,6 +87,7 @@ test("Inbox dates persist and Task drag placement commits immediately", async ({
   await page.mouse.move(end.x, end.y, { steps: 6 });
   await expect(target).toHaveClass(/is-drop-target/);
   await page.mouse.up();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
 
   const immediate = await page.evaluate(({ id, today }) => {
     const task = itemById("tasks", id);

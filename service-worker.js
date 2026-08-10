@@ -1,10 +1,10 @@
-const CACHE_NAME = "sygma-personal-web-v645-workspace";
+const CACHE_NAME = "sygma-personal-web-v646-shell-cleanup";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
-  "/styles.css?v=20260724-finance-controls",
-  "/finance-model.js?v=20260724-finance-sygma",
-  "/app.js?v=20260724-finance-controls",
+  "/styles.css",
+  "/finance-model.js",
+  "/app.js",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 
@@ -86,7 +86,6 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  const immutableAsset = url.pathname.startsWith("/_sygma/assets/")
-    || /^\/assets\/[^/]+\.[a-f0-9]{10,}\./.test(url.pathname);
+  const immutableAsset = /^\/assets\/[^/]+\.[a-f0-9]{10,}\./.test(url.pathname);
   event.respondWith(immutableAsset ? cacheFirst(event.request) : networkFirst(event.request));
 });

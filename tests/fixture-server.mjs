@@ -50,10 +50,8 @@ const sourceFiles = new Map([
 let state = createFixtureState();
 let writes = [];
 let writeAttempts = [];
-let externalWrites = [];
 let serverRevision = 1;
 let resetGeneration = 1;
-let serviceWorkerVersion = 1;
 let financeState = null;
 let financeRevision = 0;
 let financeWrites = [];
@@ -404,50 +402,12 @@ const server = createServer(async (request, response) => {
       state = createFixtureState();
       writes = [];
       writeAttempts = [];
-      externalWrites = [];
       serverRevision = 1;
       resetGeneration += 1;
-      serviceWorkerVersion = 1;
       financeState = null;
       financeRevision = 0;
       financeWrites = [];
       sendJson(response, 200, { ok: true, appStateId: FIXTURE_IDS.appState, resetGeneration });
-      return;
-    }
-    if (request.method === "POST" && path === "/__e2e__/service-worker-version") {
-      if (request.headers["x-e2e-reset-token"] !== resetToken) {
-        sendJson(response, 403, { error: "Invalid fixture reset token." });
-        return;
-      }
-      serviceWorkerVersion += 1;
-      sendJson(response, 200, { ok: true, version: serviceWorkerVersion });
-      return;
-    }
-    if (request.method === "POST" && path === "/__e2e__/external-write") {
-      if (request.headers["x-e2e-reset-token"] !== resetToken) {
-        sendJson(response, 403, { error: "Invalid fixture reset token." });
-        return;
-      }
-      const body = await readJsonBody(request);
-      const resourceId = typeof body.resourceId === "string" && body.resourceId ? body.resourceId : FIXTURE_IDS.resource;
-      const nextTitle = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Remote concurrent edit";
-      const nextState = structuredClone(state);
-      const resource = (nextState.resources || []).find((entry) => entry.id === resourceId);
-      if (!resource) {
-        sendJson(response, 404, { error: "Fixture Resource not found." });
-        return;
-      }
-      serverRevision += 1;
-      const updatedAt = new Date(Date.parse(nextState.updatedAt || "") + 1000 || Date.now()).toISOString();
-      resource.title = nextTitle;
-      resource.updatedAt = updatedAt;
-      resource.revision = Number(resource.revision || 0) + 1;
-      nextState.updatedAt = updatedAt;
-      nextState.revision = serverRevision;
-      state = nextState;
-      externalWrites.push({ serverRevision, resourceId: resource.id, title: nextTitle });
-      broadcastStateEvent();
-      sendJson(response, 200, { ok: true, revision: serverRevision, title: nextTitle }, stateRevisionHeaders("external"));
       return;
     }
     if (request.method === "GET" && path === "/__e2e__/state") {
@@ -460,8 +420,6 @@ const server = createServer(async (request, response) => {
         resetGeneration,
         writes: structuredClone(writes),
         writeAttempts: structuredClone(writeAttempts),
-        externalWrites: structuredClone(externalWrites),
-        serviceWorkerVersion,
         financeState: structuredClone(financeState),
         financeRevision,
         financeWrites: structuredClone(financeWrites),
@@ -977,8 +935,7 @@ async function sendSourceFile(request, response, relativePath, contentType) {
 }
 
 async function sendServiceWorker(request, response) {
-  const source = await readFile(resolve(root, "service-worker.js"), "utf8");
-  const body = Buffer.from(`${source}\n// fixture-service-worker-version:${serviceWorkerVersion}\n`);
+  const body = await readFile(resolve(root, "service-worker.js"));
   response.writeHead(200, {
     ...guardHeaders,
     "Content-Type": "text/javascript; charset=utf-8",
