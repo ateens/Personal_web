@@ -127,7 +127,7 @@ const VIEW_FILTER_OPTIONS = {
   today: [["all", "전체"], ["active", "진행"], ["overdue", "지연"], ["done", "완료"]],
   inbox: [["all", "전체"], ["inbox", "미분류"], ["processed", "처리됨"]],
   tasks: [["all", "전체"], ["unplanned", "미계획"], ["today", "오늘"], ["tomorrow", "내일"], ["scheduled", "예정"], ["overdue", "지연"], ["done", "완료"]],
-  projects: [["all", "전체"], ["active", "진행"], ["planned", "계획"], ["closed", "완료/중단"]],
+  projects: [["all", "전체"], ["planned", "예정"], ["active", "진행"], ["completed", "완료"], ["paused", "중단"]],
   boxes: [["all", "전체"], ["pinned", "고정"], ["normal", "일반"], ["archived", "아카이브"]],
   resources: [["all", "전체"], ["active", "활성"], ["important", "중요"], ["pinned", "고정"], ["readLater", "나중에 보기"], ["linked", "연결됨"], ["archived", "아카이브"], ["trash", "휴지통"]],
   habits: [["all", "전체"], ["active", "활성"], ["paused", "중단"], ["archived", "보관"], ["daily", "매일"], ["weekly", "주간"]],
@@ -422,13 +422,10 @@ const STATUSES = {
     canceled: "중단",
   },
   project: {
-    unplanned: "계획 전",
-    planned: "계획",
-    active: "진행중",
-    focus: "집중",
-    paused: "중단",
+    planned: "예정",
+    active: "진행",
     completed: "완료",
-    canceled: "취소",
+    paused: "중단",
   },
 };
 
@@ -1618,7 +1615,7 @@ function renderToday() {
         ${renderMetric("오늘 할 일", activeTodayTasks.length, "예정/날짜")}
         ${renderMetric("완료", doneToday.length, "오늘 체크")}
         ${renderMetric("지연", overdue.length, "재배치")}
-        ${renderMetric("진행 프로젝트", activeProjectCount, "active/focus")}
+        ${renderMetric("진행 프로젝트", activeProjectCount, "진행 상태")}
       </div>
       <div class="grid cols-2 today-dashboard-grid">
         <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
@@ -1715,9 +1712,10 @@ function renderProjects() {
       ${renderViewControls("projects", { count: projects.length, total: state.projects.length })}
       ${renderProjectCalendarPanel()}
       <div class="project-board">
-        ${renderProjectSection("진행중", projectBuckets.active, "움직이는 프로젝트", statsByProjectId)}
-        ${renderProjectSection("계획", projectBuckets.planned, "준비 중인 프로젝트", statsByProjectId)}
-        ${renderProjectSection("완료/중단", projectBuckets.closed, "닫힌 프로젝트", statsByProjectId)}
+        ${renderProjectSection("예정", projectBuckets.planned, "시작을 기다리는 프로젝트", statsByProjectId)}
+        ${renderProjectSection("진행", projectBuckets.active, "움직이는 프로젝트", statsByProjectId)}
+        ${renderProjectSection("완료", projectBuckets.completed, "마친 프로젝트", statsByProjectId)}
+        ${renderProjectSection("중단", projectBuckets.paused, "멈춘 프로젝트", statsByProjectId)}
       </div>
     </section>
   `;
@@ -3371,13 +3369,13 @@ function financeDateInput(label, name, value, options = {}) {
 
 function financeDatePickerInput(label, name, value, options = {}) {
   const selectedValue = String(value || "");
-  const month = selectedValue.slice(0, 7) || financeWorkspace.month || monthKey(new Date());
+  const month = selectedValue.slice(0, 7) || options.month || financeWorkspace.month || monthKey(new Date());
   const required = options.required ?? !options.hint;
   return `
     <div class="field">
       <span>${esc(label)}</span>
       <div class="finance-date-picker" data-finance-date-picker data-finance-date-month="${esc(month)}" data-finance-field-label="${esc(label)}">
-        <input class="finance-date-native" type="date" name="${esc(name)}" value="${esc(selectedValue)}" ${required ? "required" : ""} tabindex="-1" aria-hidden="true">
+        <input class="finance-date-native" type="date" name="${esc(name)}" value="${esc(selectedValue)}" ${required ? "required" : ""} ${options.attributes || ""} tabindex="-1" aria-hidden="true">
         <button class="finance-picker-trigger finance-date-trigger" type="button" data-finance-date-trigger aria-haspopup="dialog" aria-label="${esc(`${label}: ${financePickerDateLabel(selectedValue)}`)}">
           <time datetime="${esc(selectedValue)}" data-finance-date-value-label>${esc(financePickerDateLabel(selectedValue))}</time>
           <span aria-hidden="true">◷</span>
@@ -3449,7 +3447,7 @@ function financeSelectInput(label, name, options, fieldOptions = {}) {
       <span>${esc(label)}</span>
       <div class="finance-select" data-finance-select data-finance-field-label="${esc(label)}">
         <select class="finance-select-native" name="${esc(name)}" ${fieldOptions.required ? "required" : ""} ${fieldOptions.attributes || ""} tabindex="-1" aria-hidden="true">
-        <option value="">선택</option>
+          ${fieldOptions.allowEmpty === false ? "" : '<option value="">선택</option>'}
           ${options.map(([value, text]) => `<option value="${esc(value)}" ${String(value) === selectedValue ? "selected" : ""}>${esc(text)}</option>`).join("")}
         </select>
         <button
@@ -3459,7 +3457,6 @@ function financeSelectInput(label, name, options, fieldOptions = {}) {
           aria-haspopup="listbox"
           aria-expanded="false"
           aria-label="${esc(`${label}: ${selectedOption?.[1] || "선택"}`)}"
-          ${fieldOptions.required ? 'aria-required="true"' : ""}
         >
           <span data-finance-select-value>${esc(selectedOption?.[1] || "선택")}</span>
           <span aria-hidden="true">⌄</span>
@@ -4746,6 +4743,7 @@ function openFinanceSelect(control, focusTarget = "") {
   if (!trigger || !list || !options.length) return;
   list.hidden = false;
   control.classList.add("is-open");
+  placeFinanceSelectOptions(control, list);
   trigger.setAttribute("aria-expanded", "true");
   if (!focusTarget) return;
   const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
@@ -4754,11 +4752,23 @@ function openFinanceSelect(control, focusTarget = "") {
   target?.focus({ preventScroll: true });
 }
 
+function placeFinanceSelectOptions(control, list) {
+  const rect = control.getBoundingClientRect();
+  const viewportHeight = document.documentElement.clientHeight;
+  const above = Math.max(0, rect.top - 16);
+  const below = Math.max(0, viewportHeight - rect.bottom - 16);
+  const desired = Math.min(list.scrollHeight, 280, viewportHeight * 0.42);
+  const opensUp = below < desired && above > below;
+  control.classList.toggle("opens-up", opensUp);
+  control.style.setProperty("--finance-select-space", `${Math.floor(opensUp ? above : below)}px`);
+}
+
 function closeFinanceSelect(control, options = {}) {
   if (!(control instanceof HTMLElement)) return;
   const trigger = control.querySelector("[data-finance-select-trigger]");
   const list = control.querySelector("[data-finance-select-options]");
-  control.classList.remove("is-open");
+  control.classList.remove("is-open", "opens-up");
+  control.style.removeProperty("--finance-select-space");
   trigger?.setAttribute("aria-expanded", "false");
   if (list) list.hidden = true;
   if (options.focus) trigger?.focus({ preventScroll: true });
@@ -4768,6 +4778,21 @@ function closeFinanceSelects(except = null) {
   app.querySelectorAll("[data-finance-select].is-open").forEach((control) => {
     if (control !== except) closeFinanceSelect(control);
   });
+}
+
+function inlinePickerFieldSelector(input) {
+  const owner = input?.closest("[data-inline-owner-type][data-inline-owner-id]");
+  const field = input?.dataset.field || "";
+  if (!owner || !field) return "";
+  return `[data-inline-owner-type="${cssEscape(owner.dataset.inlineOwnerType)}"][data-inline-owner-id="${cssEscape(owner.dataset.inlineOwnerId)}"] [data-field="${cssEscape(field)}"]`;
+}
+
+function restoreInlinePickerFocus(fieldSelector, pickerSelector, triggerSelector, fallback) {
+  const replacement = fieldSelector
+    ? app.querySelector(fieldSelector)?.closest(pickerSelector)?.querySelector(triggerSelector)
+    : fallback;
+  if (replacement?.isConnected) replacement.focus({ preventScroll: true });
+  else focusViewDestination(ui.view);
 }
 
 function chooseFinanceSelectOption(option) {
@@ -4785,8 +4810,15 @@ function chooseFinanceSelectOption(option) {
   control.classList.remove("is-invalid");
   trigger.removeAttribute("aria-invalid");
   trigger.setAttribute("aria-label", `${control.dataset.financeFieldLabel || "선택"}: ${label || "선택"}`);
-  closeFinanceSelect(control, { focus: true });
+  const fieldSelector = inlinePickerFieldSelector(select);
+  closeFinanceSelect(control);
   select.dispatchEvent(new Event("change", { bubbles: true }));
+  requestAnimationFrame(() => restoreInlinePickerFocus(
+    fieldSelector,
+    "[data-finance-select]",
+    "[data-finance-select-trigger]",
+    trigger,
+  ));
 }
 
 function handleFinanceInvalid(event) {
@@ -4861,9 +4893,15 @@ function chooseFinanceDate(picker, value) {
   picker.classList.remove("is-invalid");
   trigger.removeAttribute("aria-invalid");
   trigger.setAttribute("aria-label", `${picker.dataset.financeFieldLabel || "날짜"}: ${financePickerDateLabel(value)}`);
-  input.dispatchEvent(new Event("change", { bubbles: true }));
+  const fieldSelector = inlinePickerFieldSelector(input);
   picker.querySelector("[data-finance-date-dialog]")?.close();
-  requestAnimationFrame(() => trigger.focus({ preventScroll: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  requestAnimationFrame(() => restoreInlinePickerFocus(
+    fieldSelector,
+    "[data-finance-date-picker]",
+    "[data-finance-date-trigger]",
+    trigger,
+  ));
 }
 
 function handleFinancePickerKeydown(event) {
@@ -6533,7 +6571,7 @@ function matchesControlledFilter(type, item, control, context = {}) {
 function matchesSingleControlledFilter(type, item, filter, context = {}) {
   if (type === "tasks") return matchesTaskFilter(item, filter, context);
   if (type === "captures") return item.status === filter;
-  if (type === "projects") return projectFilterKey(item) === filter || item.status === filter;
+  if (type === "projects") return item.status === filter;
   if (type === "boxes") return item.visibility === filter || (filter === "normal" && !item.visibility);
   if (type === "habits") return item.status === filter || item.cadence === filter;
   if (type === "journals") return matchesJournalFilter(item, filter);
@@ -6552,13 +6590,6 @@ function matchesTaskFilter(task, filter, context = {}) {
   if (filter === "unplanned") return !taskHasSchedule(task) && task.status !== "done" && task.status !== "canceled";
   if (filter === "active") return task.status !== "done" && task.status !== "canceled";
   return task.status === filter;
-}
-
-function projectFilterKey(project) {
-  if (project.status === "active" || project.status === "focus") return "active";
-  if (project.status === "planned" || project.status === "unplanned") return "planned";
-  if (project.status === "completed" || project.status === "paused" || project.status === "canceled") return "closed";
-  return project.status || "all";
 }
 
 function matchesResourceFilter(resource, control) {
@@ -6704,7 +6735,7 @@ function captureStatusBuckets(captures = state.captures) {
 function todayDashboardCollections(resources = state.resources, habits = state.habits, projects = state.projects) {
   const collections = { activeProjectCount: 0, pinnedResources: [], activeHabits: [] };
   for (const project of projects) {
-    if (project.status === "active" || project.status === "focus") collections.activeProjectCount += 1;
+    if (project.status === "active") collections.activeProjectCount += 1;
   }
   for (const resource of resources) {
     if (resource.pinned && resource.importance !== "archived") collections.pinnedResources.push(resource);
@@ -6715,16 +6746,11 @@ function todayDashboardCollections(resources = state.resources, habits = state.h
   return collections;
 }
 
-function projectStatusBuckets(projects = state.projects) {
-  const buckets = { active: [], planned: [], closed: [] };
+function projectStatusBuckets(projects = state.projects, excludedId = "") {
+  const buckets = { planned: [], active: [], completed: [], paused: [] };
   for (const project of projects) {
-    if (project.status === "active" || project.status === "focus") {
-      buckets.active.push(project);
-    } else if (project.status === "planned" || project.status === "unplanned") {
-      buckets.planned.push(project);
-    } else if (project.status === "completed" || project.status === "paused" || project.status === "canceled") {
-      buckets.closed.push(project);
-    }
+    if (project.id === excludedId) continue;
+    if (buckets[project.status]) buckets[project.status].push(project);
   }
   return buckets;
 }
@@ -7051,10 +7077,10 @@ function taskRelationChoiceMeta(field, item) {
 function renderProjectItem(project, statsByProjectId = null) {
   const stats = statsByProjectId?.get(project.id) || projectStats(project);
   const expanded = ui.expandedProjectId === project.id;
-  const statusColor = project.status === "focus" ? "blue" : ["completed"].includes(project.status) ? "teal" : ["paused", "canceled"].includes(project.status) ? "rose" : "violet";
+  const statusColor = project.status === "planned" ? "blue" : project.status === "completed" ? "teal" : project.status === "paused" ? "rose" : "violet";
   return `
     <article class="project-item ${expanded ? "is-expanded" : ""}" data-project-item="${project.id}">
-      <div class="project-row" role="button" tabindex="0" data-project-toggle="${project.id}" aria-expanded="${expanded ? "true" : "false"}">
+      <div class="project-row" role="button" tabindex="0" data-project-toggle="${project.id}" data-delete-drag-type="projects" data-delete-drag-id="${project.id}" aria-expanded="${expanded ? "true" : "false"}">
         <div class="project-main">
           <div class="project-title-line">
             <h3>${esc(project.name)}</h3>
@@ -8073,7 +8099,7 @@ function getTaskCalendarEvents() {
 function getProjectCalendarEvents({ visibleOnly = false } = {}) {
   const events = [];
   for (const project of state.projects) {
-    if (!(project.startDate || project.endDate) || project.status === "canceled") continue;
+    if (!(project.startDate || project.endDate) || project.status === "paused") continue;
     if (visibleOnly && !projectCalendarVisible(project.id)) continue;
     const startDate = project.startDate || project.endDate;
     const rawEndDate = project.endDate || project.startDate;
@@ -9314,10 +9340,10 @@ function renderDetailFields(type, item) {
   if (type === "projects") {
     return `
       <div class="field-grid">
-        ${selectField("상태", "status", item.status, STATUSES.project)}
-        ${relationField("박스", "boxId", item.boxId, state.boxes, "name")}
-        ${dateField("시작일", "startDate", item.startDate)}
-        ${dateField("종료일", "endDate", item.endDate)}
+        ${selectField("상태", "status", item.status, STATUSES.project, { picker: true })}
+        ${relationField("박스", "boxId", item.boxId, state.boxes, "name", { picker: true })}
+        ${dateField("시작일", "startDate", item.startDate, { picker: true })}
+        ${dateField("종료일", "endDate", item.endDate, { picker: true })}
       </div>
     `;
   }
@@ -10872,7 +10898,7 @@ function renderTodayBatch() {
 
   let projectTargets = "";
   for (const project of state.projects) {
-    if (project.status === "completed" || project.status === "canceled") continue;
+    if (project.status !== "planned" && project.status !== "active") continue;
     projectTargets += `
       <div
         class="today-batch-target"
@@ -11579,7 +11605,14 @@ function numberField(label, field, value) {
   return `<label class="field"><span>${esc(label)}</span><input class="input" type="number" data-field="${field}" value="${Number(value) || 0}"></label>`;
 }
 
-function dateField(label, field, value) {
+function dateField(label, field, value, options = {}) {
+  if (options.picker) {
+    return financeDatePickerInput(label, field, value, {
+      attributes: `data-field="${esc(field)}"`,
+      month: String(value || "").slice(0, 7) || monthKey(new Date()),
+      required: false,
+    });
+  }
   return `<label class="field"><span>${esc(label)}</span><input class="input" type="date" data-field="${field}" value="${esc(value || "")}"></label>`;
 }
 
@@ -11625,6 +11658,18 @@ function renderResourceUrlField(resource) {
 }
 
 function selectField(label, field, value, options, fieldOptions = {}) {
+  if (fieldOptions.picker) {
+    const pickerOptions = [];
+    for (const key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) pickerOptions.push([key, options[key]]);
+    }
+    return financeSelectInput(label, field, pickerOptions, {
+      value,
+      attributes: `data-field="${esc(field)}"`,
+      allowEmpty: false,
+      required: true,
+    });
+  }
   const disabled = fieldOptions.disabled === true ? 'disabled aria-disabled="true"' : "";
   return `
     <label class="field">
@@ -11637,6 +11682,15 @@ function selectField(label, field, value, options, fieldOptions = {}) {
 }
 
 function relationField(label, field, value, items, nameField, options = {}) {
+  if (options.picker) {
+    const pickerOptions = [["", "없음"]];
+    for (const item of items) pickerOptions.push([item.id, item[nameField]]);
+    return financeSelectInput(label, field, pickerOptions, {
+      value,
+      attributes: `data-field="${esc(field)}"`,
+      allowEmpty: false,
+    });
+  }
   const disabled = options.disabled === true ? 'disabled aria-disabled="true"' : "";
   return `
     <label class="field">
@@ -13408,6 +13462,10 @@ function applyFieldValue(ownerType, item, fieldName, value) {
   if (ownerType === "resources" && !resourceMutationAllowed(item)) return;
   if (ownerType === "tasks") {
     applyTaskFieldValue(item, fieldName, value);
+    return;
+  }
+  if (ownerType === "projects" && fieldName === "status") {
+    item.status = normalizeProjectStatus(value);
     return;
   }
   item[fieldName] = value;
@@ -19573,7 +19631,7 @@ function handlePointerDown(event) {
   }
 
   const deleteDragCard = event.target.closest("[data-delete-drag-type][data-delete-drag-id]");
-  if (deleteDragCard && ["inbox", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
+  if (deleteDragCard && ["inbox", "projects", "boxes", "resources"].includes(ui.view) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if (!canStartCustomPointerDrag(event)) return;
     window.getSelection()?.removeAllRanges();
     ui.pendingDeleteDrag = {
@@ -19996,6 +20054,7 @@ function finishDeleteDrag(event) {
   if (!isActiveDeleteDragPointer(event)) return;
   event.preventDefault();
   event.stopPropagation();
+  ui.suppressDeleteClickUntil = Date.now() + 900;
   const pointTarget = deleteTargetFromPoint(event.clientX, event.clientY);
   const action = pointTarget.action || "";
   const target = action
@@ -20074,6 +20133,15 @@ function animateDeleteDragDrop(done) {
 }
 
 function dragActionTargets(type, itemId) {
+  if (type === "projects") {
+    const buckets = projectStatusBuckets(state.projects, itemId);
+    return Object.entries(STATUSES.project).map(([action, title]) => ({
+      action,
+      title,
+      meta: `${title} 상태로`,
+      count: buckets[action].length,
+    }));
+  }
   if (type === "boxes") {
     const boxBuckets = boxVisibilityBuckets(state.boxes, itemId);
     return [
@@ -20149,6 +20217,16 @@ function dragActionTargets(type, itemId) {
 }
 
 function commitDragAction(type, itemId, action) {
+  if (type === "projects" && Object.prototype.hasOwnProperty.call(STATUSES.project, action)) {
+    const project = itemById("projects", itemId);
+    if (!project || project.status === action) return false;
+    project.status = action;
+    saveState();
+    showToast(`${STATUSES.project[action]} 상태로 옮겼습니다.`);
+    renderView({ soft: true, animateCards: true });
+    renderDetail();
+    return true;
+  }
   if (type === "boxes" && ["pinBox", "normalBox", "archiveBox"].includes(action)) {
     const box = itemById("boxes", itemId);
     if (!box) return false;
@@ -22026,13 +22104,14 @@ function createProject(name = "새 프로젝트", options = {}) {
   const project = {
     id: id(),
     name,
-    status: "unplanned",
+    status: "planned",
     boxId: state.boxes[0]?.id || "",
     startDate: "",
     endDate: "",
     blocks: blocks("완료 기준과 다음 행동을 적어두세요."),
     ...(options.initial || {}),
   };
+  project.status = normalizeProjectStatus(project.status);
   state.projects.push(project);
   if (!options.deferCreate) {
     afterCreate("projects", project.id, options.navigate === false ? ui.view : "projects");
@@ -23637,6 +23716,7 @@ function deleteDragItemTitle(type, itemId) {
 function deleteDragTypeLabel(type) {
   return {
     captures: "수집 항목",
+    projects: "프로젝트",
     boxes: "Box",
     tasks: "할 일",
     resources: "자료",
@@ -28801,10 +28881,17 @@ function stateNeedsClientMigration(nextState) {
     !isPlainObject(settings.openPagesIn) ||
     Object.keys(DEFAULT_RESOURCE_OPEN_PAGES_IN).some((view) => !RESOURCE_OPEN_PAGE_MODES.has(settings.openPagesIn?.[view])) ||
     !RESOURCE_SEARCH_SCOPES.has(settings.viewControls?.resources?.searchScope) ||
+    legacyProjectFilterNeedsMigration(settings) ||
+    (Array.isArray(nextState?.projects) && nextState.projects.some(projectNeedsStatusMigration)) ||
     (Array.isArray(nextState?.tasks) && nextState.tasks.some(taskNeedsDateOnlyMigration)) ||
     (nextState?.resources || []).some(resourceNeedsMigration) ||
     resourceBlockIdsNeedMigration(nextState?.resources)
   );
+}
+
+function legacyProjectFilterNeedsMigration(settings) {
+  const saved = settings?.viewControls?.projects;
+  return saved?.filter === "closed" || (Array.isArray(saved?.filters) && saved.filters.includes("closed"));
 }
 
 function resourceBlockIdsNeedMigration(resources) {
@@ -29504,7 +29591,7 @@ function normalizeState(next) {
   let seeded = null;
   const fallbackState = () => (seeded ||= createMinimalSeedState());
   const nextSettings = isPlainObject(next.settings) ? next.settings : {};
-  const projects = objectArrayWithoutGoalId(next.projects, fallbackCollection(fallbackState, "projects"));
+  const projects = normalizeProjectRecords(objectArrayWithoutGoalId(next.projects, fallbackCollection(fallbackState, "projects")));
   const tasks = normalizeTaskRecords(objectArrayWithoutGoalId(objectArrayWithoutLegacyKind(next.tasks, []), []));
   const journals = objectArrayWithoutLegacyKind(next.journals, []);
   const shouldSeedStatsDemo = !nextSettings.statsDemoDataSeeded;
@@ -29622,6 +29709,10 @@ function normalizeSavedFilterValues(view, saved, fallback = ["all"]) {
   const rawValues = Array.isArray(saved?.filters) ? saved.filters : typeof saved?.filter === "string" ? [saved.filter] : fallback;
   const normalized = [];
   for (const value of normalizeFilterValues(rawValues, "all")) {
+    if (view === "projects" && value === "closed") {
+      normalized.push("completed", "paused");
+      continue;
+    }
     if (!optionValueAllowed(VIEW_FILTER_OPTIONS[view], value) || normalized.includes(value)) continue;
     normalized.push(value);
   }
@@ -29727,6 +29818,32 @@ function objectArrayWithoutGoalId(value, fallback) {
 function objectArrayWithoutGoalLinks(value) {
   const source = objectArrayOrFallback(value, []);
   return source.filter((link) => !["goal", "goals"].includes(link.fromType) && !["goal", "goals"].includes(link.toType));
+}
+
+function normalizeProjectStatus(value) {
+  const status = String(value || "");
+  if (status === "unplanned") return "planned";
+  if (status === "focus") return "active";
+  if (status === "canceled") return "paused";
+  return Object.prototype.hasOwnProperty.call(STATUSES.project, status) ? status : "planned";
+}
+
+function projectNeedsStatusMigration(project) {
+  return isPlainObject(project) && normalizeProjectStatus(project.status) !== project.status;
+}
+
+function normalizeProjectRecords(projects) {
+  let normalized = null;
+  for (let index = 0; index < projects.length; index += 1) {
+    const project = projects[index];
+    if (!projectNeedsStatusMigration(project)) {
+      if (normalized) normalized.push(project);
+      continue;
+    }
+    if (!normalized) normalized = projects.slice(0, index);
+    normalized.push({ ...project, status: normalizeProjectStatus(project.status) });
+  }
+  return normalized || projects;
 }
 
 function normalizeTaskRecords(tasks) {
@@ -29888,13 +30005,13 @@ function ensureStatsDemoData(targetState, options = {}) {
     { id: "demo-box-life", name: "생활 기반", visibility: "normal", color: "amber", blocks: blocks("개인 정리와 생활 유지 업무를 모읍니다.") },
   ];
   const demoProjects = [
-    { id: "demo-project-ui", boxId: "demo-box-growth", name: "대시보드 UI 실험", status: "focus", startDate: day(-5), endDate: day(12), blocks: blocks("오늘 화면과 분류 흐름을 더 빠르게 만듭니다.") },
+    { id: "demo-project-ui", boxId: "demo-box-growth", name: "대시보드 UI 실험", status: "active", startDate: day(-5), endDate: day(12), blocks: blocks("오늘 화면과 분류 흐름을 더 빠르게 만듭니다.") },
     { id: "demo-project-calendar", boxId: "demo-box-growth", name: "캘린더 연동 정리", status: "active", startDate: day(-2), endDate: day(20), blocks: blocks("Task와 Project 기간을 한눈에 보이게 정리합니다.") },
     { id: "demo-project-ops", boxId: "demo-box-work", name: "운영 리포트 자동화", status: "active", startDate: day(-11), endDate: day(10), blocks: blocks("반복 리포트 생성과 확인 루틴을 자동화합니다.") },
     { id: "demo-project-inbox", boxId: "demo-box-work", name: "Inbox 분류 규칙 개선", status: "planned", startDate: day(4), endDate: day(18), blocks: blocks("수집 항목을 프로젝트에 자연스럽게 연결합니다.") },
     { id: "demo-project-run", boxId: "demo-box-health", name: "아침 운동 루틴", status: "active", startDate: day(-16), endDate: day(44), blocks: blocks("짧고 지속 가능한 운동 단위를 유지합니다.") },
     { id: "demo-project-sleep", boxId: "demo-box-health", name: "수면 로그 개선", status: "planned", startDate: day(1), endDate: day(30), blocks: blocks("수면 기록을 회복 지표와 연결합니다.") },
-    { id: "demo-project-notes", boxId: "demo-box-growth", name: "자료 태그 재정리", status: "unplanned", startDate: day(14), endDate: day(34), blocks: blocks("Resource를 실행 맥락별로 재배치합니다.") },
+    { id: "demo-project-notes", boxId: "demo-box-growth", name: "자료 태그 재정리", status: "planned", startDate: day(14), endDate: day(34), blocks: blocks("Resource를 실행 맥락별로 재배치합니다.") },
     { id: "demo-project-house", boxId: "demo-box-life", name: "집 정리 체크리스트", status: "active", startDate: day(-4), endDate: day(9), blocks: blocks("생활 유지 항목을 반복 가능하게 만듭니다.") },
     { id: "demo-project-review", boxId: "demo-box-work", name: "분기 리뷰 마감", status: "completed", startDate: day(-42), endDate: day(-8), blocks: blocks("완료된 리뷰 프로젝트입니다.") },
     { id: "demo-project-paused", boxId: "demo-box-growth", name: "장기 리서치 보류", status: "paused", startDate: day(-20), endDate: day(62), blocks: blocks("우선순위 조정으로 잠시 보류합니다.") },
@@ -30084,7 +30201,7 @@ function projectStatusCounts(projects) {
       counts.completed += 1;
       continue;
     }
-    if (project.status === "active" || project.status === "focus") counts.active += 1;
+    if (project.status === "active") counts.active += 1;
   }
   return counts;
 }

@@ -21,6 +21,7 @@ const STRING_SETTING_KEYS = ["googleCalendarId", "googleConnectedAt", "lastGoogl
 const LEGACY_KIND_COLLECTION_KEYS = new Set(["tasks", "journals"]);
 const LEGACY_TASK_TIME_FIELDS = ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"];
 const LEGACY_TASK_SOMEDAY_STATUS = "someday";
+const PROJECT_STATUSES = new Set(["planned", "active", "completed", "paused"]);
 const DEFAULT_NAV_ORDER = ["today", "inbox", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"];
 const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 const DEFAULT_CALENDAR_SOURCES = {
@@ -1906,6 +1907,7 @@ function normalizeAppStateForStorage(state) {
         changed = true;
         continue;
       }
+      if (key === "projects") cleanItem = normalizeProjectForStorage(cleanItem);
       if (key === "tasks") cleanItem = normalizeTaskForStorage(cleanItem);
       if (cleanItem !== item) {
         if (!normalizedItems) normalizedItems = items.slice(0, index);
@@ -1932,6 +1934,18 @@ function normalizeTaskForStorage(task) {
   }
   for (const field of LEGACY_TASK_TIME_FIELDS) delete cleanTask[field];
   return cleanTask;
+}
+
+function normalizeProjectForStorage(project) {
+  const status = normalizedProjectStatus(project.status);
+  return status === project.status ? project : { ...project, status };
+}
+
+function normalizedProjectStatus(value) {
+  if (value === "unplanned") return "planned";
+  if (value === "focus") return "active";
+  if (value === "canceled") return "paused";
+  return PROJECT_STATUSES.has(value) ? value : "planned";
 }
 
 function taskNeedsDateOnlyMigration(task) {
@@ -2014,7 +2028,7 @@ function normalizeViewControls(value) {
     const saved = isPlainObject(value) && isPlainObject(value[key]) ? value[key] : {};
     controls[key] = {
       ...defaults,
-      filters: normalizeViewControlFilters(saved, defaults.filters),
+      filters: normalizeViewControlFilters(saved, defaults.filters, key),
       sort: typeof saved.sort === "string" ? saved.sort : defaults.sort,
       mode: typeof saved.mode === "string" ? saved.mode : defaults.mode,
       panels: normalizeViewControlPanels(saved.panels),
@@ -2040,11 +2054,16 @@ function normalizeResourceOpenPagesIn(value) {
   return normalized;
 }
 
-function normalizeViewControlFilters(saved, fallback = ["all"]) {
+function normalizeViewControlFilters(saved, fallback = ["all"], view = "") {
   const rawValues = Array.isArray(saved?.filters) ? saved.filters : typeof saved?.filter === "string" ? [saved.filter] : fallback;
   const normalized = [];
   for (const value of rawValues) {
     if (typeof value !== "string" || normalized.includes(value)) continue;
+    if (view === "projects" && value === "closed") {
+      if (!normalized.includes("completed")) normalized.push("completed");
+      if (!normalized.includes("paused")) normalized.push("paused");
+      continue;
+    }
     normalized.push(value);
   }
   if (!normalized.length) {

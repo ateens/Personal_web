@@ -69,6 +69,7 @@ const REQUIRED_COLLECTION_KEYS = [
 ];
 const PRIMARY_COLLECTION_KEYS = ["captures", "boxes", "projects", "tasks", "resources", "habits", "journals"];
 const BLOCK_COLLECTION_KEYS = new Set(["boxes", "projects", "tasks", "resources", "habits", "journals"]);
+const PROJECT_STATUSES = new Set(["planned", "active", "completed", "paused"]);
 const SUPPORTED_BLOCK_TYPES = new Set([
   "paragraph",
   "heading1",
@@ -1300,6 +1301,9 @@ function validateIncomingState(state) {
       }
       if (registerUniqueId(seenIds, issues, item.id, `${itemPath}.id`)) ids.add(item.id);
       if (BLOCK_COLLECTION_KEYS.has(key)) validateBlocks(item, key, index, seenIds, issues);
+      if (key === "projects" && !PROJECT_STATUSES.has(item.status)) {
+        addValidationIssue(issues, `${itemPath}.status`, "unsupported_project_status", "Project status must be planned, active, completed, or paused.");
+      }
       if (key === "resources") validateResourcePageFields(item, index, seenIds, issues);
       if ((key === "captures" || key === "resources") && !isSafeStoredUrl(item.url)) {
         addValidationIssue(issues, `${itemPath}.url`, "unsafe_url_protocol", "URL uses an unsupported or unsafe protocol.");

@@ -33,13 +33,26 @@ test("completed tasks wait for hover exit and batch consecutive checks", async (
   const cards = TASK_IDS.map((id) => page.locator(`[data-task-id="${id}"]`));
   const panelTitle = (card) => card.locator("xpath=ancestor::div[contains(@class,'panel')][1]//h2");
 
-  const rest = await cards[0].locator(".check").evaluate((element) => ({
+  const rest = await Promise.all(cards.map((card) => card.locator(".check").evaluate((element) => ({
     background: getComputedStyle(element, "::before").backgroundImage,
     short: getComputedStyle(element, "::before").width,
     long: getComputedStyle(element, "::after").width,
+    top: getComputedStyle(element, "::before").top,
+    height: getComputedStyle(element, "::before").height,
+    afterTop: getComputedStyle(element, "::after").top,
+    afterHeight: getComputedStyle(element, "::after").height,
     transform: getComputedStyle(element, "::before").transform,
-  }));
-  expect(rest).toEqual({ background: "none", short: "10.5px", long: "10.5px", transform: "none" });
+  }))));
+  expect(rest).toEqual(TASK_IDS.map(() => ({
+    background: "none",
+    short: "10.5px",
+    long: "10.5px",
+    top: "21px",
+    height: "2px",
+    afterTop: "21px",
+    afterHeight: "2px",
+    transform: "none",
+  })));
 
   const firstCheck = cards[0].locator(".check");
   await firstCheck.hover();

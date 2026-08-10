@@ -67,7 +67,7 @@ struct CalendarProjectQuery: EntityQuery {
             let name = project["name"] as? String ?? ""
             let hasDate = !(project["startDate"] as? String ?? "").isEmpty
                 || !(project["endDate"] as? String ?? "").isEmpty
-            guard !id.isEmpty, !name.isEmpty, hasDate, project["status"] as? String != "canceled" else { return nil }
+            guard !id.isEmpty, !name.isEmpty, hasDate, project["status"] as? String != "paused" else { return nil }
             return CalendarProjectEntity(id: id, name: name)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -283,7 +283,7 @@ private struct CalendarProvider: AppIntentTimelineProvider {
 
         if sourceVisible("projects") {
             for project in root["projects"] as? [[String: Any]] ?? [] {
-                guard project["status"] as? String != "canceled" else { continue }
+                guard project["status"] as? String != "paused" else { continue }
                 let projectID = project["id"] as? String ?? ""
                 let visible = projectIDs?.contains(projectID) ?? (projectVisibility[projectID] as? Bool != false)
                 guard visible else { continue }

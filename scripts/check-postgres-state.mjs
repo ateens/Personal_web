@@ -252,6 +252,13 @@ try {
     "broken_relation"
   );
   await assertInvalidWriteDoesNotMutate(
+    "unsupported Project status",
+    (draft) => {
+      draft.projects[0].status = "focus";
+    },
+    "unsupported_project_status"
+  );
+  await assertInvalidWriteDoesNotMutate(
     "unsafe URL",
     (draft) => {
       draft.resources[0].url = "javascript:alert(1)";
@@ -655,7 +662,7 @@ try {
       viewControls: { resources: { mode: "list", filters: ["active", "pinned"], panels: { sort: true }, toggles: { readLater: true }, type: "article" }, today: "polluted-control" },
     },
     goals: [{ id: "removed-parent" }],
-    projects: [{ id: "polluted-project", goalId: "removed-parent" }],
+    projects: [{ id: "polluted-project", status: "focus", goalId: "removed-parent" }],
     tasks: [null, { id: "polluted-task", kind: "legacy-task-kind", goalId: "removed-parent" }],
     journals: [{ id: "polluted-journal", kind: "legacy-journal-kind" }, "polluted-journal"],
   };
@@ -666,6 +673,7 @@ try {
   assert(healedRead.payload.revision === 2 && healedRead.payload.state?.revision === 2, "state read did not reconcile the healed state to the stored revision");
   assert(healedRead.response.headers.get("etag") === '"state-2"', "healed state read did not retain the current ETag");
   assert(healedRead.payload.state?.tasks?.length === 1 && !("kind" in healedRead.payload.state.tasks[0]), "state read did not normalize polluted stored tasks");
+  assert(healedRead.payload.state?.projects?.[0]?.status === "active", "state read did not normalize the legacy Project status");
   assert(!("goals" in healedRead.payload.state) && !("goalId" in healedRead.payload.state.tasks[0]) && !("goalId" in healedRead.payload.state.projects[0]), "state read did not remove retired Goal data");
   assert(healedRead.payload.state?.journals?.length === 1 && !("kind" in healedRead.payload.state.journals[0]), "state read did not normalize polluted stored journals");
   assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
@@ -675,7 +683,7 @@ try {
   assert(!("appMode" in (healedRead.payload.state?.settings || {})), "state read returned deprecated settings from polluted storage");
 
   const healedRow = await pool.query(
-    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, state ? 'goals' AS has_goals, state->'tasks'->0 ? 'goalId' AS task_has_goal_id, state->'projects'->0 ? 'goalId' AS project_has_goal_id, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
+    "SELECT revision, state->>'version' AS version, state->>'revision' AS state_revision, jsonb_typeof(state->'tasks') AS tasks_type, jsonb_array_length(state->'tasks') AS task_count, jsonb_array_length(state->'journals') AS journal_count, state->'tasks'->0 ? 'kind' AS task_has_kind, state->'journals'->0 ? 'kind' AS journal_has_kind, state ? 'goals' AS has_goals, state->'tasks'->0 ? 'goalId' AS task_has_goal_id, state->'projects'->0 ? 'goalId' AS project_has_goal_id, state->'projects'->0->>'status' AS project_status, array_to_string(ARRAY(SELECT jsonb_array_elements_text(state->'settings'->'navOrder')), ',') AS nav_order, state->'settings'->'calendarSources' AS calendar_sources, state->'settings'->'visibleGoogleCalendars' AS visible_google_calendars, state->'settings' ? 'appMode' AS has_app_mode FROM app_state WHERE id = $1",
     [appStateId]
   );
   assert(Number(healedRow.rows[0]?.revision) === 2 && healedRow.rows[0]?.state_revision === "2", "state read did not preserve the revision while healing PostgreSQL");
@@ -686,6 +694,7 @@ try {
   assert(Number(healedRow.rows[0]?.task_count) === 1 && Number(healedRow.rows[0]?.journal_count) === 1, "state read did not remove polluted collection items from PostgreSQL");
   assert(healedRow.rows[0]?.task_has_kind === false && healedRow.rows[0]?.journal_has_kind === false, "state read did not remove legacy kind fields from PostgreSQL");
   assert(healedRow.rows[0]?.has_goals === false && healedRow.rows[0]?.task_has_goal_id === false && healedRow.rows[0]?.project_has_goal_id === false, "state read did not persist Goal removal");
+  assert(healedRow.rows[0]?.project_status === "active", "state read did not persist Project status normalization");
   assert(healedRow.rows[0]?.has_app_mode === false, "state read did not remove deprecated settings from PostgreSQL");
   const healedRelationalRows = await pool.query("SELECT count(*)::int AS tasks FROM tasks WHERE app_state_id = $1", [appStateId]);
   assert(Number(healedRelationalRows.rows[0]?.tasks) === 1, "state read did not sync healed PostgreSQL state into relational tables");
@@ -801,7 +810,7 @@ function makeValidState() {
     },
     captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", convertedTo: "resources", convertedId: "check-resource", createdAt }],
     boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
-    projects: [{ id: "check-project", name: "PostgreSQL check project", boxId: "check-box" }],
+    projects: [{ id: "check-project", name: "PostgreSQL check project", status: "planned", boxId: "check-box" }],
     tasks: [{ id: "check-task", title: "PostgreSQL check task", status: "someday", boxId: "check-box", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
     resources: [{
       id: "check-resource",
