@@ -731,6 +731,7 @@ final class QuickNotesTextView: NSTextView {
             typingAttributes = baseTypingAttributes
             super.insertText(insertString, replacementRange: NSRange(location: NSNotFound, length: 0))
         } else {
+            normalizeTypingAttributes()
             super.insertText(insertString, replacementRange: replacementRange)
         }
     }
@@ -791,6 +792,7 @@ final class QuickNotesTextView: NSTextView {
             typingAttributes = baseTypingAttributes
             return
         }
+        typingAttributes = baseTypingAttributes
         super.insertNewline(sender)
     }
 
@@ -800,9 +802,10 @@ final class QuickNotesTextView: NSTextView {
               listContext(at: list.paragraph.location - 1) != nil else { return }
         replaceCharacters(
             in: NSRange(location: list.paragraph.location, length: 0),
-            with: NSAttributedString(string: "  ", attributes: baseTypingAttributes),
-            selection: selectedRange().location + 2
+            with: NSAttributedString(string: "    ", attributes: baseTypingAttributes),
+            selection: selectedRange().location + 4
         )
+        typingAttributes = baseTypingAttributes
     }
 
     override func insertBacktab(_ sender: Any?) {
@@ -813,6 +816,7 @@ final class QuickNotesTextView: NSTextView {
             with: NSAttributedString(),
             selection: max(list.paragraph.location, selectedRange().location - indentUnit.length)
         )
+        typingAttributes = baseTypingAttributes
     }
 
     override func deleteBackward(_ sender: Any?) {
@@ -863,6 +867,14 @@ final class QuickNotesTextView: NSTextView {
         ]
     }
 
+    private func normalizeTypingAttributes() {
+        var attributes = typingAttributes
+        attributes[.font] = attributes[.font] ?? NSFont.systemFont(ofSize: 16)
+        attributes[.foregroundColor] = NSColor.quickNoteText
+        attributes.removeValue(forKey: .quickNoteBlock)
+        typingAttributes = attributes
+    }
+
     private func protectedInsertionRange(_ range: NSRange) -> NSRange {
         guard range.length == 0, let textStorage, range.location <= textStorage.length else { return range }
         let paragraph = (textStorage.string as NSString).paragraphRange(for: NSRange(location: range.location, length: 0))
@@ -906,7 +918,7 @@ final class QuickNotesTextView: NSTextView {
         if last == 9 { return NSRange(location: NSMaxRange(indent) - 1, length: 1) }
         var length = 0
         var cursor = NSMaxRange(indent)
-        while cursor > indent.location, length < 2, source.character(at: cursor - 1) == 32 {
+        while cursor > indent.location, length < 4, source.character(at: cursor - 1) == 32 {
             cursor -= 1
             length += 1
         }
