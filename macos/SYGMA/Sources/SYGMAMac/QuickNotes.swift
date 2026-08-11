@@ -1240,7 +1240,6 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private var hotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
-    private var previousApplication: NSRunningApplication?
     private var contrastTimer: Timer?
     private var suppressLocalKeysUntil = Date.distantPast
     private var suppressedToggleKeyCode: UInt16?
@@ -1284,7 +1283,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         if let panel { return panel }
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -1318,19 +1317,16 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
 
     private func show() {
         let panel = panelWindow()
-        previousApplication = NSWorkspace.shared.frontmostApplication
-        NSApp.activate(ignoringOtherApps: true)
+        panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         startContrastUpdates()
     }
 
     private func hide() {
-        let restorePreviousApplication = panel?.isKeyWindow == true && NSApp.isActive
         store.flush()
         contrastTimer?.invalidate()
         contrastTimer = nil
         panel?.orderOut(nil)
-        if restorePreviousApplication { previousApplication?.activate() }
     }
 
     private func startContrastUpdates() {
