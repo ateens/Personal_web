@@ -133,6 +133,27 @@ final class QuickNotesTests: XCTestCase {
         insert("x", into: protectedList)
         XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(protectedList.textStorage)), "- x항목")
 
+        let damagedList = NSMutableAttributedString(string: "•항목")
+        damagedList.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 1))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: damagedList), "•항목")
+
+        let backspacedList = QuickNotesTextView(frame: .zero)
+        let backspacedListValue = NSMutableAttributedString(string: "• 항목")
+        backspacedListValue.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 2))
+        backspacedList.textStorage?.setAttributedString(backspacedListValue)
+        backspacedList.setSelectedRange(NSRange(location: 2, length: 0))
+        backspacedList.deleteBackward(nil)
+        XCTAssertEqual(backspacedList.string, "•항목")
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(backspacedList.textStorage)), "•항목")
+
+        let damagedEmptyList = NSMutableAttributedString(string: "•")
+        damagedEmptyList.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 1))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: damagedEmptyList), "•")
+
+        let damagedHeading = NSMutableAttributedString(string: "제목")
+        damagedHeading.addAttribute(.quickNoteBlock, value: "h1", range: NSRange(location: 0, length: 1))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: damagedHeading), "제목")
+
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-live-markdown-\(UUID())", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = QuickNotesStore(rootURL: root)

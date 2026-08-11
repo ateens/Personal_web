@@ -276,9 +276,12 @@ enum QuickNoteMarkdownCodec {
         for (location, valueBlock) in blocks.sorted(by: { $0.key > $1.key }) {
             let (block, marker) = valueBlock
             if block.hasPrefix("h"), let level = Int(block.dropFirst()), (1...6).contains(level) {
+                guard marker.location < value.length,
+                      (value.string as NSString).substring(with: NSRange(location: marker.location, length: 1)) == headingSentinel else { continue }
                 value.deleteCharacters(in: NSRange(location: marker.location, length: 1))
                 value.insert(NSAttributedString(string: "\(String(repeating: "#", count: level)) "), at: location)
-            } else if block == "list" {
+            } else if block == "list", marker.location + 2 <= value.length,
+                      (value.string as NSString).substring(with: NSRange(location: marker.location, length: 2)) == "• " {
                 value.deleteCharacters(in: NSRange(location: marker.location, length: 2))
                 value.insert(NSAttributedString(string: "- "), at: location)
             }
