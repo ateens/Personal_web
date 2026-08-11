@@ -7,6 +7,48 @@ import SwiftUI
 private let quickNotesPanelIdentifier = NSUserInterfaceItemIdentifier("SYGMAQuickNotesPanel")
 private let quickNotesHotKeySignature: OSType = 0x5359474E // SYGN
 private let quickNotesTransparencyKey = "SYGMAQuickNotesBackgroundTransparency"
+private let quickNotesThemeKey = "SYGMAQuickNotesTheme"
+private let quickNotesThemeChanged = Notification.Name("SYGMAQuickNotesThemeChanged")
+
+enum QuickNotesColorMode: String, CaseIterable, Identifiable {
+    case dark
+    case light
+    case system
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .dark: "다크"
+        case .light: "화이트"
+        case .system: "시스템"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .dark: "moon.fill"
+        case .light: "sun.max.fill"
+        case .system: "circle.lefthalf.filled"
+        }
+    }
+
+    var appearance: NSAppearance.Name? {
+        switch self {
+        case .dark: .darkAqua
+        case .light: .aqua
+        case .system: nil
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .dark: .dark
+        case .light: .light
+        case .system: nil
+        }
+    }
+}
 
 enum QuickNoteShortcutAction: String, CaseIterable, Codable, Identifiable {
     case togglePanel, newNote, previousNote, nextNote, togglePreview, hidePanel
@@ -911,6 +953,7 @@ final class QuickNotesTextView: NSTextView {
 private struct QuickNoteEditor: NSViewRepresentable {
     @ObservedObject var store: QuickNotesStore
     let noteID: UUID
+    let colorMode: QuickNotesColorMode
 
     func makeCoordinator() -> Coordinator { Coordinator(store: store) }
 
@@ -945,6 +988,11 @@ private struct QuickNoteEditor: NSViewRepresentable {
         guard let editor = scroll.documentView as? QuickNotesTextView else { return }
         context.coordinator.store = store
         editor.pasteImage = { [weak store] image in store?.saveImage(image, for: noteID) }
+        if let storage = editor.textStorage {
+            let selection = editor.selectedRanges
+            QuickNoteMarkdownCodec.applySourceStyle(to: storage)
+            editor.selectedRanges = selection
+        }
         if context.coordinator.loadedID != noteID { context.coordinator.load(noteID) }
     }
 
@@ -1023,24 +1071,13 @@ private struct QuickNotesSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("배경 투명도")
-                        Spacer()
-                        Text("\(Int(transparency * 100))%")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Slider(value: $transparency, in: 0...0.85, step: 0.05)
-                    Text("글자와 이미지는 투명해지지 않습니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if transparency >= 0.45, !screenCaptureAllowed {
+                if transparency >= 0.45, !screenCaptureAllowed {
+                    VStack(alignment: .leading, spacing: 6) {
                         Button("배경 자동 대비 허용") {
                             screenCaptureAllowed = CGRequestScreenCaptureAccess()
                         }
                         .buttonStyle(.bordered)
-                        Text("창 뒤 중앙 영역의 밝기만 확인하며 이미지는 저장하지 않습니다. 허용 후 SYGMA를 다시 열어 주세요.")
+                        Text("시스템 모드에서 배경에 맞춰 글자색을 바꿀 때 필요합니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1087,37 +1124,53 @@ private struct QuickNotesView: View {
     @ObservedObject var store: QuickNotesStore
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
     @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
+    @AppStorage(quickNotesThemeKey) private var themeRawValue = QuickNotesColorMode.dark.rawValue
     @State private var showingSettings = false
+
+    private var colorMode: QuickNotesColorMode {
+        QuickNotesColorMode(rawValue: themeRawValue) ?? .dark
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider().overlay(Color.primary.opacity(0.08))
+            hairline
             if let noteID = store.selectedID {
                 if store.isPreviewing {
                     QuickNotePreview(store: store, noteID: noteID)
                 } else {
-                    QuickNoteEditor(store: store, noteID: noteID)
+                    QuickNoteEditor(store: store, noteID: noteID, colorMode: colorMode)
                 }
             }
-            Divider().overlay(Color.primary.opacity(0.08))
+            hairline
             footer
         }
         .frame(minWidth: 440, minHeight: 360)
         .foregroundStyle(Color(nsColor: .quickNoteText))
         .background(Color(nsColor: .windowBackgroundColor).opacity(1 - transparency))
+        .preferredColorScheme(colorMode.colorScheme)
+        .onChange(of: themeRawValue) { _, newValue in
+            NotificationCenter.default.post(name: quickNotesThemeChanged, object: newValue)
+        }
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.12))
+            .frame(height: 0.5)
     }
 
     private var header: some View {
         ZStack {
             TextField("제목", text: Binding(
-                get: { store.selectedNote?.title ?? "" },
+                get: { store.selectedNote.map(displayTitle) ?? "" },
                 set: store.renameSelected
             ))
             .textFieldStyle(.plain)
-            .font(.system(size: 13, weight: .medium))
+            .font(.system(size: 14, weight: .semibold))
             .multilineTextAlignment(.center)
             .frame(width: 230)
+            .lineLimit(1)
 
             HStack(spacing: 10) {
                 Menu {
@@ -1134,6 +1187,20 @@ private struct QuickNotesView: View {
                 Button(action: { store.createNote() }) { Image(systemName: "plus") }
                     .buttonStyle(.plain)
                     .help("새 노트 · \(shortcuts.shortcut(for: .newNote).display)")
+                Menu {
+                    ForEach(QuickNotesColorMode.allCases) { mode in
+                        Button {
+                            themeRawValue = mode.rawValue
+                        } label: {
+                            Label(mode.title, systemImage: mode.icon)
+                        }
+                    }
+                } label: {
+                    Image(systemName: colorMode.icon)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 22)
+                .help("색상 모드 · \(colorMode.title)")
                 Button(action: { showingSettings.toggle() }) { Image(systemName: "gearshape") }
                     .buttonStyle(.plain)
                     .help("Quick Notes 설정")
@@ -1153,6 +1220,14 @@ private struct QuickNotesView: View {
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
             HStack {
+                HStack(spacing: 5) {
+                    Image(systemName: "circle.lefthalf.filled")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $transparency, in: 0...0.85, step: 0.05)
+                        .frame(width: 72)
+                        .help("배경 투명도 \(Int(transparency * 100))%")
+                }
                 if !store.saveError.isEmpty {
                     Text(store.saveError).lineLimit(1).foregroundStyle(.red)
                 }
@@ -1172,9 +1247,42 @@ private struct QuickNotesView: View {
 
     private func displayTitle(_ note: QuickNoteRecord) -> String {
         let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty { return title }
+        if !title.isEmpty, title != "새 노트" { return title }
         let body = store.body(for: note.id)
-        return body.split(whereSeparator: \.isNewline).first.map(String.init) ?? "새 노트"
+        let firstLine = body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let derived = firstLine.replacingOccurrences(of: #"^\s*(?:#{1,6}\s+|[-*+]\s+)"#, with: "", options: .regularExpression)
+        return derived.isEmpty ? "새 노트" : derived
+    }
+}
+
+private final class QuickNotesTrackingView: NSView {
+    var onTitlebarHover: ((Bool) -> Void)?
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let height = min(48, bounds.height)
+        trackingArea = NSTrackingArea(
+            rect: NSRect(x: 0, y: bounds.height - height, width: bounds.width, height: height),
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        if let trackingArea { addTrackingArea(trackingArea) }
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { onTitlebarHover?(true) }
+    override func mouseExited(with event: NSEvent) { onTitlebarHover?(false) }
+}
+
+private extension NSPanel {
+    func setQuickNotesTrafficLightsVisible(_ visible: Bool) {
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = standardWindowButton(type) else { continue }
+            button.isHidden = !visible
+            button.alphaValue = visible ? 1 : 0
+        }
     }
 }
 
@@ -1241,6 +1349,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private var hotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
     private var contrastTimer: Timer?
+    private var themeObserver: NSObjectProtocol?
     private var suppressLocalKeysUntil = Date.distantPast
     private var suppressedToggleKeyCode: UInt16?
 
@@ -1248,6 +1357,17 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         store = QuickNotesStore()
         shortcuts = QuickNoteShortcutSettings()
         super.init()
+        themeObserver = NotificationCenter.default.addObserver(
+            forName: quickNotesThemeChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.startContrastUpdates() }
+        }
+    }
+
+    deinit {
+        if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) }
     }
 
     func start() {
@@ -1303,7 +1423,22 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.minSize = NSSize(width: 440, height: 360)
         panel.setFrameAutosaveName("SYGMAQuickNotes")
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications]
-        panel.contentView = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
+        applyConfiguredAppearance(to: panel)
+        panel.setQuickNotesTrafficLightsVisible(false)
+        let trackingView = QuickNotesTrackingView()
+        trackingView.onTitlebarHover = { [weak panel] hovering in
+            panel?.setQuickNotesTrafficLightsVisible(hovering)
+        }
+        let hostingView = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        trackingView.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: trackingView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
+        ])
+        panel.contentView = trackingView
         panel.delegate = self
         panel.center()
         self.panel = panel
@@ -1317,6 +1452,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
 
     private func show() {
         let panel = panelWindow()
+        applyConfiguredAppearance(to: panel)
         panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         startContrastUpdates()
@@ -1331,14 +1467,32 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
 
     private func startContrastUpdates() {
         contrastTimer?.invalidate()
+        applyConfiguredAppearance()
+        guard panel?.isVisible == true else { return }
+        guard currentColorMode == .system else { return }
         refreshContrast()
         contrastTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshContrast() }
         }
     }
 
+    private var currentColorMode: QuickNotesColorMode {
+        QuickNotesColorMode(rawValue: UserDefaults.standard.string(forKey: quickNotesThemeKey) ?? "") ?? .dark
+    }
+
+    private func applyConfiguredAppearance(to panel: NSPanel? = nil) {
+        let panel = panel ?? self.panel
+        guard let panel else { return }
+        if let name = currentColorMode.appearance {
+            panel.appearance = NSAppearance(named: name)
+        } else {
+            panel.appearance = nil
+        }
+        panel.contentView?.needsDisplay = true
+    }
+
     private func refreshContrast() {
-        guard let panel, panel.isVisible else { return }
+        guard let panel, panel.isVisible, currentColorMode == .system else { return }
         let defaults = UserDefaults.standard
         let transparency = defaults.object(forKey: quickNotesTransparencyKey) == nil
             ? 0.70

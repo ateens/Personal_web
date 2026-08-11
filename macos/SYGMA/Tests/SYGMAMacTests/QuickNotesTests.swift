@@ -275,5 +275,9 @@ final class QuickNotesTests: XCTestCase {
         XCTAssertEqual(dark.alpha, 1, accuracy: 0.01)
         XCTAssertTrue(QuickNotesController.prefersLightText(luminance: 0.1))
         XCTAssertFalse(QuickNotesController.prefersLightText(luminance: 0.9))
+
+        XCTAssertEqual(QuickNotesColorMode.dark.appearance, .darkAqua)
+        XCTAssertEqual(QuickNotesColorMode.light.appearance, .aqua)
+        XCTAssertNil(QuickNotesColorMode.system.appearance)
     }
 }
