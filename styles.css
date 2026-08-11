@@ -10852,29 +10852,6 @@ body.is-task-placement-open {
   outline-offset: 2px;
 }
 
-@media (hover: hover) and (pointer: fine) {
-  .finance-entry-form-card > summary:hover,
-  .finance-manage-details > summary:hover {
-    padding-left: 18px;
-    background-color: rgba(255, 255, 255, 0.28);
-  }
-
-  .finance-record:hover {
-    z-index: 1;
-    padding-inline: 14px;
-    border-radius: var(--hover-radius);
-    background: var(--hover-surface);
-    box-shadow: var(--hover-shadow);
-    transform: translateX(4px) scaleX(1.008);
-  }
-
-  .finance-record-actions button:hover:not(:disabled) {
-    color: var(--ink);
-    background-color: rgba(255, 255, 255, 0.4);
-    transform: translateY(-1px);
-  }
-}
-
 @media (max-width: 960px) {
   .finance-metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
