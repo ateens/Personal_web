@@ -10427,7 +10427,6 @@ body.is-task-placement-open {
   height: 1px;
   background: var(--divider-h);
   transform: translateX(-50%);
-  transition: width 300ms var(--ease);
 }
 
 .finance-record:last-child::after {
@@ -10485,6 +10484,7 @@ body.is-task-placement-open {
 }
 
 .finance-record-actions button {
+  flex: 0 0 auto;
   min-height: 34px;
   border: 0;
   border-radius: 0;
@@ -10495,6 +10495,7 @@ body.is-task-placement-open {
   background-repeat: no-repeat;
   background-size: calc(100% - 8px) 1px;
   color: var(--finance-muted);
+  white-space: nowrap;
   cursor: pointer;
   transition: color 180ms var(--ease), background-color 180ms var(--ease), transform 180ms var(--ease);
 }
@@ -10550,6 +10551,11 @@ body.is-task-placement-open {
 .finance-card-workspace > summary strong,
 .finance-card-workspace > summary small {
   display: block;
+}
+
+.finance-card-workspace > summary strong {
+  font-size: 20px;
+  line-height: 1.2;
 }
 
 .finance-card-workspace > summary > span:last-child {
@@ -10823,10 +10829,6 @@ body.is-task-placement-open {
     transform: translateX(4px) scaleX(1.008);
   }
 
-  .finance-record:hover::after {
-    width: calc(100% - 28px);
-  }
-
   .finance-record-actions button:hover:not(:disabled) {
     color: var(--ink);
     background-color: rgba(255, 255, 255, 0.4);
@@ -10875,6 +10877,8 @@ body.is-task-placement-open {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
+    padding-right: 14px;
+    padding-left: 14px;
   }
 
   .finance-card-workspace-body {
@@ -10965,6 +10969,21 @@ body.is-task-placement-open {
   }
 }
 
+@media (max-width: 1100px) {
+  .finance-recurring-record {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .finance-recurring-record .finance-record-actions {
+    width: 100%;
+    align-items: center;
+    flex-flow: row wrap;
+    gap: 8px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .finance-loading-mark,
   .finance-select-options,
@@ -11027,6 +11046,29 @@ body.is-task-placement-open {
 .finance-metric.metric {
   padding: 30px;
   transition: transform 240ms var(--ease), background-color 240ms var(--ease), box-shadow 240ms var(--ease);
+}
+
+.finance-card-workspace .finance-metric-grid-compact {
+  margin-bottom: 16px;
+}
+
+.finance-card-workspace .finance-metric:first-child {
+  padding-left: 0;
+}
+
+.finance-card-workspace .finance-metric:last-child {
+  padding-right: 0;
+}
+
+.finance-card-workspace .finance-entry-form-card > summary {
+  padding-left: 0;
+}
+
+@media (max-width: 560px) {
+  .finance-card-workspace .finance-metric.metric {
+    padding-right: 0;
+    padding-left: 0;
+  }
 }
 
 .finance-metric + .finance-metric::before {

@@ -120,13 +120,27 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   await page.locator('.finance-tabs [data-finance-tab="fixed"]').click();
   const paymentForm = page.locator('form[data-form="finance-fixed-cost-payment"]').first();
   await paymentForm.locator("xpath=..").locator("summary").click();
-  await paymentForm.getByRole("button", { name: "실제 출금 확인" }).click();
+  await paymentForm.getByRole("button", { name: "납부", exact: true }).click();
   await expect.poll(async () => {
     const state = (await fixtureSnapshot(request)).financeState;
     const settlement = state.settlements.find((item) => item.targetType === "entry" && item.status === "paid");
     const movement = state.movements.find((item) => item.id === settlement?.movementId);
     return movement && { kind: movement.kind, fromAccountId: movement.fromAccountId, amountKrw: movement.amountKrw };
   }).toEqual({ kind: "external", fromAccountId: accountId, amountKrw: 600_000 });
+
+  const beforeArchive = await fixtureSnapshot(request);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "보관", exact: true }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.recurringRules[0].status).toBe("archived");
+  const archived = page.locator("[data-finance-recurring-archive]");
+  await expect(archived.locator("summary")).toHaveText("보관 내역 (1)");
+  await archived.locator("summary").click();
+  await expect(archived).toContainText("기존 납부 기록을 유지");
+  await expect(archived).toContainText("수정한 자동 월세");
+  await expect.poll(async () => {
+    const state = (await fixtureSnapshot(request)).financeState;
+    return { entries: state.entries.length, settlements: state.settlements.length };
+  }).toEqual({ entries: beforeArchive.financeState.entries.length, settlements: beforeArchive.financeState.settlements.length });
 
   await page.locator('.finance-tabs [data-finance-tab="accounts"]').click();
   page.once("dialog", (dialog) => dialog.accept());

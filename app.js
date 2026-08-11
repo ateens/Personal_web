@@ -2399,7 +2399,7 @@ function renderFinanceFixedCostPaymentForm(state, entry, settlement, rule) {
           ${financeDateInput("실제 출금일", "postedOn", settlement.scheduledOn)}
           ${financeMoneyInput("실제 금액", "amountKrw", { value: entry.amountKrw })}
         </div>
-        <button class="button" type="submit">실제 출금 확인</button>
+        <button class="button" type="submit">납부</button>
       </form>
     </details>
   `;
@@ -2751,10 +2751,11 @@ function renderFinanceLoanManage(state) {
 
 function renderFinanceRecurringManage(state) {
   const rules = state.recurringRules.filter((rule) => rule.kind === "fixed_expense" && rule.status !== "archived");
+  const archivedRules = state.recurringRules.filter((rule) => rule.kind === "fixed_expense" && rule.status === "archived");
   return `
     <section class="finance-stage-panel panel" aria-labelledby="finance-recurring-manage-title">
-      <h2 id="finance-recurring-manage-title">고정비 설정</h2>
-      <details class="finance-manage-details" ${rules.length ? "" : "open"}>
+      <h2 id="finance-recurring-manage-title">고정비 관리</h2>
+      <details class="finance-manage-details" ${rules.length || archivedRules.length ? "" : "open"}>
         <summary>고정비 추가</summary>
         ${renderFinanceRecurringRuleForm(state)}
       </details>
@@ -2768,11 +2769,11 @@ function renderFinanceRecurringManage(state) {
             <article class="finance-record finance-recurring-record">
               <div>
                 <strong>${esc(rule.name)}</strong>
-                <small>${paused ? "일시정지 · " : ""}${rule.creationMode === "auto" ? "자동 생성" : "수동 생성"} · 매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}</small>
+                <span class="visually-hidden">${paused ? "일시정지 · " : ""}${rule.creationMode === "auto" ? "자동 생성" : "수동 생성"} · 매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}${created ? " · 이 달 납부 생성됨" : ""}</span>
               </div>
               <div class="finance-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(rule.amountEstimateKrw))}</span>
-                ${rule.creationMode === "auto" ? `<span>${created ? "납부 항목 생성됨" : `${esc(rule.dueDay)}일 자동 생성`}</span>` : `<button type="button" data-finance-create-recurring-period="${esc(rule.id)}" ${created || paused ? "disabled" : ""}>${created ? "납부 항목 생성됨" : paused ? "정지 중" : `${esc(financeWorkspace.month)} 납부 항목 만들기`}</button>`}
+                ${rule.creationMode === "manual" && !created && !paused ? `<button type="button" data-finance-create-recurring-period="${esc(rule.id)}">납부 생성</button>` : ""}
                 <button type="button" data-finance-recurring-status="${paused ? "active" : "paused"}" data-finance-recurring-rule-id="${esc(rule.id)}">${paused ? "다시 시작" : "일시정지"}</button>
                 ${references
                   ? `<button type="button" data-finance-recurring-status="archived" data-finance-recurring-rule-id="${esc(rule.id)}">보관</button>`
@@ -2784,8 +2785,22 @@ function renderFinanceRecurringManage(state) {
               ${renderFinanceRecurringRuleForm(state, rule)}
             </details>
           `;
-        }).join("") || '<p class="finance-empty-copy">등록된 고정비가 없습니다.</p>'}
+        }).join("") || '<p class="finance-empty-copy">사용 중인 고정비가 없습니다.</p>'}
       </div>
+      <details class="finance-manage-details" data-finance-recurring-archive>
+        <summary>보관 내역 (${esc(archivedRules.length)})</summary>
+        <p class="finance-form-note">새 납부 생성은 멈추고 기존 납부 기록을 유지한 항목입니다.</p>
+        <div class="finance-record-list">
+          ${archivedRules.map((rule) => `
+            <article class="finance-record">
+              <div><strong>${esc(rule.name)}</strong></div>
+              <div class="finance-record-actions">
+                <span class="finance-record-amount">${esc(formatFinanceKrw(rule.amountEstimateKrw))}</span>
+              </div>
+            </article>
+          `).join("") || '<p class="finance-empty-copy">보관한 고정비가 없습니다.</p>'}
+        </div>
+      </details>
     </section>
   `;
 }
@@ -4296,13 +4311,13 @@ async function setFinanceRecurringRuleStatus(ruleId, status) {
   const state = financeWorkspace.state;
   const rule = state?.recurringRules.find((item) => item.id === ruleId);
   if (!rule || !["active", "paused", "archived"].includes(status)) return;
-  if (status === "archived" && !window.confirm(`‘${rule.name}’ 고정비를 보관할까요? 과거 기록은 유지됩니다.`)) return;
+  if (status === "archived" && !window.confirm(`‘${rule.name}’을 보관 내역으로 옮길까요? 기존 납부 기록은 유지되고 새 납부는 생성하지 않습니다.`)) return;
   const nextState = structuredClone(state);
   const nextRule = nextState.recurringRules.find((item) => item.id === ruleId);
   nextRule.status = status;
   await saveFinanceState(
     nextState,
-    status === "active" ? "고정비 반복을 다시 시작했습니다." : status === "paused" ? "고정비 반복을 잠시 멈췄습니다." : "고정비를 보관했습니다.",
+    status === "active" ? "고정비 반복을 다시 시작했습니다." : status === "paused" ? "고정비 반복을 잠시 멈췄습니다." : "고정비를 보관 내역으로 옮겼습니다.",
   );
 }
 
