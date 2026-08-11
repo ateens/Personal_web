@@ -14,6 +14,7 @@ final class QuickNotesTests: XCTestCase {
         let pasteboard = try XCTUnwrap(NSPasteboard(name: NSPasteboard.Name("SYGMAQuickNotesTests-\(UUID())")))
         XCTAssertTrue(pasteboard.setData(try XCTUnwrap(image.tiffRepresentation), forType: .tiff))
         XCTAssertNotNil(QuickNotesTextView.imageFromPasteboard(pasteboard))
+        XCTAssertTrue(QuickNotesTextView.canPasteImage(from: pasteboard))
 
         let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("clip-\(UUID()).png")
         defer { try? FileManager.default.removeItem(at: imageURL) }

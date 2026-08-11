@@ -735,6 +735,18 @@ final class QuickNotesTextView: NSTextView {
         return nil
     }
 
+    static func canPasteImage(from pasteboard: NSPasteboard = .general) -> Bool {
+        imageFromPasteboard(pasteboard) != nil
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)) {
+            return isEditable && Self.canPasteImage()
+                || super.validateUserInterfaceItem(item)
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let inserted = (insertString as? NSAttributedString)?.string ?? (insertString as? String)
         let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
