@@ -722,6 +722,19 @@ final class QuickNotesTextView: NSTextView {
     var pasteImage: ((NSImage) -> NSTextAttachment?)?
     private var caretScrollPending = false
 
+    static func imageFromPasteboard(_ pasteboard: NSPasteboard = .general) -> NSImage? {
+        if let image = NSImage(pasteboard: pasteboard) { return image }
+        for item in pasteboard.pasteboardItems ?? [] {
+            for type in item.types {
+                if let data = item.data(forType: type), let image = NSImage(data: data) { return image }
+            }
+        }
+        for object in pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) ?? [] {
+            if let url = (object as? NSURL)?.filePathURL, let image = NSImage(contentsOf: url) { return image }
+        }
+        return nil
+    }
+
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let inserted = (insertString as? NSAttributedString)?.string ?? (insertString as? String)
         let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
@@ -859,7 +872,7 @@ final class QuickNotesTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
-        if let image = NSImage(pasteboard: .general), let attachment = pasteImage?(image) {
+        if let image = Self.imageFromPasteboard(), let attachment = pasteImage?(image) {
             let range = selectedRange()
             let insertion = NSMutableAttributedString(string: range.location == 0 ? "" : "\n")
             insertion.append(NSAttributedString(attachment: attachment))

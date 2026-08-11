@@ -5,6 +5,27 @@ import XCTest
 
 final class QuickNotesTests: XCTestCase {
     @MainActor
+    func testImagePasteboardDecoderHandlesImageDataAndFileURLs() throws {
+        let image = NSImage(size: NSSize(width: 4, height: 4))
+        image.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(x: 0, y: 0, width: 4, height: 4).fill()
+        image.unlockFocus()
+        let pasteboard = try XCTUnwrap(NSPasteboard(name: NSPasteboard.Name("SYGMAQuickNotesTests-\(UUID())")))
+        XCTAssertTrue(pasteboard.setData(try XCTUnwrap(image.tiffRepresentation), forType: .tiff))
+        XCTAssertNotNil(QuickNotesTextView.imageFromPasteboard(pasteboard))
+
+        let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("clip-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: imageURL) }
+        let png = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+            .representation(using: .png, properties: [:])
+        try XCTUnwrap(png).write(to: imageURL, options: .atomic)
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects([imageURL as NSURL]))
+        XCTAssertNotNil(QuickNotesTextView.imageFromPasteboard(pasteboard))
+    }
+
+    @MainActor
     func testMarkdownImageAndPersistenceRoundTrip() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-notes-\(UUID())", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
