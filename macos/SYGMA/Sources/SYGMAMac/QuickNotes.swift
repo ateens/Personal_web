@@ -1343,6 +1343,11 @@ private extension NSPanel {
             guard let button = standardWindowButton(type) else { continue }
             button.isHidden = !visible
             button.alphaValue = visible ? 1 : 0
+            if let superview = button.superview {
+                var frame = button.frame
+                frame.origin.y = superview.bounds.midY - 8 - frame.height / 2
+                button.frame = frame
+            }
         }
     }
 }
