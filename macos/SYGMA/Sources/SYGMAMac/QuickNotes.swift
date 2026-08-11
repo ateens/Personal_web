@@ -953,7 +953,6 @@ final class QuickNotesTextView: NSTextView {
 private struct QuickNoteEditor: NSViewRepresentable {
     @ObservedObject var store: QuickNotesStore
     let noteID: UUID
-    let colorMode: QuickNotesColorMode
 
     func makeCoordinator() -> Coordinator { Coordinator(store: store) }
 
@@ -988,11 +987,6 @@ private struct QuickNoteEditor: NSViewRepresentable {
         guard let editor = scroll.documentView as? QuickNotesTextView else { return }
         context.coordinator.store = store
         editor.pasteImage = { [weak store] image in store?.saveImage(image, for: noteID) }
-        if let storage = editor.textStorage {
-            let selection = editor.selectedRanges
-            QuickNoteMarkdownCodec.applySourceStyle(to: storage)
-            editor.selectedRanges = selection
-        }
         if context.coordinator.loadedID != noteID { context.coordinator.load(noteID) }
     }
 
@@ -1139,7 +1133,7 @@ private struct QuickNotesView: View {
                 if store.isPreviewing {
                     QuickNotePreview(store: store, noteID: noteID)
                 } else {
-                    QuickNoteEditor(store: store, noteID: noteID, colorMode: colorMode)
+                    QuickNoteEditor(store: store, noteID: noteID)
                 }
             }
             hairline
@@ -1149,6 +1143,7 @@ private struct QuickNotesView: View {
         .foregroundStyle(Color(nsColor: .quickNoteText))
         .background(Color(nsColor: .windowBackgroundColor).opacity(1 - transparency))
         .preferredColorScheme(colorMode.colorScheme)
+        .ignoresSafeArea(.container, edges: .top)
         .onChange(of: themeRawValue) { _, newValue in
             NotificationCenter.default.post(name: quickNotesThemeChanged, object: newValue)
         }
@@ -1161,16 +1156,19 @@ private struct QuickNotesView: View {
     }
 
     private var header: some View {
-        ZStack {
+        HStack(spacing: 0) {
+            Color.clear
+                .frame(width: 74)
             TextField("제목", text: Binding(
                 get: { store.selectedNote.map(displayTitle) ?? "" },
                 set: store.renameSelected
             ))
             .textFieldStyle(.plain)
             .font(.system(size: 14, weight: .semibold))
-            .multilineTextAlignment(.center)
-            .frame(width: 230)
+            .multilineTextAlignment(.leading)
+            .frame(width: 170, alignment: .leading)
             .lineLimit(1)
+            Spacer(minLength: 8)
 
             HStack(spacing: 10) {
                 Menu {
@@ -1208,7 +1206,6 @@ private struct QuickNotesView: View {
                         QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
                     }
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.trailing, 14)
         }
         .frame(height: 40)
