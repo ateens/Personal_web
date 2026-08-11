@@ -1288,20 +1288,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.minSize = NSSize(width: 440, height: 360)
         panel.setFrameAutosaveName("SYGMAQuickNotes")
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications]
-        let effect = NSVisualEffectView()
-        effect.material = .underWindowBackground
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        let hosting = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
-        hosting.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(hosting)
-        NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: effect.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-        ])
-        panel.contentView = effect
+        panel.contentView = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
         panel.delegate = self
         panel.center()
         self.panel = panel
@@ -1357,7 +1344,10 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
                 .optionOnScreenBelowWindow,
                 windowID,
                 [.bestResolution]
-              ) else { return }
+              ) else {
+            panel.appearance = nil
+            return
+        }
         let bitmap = NSBitmapImageRep(cgImage: image)
         var luminance: CGFloat = 0
         var count: CGFloat = 0
@@ -1368,7 +1358,10 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
                 count += 1
             }
         }
-        guard count > 0 else { return }
+        guard count > 0 else {
+            panel.appearance = nil
+            return
+        }
         let appearanceName: NSAppearance.Name = Self.prefersLightText(luminance: luminance / count) ? .darkAqua : .aqua
         if panel.appearance?.name != appearanceName {
             panel.appearance = NSAppearance(named: appearanceName)
