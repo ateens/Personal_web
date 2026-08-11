@@ -720,6 +720,7 @@ enum QuickNoteMarkdownCodec {
 
 final class QuickNotesTextView: NSTextView {
     var pasteImage: ((NSImage) -> NSTextAttachment?)?
+    private var caretScrollPending = false
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         let inserted = (insertString as? NSAttributedString)?.string ?? (insertString as? String)
@@ -734,11 +735,16 @@ final class QuickNotesTextView: NSTextView {
             normalizeTypingAttributes()
             super.insertText(insertString, replacementRange: replacementRange)
         }
+        ensureCaretVisible()
     }
 
     override func insertNewline(_ sender: Any?) {
         let selection = selectedRange()
-        guard selection.length == 0 else { super.insertNewline(sender); return }
+        guard selection.length == 0 else {
+            super.insertNewline(sender)
+            ensureCaretVisible()
+            return
+        }
         let source = string as NSString
 
         if let list = listContext(at: selection.location) {
@@ -794,6 +800,7 @@ final class QuickNotesTextView: NSTextView {
         }
         typingAttributes = baseTypingAttributes
         super.insertNewline(sender)
+        ensureCaretVisible()
     }
 
     override func insertTab(_ sender: Any?) {
@@ -821,7 +828,11 @@ final class QuickNotesTextView: NSTextView {
 
     override func deleteBackward(_ sender: Any?) {
         let selection = selectedRange()
-        guard let list = listContext(at: selection.location) else { super.deleteBackward(sender); return }
+        guard let list = listContext(at: selection.location) else {
+            super.deleteBackward(sender)
+            ensureCaretVisible()
+            return
+        }
         if selection.length > 0, NSIntersectionRange(selection, list.marker).length > 0 {
             let end = max(NSMaxRange(selection), NSMaxRange(list.marker))
             replaceCharacters(
@@ -833,6 +844,7 @@ final class QuickNotesTextView: NSTextView {
         }
         guard selection.length == 0, selection.location <= NSMaxRange(list.marker) else {
             super.deleteBackward(sender)
+            ensureCaretVisible()
             return
         }
         if let indentUnit = indentUnitRange(in: list.indent) {
@@ -855,9 +867,11 @@ final class QuickNotesTextView: NSTextView {
             textStorage?.replaceCharacters(in: range, with: insertion)
             setSelectedRange(NSRange(location: range.location + insertion.length, length: 0))
             didChangeText()
+            ensureCaretVisible()
             return
         }
         super.paste(sender)
+        ensureCaretVisible()
     }
 
     private var baseTypingAttributes: [NSAttributedString.Key: Any] {
@@ -873,6 +887,19 @@ final class QuickNotesTextView: NSTextView {
         attributes[.foregroundColor] = NSColor.quickNoteText
         attributes.removeValue(forKey: .quickNoteBlock)
         typingAttributes = attributes
+    }
+
+    private func ensureCaretVisible() {
+        guard window != nil, !caretScrollPending else { return }
+        caretScrollPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.caretScrollPending = false
+            guard let textContainer = self.textContainer,
+                  self.selectedRange().location != NSNotFound else { return }
+            self.layoutManager?.ensureLayout(for: textContainer)
+            self.scrollRangeToVisible(self.selectedRange())
+        }
     }
 
     private func protectedInsertionRange(_ range: NSRange) -> NSRange {
@@ -958,6 +985,7 @@ final class QuickNotesTextView: NSTextView {
         textStorage.replaceCharacters(in: range, with: replacement)
         setSelectedRange(NSRange(location: selection, length: 0))
         didChangeText()
+        ensureCaretVisible()
         return true
     }
 }
@@ -1411,7 +1439,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private func panelWindow() -> NSPanel {
         if let panel { return panel }
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 496, height: 1900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -1430,7 +1458,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.backgroundColor = .clear
         panel.alphaValue = 1
         panel.minSize = NSSize(width: 440, height: 360)
-        panel.setFrameAutosaveName("SYGMAQuickNotes")
+        panel.setFrameAutosaveName("SYGMAQuickNotesTall")
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications]
         applyConfiguredAppearance(to: panel)
         panel.setQuickNotesTrafficLightsVisible(false)
@@ -1450,6 +1478,12 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.contentView = trackingView
         panel.delegate = self
         panel.center()
+        if let visibleFrame = (NSScreen.screens.first { $0.frame.origin == .zero } ?? NSScreen.main)?.visibleFrame {
+            var frame = panel.frame
+            frame.origin.x = visibleFrame.midX - frame.width / 2
+            frame.origin.y = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+            panel.setFrame(frame, display: false)
+        }
         self.panel = panel
         return panel
     }
