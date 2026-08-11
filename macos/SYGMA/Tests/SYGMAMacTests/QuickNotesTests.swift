@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import XCTest
 @testable import SYGMAMac
 
@@ -143,8 +144,8 @@ final class QuickNotesTests: XCTestCase {
         backspacedList.textStorage?.setAttributedString(backspacedListValue)
         backspacedList.setSelectedRange(NSRange(location: 2, length: 0))
         backspacedList.deleteBackward(nil)
-        XCTAssertEqual(backspacedList.string, "•항목")
-        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(backspacedList.textStorage)), "•항목")
+        XCTAssertEqual(backspacedList.string, "항목")
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(backspacedList.textStorage)), "항목")
 
         let damagedEmptyList = NSMutableAttributedString(string: "•")
         damagedEmptyList.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 1))
@@ -171,5 +172,92 @@ final class QuickNotesTests: XCTestCase {
         let emptyHeading = QuickNoteMarkdownCodec.editorValue(markdown: "# \n", noteID: noteID, store: reloaded)
         XCTAssertEqual(emptyHeading.string, "\(QuickNoteMarkdownCodec.headingSentinel)\n")
         XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: emptyHeading), "# \n")
+    }
+
+    @MainActor
+    func testNestedListIndentationRoundTripAndEditing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-nested-list-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let markdown = "- parent\n  - child\n\t- tab\n    - four\n"
+        let restored = QuickNoteMarkdownCodec.editorValue(markdown: markdown, noteID: noteID, store: store)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: restored), markdown)
+
+        let editor = QuickNotesTextView(frame: .zero)
+        editor.allowsUndo = true
+        editor.textStorage?.setAttributedString(QuickNoteMarkdownCodec.editorValue(
+            markdown: "- parent\n- child",
+            noteID: noteID,
+            store: store
+        ))
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        editor.insertTab(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(editor.textStorage)), "- parent\n  - child")
+        editor.insertNewline(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(editor.textStorage)), "- parent\n  - child\n  - ")
+        editor.insertBacktab(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(editor.textStorage)), "- parent\n  - child\n- ")
+
+        let first = QuickNotesTextView(frame: .zero)
+        first.textStorage?.setAttributedString(QuickNoteMarkdownCodec.editorValue(markdown: "- only", noteID: noteID, store: store))
+        first.setSelectedRange(NSRange(location: 2, length: 0))
+        first.insertTab(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(first.textStorage)), "- only")
+
+        let nested = QuickNotesTextView(frame: .zero)
+        nested.textStorage?.setAttributedString(QuickNoteMarkdownCodec.editorValue(markdown: "- parent\n  - child", noteID: noteID, store: store))
+        nested.setSelectedRange(NSRange(location: 13, length: 0))
+        nested.deleteBackward(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(nested.textStorage)), "- parent\n- child")
+    }
+
+    @MainActor
+    func testShortcutSettingsAndAdaptiveTextColor() throws {
+        let suite = "SYGMAQuickNotesTests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = QuickNoteShortcutSettings(defaults: defaults)
+
+        XCTAssertEqual(settings.shortcut(for: .note1).display, "⌘1")
+        XCTAssertEqual(settings.shortcut(for: .note9).display, "⌘9")
+        XCTAssertEqual(QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: .command, key: "ㅜ").display, "⌘N")
+        XCTAssertEqual(Set(QuickNoteShortcutAction.allCases.map(settings.shortcut)).count, QuickNoteShortcutAction.allCases.count)
+        XCTAssertNotNil(settings.validationMessage(for: settings.shortcut(for: .note1), action: .note2))
+
+        let custom = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_P), modifiers: [.command, .option], key: "P")
+        settings.save(custom, for: .newNote)
+        XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .newNote), custom)
+
+        let plainLetter = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "p",
+            charactersIgnoringModifiers: "p",
+            isARepeat: false,
+            keyCode: UInt16(kVK_ANSI_P)
+        ))
+        XCTAssertNil(QuickNoteShortcut(event: plainLetter))
+
+        func colorComponents(_ appearanceName: NSAppearance.Name) -> (white: CGFloat, alpha: CGFloat) {
+            var white: CGFloat = -1
+            var alpha: CGFloat = -1
+            NSAppearance(named: appearanceName)?.performAsCurrentDrawingAppearance {
+                NSColor.quickNoteText.usingColorSpace(.deviceGray)?.getWhite(&white, alpha: &alpha)
+            }
+            return (white, alpha)
+        }
+        let light = colorComponents(.aqua)
+        let dark = colorComponents(.darkAqua)
+        XCTAssertEqual(light.white, 0, accuracy: 0.01)
+        XCTAssertEqual(dark.white, 1, accuracy: 0.01)
+        XCTAssertEqual(light.alpha, 1, accuracy: 0.01)
+        XCTAssertEqual(dark.alpha, 1, accuracy: 0.01)
+        XCTAssertTrue(QuickNotesController.prefersLightText(luminance: 0.1))
+        XCTAssertFalse(QuickNotesController.prefersLightText(luminance: 0.9))
     }
 }

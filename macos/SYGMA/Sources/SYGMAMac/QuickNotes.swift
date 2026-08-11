@@ -1,10 +1,243 @@
 import AppKit
 import Carbon.HIToolbox
 import Combine
+import CoreGraphics
 import SwiftUI
 
 private let quickNotesPanelIdentifier = NSUserInterfaceItemIdentifier("SYGMAQuickNotesPanel")
 private let quickNotesHotKeySignature: OSType = 0x5359474E // SYGN
+private let quickNotesTransparencyKey = "SYGMAQuickNotesBackgroundTransparency"
+
+enum QuickNoteShortcutAction: String, CaseIterable, Codable, Identifiable {
+    case togglePanel, newNote, previousNote, nextNote, togglePreview, hidePanel
+    case note1, note2, note3, note4, note5, note6, note7, note8, note9
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .togglePanel: "열기 / 숨기기"
+        case .newNote: "새 노트"
+        case .previousNote: "이전 노트"
+        case .nextNote: "다음 노트"
+        case .togglePreview: "미리보기"
+        case .hidePanel: "숨기기"
+        case .note1, .note2, .note3, .note4, .note5, .note6, .note7, .note8, .note9:
+            "노트 \(noteNumber!)"
+        }
+    }
+
+    var noteNumber: Int? {
+        switch self {
+        case .note1: 1
+        case .note2: 2
+        case .note3: 3
+        case .note4: 4
+        case .note5: 5
+        case .note6: 6
+        case .note7: 7
+        case .note8: 8
+        case .note9: 9
+        default: nil
+        }
+    }
+}
+
+struct QuickNoteShortcut: Codable, Hashable {
+    let keyCode: UInt16
+    let modifiers: UInt
+    let key: String
+
+    private static let modifierMask: NSEvent.ModifierFlags = [.control, .option, .shift, .command]
+    private static let unmodifiedKeys: Set<UInt16> = [
+        UInt16(kVK_Escape), UInt16(kVK_F1), UInt16(kVK_F2), UInt16(kVK_F3), UInt16(kVK_F4),
+        UInt16(kVK_F5), UInt16(kVK_F6), UInt16(kVK_F7), UInt16(kVK_F8), UInt16(kVK_F9),
+        UInt16(kVK_F10), UInt16(kVK_F11), UInt16(kVK_F12), UInt16(kVK_F13), UInt16(kVK_F14),
+        UInt16(kVK_F15), UInt16(kVK_F16), UInt16(kVK_F17), UInt16(kVK_F18), UInt16(kVK_F19),
+        UInt16(kVK_F20),
+    ]
+    private static let ansiKeyLabels: [UInt16: String] = [
+        UInt16(kVK_ANSI_A): "A", UInt16(kVK_ANSI_B): "B", UInt16(kVK_ANSI_C): "C",
+        UInt16(kVK_ANSI_D): "D", UInt16(kVK_ANSI_E): "E", UInt16(kVK_ANSI_F): "F",
+        UInt16(kVK_ANSI_G): "G", UInt16(kVK_ANSI_H): "H", UInt16(kVK_ANSI_I): "I",
+        UInt16(kVK_ANSI_J): "J", UInt16(kVK_ANSI_K): "K", UInt16(kVK_ANSI_L): "L",
+        UInt16(kVK_ANSI_M): "M", UInt16(kVK_ANSI_N): "N", UInt16(kVK_ANSI_O): "O",
+        UInt16(kVK_ANSI_P): "P", UInt16(kVK_ANSI_Q): "Q", UInt16(kVK_ANSI_R): "R",
+        UInt16(kVK_ANSI_S): "S", UInt16(kVK_ANSI_T): "T", UInt16(kVK_ANSI_U): "U",
+        UInt16(kVK_ANSI_V): "V", UInt16(kVK_ANSI_W): "W", UInt16(kVK_ANSI_X): "X",
+        UInt16(kVK_ANSI_Y): "Y", UInt16(kVK_ANSI_Z): "Z",
+        UInt16(kVK_ANSI_0): "0", UInt16(kVK_ANSI_1): "1", UInt16(kVK_ANSI_2): "2",
+        UInt16(kVK_ANSI_3): "3", UInt16(kVK_ANSI_4): "4", UInt16(kVK_ANSI_5): "5",
+        UInt16(kVK_ANSI_6): "6", UInt16(kVK_ANSI_7): "7", UInt16(kVK_ANSI_8): "8",
+        UInt16(kVK_ANSI_9): "9", UInt16(kVK_ANSI_Minus): "-", UInt16(kVK_ANSI_Equal): "=",
+        UInt16(kVK_ANSI_LeftBracket): "[", UInt16(kVK_ANSI_RightBracket): "]",
+        UInt16(kVK_ANSI_Backslash): "\\", UInt16(kVK_ANSI_Semicolon): ";",
+        UInt16(kVK_ANSI_Quote): "'", UInt16(kVK_ANSI_Comma): ",",
+        UInt16(kVK_ANSI_Period): ".", UInt16(kVK_ANSI_Slash): "/", UInt16(kVK_ANSI_Grave): "`",
+    ]
+
+    init(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, key: String) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers.intersection(Self.modifierMask).rawValue
+        self.key = key
+    }
+
+    init?(event: NSEvent) {
+        let flags = event.modifierFlags.intersection(Self.modifierMask)
+        let key = Self.keyLabel(keyCode: event.keyCode, fallback: event.charactersIgnoringModifiers)
+        guard !key.isEmpty, !flags.intersection([.command, .option, .control]).isEmpty || Self.unmodifiedKeys.contains(event.keyCode) else {
+            return nil
+        }
+        self.init(keyCode: event.keyCode, modifiers: flags, key: key)
+    }
+
+    var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
+    var hasPrimaryModifier: Bool { !modifierFlags.intersection([.command, .option, .control]).isEmpty }
+    var isSafe: Bool { !key.isEmpty && (hasPrimaryModifier || Self.unmodifiedKeys.contains(keyCode)) }
+
+    var display: String {
+        var result = ""
+        if modifierFlags.contains(.control) { result += "⌃" }
+        if modifierFlags.contains(.option) { result += "⌥" }
+        if modifierFlags.contains(.shift) { result += "⇧" }
+        if modifierFlags.contains(.command) { result += "⌘" }
+        return result + Self.keyLabel(keyCode: keyCode, fallback: key)
+    }
+
+    var carbonModifiers: UInt32 {
+        var result: UInt32 = 0
+        if modifierFlags.contains(.control) { result |= UInt32(controlKey) }
+        if modifierFlags.contains(.option) { result |= UInt32(optionKey) }
+        if modifierFlags.contains(.shift) { result |= UInt32(shiftKey) }
+        if modifierFlags.contains(.command) { result |= UInt32(cmdKey) }
+        return result
+    }
+
+    func matches(_ event: NSEvent) -> Bool {
+        keyCode == event.keyCode && modifierFlags == event.modifierFlags.intersection(Self.modifierMask)
+    }
+
+    static func == (lhs: QuickNoteShortcut, rhs: QuickNoteShortcut) -> Bool {
+        lhs.keyCode == rhs.keyCode && lhs.modifiers == rhs.modifiers
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(keyCode)
+        hasher.combine(modifiers)
+    }
+
+    private static func keyLabel(keyCode: UInt16, fallback: String?) -> String {
+        if let label = ansiKeyLabels[keyCode] { return label }
+        switch Int(keyCode) {
+        case kVK_Escape: return "Esc"
+        case kVK_Return: return "↩"
+        case kVK_Tab: return "Tab"
+        case kVK_Space: return "Space"
+        case kVK_Delete: return "⌫"
+        case kVK_ForwardDelete: return "⌦"
+        case kVK_LeftArrow: return "←"
+        case kVK_RightArrow: return "→"
+        case kVK_UpArrow: return "↑"
+        case kVK_DownArrow: return "↓"
+        case kVK_F1: return "F1"
+        case kVK_F2: return "F2"
+        case kVK_F3: return "F3"
+        case kVK_F4: return "F4"
+        case kVK_F5: return "F5"
+        case kVK_F6: return "F6"
+        case kVK_F7: return "F7"
+        case kVK_F8: return "F8"
+        case kVK_F9: return "F9"
+        case kVK_F10: return "F10"
+        case kVK_F11: return "F11"
+        case kVK_F12: return "F12"
+        case kVK_F13: return "F13"
+        case kVK_F14: return "F14"
+        case kVK_F15: return "F15"
+        case kVK_F16: return "F16"
+        case kVK_F17: return "F17"
+        case kVK_F18: return "F18"
+        case kVK_F19: return "F19"
+        case kVK_F20: return "F20"
+        default: return (fallback ?? "").uppercased()
+        }
+    }
+}
+
+@MainActor
+final class QuickNoteShortcutSettings: ObservableObject {
+    private static let defaultsKey = "SYGMAQuickNotesShortcutsV1"
+    @Published private(set) var shortcuts: [QuickNoteShortcutAction: QuickNoteShortcut]
+    @Published var capturingAction: QuickNoteShortcutAction?
+    @Published private(set) var message = ""
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let data = defaults.data(forKey: Self.defaultsKey),
+           let stored = try? JSONDecoder().decode([String: QuickNoteShortcut].self, from: data) {
+            let decoded = Dictionary(uniqueKeysWithValues: QuickNoteShortcutAction.allCases.compactMap { action in
+                stored[action.rawValue].map { (action, $0) }
+            })
+            shortcuts = decoded.count == QuickNoteShortcutAction.allCases.count
+                && Set(decoded.values).count == decoded.count
+                && decoded.values.allSatisfy(\.isSafe)
+                ? decoded
+                : Self.defaultShortcuts
+        } else {
+            shortcuts = Self.defaultShortcuts
+        }
+    }
+
+    func shortcut(for action: QuickNoteShortcutAction) -> QuickNoteShortcut {
+        shortcuts[action] ?? Self.defaultShortcuts[action]!
+    }
+
+    func beginCapture(_ action: QuickNoteShortcutAction) {
+        capturingAction = action
+        message = ""
+    }
+
+    func cancelCapture() { capturingAction = nil }
+
+    func validationMessage(for shortcut: QuickNoteShortcut, action: QuickNoteShortcutAction) -> String? {
+        if action == .togglePanel, !shortcut.hasPrimaryModifier {
+            return "전역 단축키에는 Command, Option 또는 Control이 필요합니다."
+        }
+        return shortcuts.contains(where: { $0.key != action && $0.value == shortcut }) ? "이미 사용 중인 단축키입니다." : nil
+    }
+
+    func save(_ shortcut: QuickNoteShortcut, for action: QuickNoteShortcutAction) {
+        shortcuts[action] = shortcut
+        capturingAction = nil
+        message = ""
+        let stored = Dictionary(uniqueKeysWithValues: shortcuts.map { ($0.key.rawValue, $0.value) })
+        if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.defaultsKey) }
+    }
+
+    func fail(_ reason: String) { message = reason }
+
+    static let defaultShortcuts: [QuickNoteShortcutAction: QuickNoteShortcut] = {
+        let command: NSEvent.ModifierFlags = .command
+        return [
+            .togglePanel: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: [.command, .option], key: "N"),
+            .newNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: command, key: "N"),
+            .previousNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_LeftBracket), modifiers: command, key: "["),
+            .nextNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_RightBracket), modifiers: command, key: "]"),
+            .togglePreview: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_M), modifiers: [.command, .shift], key: "M"),
+            .hidePanel: QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc"),
+            .note1: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_1), modifiers: command, key: "1"),
+            .note2: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_2), modifiers: command, key: "2"),
+            .note3: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_3), modifiers: command, key: "3"),
+            .note4: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_4), modifiers: command, key: "4"),
+            .note5: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_5), modifiers: command, key: "5"),
+            .note6: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_6), modifiers: command, key: "6"),
+            .note7: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_7), modifiers: command, key: "7"),
+            .note8: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_8), modifiers: command, key: "8"),
+            .note9: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_9), modifiers: command, key: "9"),
+        ]
+    }()
+}
 
 struct QuickNoteRecord: Codable, Identifiable, Equatable {
     let id: UUID
@@ -257,13 +490,19 @@ extension NSAttributedString.Key {
     static let quickNoteBlock = NSAttributedString.Key("SYGMAQuickNoteBlock")
 }
 
+extension NSColor {
+    static let quickNoteText = NSColor(name: "SYGMAQuickNoteText") { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : .black
+    }
+}
+
 enum QuickNoteMarkdownCodec {
     static let headingSentinel = "\u{200B}"
     private static let imagePattern = try! NSRegularExpression(
         pattern: #"!\[([^\]]*)\]\((assets/[0-9a-fA-F-]{36}\.png)\)"#
     )
     private static let headingPattern = try! NSRegularExpression(pattern: #"(?m)^(#{1,6})[ \t]+"#)
-    private static let listPattern = try! NSRegularExpression(pattern: #"(?m)^-[ \t]+"#)
+    private static let listPattern = try! NSRegularExpression(pattern: #"(?m)^([ \t]*)-[ \t]+"#)
 
     static func markdown(from attributed: NSAttributedString) -> String {
         let value = NSMutableAttributedString(attributedString: attributed)
@@ -283,7 +522,7 @@ enum QuickNoteMarkdownCodec {
             } else if block == "list", marker.location + 2 <= value.length,
                       (value.string as NSString).substring(with: NSRange(location: marker.location, length: 2)) == "• " {
                 value.deleteCharacters(in: NSRange(location: marker.location, length: 2))
-                value.insert(NSAttributedString(string: "- "), at: location)
+                value.insert(NSAttributedString(string: "- "), at: marker.location)
             }
         }
         var replacements: [(NSRange, String)] = []
@@ -325,7 +564,7 @@ enum QuickNoteMarkdownCodec {
         paragraph.paragraphSpacing = 8
         value.addAttributes([
             .font: NSFont.systemFont(ofSize: 16),
-            .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1),
+            .foregroundColor: NSColor.quickNoteText,
             .paragraphStyle: paragraph,
         ], range: range)
 
@@ -338,7 +577,7 @@ enum QuickNoteMarkdownCodec {
         style(#"`([^`\n]+)`"#, in: value) { match in
             value.addAttributes([
                 .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
-                .backgroundColor: NSColor(calibratedWhite: 0.28, alpha: 1),
+                .backgroundColor: NSColor.quaternaryLabelColor,
             ], range: match.range(at: 1))
         }
         style(#"\[([^\]]+)\]\((https?://[^)]+)\)"#, in: value) { match in
@@ -404,8 +643,14 @@ enum QuickNoteMarkdownCodec {
 
         let listMatches = listPattern.matches(in: value.string, range: NSRange(location: 0, length: value.length))
         for match in listMatches.reversed() {
-            value.replaceCharacters(in: match.range, with: "• ")
-            value.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: match.range.location, length: 2))
+            let indentLength = match.range(at: 1).length
+            let indent = (value.string as NSString).substring(with: match.range(at: 1))
+            value.replaceCharacters(in: match.range, with: "\(indent)• ")
+            value.addAttribute(
+                .quickNoteBlock,
+                value: "list",
+                range: NSRange(location: match.range.location + indentLength, length: 2)
+            )
         }
     }
 
@@ -438,19 +683,23 @@ final class QuickNotesTextView: NSTextView {
         let selection = selectedRange()
         guard selection.length == 0 else { super.insertNewline(sender); return }
         let source = string as NSString
-        let paragraph = source.paragraphRange(for: NSRange(location: min(selection.location, source.length), length: 0))
-        var end = NSMaxRange(paragraph)
-        while end > paragraph.location, [10, 13].contains(source.character(at: end - 1)) { end -= 1 }
-        let lineRange = NSRange(location: paragraph.location, length: end - paragraph.location)
-        let line = source.substring(with: lineRange)
 
-        if line.hasPrefix("• ") {
-            if line.dropFirst(2).trimmingCharacters(in: .whitespaces).isEmpty {
-                replaceCharacters(in: NSRange(location: paragraph.location, length: 2), with: NSAttributedString(), selection: paragraph.location)
+        if let list = listContext(at: selection.location) {
+            if source.substring(with: list.content).trimmingCharacters(in: .whitespaces).isEmpty {
+                if let indentUnit = indentUnitRange(in: list.indent) {
+                    replaceCharacters(
+                        in: indentUnit,
+                        with: NSAttributedString(),
+                        selection: max(list.paragraph.location, selection.location - indentUnit.length)
+                    )
+                } else {
+                    replaceCharacters(in: list.marker, with: NSAttributedString(), selection: list.paragraph.location)
+                }
             } else {
-                let markerEnd = paragraph.location + 2
+                let markerEnd = NSMaxRange(list.marker)
                 let splitAt = max(selection.location, markerEnd)
                 let insertion = NSMutableAttributedString(string: "\n", attributes: baseTypingAttributes)
+                insertion.append(NSAttributedString(string: source.substring(with: list.indent), attributes: baseTypingAttributes))
                 insertion.append(NSAttributedString(string: "• ", attributes: [.quickNoteBlock: "list"]))
                 let caret = selection.location <= markerEnd ? markerEnd : splitAt + insertion.length
                 replaceCharacters(
@@ -462,6 +711,12 @@ final class QuickNotesTextView: NSTextView {
             typingAttributes = baseTypingAttributes
             return
         }
+
+        let paragraph = source.paragraphRange(for: NSRange(location: min(selection.location, source.length), length: 0))
+        var end = NSMaxRange(paragraph)
+        while end > paragraph.location, [10, 13].contains(source.character(at: end - 1)) { end -= 1 }
+        let lineRange = NSRange(location: paragraph.location, length: end - paragraph.location)
+        let line = source.substring(with: lineRange)
 
         if line.hasPrefix(QuickNoteMarkdownCodec.headingSentinel) {
             if line == QuickNoteMarkdownCodec.headingSentinel {
@@ -483,6 +738,54 @@ final class QuickNotesTextView: NSTextView {
         super.insertNewline(sender)
     }
 
+    override func insertTab(_ sender: Any?) {
+        guard let list = listContext(at: selectedRange().location), selectedRange().length == 0,
+              list.paragraph.location > 0,
+              listContext(at: list.paragraph.location - 1) != nil else { return }
+        replaceCharacters(
+            in: NSRange(location: list.paragraph.location, length: 0),
+            with: NSAttributedString(string: "  ", attributes: baseTypingAttributes),
+            selection: selectedRange().location + 2
+        )
+    }
+
+    override func insertBacktab(_ sender: Any?) {
+        guard let list = listContext(at: selectedRange().location), selectedRange().length == 0,
+              let indentUnit = indentUnitRange(in: list.indent) else { return }
+        replaceCharacters(
+            in: indentUnit,
+            with: NSAttributedString(),
+            selection: max(list.paragraph.location, selectedRange().location - indentUnit.length)
+        )
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        let selection = selectedRange()
+        guard let list = listContext(at: selection.location) else { super.deleteBackward(sender); return }
+        if selection.length > 0, NSIntersectionRange(selection, list.marker).length > 0 {
+            let end = max(NSMaxRange(selection), NSMaxRange(list.marker))
+            replaceCharacters(
+                in: NSRange(location: list.paragraph.location, length: end - list.paragraph.location),
+                with: NSAttributedString(),
+                selection: list.paragraph.location
+            )
+            return
+        }
+        guard selection.length == 0, selection.location <= NSMaxRange(list.marker) else {
+            super.deleteBackward(sender)
+            return
+        }
+        if let indentUnit = indentUnitRange(in: list.indent) {
+            replaceCharacters(
+                in: indentUnit,
+                with: NSAttributedString(),
+                selection: max(list.paragraph.location, selection.location - indentUnit.length)
+            )
+        } else {
+            replaceCharacters(in: list.marker, with: NSAttributedString(), selection: list.paragraph.location)
+        }
+    }
+
     override func paste(_ sender: Any?) {
         if let image = NSImage(pasteboard: .general), let attachment = pasteImage?(image) {
             let range = selectedRange()
@@ -500,7 +803,7 @@ final class QuickNotesTextView: NSTextView {
     private var baseTypingAttributes: [NSAttributedString.Key: Any] {
         [
             .font: NSFont.systemFont(ofSize: 16),
-            .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1),
+            .foregroundColor: NSColor.quickNoteText,
         ]
     }
 
@@ -517,6 +820,43 @@ final class QuickNotesTextView: NSTextView {
         return NSRange(location: NSMaxRange(marker), length: 0)
     }
 
+    private func listContext(at location: Int) -> (paragraph: NSRange, indent: NSRange, marker: NSRange, content: NSRange)? {
+        guard let textStorage, location <= textStorage.length else { return nil }
+        let source = textStorage.string as NSString
+        let paragraph = source.paragraphRange(for: NSRange(location: min(location, source.length), length: 0))
+        var marker: NSRange?
+        textStorage.enumerateAttribute(.quickNoteBlock, in: paragraph) { block, range, stop in
+            guard block as? String == "list", range.length == 2,
+                  NSMaxRange(range) <= source.length,
+                  source.substring(with: range) == "• " else { return }
+            marker = range
+            stop.pointee = true
+        }
+        guard let marker, marker.location >= paragraph.location else { return nil }
+        var end = NSMaxRange(paragraph)
+        while end > paragraph.location, [10, 13].contains(source.character(at: end - 1)) { end -= 1 }
+        return (
+            paragraph,
+            NSRange(location: paragraph.location, length: marker.location - paragraph.location),
+            marker,
+            NSRange(location: NSMaxRange(marker), length: max(0, end - NSMaxRange(marker)))
+        )
+    }
+
+    private func indentUnitRange(in indent: NSRange) -> NSRange? {
+        guard indent.length > 0 else { return nil }
+        let source = string as NSString
+        let last = source.character(at: NSMaxRange(indent) - 1)
+        if last == 9 { return NSRange(location: NSMaxRange(indent) - 1, length: 1) }
+        var length = 0
+        var cursor = NSMaxRange(indent)
+        while cursor > indent.location, length < 2, source.character(at: cursor - 1) == 32 {
+            cursor -= 1
+            length += 1
+        }
+        return length > 0 ? NSRange(location: cursor, length: length) : nil
+    }
+
     private func applyBlockShortcut(at location: Int) -> Bool {
         let source = string as NSString
         guard location <= source.length else { return false }
@@ -524,9 +864,10 @@ final class QuickNotesTextView: NSTextView {
         let prefixRange = NSRange(location: paragraph.location, length: location - paragraph.location)
         let prefix = source.substring(with: prefixRange)
 
-        if prefix == "-" {
+        if prefix.last == "-", prefix.dropLast().allSatisfy({ $0 == " " || $0 == "\t" }) {
             let bullet = NSAttributedString(string: "• ", attributes: [.quickNoteBlock: "list"])
-            guard replaceCharacters(in: prefixRange, with: bullet, selection: paragraph.location + 2) else { return false }
+            let marker = NSRange(location: location - 1, length: 1)
+            guard replaceCharacters(in: marker, with: bullet, selection: location + 1) else { return false }
             typingAttributes = baseTypingAttributes
             return true
         }
@@ -608,7 +949,7 @@ private struct QuickNoteEditor: NSViewRepresentable {
             editor.textStorage?.setAttributedString(QuickNoteMarkdownCodec.editorValue(markdown: store.body(for: id), noteID: id, store: store))
             editor.typingAttributes = [
                 .font: NSFont.systemFont(ofSize: 16),
-                .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1),
+                .foregroundColor: NSColor.quickNoteText,
             ]
             loadedID = id
             styling = false
@@ -660,13 +1001,84 @@ private struct QuickNotePreview: View {
     }
 }
 
+private struct QuickNotesSettingsView: View {
+    @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @Binding var transparency: Double
+    @State private var screenCaptureAllowed = CGPreflightScreenCaptureAccess()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("배경 투명도")
+                        Spacer()
+                        Text("\(Int(transparency * 100))%")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: $transparency, in: 0...0.85, step: 0.05)
+                    Text("글자와 이미지는 투명해지지 않습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if transparency >= 0.45, !screenCaptureAllowed {
+                        Button("배경 자동 대비 허용") {
+                            screenCaptureAllowed = CGRequestScreenCaptureAccess()
+                        }
+                        .buttonStyle(.bordered)
+                        Text("창 뒤 중앙 영역의 밝기만 확인하며 이미지는 저장하지 않습니다. 허용 후 SYGMA를 다시 열어 주세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !shortcuts.message.isEmpty {
+                    Text(shortcuts.message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.prefix(6)), title: "단축키")
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.dropFirst(6)), title: "노트 바로 이동")
+            }
+            .padding(18)
+        }
+        .frame(width: 390, height: 560)
+        .onDisappear { shortcuts.cancelCapture() }
+    }
+
+    private func shortcutSection(_ actions: [QuickNoteShortcutAction], title: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline)
+            ForEach(actions) { action in
+                HStack {
+                    Text(action.title)
+                    Spacer()
+                    Button {
+                        shortcuts.beginCapture(action)
+                    } label: {
+                        Text(shortcuts.capturingAction == action ? "키 입력…" : shortcuts.shortcut(for: action).display)
+                            .monospaced()
+                            .frame(minWidth: 72)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("\(action.title) 단축키")
+                }
+            }
+        }
+    }
+}
+
 private struct QuickNotesView: View {
     @ObservedObject var store: QuickNotesStore
+    @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
+    @State private var showingSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider().overlay(Color.white.opacity(0.08))
+            Divider().overlay(Color.primary.opacity(0.08))
             if let noteID = store.selectedID {
                 if store.isPreviewing {
                     QuickNotePreview(store: store, noteID: noteID)
@@ -674,12 +1086,12 @@ private struct QuickNotesView: View {
                     QuickNoteEditor(store: store, noteID: noteID)
                 }
             }
-            Divider().overlay(Color.white.opacity(0.08))
+            Divider().overlay(Color.primary.opacity(0.08))
             footer
         }
         .frame(minWidth: 440, minHeight: 360)
-        .background(Color(nsColor: NSColor(calibratedWhite: 0.20, alpha: 1)))
-        .preferredColorScheme(.dark)
+        .foregroundStyle(Color(nsColor: .quickNoteText))
+        .background(Color(nsColor: .windowBackgroundColor).opacity(1 - transparency))
     }
 
     private var header: some View {
@@ -694,7 +1106,6 @@ private struct QuickNotesView: View {
             .frame(width: 230)
 
             HStack(spacing: 10) {
-                Text("⌥⌘N").font(.system(size: 11, weight: .medium, design: .rounded)).foregroundStyle(.secondary)
                 Menu {
                     ForEach(Array(store.notes.enumerated()), id: \.element.id) { index, note in
                         Button("\(index + 1). \(displayTitle(note))") { store.select(note.id) }
@@ -708,7 +1119,13 @@ private struct QuickNotesView: View {
                 .frame(width: 22)
                 Button(action: { store.createNote() }) { Image(systemName: "plus") }
                     .buttonStyle(.plain)
-                    .help("새 노트 · ⌘N")
+                    .help("새 노트 · \(shortcuts.shortcut(for: .newNote).display)")
+                Button(action: { showingSettings.toggle() }) { Image(systemName: "gearshape") }
+                    .buttonStyle(.plain)
+                    .help("Quick Notes 설정")
+                    .popover(isPresented: $showingSettings, arrowEdge: .top) {
+                        QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
+                    }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.trailing, 14)
@@ -731,7 +1148,7 @@ private struct QuickNotesView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(store.isPreviewing ? Color.blue : Color.secondary)
-                .help("Markdown \(store.isPreviewing ? "편집" : "미리보기") · ⌘⇧M")
+                .help("Markdown \(store.isPreviewing ? "편집" : "미리보기") · \(shortcuts.shortcut(for: .togglePreview).display)")
             }
             .padding(.horizontal, 14)
         }
@@ -749,12 +1166,13 @@ private struct QuickNotesView: View {
 
 private final class GlobalHotKeys {
     private var handler: EventHandlerRef?
-    private var references: [EventHotKeyRef] = []
-    private let action: (UInt32) -> Void
+    private var reference: EventHotKeyRef?
+    private var shortcut: QuickNoteShortcut?
+    private let action: () -> Void
 
-    init(action: @escaping (UInt32) -> Void) { self.action = action }
+    init(action: @escaping () -> Void) { self.action = action }
 
-    func start() {
+    func start(with shortcut: QuickNoteShortcut) -> Bool {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
             guard let event, let userData else { return OSStatus(eventNotHandledErr) }
@@ -769,58 +1187,72 @@ private final class GlobalHotKeys {
                 &hotKeyID
             )
             guard result == noErr else { return result }
-            Unmanaged<GlobalHotKeys>.fromOpaque(userData).takeUnretainedValue().action(hotKeyID.id)
+            guard hotKeyID.id == 1 else { return OSStatus(eventNotHandledErr) }
+            Unmanaged<GlobalHotKeys>.fromOpaque(userData).takeUnretainedValue().action()
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &handler)
-
-        if register(id: 1, key: UInt32(kVK_ANSI_N)) {
-            NSLog("SYGMA Quick Notes registered ⌥⌘N.")
-        } else {
-            NSLog("SYGMA Quick Notes could not register ⌥⌘N; use the Notes menu instead.")
-        }
+        return update(shortcut)
     }
 
     deinit {
-        for reference in references { UnregisterEventHotKey(reference) }
+        if let reference { UnregisterEventHotKey(reference) }
         if let handler { RemoveEventHandler(handler) }
     }
 
-    private func register(id: UInt32, key: UInt32) -> Bool {
-        var reference: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: quickNotesHotKeySignature, id: id)
-        if RegisterEventHotKey(key, UInt32(cmdKey | optionKey), hotKeyID, GetApplicationEventTarget(), 0, &reference) == noErr,
-           let reference {
-            references.append(reference)
-            return true
-        }
-        return false
+    func update(_ shortcut: QuickNoteShortcut) -> Bool {
+        guard self.shortcut != shortcut else { return true }
+        var nextReference: EventHotKeyRef?
+        let hotKeyID = EventHotKeyID(signature: quickNotesHotKeySignature, id: 1)
+        guard RegisterEventHotKey(
+            UInt32(shortcut.keyCode),
+            shortcut.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &nextReference
+        ) == noErr, let nextReference else { return false }
+        if let reference { UnregisterEventHotKey(reference) }
+        reference = nextReference
+        self.shortcut = shortcut
+        NSLog("SYGMA Quick Notes registered %@.", shortcut.display)
+        return true
     }
 }
 
 @MainActor
 final class QuickNotesController: NSObject, NSWindowDelegate {
     private let store: QuickNotesStore
+    private let shortcuts: QuickNoteShortcutSettings
     private var panel: NSPanel?
     private var hotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
     private var previousApplication: NSRunningApplication?
+    private var contrastTimer: Timer?
+    private var suppressLocalKeysUntil = Date.distantPast
+    private var suppressedToggleKeyCode: UInt16?
 
     override init() {
         store = QuickNotesStore()
+        shortcuts = QuickNoteShortcutSettings()
         super.init()
     }
 
     func start() {
-        let hotKeys = GlobalHotKeys { [weak self] id in
+        let hotKeys = GlobalHotKeys { [weak self] in
             DispatchQueue.main.async {
-                guard let self else { return }
-                if id == 1 { self.toggle() }
+                self?.suppressLocalKeysUntil = Date().addingTimeInterval(0.25)
+                self?.suppressedToggleKeyCode = self?.shortcuts.shortcut(for: .togglePanel).keyCode
+                self?.toggle()
             }
         }
-        hotKeys.start()
+        if !hotKeys.start(with: shortcuts.shortcut(for: .togglePanel)) {
+            shortcuts.fail("전역 단축키를 등록하지 못했습니다. Notes 메뉴로 열 수 있습니다.")
+        }
         self.hotKeys = hotKeys
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.panel?.isKeyWindow == true else { return event }
+            guard let self else { return event }
+            if self.isSuppressedGlobalDuplicate(event) { return nil }
+            guard self.shortcuts.capturingAction != nil || self.panel?.isKeyWindow == true else { return event }
             return self.handle(event) ? nil : event
         }
     }
@@ -850,11 +1282,26 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
-        panel.backgroundColor = NSColor(calibratedWhite: 0.20, alpha: 1)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.alphaValue = 1
         panel.minSize = NSSize(width: 440, height: 360)
         panel.setFrameAutosaveName("SYGMAQuickNotes")
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications]
-        panel.contentViewController = NSHostingController(rootView: QuickNotesView(store: store))
+        let effect = NSVisualEffectView()
+        effect.material = .underWindowBackground
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        let hosting = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(hosting)
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: effect.topAnchor),
+            hosting.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
+        ])
+        panel.contentView = effect
         panel.delegate = self
         panel.center()
         self.panel = panel
@@ -871,23 +1318,108 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         previousApplication = NSWorkspace.shared.frontmostApplication
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        startContrastUpdates()
     }
 
     private func hide() {
         let restorePreviousApplication = panel?.isKeyWindow == true && NSApp.isActive
         store.flush()
+        contrastTimer?.invalidate()
+        contrastTimer = nil
         panel?.orderOut(nil)
         if restorePreviousApplication { previousApplication?.activate() }
     }
 
+    private func startContrastUpdates() {
+        contrastTimer?.invalidate()
+        refreshContrast()
+        contrastTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshContrast() }
+        }
+    }
+
+    private func refreshContrast() {
+        guard let panel, panel.isVisible else { return }
+        let defaults = UserDefaults.standard
+        let transparency = defaults.object(forKey: quickNotesTransparencyKey) == nil
+            ? 0.70
+            : defaults.double(forKey: quickNotesTransparencyKey)
+        guard transparency >= 0.45, CGPreflightScreenCaptureAccess() else {
+            panel.appearance = nil
+            return
+        }
+        let windowID = CGWindowID(panel.windowNumber)
+        guard let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]])?.first,
+              let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+              let image = CGWindowListCreateImage(
+                CGRect(x: bounds.midX - 24, y: bounds.midY - 24, width: 48, height: 48),
+                .optionOnScreenBelowWindow,
+                windowID,
+                [.bestResolution]
+              ) else { return }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var luminance: CGFloat = 0
+        var count: CGFloat = 0
+        for x in stride(from: 0, to: bitmap.pixelsWide, by: max(1, bitmap.pixelsWide / 4)) {
+            for y in stride(from: 0, to: bitmap.pixelsHigh, by: max(1, bitmap.pixelsHigh / 4)) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                luminance += 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+                count += 1
+            }
+        }
+        guard count > 0 else { return }
+        let appearanceName: NSAppearance.Name = Self.prefersLightText(luminance: luminance / count) ? .darkAqua : .aqua
+        if panel.appearance?.name != appearanceName {
+            panel.appearance = NSAppearance(named: appearanceName)
+            panel.contentView?.needsDisplay = true
+            NSLog("SYGMA Quick Notes contrast %@ (luminance %.2f).", appearanceName.rawValue, luminance / count)
+        }
+    }
+
+    static func prefersLightText(luminance: CGFloat) -> Bool { luminance < 0.52 }
+
+    private func isSuppressedGlobalDuplicate(_ event: NSEvent) -> Bool {
+        Date() < suppressLocalKeysUntil
+            && event.keyCode == suppressedToggleKeyCode
+            && !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+    }
+
     private func handle(_ event: NSEvent) -> Bool {
-        if event.keyCode == UInt16(kVK_Escape) { hide(); return true }
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else { return false }
-        if event.charactersIgnoringModifiers == "n" { store.createNote(); return true }
-        if event.charactersIgnoringModifiers == "[" { store.select(offset: -1); return true }
-        if event.charactersIgnoringModifiers == "]" { store.select(offset: 1); return true }
-        if event.charactersIgnoringModifiers == "m", event.modifierFlags.contains(.shift) { store.togglePreview(); return true }
-        if let value = Int(event.charactersIgnoringModifiers ?? ""), (1...9).contains(value) { store.select(number: value); return true }
-        return false
+        if let action = shortcuts.capturingAction {
+            if event.isARepeat { return true }
+            guard let shortcut = QuickNoteShortcut(event: event) else {
+                shortcuts.fail("문자 키는 Command, Option 또는 Control과 함께 입력해 주세요.")
+                return true
+            }
+            if let message = shortcuts.validationMessage(for: shortcut, action: action) {
+                shortcuts.fail(message)
+                return true
+            }
+            if action == .togglePanel, hotKeys?.update(shortcut) != true {
+                shortcuts.fail("이미 다른 앱에서 사용 중인 전역 단축키입니다.")
+                return true
+            }
+            shortcuts.save(shortcut, for: action)
+            return true
+        }
+
+        guard let action = QuickNoteShortcutAction.allCases.first(where: {
+            $0 != .togglePanel && shortcuts.shortcut(for: $0).matches(event)
+        }) else {
+            return false
+        }
+        if event.isARepeat { return true }
+        switch action {
+        case .togglePanel: break
+        case .newNote: store.createNote()
+        case .previousNote: store.select(offset: -1)
+        case .nextNote: store.select(offset: 1)
+        case .togglePreview: store.togglePreview()
+        case .hidePanel: hide()
+        case .note1, .note2, .note3, .note4, .note5, .note6, .note7, .note8, .note9:
+            store.select(number: action.noteNumber!)
+        }
+        return true
     }
 }
