@@ -1339,15 +1339,32 @@ private final class QuickNotesTrackingView: NSView {
 
 private extension NSPanel {
     func setQuickNotesTrafficLightsVisible(_ visible: Bool) {
-        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = standardWindowButton(type) else { continue }
-            button.isHidden = !visible
-            button.alphaValue = visible ? 1 : 0
-            if let superview = button.superview {
-                var frame = button.frame
-                frame.origin.y = superview.bounds.midY - 8 - frame.height / 2
-                button.frame = frame
-            }
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+            .compactMap { standardWindowButton($0) }
+        buttons.forEach {
+            $0.isHidden = !visible
+            $0.alphaValue = visible ? 1 : 0
+        }
+        guard let contentView, let anchor = buttons.first,
+              let anchorSuperview = anchor.superview else { return }
+
+        let target = contentView.convert(
+            NSPoint(x: contentView.bounds.midX, y: contentView.bounds.maxY - 19),
+            to: anchorSuperview
+        )
+        var anchorFrame = anchor.frame
+        anchorFrame.origin.y = target.y - anchorFrame.height / 2
+        anchor.frame = anchorFrame
+        let alignedCenter = anchorSuperview.convert(
+            NSPoint(x: anchorFrame.midX, y: anchorFrame.midY),
+            to: contentView
+        )
+
+        for button in buttons.dropFirst() {
+            guard let superview = button.superview else { continue }
+            var frame = button.frame
+            frame.origin.y = superview.convert(alignedCenter, from: contentView).y - frame.height / 2
+            button.frame = frame
         }
     }
 }
