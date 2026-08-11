@@ -253,13 +253,36 @@ final class QuickNoteImageAttachment: NSTextAttachment {
     required init?(coder: NSCoder) { nil }
 }
 
+extension NSAttributedString.Key {
+    static let quickNoteBlock = NSAttributedString.Key("SYGMAQuickNoteBlock")
+}
+
 enum QuickNoteMarkdownCodec {
+    static let headingSentinel = "\u{200B}"
     private static let imagePattern = try! NSRegularExpression(
         pattern: #"!\[([^\]]*)\]\((assets/[0-9a-fA-F-]{36}\.png)\)"#
     )
+    private static let headingPattern = try! NSRegularExpression(pattern: #"(?m)^(#{1,6})[ \t]+"#)
+    private static let listPattern = try! NSRegularExpression(pattern: #"(?m)^-[ \t]+"#)
 
     static func markdown(from attributed: NSAttributedString) -> String {
         let value = NSMutableAttributedString(attributedString: attributed)
+        var blocks: [Int: (block: String, marker: NSRange)] = [:]
+        value.enumerateAttribute(.quickNoteBlock, in: NSRange(location: 0, length: value.length)) { block, range, _ in
+            guard let block = block as? String, range.length > 0 else { return }
+            let paragraph = (value.string as NSString).paragraphRange(for: NSRange(location: range.location, length: 0))
+            blocks[paragraph.location] = (block, range)
+        }
+        for (location, valueBlock) in blocks.sorted(by: { $0.key > $1.key }) {
+            let (block, marker) = valueBlock
+            if block.hasPrefix("h"), let level = Int(block.dropFirst()), (1...6).contains(level) {
+                value.deleteCharacters(in: NSRange(location: marker.location, length: 1))
+                value.insert(NSAttributedString(string: "\(String(repeating: "#", count: level)) "), at: location)
+            } else if block == "list" {
+                value.deleteCharacters(in: NSRange(location: marker.location, length: 2))
+                value.insert(NSAttributedString(string: "- "), at: location)
+            }
+        }
         var replacements: [(NSRange, String)] = []
         value.enumerateAttribute(.attachment, in: NSRange(location: 0, length: value.length)) { attachment, range, _ in
             guard let image = attachment as? QuickNoteImageAttachment else { return }
@@ -278,8 +301,13 @@ enum QuickNoteMarkdownCodec {
                   let image = store.image(noteID: noteID, relativePath: String(markdown[pathRange])) else { continue }
             value.replaceCharacters(in: match.range, with: NSAttributedString(attachment: QuickNoteImageAttachment(relativePath: String(markdown[pathRange]), image: image)))
         }
+        materializeBlocks(in: value)
         applySourceStyle(to: value)
         return value
+    }
+
+    static func headingFont(level: Int) -> NSFont {
+        NSFont.systemFont(ofSize: max(18, 27 - CGFloat(level) * 2), weight: .semibold)
     }
 
     static func applySourceStyle(to value: NSMutableAttributedString) {
@@ -298,11 +326,6 @@ enum QuickNoteMarkdownCodec {
             .paragraphStyle: paragraph,
         ], range: range)
 
-        style(#"(?m)^(#{1,6})\s+(.+)$"#, in: value) { match in
-            let level = match.range(at: 1).length
-            value.addAttribute(.foregroundColor, value: NSColor(calibratedWhite: 0.52, alpha: 1), range: match.range(at: 1))
-            value.addAttribute(.font, value: NSFont.systemFont(ofSize: max(18, 27 - CGFloat(level) * 2), weight: .semibold), range: match.range(at: 2))
-        }
         style(#"\*\*([^*\n]+)\*\*"#, in: value) { match in
             value.addAttribute(.font, value: NSFont.systemFont(ofSize: 16, weight: .bold), range: match.range(at: 1))
         }
@@ -323,6 +346,24 @@ enum QuickNoteMarkdownCodec {
         }
         style(#"(?m)^\s*(?:[-*+]|>)\s+"#, in: value) { match in
             value.addAttribute(.foregroundColor, value: NSColor.systemBlue, range: match.range)
+        }
+        var blocks: [Int: String] = [:]
+        value.enumerateAttribute(.quickNoteBlock, in: range) { block, blockRange, _ in
+            guard let block = block as? String else { return }
+            blocks[(value.string as NSString).paragraphRange(for: NSRange(location: blockRange.location, length: 0)).location] = block
+            if block == "list" {
+                value.addAttribute(.foregroundColor, value: NSColor.systemBlue, range: blockRange)
+            }
+        }
+        for (location, block) in blocks {
+            guard block.hasPrefix("h"), let level = Int(block.dropFirst()), (1...6).contains(level) else { continue }
+            var contentRange = paragraphContentRange(at: location, in: value.string as NSString)
+            if contentRange.length > 0,
+               (value.string as NSString).substring(with: NSRange(location: contentRange.location, length: 1)) == headingSentinel {
+                contentRange.location += 1
+                contentRange.length -= 1
+            }
+            if contentRange.length > 0 { value.addAttribute(.font, value: headingFont(level: level), range: contentRange) }
         }
     }
 
@@ -347,10 +388,97 @@ enum QuickNoteMarkdownCodec {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
         for match in regex.matches(in: value.string, range: NSRange(location: 0, length: value.length)) { apply(match) }
     }
+
+    private static func materializeBlocks(in value: NSMutableAttributedString) {
+        let headingMatches = headingPattern.matches(in: value.string, range: NSRange(location: 0, length: value.length))
+        for match in headingMatches.reversed() {
+            let level = match.range(at: 1).length
+            value.replaceCharacters(
+                in: match.range,
+                with: NSAttributedString(string: headingSentinel, attributes: [.quickNoteBlock: "h\(level)"])
+            )
+        }
+
+        let listMatches = listPattern.matches(in: value.string, range: NSRange(location: 0, length: value.length))
+        for match in listMatches.reversed() {
+            value.replaceCharacters(in: match.range, with: "• ")
+            value.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: match.range.location, length: 2))
+        }
+    }
+
+    private static func paragraphContentRange(at location: Int, in value: NSString) -> NSRange {
+        let paragraph = value.paragraphRange(for: NSRange(location: min(location, value.length), length: 0))
+        var end = NSMaxRange(paragraph)
+        while end > paragraph.location, [10, 13].contains(value.character(at: end - 1)) { end -= 1 }
+        return NSRange(location: paragraph.location, length: end - paragraph.location)
+    }
 }
 
-private final class QuickNotesTextView: NSTextView {
+final class QuickNotesTextView: NSTextView {
     var pasteImage: ((NSImage) -> NSTextAttachment?)?
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let inserted = (insertString as? NSAttributedString)?.string ?? (insertString as? String)
+        let range = replacementRange.location == NSNotFound ? selectedRange() : replacementRange
+        if inserted == " ", range.length == 0, applyBlockShortcut(at: range.location) { return }
+        let protectedRange = protectedInsertionRange(range)
+        if protectedRange != range {
+            setSelectedRange(protectedRange)
+            typingAttributes = baseTypingAttributes
+            super.insertText(insertString, replacementRange: NSRange(location: NSNotFound, length: 0))
+        } else {
+            super.insertText(insertString, replacementRange: replacementRange)
+        }
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        let selection = selectedRange()
+        guard selection.length == 0 else { super.insertNewline(sender); return }
+        let source = string as NSString
+        let paragraph = source.paragraphRange(for: NSRange(location: min(selection.location, source.length), length: 0))
+        var end = NSMaxRange(paragraph)
+        while end > paragraph.location, [10, 13].contains(source.character(at: end - 1)) { end -= 1 }
+        let lineRange = NSRange(location: paragraph.location, length: end - paragraph.location)
+        let line = source.substring(with: lineRange)
+
+        if line.hasPrefix("• ") {
+            if line.dropFirst(2).trimmingCharacters(in: .whitespaces).isEmpty {
+                replaceCharacters(in: NSRange(location: paragraph.location, length: 2), with: NSAttributedString(), selection: paragraph.location)
+            } else {
+                let markerEnd = paragraph.location + 2
+                let splitAt = max(selection.location, markerEnd)
+                let insertion = NSMutableAttributedString(string: "\n", attributes: baseTypingAttributes)
+                insertion.append(NSAttributedString(string: "• ", attributes: [.quickNoteBlock: "list"]))
+                let caret = selection.location <= markerEnd ? markerEnd : splitAt + insertion.length
+                replaceCharacters(
+                    in: NSRange(location: splitAt, length: 0),
+                    with: insertion,
+                    selection: caret
+                )
+            }
+            typingAttributes = baseTypingAttributes
+            return
+        }
+
+        if line.hasPrefix(QuickNoteMarkdownCodec.headingSentinel) {
+            if line == QuickNoteMarkdownCodec.headingSentinel {
+                replaceCharacters(
+                    in: lineRange,
+                    with: NSAttributedString(string: "\n", attributes: baseTypingAttributes),
+                    selection: paragraph.location + 1
+                )
+            } else {
+                replaceCharacters(
+                    in: selection,
+                    with: NSAttributedString(string: "\n", attributes: baseTypingAttributes),
+                    selection: selection.location + 1
+                )
+            }
+            typingAttributes = baseTypingAttributes
+            return
+        }
+        super.insertNewline(sender)
+    }
 
     override func paste(_ sender: Any?) {
         if let image = NSImage(pasteboard: .general), let attachment = pasteImage?(image) {
@@ -364,6 +492,61 @@ private final class QuickNotesTextView: NSTextView {
             return
         }
         super.paste(sender)
+    }
+
+    private var baseTypingAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 16),
+            .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1),
+        ]
+    }
+
+    private func protectedInsertionRange(_ range: NSRange) -> NSRange {
+        guard range.length == 0, let textStorage, range.location <= textStorage.length else { return range }
+        let paragraph = (textStorage.string as NSString).paragraphRange(for: NSRange(location: range.location, length: 0))
+        var marker: NSRange?
+        textStorage.enumerateAttribute(.quickNoteBlock, in: paragraph) { block, blockRange, stop in
+            guard block != nil else { return }
+            marker = blockRange
+            stop.pointee = true
+        }
+        guard let marker, range.location < NSMaxRange(marker) else { return range }
+        return NSRange(location: NSMaxRange(marker), length: 0)
+    }
+
+    private func applyBlockShortcut(at location: Int) -> Bool {
+        let source = string as NSString
+        guard location <= source.length else { return false }
+        let paragraph = source.paragraphRange(for: NSRange(location: location, length: 0))
+        let prefixRange = NSRange(location: paragraph.location, length: location - paragraph.location)
+        let prefix = source.substring(with: prefixRange)
+
+        if prefix == "-" {
+            let bullet = NSAttributedString(string: "• ", attributes: [.quickNoteBlock: "list"])
+            guard replaceCharacters(in: prefixRange, with: bullet, selection: paragraph.location + 2) else { return false }
+            typingAttributes = baseTypingAttributes
+            return true
+        }
+
+        guard (1...6).contains(prefix.count), prefix.allSatisfy({ $0 == "#" }) else { return false }
+        let sentinel = NSAttributedString(
+            string: QuickNoteMarkdownCodec.headingSentinel,
+            attributes: [.quickNoteBlock: "h\(prefix.count)"]
+        )
+        guard replaceCharacters(in: prefixRange, with: sentinel, selection: paragraph.location + 1) else { return false }
+        var attributes = baseTypingAttributes
+        attributes[.font] = QuickNoteMarkdownCodec.headingFont(level: prefix.count)
+        typingAttributes = attributes
+        return true
+    }
+
+    @discardableResult
+    private func replaceCharacters(in range: NSRange, with replacement: NSAttributedString, selection: Int) -> Bool {
+        guard shouldChangeText(in: range, replacementString: replacement.string), let textStorage else { return false }
+        textStorage.replaceCharacters(in: range, with: replacement)
+        setSelectedRange(NSRange(location: selection, length: 0))
+        didChangeText()
+        return true
     }
 }
 

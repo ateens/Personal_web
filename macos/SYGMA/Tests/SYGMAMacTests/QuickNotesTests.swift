@@ -47,4 +47,108 @@ final class QuickNotesTests: XCTestCase {
             1
         )
     }
+
+    @MainActor
+    func testLiveMarkdownBlockShortcutsAndPersistenceRoundTrip() throws {
+        func insert(_ value: String, into editor: QuickNotesTextView) {
+            editor.insertText(value, replacementRange: editor.selectedRange())
+        }
+
+        let heading = QuickNotesTextView(frame: .zero)
+        let headingWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [], backing: .buffered, defer: false)
+        headingWindow.contentView = heading
+        heading.allowsUndo = true
+        heading.string = "#"
+        heading.setSelectedRange(NSRange(location: 1, length: 0))
+        insert(" ", into: heading)
+        XCTAssertEqual(heading.string, QuickNoteMarkdownCodec.headingSentinel)
+        XCTAssertEqual(heading.selectedRange(), NSRange(location: 1, length: 0))
+        XCTAssertEqual((heading.typingAttributes[.font] as? NSFont)?.pointSize, 25)
+
+        let undoManager = try XCTUnwrap(heading.undoManager)
+        undoManager.undo()
+        XCTAssertEqual(heading.string, "#")
+        undoManager.redo()
+        XCTAssertEqual(heading.string, QuickNoteMarkdownCodec.headingSentinel)
+        heading.setSelectedRange(NSRange(location: 1, length: 0))
+        insert("제목", into: heading)
+        XCTAssertEqual(heading.string.replacingOccurrences(of: QuickNoteMarkdownCodec.headingSentinel, with: ""), "제목")
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(heading.textStorage)), "# 제목")
+
+        heading.setSelectedRange(NSRange(location: 0, length: 0))
+        heading.insertNewline(nil)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(heading.textStorage)), "\n# 제목")
+
+        let list = QuickNotesTextView(frame: .zero)
+        list.string = "-"
+        list.setSelectedRange(NSRange(location: 1, length: 0))
+        insert(" ", into: list)
+        XCTAssertEqual(list.string, "• ")
+        XCTAssertEqual(list.selectedRange(), NSRange(location: 2, length: 0))
+
+        insert("항목", into: list)
+        list.insertNewline(nil)
+        XCTAssertEqual(list.string, "• 항목\n• ")
+        XCTAssertEqual(list.selectedRange(), NSRange(location: 7, length: 0))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(list.textStorage)), "- 항목\n- ")
+
+        list.insertNewline(nil)
+        XCTAssertEqual(list.string, "• 항목\n")
+        XCTAssertEqual(list.selectedRange(), NSRange(location: 5, length: 0))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(list.textStorage)), "- 항목\n")
+
+        let listAtStart = QuickNotesTextView(frame: .zero)
+        let listValue = NSMutableAttributedString(string: "• 항목")
+        listValue.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 2))
+        listAtStart.textStorage?.setAttributedString(listValue)
+        listAtStart.setSelectedRange(NSRange(location: 0, length: 0))
+        listAtStart.insertNewline(nil)
+        XCTAssertEqual(listAtStart.string, "• \n• 항목")
+        XCTAssertEqual(listAtStart.selectedRange(), NSRange(location: 2, length: 0))
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(listAtStart.textStorage)), "- \n- 항목")
+
+        let displacedHeading = NSMutableAttributedString(string: "x")
+        displacedHeading.append(NSAttributedString(string: QuickNoteMarkdownCodec.headingSentinel, attributes: [.quickNoteBlock: "h1"]))
+        displacedHeading.append(NSAttributedString(string: "제목"))
+        let displacedHeadingMarkdown = QuickNoteMarkdownCodec.markdown(from: displacedHeading)
+        XCTAssertEqual(displacedHeadingMarkdown, "# x제목")
+        XCTAssertFalse(displacedHeadingMarkdown.contains(QuickNoteMarkdownCodec.headingSentinel))
+
+        let protectedHeading = QuickNotesTextView(frame: .zero)
+        let protectedHeadingValue = NSMutableAttributedString(
+            string: QuickNoteMarkdownCodec.headingSentinel,
+            attributes: [.quickNoteBlock: "h1"]
+        )
+        protectedHeadingValue.append(NSAttributedString(string: "제목"))
+        protectedHeading.textStorage?.setAttributedString(protectedHeadingValue)
+        protectedHeading.setSelectedRange(NSRange(location: 0, length: 0))
+        insert("y", into: protectedHeading)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(protectedHeading.textStorage)), "# y제목")
+
+        let protectedList = QuickNotesTextView(frame: .zero)
+        let protectedListValue = NSMutableAttributedString(string: "• 항목")
+        protectedListValue.addAttribute(.quickNoteBlock, value: "list", range: NSRange(location: 0, length: 2))
+        protectedList.textStorage?.setAttributedString(protectedListValue)
+        protectedList.setSelectedRange(NSRange(location: 0, length: 0))
+        insert("x", into: protectedList)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: try XCTUnwrap(protectedList.textStorage)), "- x항목")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-live-markdown-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let persisted = "# 제목\n- 항목\n"
+        store.updateBody(persisted, for: noteID)
+        store.flush()
+
+        let reloaded = QuickNotesStore(rootURL: root)
+        let restored = QuickNoteMarkdownCodec.editorValue(markdown: reloaded.body(for: noteID), noteID: noteID, store: reloaded)
+        XCTAssertEqual(restored.string.replacingOccurrences(of: QuickNoteMarkdownCodec.headingSentinel, with: ""), "제목\n• 항목\n")
+        XCTAssertEqual((restored.attribute(.font, at: 1, effectiveRange: nil) as? NSFont)?.pointSize, 25)
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: restored), persisted)
+
+        let emptyHeading = QuickNoteMarkdownCodec.editorValue(markdown: "# \n", noteID: noteID, store: reloaded)
+        XCTAssertEqual(emptyHeading.string, "\(QuickNoteMarkdownCodec.headingSentinel)\n")
+        XCTAssertEqual(QuickNoteMarkdownCodec.markdown(from: emptyHeading), "# \n")
+    }
 }
