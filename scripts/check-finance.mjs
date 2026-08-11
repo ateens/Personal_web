@@ -91,7 +91,9 @@ assert.equal(financeSessionSecretConfigured("short"), false);
 const session = createFinanceSession(sessionSecret, { now: sessionNow, ttlSeconds: 600 });
 assert.ok(verifyFinanceSession(session, sessionSecret, { now: sessionNow + 599_000 }));
 assert.equal(verifyFinanceSession(session, sessionSecret, { now: sessionNow + 600_000 }), null);
-assert.equal(verifyFinanceSession(`${session.slice(0, -1)}x`, sessionSecret, { now: sessionNow }), null);
+const [sessionPayload, sessionMac] = session.split(".");
+const tamperedSession = `${sessionPayload}.${sessionMac.startsWith("x") ? "y" : "x"}${sessionMac.slice(1)}`;
+assert.equal(verifyFinanceSession(tamperedSession, sessionSecret, { now: sessionNow }), null);
 
 const emptyState = createEmptyFinanceState();
 assert.deepEqual(validateFinanceState(emptyState), []);
