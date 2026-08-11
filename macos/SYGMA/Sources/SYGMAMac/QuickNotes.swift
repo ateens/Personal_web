@@ -1221,57 +1221,56 @@ private struct QuickNotesView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 0) {
-            Color.clear
-                .frame(width: 74)
-            TextField("제목", text: Binding(
-                get: { store.selectedNote.map(displayTitle) ?? "" },
-                set: store.renameSelected
-            ))
-            .textFieldStyle(.plain)
-            .font(.system(size: 14, weight: .semibold))
-            .multilineTextAlignment(.leading)
-            .frame(width: 170, alignment: .leading)
-            .lineLimit(1)
-            Spacer(minLength: 8)
+        ZStack {
+            Text(store.selectedNote.map(displayTitle) ?? "새 노트")
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .allowsHitTesting(false)
+                .accessibilityLabel("현재 노트 제목")
 
-            HStack(spacing: 10) {
-                Menu {
-                    ForEach(Array(store.notes.enumerated()), id: \.element.id) { index, note in
-                        Button("\(index + 1). \(displayTitle(note))") { store.select(note.id) }
+            HStack(spacing: 0) {
+                Color.clear
+                    .frame(width: 74)
+                Spacer(minLength: 8)
+                HStack(spacing: 10) {
+                    Menu {
+                        ForEach(Array(store.notes.enumerated()), id: \.element.id) { index, note in
+                            Button("\(index + 1). \(displayTitle(note))") { store.select(note.id) }
+                        }
+                        Divider()
+                        Button("현재 노트 삭제", role: .destructive) { store.deleteSelected() }
+                    } label: {
+                        Image(systemName: "rectangle.stack")
                     }
-                    Divider()
-                    Button("현재 노트 삭제", role: .destructive) { store.deleteSelected() }
-                } label: {
-                    Image(systemName: "rectangle.stack")
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 22)
-                Button(action: { store.createNote() }) { Image(systemName: "plus") }
-                    .buttonStyle(.plain)
-                    .help("새 노트 · \(shortcuts.shortcut(for: .newNote).display)")
-                Menu {
-                    ForEach(QuickNotesColorMode.allCases) { mode in
-                        Button {
-                            themeRawValue = mode.rawValue
-                        } label: {
-                            Label(mode.title, systemImage: mode.icon)
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 22)
+                    Button(action: { store.createNote() }) { Image(systemName: "plus") }
+                        .buttonStyle(.plain)
+                        .help("새 노트 · \(shortcuts.shortcut(for: .newNote).display)")
+                    Menu {
+                        ForEach(QuickNotesColorMode.allCases) { mode in
+                            Button {
+                                themeRawValue = mode.rawValue
+                            } label: {
+                                Label(mode.title, systemImage: mode.icon)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: colorMode.icon)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 22)
+                    .help("색상 모드 · \(colorMode.title)")
+                    Button(action: { showingSettings.toggle() }) { Image(systemName: "gearshape") }
+                        .buttonStyle(.plain)
+                        .help("Quick Notes 설정")
+                        .popover(isPresented: $showingSettings, arrowEdge: .top) {
+                            QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
                         }
                     }
-                } label: {
-                    Image(systemName: colorMode.icon)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 22)
-                .help("색상 모드 · \(colorMode.title)")
-                Button(action: { showingSettings.toggle() }) { Image(systemName: "gearshape") }
-                    .buttonStyle(.plain)
-                    .help("Quick Notes 설정")
-                    .popover(isPresented: $showingSettings, arrowEdge: .top) {
-                        QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
-                    }
+                .padding(.trailing, 14)
             }
-            .padding(.trailing, 14)
         }
         .frame(height: 40)
     }
@@ -1308,11 +1307,11 @@ private struct QuickNotesView: View {
     }
 
     private func displayTitle(_ note: QuickNoteRecord) -> String {
-        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty, title != "새 노트" { return title }
         let body = store.body(for: note.id)
         let firstLine = body.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        let derived = firstLine.replacingOccurrences(of: #"^\s*(?:#{1,6}\s+|[-*+]\s+)"#, with: "", options: .regularExpression)
+        let derived = firstLine
+            .replacingOccurrences(of: #"^\s*(?:#{1,6}\s+|[-*+]\s+)"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return derived.isEmpty ? "새 노트" : derived
     }
 }
