@@ -9889,6 +9889,7 @@ body.is-task-placement-open {
 }
 
 .finance-form-grid {
+  align-items: start;
   margin-bottom: 16px;
 }
 
@@ -9950,7 +9951,8 @@ body.is-task-placement-open {
 }
 
 .finance-entry-form-card[open] > .finance-native-form,
-.finance-manage-details[open] > .finance-native-form {
+.finance-manage-details[open] > .finance-native-form,
+.finance-card-workspace[open] > .finance-card-workspace-body {
   animation: inline-edit-in 360ms cubic-bezier(0.16, 0.92, 0.22, 1) both;
 }
 
@@ -10583,7 +10585,43 @@ body.is-task-placement-open {
 
 .finance-card-workspace-body {
   padding: 4px 22px 24px;
-  animation: inline-edit-in 360ms cubic-bezier(0.16, 0.92, 0.22, 1) both;
+}
+
+@supports selector(details::details-content) {
+  .finance-entry-form-card,
+  .finance-manage-details,
+  .finance-card-workspace {
+    interpolate-size: allow-keywords;
+  }
+
+  .finance-entry-form-card::details-content,
+  .finance-manage-details::details-content,
+  .finance-card-workspace::details-content {
+    display: block;
+    block-size: 0;
+    overflow: hidden;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition:
+      block-size 360ms cubic-bezier(0.16, 0.92, 0.22, 1),
+      content-visibility 360ms allow-discrete,
+      opacity 220ms var(--ease),
+      transform 360ms cubic-bezier(0.16, 0.92, 0.22, 1);
+  }
+
+  .finance-entry-form-card[open]::details-content,
+  .finance-manage-details[open]::details-content,
+  .finance-card-workspace[open]::details-content {
+    block-size: auto;
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .finance-entry-form-card[open] > .finance-native-form,
+  .finance-manage-details[open] > .finance-native-form,
+  .finance-card-workspace[open] > .finance-card-workspace-body {
+    animation: none;
+  }
 }
 
 .finance-card-section {
@@ -10991,6 +11029,12 @@ body.is-task-placement-open {
   .finance-date-dialog::backdrop {
     animation: none;
   }
+
+  .finance-entry-form-card::details-content,
+  .finance-manage-details::details-content,
+  .finance-card-workspace::details-content {
+    transition: none;
+  }
 }
 
 @media (forced-colors: active) {
@@ -11045,7 +11089,7 @@ body.is-task-placement-open {
 
 .finance-metric.metric {
   padding: 30px;
-  transition: transform 240ms var(--ease), background-color 240ms var(--ease), box-shadow 240ms var(--ease);
+  transition: transform 240ms var(--ease), box-shadow 240ms var(--ease), background 240ms var(--ease);
 }
 
 .finance-card-workspace .finance-metric-grid-compact {
@@ -11075,13 +11119,6 @@ body.is-task-placement-open {
   transition: top 260ms var(--ease), height 260ms var(--ease);
 }
 
-.finance-metric:hover {
-  z-index: 2;
-  transform: translateY(-2px) scaleX(1.018);
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.08));
-  box-shadow: 0 26px 72px -54px rgba(15, 23, 42, 0.32);
-}
-
 .finance-metric > .metric-label,
 .finance-metric > .metric-sub {
   color: var(--muted);
@@ -11105,12 +11142,6 @@ body.is-task-placement-open {
 
 .finance-stage-panel.panel {
   padding: clamp(34px, 4vw, 48px) clamp(28px, 4vw, 44px) clamp(38px, 4.5vw, 54px);
-}
-
-.finance-stage-panel.panel:hover {
-  z-index: 2;
-  transform: translateY(-2px) scaleX(1.012);
-  background-color: rgba(255, 255, 255, 0.22);
 }
 
 .finance-stage-panel h2 {
