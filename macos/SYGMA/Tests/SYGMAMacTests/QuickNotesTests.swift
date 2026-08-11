@@ -217,8 +217,13 @@ final class QuickNotesTests: XCTestCase {
         let suite = "SYGMAQuickNotesTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
+        var legacy = Dictionary(uniqueKeysWithValues: QuickNoteShortcutSettings.defaultShortcuts.map { ($0.key.rawValue, $0.value) })
+        legacy[QuickNoteShortcutAction.hidePanel.rawValue] = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
+        defaults.set(try JSONEncoder().encode(legacy), forKey: "SYGMAQuickNotesShortcutsV1")
         let settings = QuickNoteShortcutSettings(defaults: defaults)
 
+        XCTAssertEqual(settings.shortcut(for: .hidePanel).display, "⌘W")
+        XCTAssertNotNil(defaults.data(forKey: "SYGMAQuickNotesShortcutsV2"))
         XCTAssertEqual(settings.shortcut(for: .note1).display, "⌘1")
         XCTAssertEqual(settings.shortcut(for: .note9).display, "⌘9")
         XCTAssertEqual(QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: .command, key: "ㅜ").display, "⌘N")
@@ -228,6 +233,17 @@ final class QuickNotesTests: XCTestCase {
         let custom = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_P), modifiers: [.command, .option], key: "P")
         settings.save(custom, for: .newNote)
         XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .newNote), custom)
+
+        let escape = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
+        settings.save(escape, for: .hidePanel)
+        XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .hidePanel), escape)
+
+        defaults.removeObject(forKey: "SYGMAQuickNotesShortcutsV2")
+        legacy[QuickNoteShortcutAction.newNote.rawValue] = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_W), modifiers: .command, key: "W")
+        defaults.set(try JSONEncoder().encode(legacy), forKey: "SYGMAQuickNotesShortcutsV1")
+        let conflictSettings = QuickNoteShortcutSettings(defaults: defaults)
+        XCTAssertEqual(conflictSettings.shortcut(for: .hidePanel), escape)
+        XCTAssertEqual(conflictSettings.shortcut(for: .newNote).display, "⌘W")
 
         let plainLetter = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,

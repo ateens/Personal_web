@@ -21,7 +21,7 @@ enum QuickNoteShortcutAction: String, CaseIterable, Codable, Identifiable {
         case .previousNote: "이전 노트"
         case .nextNote: "다음 노트"
         case .togglePreview: "미리보기"
-        case .hidePanel: "숨기기"
+        case .hidePanel: "닫기"
         case .note1, .note2, .note3, .note4, .note5, .note6, .note7, .note8, .note9:
             "노트 \(noteNumber!)"
         }
@@ -166,7 +166,9 @@ struct QuickNoteShortcut: Codable, Hashable {
 
 @MainActor
 final class QuickNoteShortcutSettings: ObservableObject {
-    private static let defaultsKey = "SYGMAQuickNotesShortcutsV1"
+    private static let defaultsKey = "SYGMAQuickNotesShortcutsV2"
+    private static let legacyDefaultsKey = "SYGMAQuickNotesShortcutsV1"
+    private static let legacyHideShortcut = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
     @Published private(set) var shortcuts: [QuickNoteShortcutAction: QuickNoteShortcut]
     @Published var capturingAction: QuickNoteShortcutAction?
     @Published private(set) var message = ""
@@ -174,16 +176,28 @@ final class QuickNoteShortcutSettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        if let data = defaults.data(forKey: Self.defaultsKey),
+        let currentData = defaults.data(forKey: Self.defaultsKey)
+        let legacyData = currentData == nil ? defaults.data(forKey: Self.legacyDefaultsKey) : nil
+        if let data = currentData ?? legacyData,
            let stored = try? JSONDecoder().decode([String: QuickNoteShortcut].self, from: data) {
             let decoded = Dictionary(uniqueKeysWithValues: QuickNoteShortcutAction.allCases.compactMap { action in
                 stored[action.rawValue].map { (action, $0) }
             })
-            shortcuts = decoded.count == QuickNoteShortcutAction.allCases.count
+            var loaded = decoded.count == QuickNoteShortcutAction.allCases.count
                 && Set(decoded.values).count == decoded.count
                 && decoded.values.allSatisfy(\.isSafe)
                 ? decoded
                 : Self.defaultShortcuts
+            if legacyData != nil,
+               loaded[.hidePanel] == Self.legacyHideShortcut,
+               !loaded.contains(where: { $0.key != .hidePanel && $0.value == Self.defaultShortcuts[.hidePanel] }) {
+                loaded[.hidePanel] = Self.defaultShortcuts[.hidePanel]
+            }
+            shortcuts = loaded
+            if legacyData != nil {
+                let stored = Dictionary(uniqueKeysWithValues: loaded.map { ($0.key.rawValue, $0.value) })
+                if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.defaultsKey) }
+            }
         } else {
             shortcuts = Self.defaultShortcuts
         }
@@ -225,7 +239,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
             .previousNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_LeftBracket), modifiers: command, key: "["),
             .nextNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_RightBracket), modifiers: command, key: "]"),
             .togglePreview: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_M), modifiers: [.command, .shift], key: "M"),
-            .hidePanel: QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc"),
+            .hidePanel: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_W), modifiers: command, key: "W"),
             .note1: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_1), modifiers: command, key: "1"),
             .note2: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_2), modifiers: command, key: "2"),
             .note3: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_3), modifiers: command, key: "3"),
@@ -1253,7 +1267,9 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             guard let self else { return event }
             if self.isSuppressedGlobalDuplicate(event) { return nil }
             guard self.shortcuts.capturingAction != nil || self.panel?.isKeyWindow == true else { return event }
-            return self.handle(event) ? nil : event
+            if self.handle(event) { return nil }
+            return event.keyCode == UInt16(kVK_ANSI_W)
+                && event.modifierFlags.intersection([.control, .option, .shift, .command]) == .command ? nil : event
         }
     }
 
