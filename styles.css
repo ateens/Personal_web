@@ -10529,7 +10529,7 @@ body.is-task-placement-open {
 
 .finance-card-workspace.finance-stage-panel.panel {
   overflow: hidden;
-  padding: 0;
+  padding: clamp(34px, 4vw, 48px) clamp(28px, 4vw, 44px) clamp(38px, 4.5vw, 54px);
 }
 
 .finance-card-workspace > summary {
@@ -10538,7 +10538,7 @@ body.is-task-placement-open {
   justify-content: space-between;
   gap: 20px;
   min-height: 76px;
-  padding: 18px 22px;
+  padding: 0;
   color: var(--ink);
   cursor: pointer;
   list-style: none;
@@ -10556,8 +10556,9 @@ body.is-task-placement-open {
 }
 
 .finance-card-workspace > summary strong {
-  font-size: 20px;
-  line-height: 1.2;
+  font-size: clamp(22px, 3vw, 32px);
+  letter-spacing: -0.035em;
+  line-height: normal;
 }
 
 .finance-card-workspace > summary > span:last-child {
@@ -10584,7 +10585,7 @@ body.is-task-placement-open {
 }
 
 .finance-card-workspace-body {
-  padding: 4px 22px 24px;
+  padding: 0;
 }
 
 @supports selector(details::details-content) {
@@ -10915,17 +10916,19 @@ body.is-task-placement-open {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
-    padding-right: 14px;
-    padding-left: 14px;
+    padding: 0;
   }
 
   .finance-card-workspace-body {
-    padding-right: 14px;
-    padding-left: 14px;
+    padding: 0;
   }
 }
 
 @media (max-width: 560px) {
+  .finance-card-workspace.finance-stage-panel.panel {
+    padding: 32px 24px 38px;
+  }
+
   .app.is-finance-view .main {
     padding-right: 18px;
     padding-left: 18px;
@@ -11146,6 +11149,28 @@ body.is-task-placement-open {
 
 .finance-stage-panel h2 {
   color: var(--ink);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .finance-view .finance-stage-panel.panel:hover {
+    transition: none;
+    transform: none;
+  }
+
+  .finance-view .finance-metric:hover {
+    z-index: auto;
+    transition: none;
+    transform: none;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .finance-view .finance-metric + .finance-metric:hover::before {
+    top: 23%;
+    height: 54%;
+    background: var(--divider-v);
+    transition: none;
+  }
 }
 
 .finance-tab-panel.is-entering .finance-stat-bar-track i {
