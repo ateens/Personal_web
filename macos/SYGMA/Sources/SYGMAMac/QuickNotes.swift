@@ -1439,7 +1439,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private func panelWindow() -> NSPanel {
         if let panel { return panel }
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 496, height: 1900),
+            contentRect: NSRect(x: 0, y: 0, width: 496, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -1458,7 +1458,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.backgroundColor = .clear
         panel.alphaValue = 1
         panel.minSize = NSSize(width: 440, height: 360)
-        panel.setFrameAutosaveName("SYGMAQuickNotesTall")
+        panel.setFrameAutosaveName("SYGMAQuickNotesCompact")
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications]
         applyConfiguredAppearance(to: panel)
         panel.setQuickNotesTrafficLightsVisible(false)
