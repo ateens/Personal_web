@@ -2652,7 +2652,7 @@ function renderFinanceAccounts(state) {
                 </div>
               </article>
               <details class="finance-manage-details finance-record-edit" data-finance-edit-account="${esc(account.id)}">
-                <summary>${esc(account.name)} 수정</summary>
+                <summary aria-label="${esc(account.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
                 ${renderFinanceAccountForm(state, account)}
               </details>
             `;
@@ -2707,7 +2707,7 @@ function renderFinancePaymentMethodManage(state, group) {
               </div>
             </article>
             <details class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
-              <summary>${esc(method.name)} 수정</summary>
+              <summary aria-label="${esc(method.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
               ${renderFinancePaymentMethodForm(state, method, group)}
             </details>
           `;
@@ -2739,7 +2739,7 @@ function renderFinanceLoanManage(state) {
               </div>
             </article>
             <details class="finance-manage-details finance-record-edit" data-finance-edit-loan="${esc(loan.id)}">
-              <summary>${esc(loan.name)} 수정</summary>
+              <summary aria-label="${esc(loan.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
               ${renderFinanceLoanForm(loan)}
             </details>
           `;
@@ -2781,7 +2781,7 @@ function renderFinanceRecurringManage(state) {
               </div>
             </article>
             <details class="finance-manage-details finance-record-edit" data-finance-edit-recurring-rule="${esc(rule.id)}">
-              <summary>${esc(rule.name)} 수정</summary>
+              <summary aria-label="${esc(rule.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
               ${renderFinanceRecurringRuleForm(state, rule)}
             </details>
           `;
@@ -2796,6 +2796,7 @@ function renderFinanceRecurringManage(state) {
               <div><strong>${esc(rule.name)}</strong></div>
               <div class="finance-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(rule.amountEstimateKrw))}</span>
+                <button type="button" data-finance-recurring-status="active" data-finance-recurring-rule-id="${esc(rule.id)}">보관 취소</button>
               </div>
             </article>
           `).join("") || '<p class="finance-empty-copy">보관한 고정비가 없습니다.</p>'}
@@ -4314,10 +4315,14 @@ async function setFinanceRecurringRuleStatus(ruleId, status) {
   if (status === "archived" && !window.confirm(`‘${rule.name}’을 보관 내역으로 옮길까요? 기존 납부 기록은 유지되고 새 납부는 생성하지 않습니다.`)) return;
   const nextState = structuredClone(state);
   const nextRule = nextState.recurringRules.find((item) => item.id === ruleId);
+  const restoringArchivedRule = status === "active" && rule.status === "archived";
   nextRule.status = status;
+  if (restoringArchivedRule) nextRule.activeFrom = dateKey(new Date());
   await saveFinanceState(
     nextState,
-    status === "active" ? "고정비 반복을 다시 시작했습니다." : status === "paused" ? "고정비 반복을 잠시 멈췄습니다." : "고정비를 보관 내역으로 옮겼습니다.",
+    restoringArchivedRule
+      ? "보관한 고정비를 오늘부터 다시 시작했습니다."
+      : status === "active" ? "고정비 반복을 다시 시작했습니다." : status === "paused" ? "고정비 반복을 잠시 멈췄습니다." : "고정비를 보관 내역으로 옮겼습니다.",
   );
 }
 

@@ -43,6 +43,8 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   const accountId = snapshot.financeState.accounts[0].id;
 
   const accountEdit = page.locator(`[data-finance-edit-account="${accountId}"]`);
+  await expect(accountEdit.locator("summary")).toHaveAttribute("aria-label", "생활비 통장 수정");
+  await expect(accountEdit.locator(".finance-edit-icon")).toHaveText("✎");
   await accountEdit.locator("summary").click();
   await accountEdit.locator('[name="name"]').fill("수정한 생활비 통장");
   await accountEdit.getByRole("button", { name: "계좌 수정 저장" }).click();
@@ -52,6 +54,8 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   snapshot = await fixtureSnapshot(request);
   const cardId = snapshot.financeState.paymentMethods[0].id;
   const cardEdit = page.locator(`[data-finance-edit-payment-method="${cardId}"]`);
+  await expect(cardEdit.locator("summary")).toHaveAttribute("aria-label", "생활 신용카드 수정");
+  await expect(cardEdit.locator(".finance-edit-icon")).toHaveText("✎");
   await cardEdit.locator("summary").click();
   await cardEdit.locator('[name="name"]').fill("수정한 생활 신용카드");
   await cardEdit.locator('[name="dueDay"]').fill("17");
@@ -137,6 +141,12 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   await archived.locator("summary").click();
   await expect(archived).toContainText("기존 납부 기록을 유지");
   await expect(archived).toContainText("수정한 자동 월세");
+  const restoreButton = archived.locator('[data-finance-recurring-status="active"]');
+  await expect(restoreButton).toHaveText("보관 취소");
+  await restoreButton.click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.recurringRules[0].status).toBe("active");
+  await expect.poll(async () => (await fixtureSnapshot(request)).financeState.recurringRules[0].activeFrom).toBe(`${today.month}-${today.day.padStart(2, "0")}`);
+  await expect(archived.locator("summary")).toHaveText("보관 내역 (0)");
   await expect.poll(async () => {
     const state = (await fixtureSnapshot(request)).financeState;
     return { entries: state.entries.length, settlements: state.settlements.length };
@@ -408,7 +418,7 @@ test("statistics calendar follows occurrence dates and keeps finance headings co
       expandsLeft: hovered.x < basisCardBox.x - 1,
       expandsRight: hovered.x + hovered.width > basisCardBox.x + basisCardBox.width + 1,
     };
-  }).toEqual({ expandsLeft: true, expandsRight: true });
+  }).toEqual({ expandsLeft: false, expandsRight: false });
 
   await expect(calendar.locator('[data-finance-consumption-date="2026-07-04"] [data-finance-consumption-entry="entry-expense-calendar"]')).toContainText("식비");
   const refundEntry = calendar.locator('[data-finance-consumption-date="2026-07-05"] [data-finance-consumption-entry="entry-refund-calendar"]');

@@ -11279,6 +11279,41 @@ body.is-task-placement-open {
   background-color: rgba(255, 255, 255, 0.1);
 }
 
+.finance-record-edit > summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 44px;
+  padding: 7px 8px;
+  color: var(--muted);
+}
+
+.finance-record-edit > summary::after {
+  display: none;
+}
+
+.finance-edit-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+  transition: color 180ms var(--ease), background-color 180ms var(--ease), transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1);
+}
+
+.finance-record-edit[open] > summary {
+  color: var(--blue);
+}
+
+.finance-record-edit[open] .finance-edit-icon {
+  background-color: rgba(37, 99, 235, 0.1);
+  transform: rotate(-12deg);
+}
+
 .finance-view-stats {
   width: 100%;
   max-width: none;
