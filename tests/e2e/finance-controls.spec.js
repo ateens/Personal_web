@@ -158,66 +158,292 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   await expect.poll(async () => (await fixtureSnapshot(request)).financeState.loans.length).toBe(0);
 });
 
-test("credit-card workspace stores starting totals and installments, then pays without another expense", async ({ page, request }) => {
-  await createAccount(page, request);
-  await createCreditCard(page, request, { dueDay: "14" });
-  const initial = await fixtureSnapshot(request);
-  const accountId = initial.financeState.accounts[0].id;
+test("credit-card workspace shows current debt and pays a confirmed statement once", async ({ page, request }) => {
+  const accountId = "account-card";
+  const cardId = "card-hyundai";
+  const planId = "plan-notebook";
+  const pastMovementId = "movement-card-july";
+  const existingStatement = {
+    id: "statement-august-existing",
+    paymentMethodId: cardId,
+    paymentAccountId: accountId,
+    periodStart: "2026-07-01",
+    periodEnd: "2026-07-31",
+    statementOn: "2026-08-01",
+    scheduledOn: "2026-08-12",
+    statementAmountKrw: 60_000,
+    status: "confirmed",
+    items: [{
+      entryId: "entry-july-existing",
+      amountKrw: 60_000,
+      installmentNumber: 1,
+      installmentCount: 1,
+    }],
+  };
+  const installments = [
+    ["statement-installment-1", "2026-07-12", "paid", 1],
+    ["statement-installment-2", "2026-08-12", "confirmed", 2],
+    ["statement-installment-3", "2026-09-12", "confirmed", 3],
+  ].map(([id, scheduledOn, status, installmentNumber]) => ({
+    id,
+    paymentMethodId: cardId,
+    paymentAccountId: accountId,
+    periodStart: "2026-05-01",
+    periodEnd: "2026-05-31",
+    statementOn: "2026-05-31",
+    scheduledOn,
+    statementAmountKrw: 200_000,
+    status,
+    source: "opening_installment",
+    planId,
+    label: "노트북",
+    installmentNumber,
+    installmentCount: 3,
+    items: [],
+  }));
+  const seeded = await page.evaluate(async (state) => {
+    const currentResponse = await fetch("/api/finance/state");
+    const current = await currentResponse.json();
+    const response = await fetch("/api/finance/state", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": `"finance-state-${current.revision}"`,
+      },
+      body: JSON.stringify({ state, baseRevision: current.revision }),
+    });
+    return { ok: response.ok, status: response.status, body: await response.json() };
+  }, {
+    schemaVersion: 1,
+    currency: "KRW",
+    accounts: [{
+      id: accountId,
+      name: "생활비 통장",
+      type: "bank",
+      openingBalanceKrw: 5_000_000,
+      openingOn: "2026-01-01",
+    }],
+    paymentMethods: [{
+      id: cardId,
+      name: "현대신용",
+      type: "credit_card",
+      paymentAccountId: accountId,
+      cycleEndDay: 31,
+      dueDay: 12,
+      dueMonthOffset: 1,
+    }],
+    entries: [
+      {
+        id: "entry-july-existing",
+        kind: "expense",
+        title: "7월 기존 확정분",
+        amountKrw: 60_000,
+        occurredOn: "2026-07-05",
+        recognitionMonth: "2026-07",
+        category: "생활",
+        paymentMethodId: cardId,
+        status: "confirmed",
+      },
+      {
+        id: "entry-july-expense",
+        kind: "expense",
+        title: "7월 일시불",
+        amountKrw: 100_000,
+        occurredOn: "2026-07-10",
+        recognitionMonth: "2026-07",
+        category: "생활",
+        paymentMethodId: cardId,
+        status: "confirmed",
+      },
+      {
+        id: "entry-july-refund",
+        kind: "refund",
+        title: "7월 환불",
+        amountKrw: 10_000,
+        occurredOn: "2026-07-15",
+        recognitionMonth: "2026-07",
+        originalEntryId: "entry-july-expense",
+        paymentMethodId: cardId,
+        status: "confirmed",
+      },
+      {
+        id: "entry-august-expense",
+        kind: "expense",
+        title: "8월 사용",
+        amountKrw: 80_000,
+        occurredOn: "2026-08-05",
+        recognitionMonth: "2026-08",
+        category: "생활",
+        paymentMethodId: cardId,
+        status: "confirmed",
+      },
+    ],
+    movements: [{
+      id: pastMovementId,
+      kind: "card_payment",
+      amountKrw: 200_000,
+      postedOn: "2026-07-12",
+      fromAccountId: accountId,
+      counterpartyType: "card",
+      counterpartyId: cardId,
+      status: "confirmed",
+    }],
+    settlements: [
+      {
+        id: "settlement-july-existing",
+        targetType: "entry",
+        targetId: "entry-july-existing",
+        expectedAmountKrw: 60_000,
+        scheduledOn: "2026-08-12",
+        status: "canceled",
+      },
+      {
+        id: "settlement-august-existing",
+        targetType: "card_statement",
+        targetId: existingStatement.id,
+        expectedAmountKrw: existingStatement.statementAmountKrw,
+        scheduledOn: existingStatement.scheduledOn,
+        status: "confirmed",
+      },
+      {
+        id: "settlement-july-expense",
+        targetType: "entry",
+        targetId: "entry-july-expense",
+        expectedAmountKrw: 100_000,
+        scheduledOn: "2026-08-12",
+        status: "estimated",
+      },
+      {
+        id: "settlement-july-refund",
+        targetType: "entry",
+        targetId: "entry-july-refund",
+        expectedAmountKrw: 10_000,
+        scheduledOn: "2026-08-12",
+        status: "estimated",
+      },
+      {
+        id: "settlement-august-expense",
+        targetType: "entry",
+        targetId: "entry-august-expense",
+        expectedAmountKrw: 80_000,
+        scheduledOn: "2026-09-12",
+        status: "estimated",
+      },
+      ...installments.map((statement) => ({
+        id: `settlement-${statement.id}`,
+        targetType: "card_statement",
+        targetId: statement.id,
+        expectedAmountKrw: statement.statementAmountKrw,
+        scheduledOn: statement.scheduledOn,
+        status: statement.status,
+        ...(statement.status === "paid" ? {
+          movementId: pastMovementId,
+          settledAmountKrw: statement.statementAmountKrw,
+        } : {}),
+      })),
+    ],
+    cardStatements: [...installments, existingStatement],
+    loans: [],
+    loanPayments: [],
+    recurringRules: [],
+    balanceChecks: [],
+  });
+  expect(seeded, JSON.stringify(seeded.body)).toMatchObject({ ok: true, status: 200 });
 
+  await page.reload();
+  await expect(page.locator('[data-finance-screen="dashboard"]')).toBeVisible();
+  const monthPicker = page.locator(".finance-month-control [data-finance-select]");
+  await monthPicker.locator("[data-finance-select-trigger]").click();
+  await monthPicker.locator('[data-finance-select-option="2026-08"]').click();
   await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
-  const card = page.locator("[data-finance-card]").first();
-  await expect(card).toContainText("매월 14일 납부");
-  const totalForm = card.locator('form[data-form="finance-card-usage-total"]');
-  await totalForm.locator("xpath=..").locator("summary").click();
-  await totalForm.locator('[name="amountKrw"]').fill("2000000");
-  await totalForm.getByRole("button", { name: "시작 사용액 저장" }).click();
 
-  await page.locator('.finance-tabs [data-finance-tab="entries"]').click();
-  await page.getByText("지출", { exact: true }).click();
-  const expenseForm = page.locator('form[data-form="finance-expense"]');
-  const cardId = (await fixtureSnapshot(request)).financeState.paymentMethods[0].id;
-  await expenseForm.locator('[name="title"]').fill("추가 생활비");
-  await expenseForm.locator('[name="amountKrw"]').fill("100000");
-  await expenseForm.locator('select[name="paymentMethodId"]').selectOption(cardId);
-  await expenseForm.getByRole("button", { name: "쓴 기록 저장" }).click();
+  const card = page.locator(`[data-finance-card="${cardId}"]`);
+  await expect(card.locator(".finance-metric .metric-label")).toHaveText(["이번달 현황", "총 사용액"]);
+  await expect(card.locator(".finance-metric").filter({ hasText: "이번달 현황" }).locator(".metric-value")).toHaveText("₩80,000");
+  await expect(card.locator(".finance-metric").filter({ hasText: "총 사용액" }).locator(".metric-value")).toHaveText("₩630,000");
+  await expect(card.locator('form[data-form="finance-card-usage-total"], form[data-form="finance-card-installment"], form[data-form="finance-card-payment"]')).toHaveCount(0);
+  await expect(card).not.toContainText(/이전 달|시작 사용액|기존 할부 일정 등록|실제 출금 확인/);
 
-  await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
-  await expect(page.locator("[data-finance-card]").first()).toContainText("₩2,100,000");
-  const installmentForm = page.locator('form[data-form="finance-card-installment"]');
-  await installmentForm.locator("xpath=..").locator("summary").click();
-  await installmentForm.locator('[name="label"]').fill("기존 노트북");
-  await installmentForm.locator('[name="totalAmountKrw"]').fill("600000");
-  await installmentForm.locator('[name="installmentCount"]').fill("3");
-  await installmentForm.getByRole("button", { name: "할부 일정 저장" }).click();
+  const plan = card.locator(`[data-finance-installment-plan="${planId}"]`);
+  await expect(plan).toHaveCount(1);
+  await expect(plan).not.toHaveAttribute("open", "");
+  await plan.locator("[data-finance-installment-toggle]").click();
+  await expect(plan).toHaveAttribute("open", "");
+  await expect(plan.getByText("총 금액", { exact: true })).toBeVisible();
+  await expect(plan).toContainText("₩600,000");
+  await expect(plan.getByText("남은 금액", { exact: true })).toBeVisible();
+  await expect(plan).toContainText("₩400,000");
+  await expect(plan).toContainText(/1\/3[\s\S]*2026-07-12[\s\S]*₩200,000/);
+  await expect(plan).toContainText(/2\/3[\s\S]*2026-08-12[\s\S]*₩200,000/);
+  await expect(plan).toContainText(/3\/3[\s\S]*2026-09-12[\s\S]*₩200,000/);
 
-  await expect.poll(async () => {
-    const state = (await fixtureSnapshot(request)).financeState;
-    return {
-      entries: state.entries.length,
-      installments: state.cardStatements.filter((item) => item.source === "opening_installment").map((item) => item.statementAmountKrw),
-    };
-  }).toEqual({ entries: 2, installments: [200_000, 200_000, 200_000] });
+  const statementForm = card.locator('form[data-form="finance-card-statement"]');
+  await statementForm.locator("xpath=..").locator(":scope > summary").click();
+  await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "7월 일시불 이용액" }).locator("strong")).toHaveText("₩150,000");
+  await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "할부 총합" }).locator("strong")).toHaveText("₩200,000");
+  await statementForm.locator("[data-finance-statement-adjustment-amount]").fill("10000");
+  await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "총 납부액" }).locator("strong")).toHaveText("₩360,000");
 
   const beforePay = await fixtureSnapshot(request);
-  const entriesBefore = beforePay.financeState.entries.length;
-  const movementsBefore = beforePay.financeState.movements.length;
-  const cardPaymentForm = page.locator('form[data-form="finance-card-payment"]').first();
-  await cardPaymentForm.locator("xpath=..").locator("summary").click();
-  await cardPaymentForm.getByRole("button", { name: "전액 출금 확인" }).click();
+  await statementForm.getByRole("button", { name: /명세서 확정/ }).click();
   await expect.poll(async () => {
     const state = (await fixtureSnapshot(request)).financeState;
-    const movement = state.movements.find((item) => item.kind === "card_payment");
+    const movement = state.movements.find((item) => item.id !== pastMovementId && item.kind === "card_payment");
+    const ordinaryStatements = state.cardStatements.filter((item) => (
+      item.paymentMethodId === cardId
+      && item.source !== "opening_installment"
+      && item.scheduledOn === "2026-08-12"
+    ));
+    const ordinaryStatement = ordinaryStatements[0];
+    const currentInstallment = state.cardStatements.find((item) => item.id === "statement-installment-2");
+    const futureInstallment = state.cardStatements.find((item) => item.id === "statement-installment-3");
+    const paidStatementIds = new Set([ordinaryStatement?.id, currentInstallment?.id].filter(Boolean));
+    const paidSettlements = state.settlements.filter((item) => paidStatementIds.has(item.targetId));
+    const directStatuses = state.settlements
+      .filter((item) => ["entry-july-existing", "entry-july-expense", "entry-july-refund"].includes(item.targetId))
+      .map((item) => item.status)
+      .sort();
     return {
       entries: state.entries.length,
       movements: state.movements.length,
-      amountKrw: movement?.amountKrw,
-      fromAccountId: movement?.fromAccountId,
+      movement: movement && {
+        amountKrw: movement.amountKrw,
+        postedOn: movement.postedOn,
+        fromAccountId: movement.fromAccountId,
+      },
+      ordinaryStatement: ordinaryStatement && {
+        reused: ordinaryStatement.id === existingStatement.id,
+        amountKrw: ordinaryStatement.statementAmountKrw,
+        status: ordinaryStatement.status,
+        itemIds: ordinaryStatement.items.map((item) => item.entryId).sort(),
+      },
+      ordinaryStatementCount: ordinaryStatements.length,
+      currentInstallmentStatus: currentInstallment?.status,
+      futureInstallmentStatus: futureInstallment?.status,
+      paidSettlements: paidSettlements.length,
+      allPaid: paidSettlements.every((item) => item.status === "paid"),
+      sameMovement: paidSettlements.every((item) => item.movementId === movement?.id),
+      settledAmountKrw: paidSettlements.reduce((total, item) => total + Number(item.settledAmountKrw || 0), 0),
+      directStatuses,
     };
   }).toEqual({
-    entries: entriesBefore,
-    movements: movementsBefore + 1,
-    amountKrw: 200_000,
-    fromAccountId: accountId,
+    entries: beforePay.financeState.entries.length,
+    movements: beforePay.financeState.movements.length + 1,
+    movement: { amountKrw: 360_000, postedOn: "2026-08-12", fromAccountId: accountId },
+    ordinaryStatement: {
+      reused: true,
+      amountKrw: 160_000,
+      status: "paid",
+      itemIds: ["entry-july-existing", "entry-july-expense", "entry-july-refund"],
+    },
+    ordinaryStatementCount: 1,
+    currentInstallmentStatus: "paid",
+    futureInstallmentStatus: "confirmed",
+    paidSettlements: 2,
+    allPaid: true,
+    sameMovement: true,
+    settledAmountKrw: 360_000,
+    directStatuses: ["canceled", "canceled", "canceled"],
   });
 });
 

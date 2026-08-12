@@ -2325,62 +2325,65 @@ function renderFinanceCardStatementForm(state, method) {
   const existingStatement = state.cardStatements.find((statement) => (
     statement.paymentMethodId === method.id
     && statement.source !== "opening_installment"
+    && statement.status === "confirmed"
+    && statement.scheduledOn.slice(0, 7) === financeWorkspace.month
+  ));
+  const paidStatement = state.cardStatements.some((statement) => (
+    statement.paymentMethodId === method.id
+    && statement.source !== "opening_installment"
+    && statement.status === "paid"
     && statement.scheduledOn.slice(0, 7) === financeWorkspace.month
   ));
   const candidateTotal = candidates.reduce((total, entry) => (
     total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
   ), 0);
+  const installments = state.cardStatements.filter((statement) => (
+    statement.paymentMethodId === method.id
+    && statement.source === "opening_installment"
+    && statement.status === "confirmed"
+    && statement.scheduledOn.slice(0, 7) === financeWorkspace.month
+  ));
+  const installmentTotal = installments.reduce((total, statement) => total + statement.statementAmountKrw, 0);
   const candidateDates = candidates.map((entry) => entry.occurredOn).sort();
   const fallbackPeriod = financeModel.shiftMonthKey(financeWorkspace.month, -1);
-  const periodStart = candidateDates[0] || `${fallbackPeriod}-01`;
-  const periodEnd = candidateDates.at(-1) || financeModel.dateForMonthDay(fallbackPeriod, 31);
+  const periodStart = [existingStatement?.periodStart, candidateDates[0]].filter(Boolean).sort()[0] || `${fallbackPeriod}-01`;
+  const periodEnd = [existingStatement?.periodEnd, candidateDates.at(-1)].filter(Boolean).sort().at(-1) || financeModel.dateForMonthDay(fallbackPeriod, 31);
   const paymentAccount = state.accounts.find((account) => account.id === method.paymentAccountId);
   const scheduledOn = financeModel.dateForMonthDay(financeWorkspace.month, method.dueDay || 1);
+  const existingAdjustmentTotal = existingStatement?.adjustments?.reduce((total, item) => total + item.amountKrw, 0) || 0;
+  const oneTimeTotal = (existingStatement?.statementAmountKrw || 0) + candidateTotal;
+  const paymentTotal = oneTimeTotal + installmentTotal;
+  const paid = paidStatement && !candidates.length && !installments.length;
   return `
     <details class="finance-entry-form-card">
-      <summary>${esc(method.name)} ${existingStatement ? "명세서 확정됨" : "명세서 확정"}</summary>
+      <summary>${esc(method.name)} ${paid ? "납부 완료" : "명세서 확정"}</summary>
       <form data-form="finance-card-statement" class="finance-native-form">
         <input type="hidden" name="paymentMethodId" value="${esc(method.id)}">
-        <p class="finance-form-note">일시불·전액 납부만 지원합니다. 출금 계좌: ${esc(paymentAccount?.name || "설정된 계좌")} · 이번 명세서에서는 바뀌지 않습니다.</p>
+        <input type="hidden" name="settlementMonth" value="${esc(financeWorkspace.month)}">
+        <input type="hidden" name="scheduledOn" value="${esc(scheduledOn)}">
+        ${existingStatement ? `<input type="hidden" name="statementId" value="${esc(existingStatement.id)}">` : ""}
+        ${candidates.map((entry) => `<input type="hidden" name="entryId" value="${esc(entry.id)}">`).join("")}
+        <p class="finance-form-note">${esc(paymentAccount?.name || "설정된 계좌")}에서 카드대금이 바로 출금됩니다.</p>
+        <div class="finance-statement-breakdown">
+          ${financeFormFact(`${financePickerMonthLabel(fallbackPeriod)} 일시불 이용액`, formatFinanceKrw(oneTimeTotal - existingAdjustmentTotal))}
+          ${financeFormFact("할부 총합", formatFinanceKrw(installmentTotal))}
+          ${financeFormFact("기타 추가", formatFinanceKrw(existingAdjustmentTotal))}
+        </div>
         <div class="field-grid">
           ${financeDateInput("사용 기간 시작", "periodStart", periodStart)}
           ${financeDateInput("사용 기간 끝", "periodEnd", periodEnd)}
-          ${financeDateInput("명세서 확인일", "statementOn", `${financeWorkspace.month}-01`)}
-          ${financeDateInput("출금 예정일", "scheduledOn", scheduledOn)}
-          ${financeMoneyInput("명세서 실제 금액", "statementAmountKrw", { value: candidateTotal > 0 ? candidateTotal : "" })}
+          ${financeDateInput("실제 출금일", "postedOn", scheduledOn)}
+          ${financeTextInput("기타 항목", "adjustmentLabel", { placeholder: "예: 카드론·수수료" })}
+          <label class="field">
+            <span>기타 금액</span>
+            <input class="input" type="number" name="adjustmentAmountKrw" min="1" max="9007199254740991" step="1" inputmode="numeric" data-finance-statement-adjustment-amount>
+          </label>
         </div>
-        <fieldset class="finance-check-fieldset">
-          <legend>이 명세서에 포함된 사용·환불 기록</legend>
-          ${candidates.length ? `
-            <div class="finance-check-list">
-              ${candidates.map((entry) => `
-                <label>
-                  <input type="checkbox" name="entryId" value="${esc(entry.id)}" checked>
-                  <span>${esc(entry.occurredOn)} · ${esc(entry.title)}</span>
-                  <strong>${entry.kind === "refund" ? "−" : ""}${esc(formatFinanceKrw(entry.amountKrw))}</strong>
-                </label>
-              `).join("")}
-            </div>
-          ` : '<p class="finance-empty-copy">이 달에 출금 예정인 미확정 카드 사용이 없습니다. 카드사 명세서 금액만 따로 확정할 수도 있습니다.</p>'}
-        </fieldset>
-        <button class="button" type="submit" ${existingStatement ? "disabled" : ""}>${existingStatement ? "이 달 명세서 확정됨" : "명세서 확정"}</button>
-      </form>
-    </details>
-  `;
-}
-
-function renderFinanceCardPaymentForm(state, statement) {
-  const method = state.paymentMethods.find((item) => item.id === statement.paymentMethodId);
-  const account = state.accounts.find((item) => item.id === (statement.paymentAccountId || method?.paymentAccountId));
-  return `
-    <details class="finance-entry-form-card finance-payment-confirm-card">
-      <summary>${esc(method?.name || "신용카드")} 실제 출금 확인</summary>
-      <form data-form="finance-card-payment" class="finance-native-form">
-        <input type="hidden" name="statementId" value="${esc(statement.id)}">
-        ${financeFormFact("납부 금액", formatFinanceKrw(statement.statementAmountKrw))}
-        ${financeFormFact("출금 계좌", account?.name || "설정 확인 필요")}
-        ${financeDateInput("실제 출금일", "postedOn", statement.scheduledOn)}
-        <button class="button" type="submit">전액 출금 확인</button>
+        <p class="finance-form-fact finance-statement-total">
+          <span>총 납부액</span>
+          <strong data-finance-statement-total data-base-amount="${esc(paymentTotal)}">${esc(formatFinanceKrw(paymentTotal))}</strong>
+        </p>
+        <button class="button" type="submit" ${paid || (!paymentTotal && existingStatement) ? "disabled" : ""}>${paid ? "납부 완료" : "명세서 확정 및 출금"}</button>
       </form>
     </details>
   `;
@@ -2422,29 +2425,23 @@ function renderFinanceCards(state) {
 
 function renderFinanceCardWorkspace(state, method, open) {
   const month = financeWorkspace.month;
-  const previousMonth = financeModel.shiftMonthKey(month, -1);
   const entries = financeCardUsageEntries(state, method.id, month);
-  const statements = state.cardStatements
-    .filter((statement) => (
-      statement.paymentMethodId === method.id
-      && (statement.status === "confirmed" || statement.scheduledOn.slice(0, 7) === month)
-    ))
-    .sort((left, right) => left.scheduledOn.localeCompare(right.scheduledOn) || left.id.localeCompare(right.id));
+  const plans = financeCardInstallmentPlans(state, method.id);
   const account = state.accounts.find((item) => item.id === method.paymentAccountId);
+  const currentUsageKrw = financeCardUsageKrw(state, method.id, month);
+  const totalUsageKrw = financeCardTotalUsageKrw(state, method.id);
   return `
     <details class="finance-stage-panel panel finance-card-workspace" data-finance-card="${esc(method.id)}" ${open ? "open" : ""}>
       <summary>
         <span><strong>${esc(method.name)}</strong><small>매월 ${esc(method.dueDay || 1)}일 납부 · ${esc(account?.name || "출금 계좌 확인 필요")}</small></span>
-        <span>${esc(formatFinanceKrw(financeCardUsageKrw(state, method.id, month)))}</span>
+        <span>${esc(formatFinanceKrw(totalUsageKrw))}</span>
       </summary>
       <div class="finance-card-workspace-body">
         <div class="finance-metric-grid metric-grid finance-metric-grid-compact">
-          ${renderFinanceMetric(`${month} 사용액`, formatFinanceKrw(financeCardUsageKrw(state, method.id, month)), `${entries.length}개 기록`, "spent")}
-          ${renderFinanceMetric(`${previousMonth} 사용액`, formatFinanceKrw(financeCardUsageKrw(state, method.id, previousMonth)), "이전 달", "scheduled")}
+          ${renderFinanceMetric("이번달 현황", formatFinanceKrw(currentUsageKrw), `${financePickerMonthLabel(financeModel.shiftMonthKey(month, 1))} 납부 예정`, "spent")}
+          ${renderFinanceMetric("총 사용액", formatFinanceKrw(totalUsageKrw), "미납 일시불 · 할부", "scheduled")}
         </div>
         <div class="finance-form-grid">
-          ${renderFinanceCardUsageTotalForm(state, method)}
-          ${renderFinanceCardInstallmentForm(method)}
           ${renderFinanceCardStatementForm(state, method)}
         </div>
         <section class="finance-card-section" aria-labelledby="finance-card-records-${esc(method.id)}">
@@ -2454,18 +2451,9 @@ function renderFinanceCardWorkspace(state, method, open) {
           </div>
         </section>
         <section class="finance-card-section" aria-labelledby="finance-card-schedule-${esc(method.id)}">
-          <h3 id="finance-card-schedule-${esc(method.id)}">할부 일정</h3>
-          <div class="finance-record-list">
-            ${statements.map((statement) => `
-              <article class="finance-record">
-                <div>
-                  <strong>${esc(statement.source === "opening_installment" ? `${statement.label || "기존 할부"} ${statement.installmentNumber}/${statement.installmentCount}` : `${statement.scheduledOn.slice(0, 7)} 명세서`)}</strong>
-                  <small>${esc(statement.scheduledOn)} 납부 · ${esc(financeSettlementStatusLabel(statement.status))}</small>
-                </div>
-                <span class="finance-record-amount">${esc(formatFinanceKrw(statement.statementAmountKrw))}</span>
-              </article>
-              ${statement.status === "confirmed" ? renderFinanceCardPaymentForm(state, statement) : ""}
-            `).join("") || '<p class="finance-empty-copy">등록된 납부 일정이 없습니다.</p>'}
+          <h3 id="finance-card-schedule-${esc(method.id)}">할부</h3>
+          <div class="finance-installment-plans">
+            ${plans.map(renderFinanceInstallmentPlan).join("") || '<p class="finance-empty-copy">등록된 할부가 없습니다.</p>'}
           </div>
         </section>
       </div>
@@ -2473,50 +2461,50 @@ function renderFinanceCardWorkspace(state, method, open) {
   `;
 }
 
-function renderFinanceCardUsageTotalForm(state, method) {
-  const month = financeWorkspace.month;
-  const previousMonth = financeModel.shiftMonthKey(month, -1);
-  const existing = state.entries.find((entry) => (
-    entry.source === "card_month_total"
-    && entry.paymentMethodId === method.id
-    && entry.recognitionMonth === month
-  ));
+function renderFinanceInstallmentPlan(plan) {
   return `
-    <details class="finance-entry-form-card">
-      <summary>시작 사용액 설정</summary>
-      <form data-form="finance-card-usage-total" class="finance-native-form">
-        <input type="hidden" name="paymentMethodId" value="${esc(method.id)}">
-        <p class="finance-form-note">처음 시작할 때 카드사 앱의 월 전체 사용액을 한 건으로 넣습니다. 같은 월을 다시 저장하면 그 시작값만 수정됩니다.</p>
-        <div class="field-grid">
-          ${financeSelectInput("기준 월", "usageMonth", [
-            [month, `${financePickerMonthLabel(month)} · 조회 월`],
-            [previousMonth, `${financePickerMonthLabel(previousMonth)} · 이전 월`],
-          ], { required: true, allowEmpty: false, value: month })}
-          ${financeMoneyInput("시작 사용액", "amountKrw", { value: existing?.amountKrw || "" })}
+    <details class="finance-installment-plan" data-finance-installment-plan="${esc(plan.planId)}">
+      <summary data-finance-installment-toggle>
+        <span><strong>${esc(plan.label)}</strong><small>${plan.remainingCount}회 남음 · ${esc(plan.firstOn)}~${esc(plan.lastOn)}</small></span>
+        <span class="finance-installment-plan-balance">${esc(formatFinanceKrw(plan.remainingKrw))}</span>
+      </summary>
+      <div class="finance-installment-plan-body">
+        <div class="finance-statement-breakdown">
+          ${financeFormFact("총 금액", formatFinanceKrw(plan.totalKrw))}
+          ${financeFormFact("납부 금액", formatFinanceKrw(plan.paidKrw))}
+          ${financeFormFact("남은 금액", formatFinanceKrw(plan.remainingKrw))}
         </div>
-        <button class="button" type="submit">시작 사용액 저장</button>
-      </form>
+        <div class="finance-installment-months">
+          ${plan.statements.map((statement) => `
+            <div>
+              <span>${esc(`${statement.installmentNumber}/${statement.installmentCount}`)} · ${esc(statement.scheduledOn)}</span>
+              <small>${esc(financeSettlementStatusLabel(statement.status))}</small>
+              <strong>${esc(formatFinanceKrw(statement.statementAmountKrw))}</strong>
+            </div>
+          `).join("")}
+        </div>
+      </div>
     </details>
   `;
 }
 
-function renderFinanceCardInstallmentForm(method) {
-  return `
-    <details class="finance-entry-form-card">
-      <summary>기존 할부 일정 등록</summary>
-      <form data-form="finance-card-installment" class="finance-native-form">
-        <input type="hidden" name="paymentMethodId" value="${esc(method.id)}">
-        <p class="finance-form-note">이미 결제한 할부의 남은 총액과 횟수를 입력하면 ${esc(method.dueDay || 1)}일 기준으로 월별 납부액을 나눕니다.</p>
-        <div class="field-grid">
-          ${financeTextInput("할부 이름", "label", { placeholder: "예: 노트북", required: true })}
-          ${financeMoneyInput("남은 총액", "totalAmountKrw")}
-          ${financeNumberInput("남은 횟수", "installmentCount", "", 1, 120)}
-          ${financeSelectInput("첫 납부 월", "firstPaymentMonth", financeMonthOptions(financeWorkspace.month, 0, 60), { required: true, allowEmpty: false, value: financeWorkspace.month })}
-        </div>
-        <button class="button" type="submit">할부 일정 저장</button>
-      </form>
-    </details>
-  `;
+function financeCardInstallmentPlans(state, methodId) {
+  const plans = new Map();
+  for (const statement of state.cardStatements.filter((item) => item.paymentMethodId === methodId && item.source === "opening_installment")) {
+    const plan = plans.get(statement.planId) || { planId: statement.planId, label: statement.label || "할부", statements: [] };
+    plan.statements.push(statement);
+    plans.set(statement.planId, plan);
+  }
+  return [...plans.values()].map((plan) => {
+    plan.statements.sort((left, right) => left.installmentNumber - right.installmentNumber || left.scheduledOn.localeCompare(right.scheduledOn));
+    plan.totalKrw = plan.statements.reduce((total, item) => total + item.statementAmountKrw, 0);
+    plan.paidKrw = plan.statements.filter((item) => ["paid", "historical_paid"].includes(item.status)).reduce((total, item) => total + item.statementAmountKrw, 0);
+    plan.remainingKrw = plan.totalKrw - plan.paidKrw;
+    plan.remainingCount = plan.statements.filter((item) => ["estimated", "confirmed"].includes(item.status)).length;
+    plan.firstOn = plan.statements[0]?.scheduledOn || "";
+    plan.lastOn = plan.statements.at(-1)?.scheduledOn || "";
+    return plan;
+  }).sort((left, right) => left.firstOn.localeCompare(right.firstOn) || left.planId.localeCompare(right.planId));
 }
 
 function financeCardUsageEntries(state, methodId, month) {
@@ -2534,6 +2522,23 @@ function financeCardUsageKrw(state, methodId, month) {
   return financeCardUsageEntries(state, methodId, month).reduce((total, entry) => (
     total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
   ), 0);
+}
+
+function financeCardTotalUsageKrw(state, methodId) {
+  const entryById = new Map(state.entries.map((entry) => [entry.id, entry]));
+  const entryTotal = state.settlements.filter((settlement) => (
+    settlement.targetType === "entry"
+    && ["estimated", "confirmed"].includes(settlement.status)
+    && entryById.get(settlement.targetId)?.paymentMethodId === methodId
+  )).reduce((total, settlement) => {
+    const entry = entryById.get(settlement.targetId);
+    return total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw);
+  }, 0);
+  const statementTotal = state.cardStatements.filter((statement) => (
+    statement.paymentMethodId === methodId
+    && ["estimated", "confirmed"].includes(statement.status)
+  )).reduce((total, statement) => total + statement.statementAmountKrw, 0);
+  return entryTotal + statementTotal;
 }
 
 function financeMonthOptions(centerMonth, before, after) {
@@ -3040,7 +3045,7 @@ function financeMovementKindLabel(kind) {
 }
 
 function financeSettlementStatusLabel(status) {
-  return { estimated: "예상", confirmed: "확정", paid: "출금 확인", canceled: "취소" }[status] || status;
+  return { estimated: "예상", confirmed: "확정", paid: "납부 완료", historical_paid: "납부 완료", canceled: "취소" }[status] || status;
 }
 
 function financeAccountOptions(accounts) {
@@ -3775,18 +3780,15 @@ async function submitFinanceCardStatement(form) {
   return runFinanceFormMutation(form, (nextState) => {
     const methodId = financeFormText(form, "paymentMethodId");
     const method = nextState.paymentMethods.find((item) => item.id === methodId);
-    if (method?.type !== "credit_card") throw new Error("신용카드를 다시 확인해주세요.");
-    const scheduledOn = financeFormText(form, "scheduledOn");
-    if (nextState.cardStatements.some((statement) => (
-      statement.paymentMethodId === method.id
-      && statement.source !== "opening_installment"
-      && statement.scheduledOn.slice(0, 7) === scheduledOn.slice(0, 7)
-    ))) {
-      throw new Error("이 카드의 같은 달 명세서가 이미 확정되어 있습니다.");
+    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("신용카드와 출금 계좌를 다시 확인해주세요.");
+    const statementId = financeFormText(form, "statementId");
+    const existingStatement = statementId ? nextState.cardStatements.find((item) => item.id === statementId) : null;
+    if (statementId && (!existingStatement || existingStatement.status !== "confirmed" || existingStatement.paymentMethodId !== method.id)) {
+      throw new Error("납부할 카드 명세서를 다시 확인해주세요.");
     }
     const selectedIds = new Set(financeFormTexts(form, "entryId"));
     const alreadyAllocated = new Set(nextState.cardStatements.flatMap((statement) => (
-      statement.items.map((item) => item.entryId)
+      statement.id === statementId ? [] : statement.items.map((item) => item.entryId)
     )));
     const selectedEntries = nextState.entries.filter((entry) => selectedIds.has(entry.id));
     if (selectedEntries.length !== selectedIds.size) throw new Error("선택한 사용 기록을 다시 확인해주세요.");
@@ -3806,36 +3808,112 @@ async function submitFinanceCardStatement(form) {
       ));
       if (!activeSettlement) throw new Error("출금 예정이 살아 있는 카드 사용 기록만 포함할 수 있습니다.");
     }
-    const statementAmountKrw = financeFormPositiveMoney(form, "statementAmountKrw");
     const itemTotalKrw = selectedEntries.reduce((total, entry) => (
       total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
     ), 0);
-    if (
-      itemTotalKrw !== statementAmountKrw
-      && !window.confirm(`선택한 사용·환불 합계는 ${formatFinanceKrw(itemTotalKrw)}이고 카드사 명세서는 ${formatFinanceKrw(statementAmountKrw)}입니다. 차이를 확인했으며 이 금액으로 확정할까요?`)
-    ) {
-      return false;
+    const adjustmentLabelInput = financeFormText(form, "adjustmentLabel");
+    const adjustmentRaw = financeFormText(form, "adjustmentAmountKrw");
+    const adjustmentAmountKrw = adjustmentRaw ? Number(adjustmentRaw) : 0;
+    const adjustmentLabel = adjustmentLabelInput || "기타";
+    if (adjustmentLabelInput && !adjustmentRaw) throw new Error("기타 항목의 금액을 입력해주세요.");
+    if (adjustmentRaw && (!Number.isSafeInteger(adjustmentAmountKrw) || adjustmentAmountKrw <= 0)) {
+      throw new Error("기타 금액은 1원 이상이어야 합니다.");
     }
     const periodStart = financeFormText(form, "periodStart");
     const periodEnd = financeFormText(form, "periodEnd");
     if (periodStart > periodEnd) throw new Error("사용 기간 시작일은 끝일보다 늦을 수 없습니다.");
-    const statement = {
-      id: financeEntityId("statement"),
-      paymentMethodId: method.id,
-      paymentAccountId: method.paymentAccountId,
-      periodStart,
-      periodEnd,
-      statementOn: financeFormText(form, "statementOn"),
-      scheduledOn,
-      statementAmountKrw,
+    const postedOn = financeFormText(form, "postedOn");
+    const scheduledOn = financeFormText(form, "scheduledOn");
+    const settlementMonth = financeFormText(form, "settlementMonth");
+    const installments = nextState.cardStatements.filter((statement) => (
+      statement.paymentMethodId === method.id
+      && statement.source === "opening_installment"
+      && statement.status === "confirmed"
+      && statement.scheduledOn.slice(0, 7) === settlementMonth
+    ));
+    const statementAmountKrw = (existingStatement?.statementAmountKrw || 0) + itemTotalKrw + adjustmentAmountKrw;
+    if (!existingStatement && selectedEntries.length && statementAmountKrw <= 0) {
+      throw new Error("일시불·환불과 기타 항목의 합계는 1원 이상이어야 합니다.");
+    }
+    const totalAmountKrw = statementAmountKrw + installments.reduce((total, statement) => total + statement.statementAmountKrw, 0);
+    if (!Number.isSafeInteger(totalAmountKrw) || totalAmountKrw <= 0) throw new Error("납부할 카드대금이 없습니다.");
+    const movement = {
+      id: financeEntityId("movement"),
+      kind: "card_payment",
+      amountKrw: totalAmountKrw,
+      postedOn,
+      fromAccountId: method.paymentAccountId,
+      counterpartyType: "card",
+      counterpartyId: method.id,
       status: "confirmed",
-      items: selectedEntries.map((entry) => ({
+    };
+    const statements = [...installments];
+    if (existingStatement) {
+      const existingAdjustments = existingStatement.adjustments || [];
+      const existingItemTotal = existingStatement.items.reduce((total, item) => {
+        const entry = nextState.entries.find((candidate) => candidate.id === item.entryId);
+        return total + (entry?.kind === "refund" ? -item.amountKrw : item.amountKrw);
+      }, 0);
+      const legacyAdjustmentKrw = existingStatement.statementAmountKrw
+        - existingItemTotal
+        - existingAdjustments.reduce((total, item) => total + item.amountKrw, 0);
+      if (legacyAdjustmentKrw < 0) throw new Error("기존 명세서 금액 구성을 다시 확인해주세요.");
+      existingStatement.periodStart = [existingStatement.periodStart, periodStart].sort()[0];
+      existingStatement.periodEnd = [existingStatement.periodEnd, periodEnd].sort().at(-1);
+      existingStatement.statementAmountKrw = statementAmountKrw;
+      if (legacyAdjustmentKrw || adjustmentAmountKrw || existingStatement.adjustments) {
+        existingStatement.adjustments = [
+          ...existingAdjustments,
+          ...(legacyAdjustmentKrw ? [{ label: "기존 기타", amountKrw: legacyAdjustmentKrw }] : []),
+          ...(adjustmentAmountKrw ? [{ label: adjustmentLabel, amountKrw: adjustmentAmountKrw }] : []),
+        ];
+      }
+      existingStatement.items.push(...selectedEntries.map((entry) => ({
         entryId: entry.id,
         amountKrw: entry.amountKrw,
         installmentNumber: 1,
         installmentCount: 1,
-      })),
-    };
+      })));
+      const existingSettlement = nextState.settlements.find((item) => (
+        item.targetType === "card_statement"
+        && item.targetId === existingStatement.id
+        && item.status === "confirmed"
+      ));
+      if (!existingSettlement) throw new Error("확정된 카드대금 납부 일정을 찾을 수 없습니다.");
+      existingSettlement.expectedAmountKrw = statementAmountKrw;
+      statements.push(existingStatement);
+    } else if (statementAmountKrw > 0) {
+      const statement = {
+        id: financeEntityId("statement"),
+        paymentMethodId: method.id,
+        paymentAccountId: method.paymentAccountId,
+        periodStart,
+        periodEnd,
+        statementOn: postedOn,
+        scheduledOn,
+        statementAmountKrw,
+        status: "paid",
+        adjustments: adjustmentAmountKrw ? [{ label: adjustmentLabel, amountKrw: adjustmentAmountKrw }] : [],
+        items: selectedEntries.map((entry) => ({
+          entryId: entry.id,
+          amountKrw: entry.amountKrw,
+          installmentNumber: 1,
+          installmentCount: 1,
+        })),
+      };
+      nextState.cardStatements.push(statement);
+      nextState.settlements.push({
+        id: financeEntityId("settlement"),
+        targetType: "card_statement",
+        targetId: statement.id,
+        expectedAmountKrw: statementAmountKrw,
+        scheduledOn: statement.scheduledOn,
+        movementId: movement.id,
+        settledAmountKrw: statementAmountKrw,
+        status: "paid",
+      });
+      statements.push(statement);
+    }
     for (const settlement of nextState.settlements) {
       if (
         settlement.targetType === "entry"
@@ -3845,156 +3923,21 @@ async function submitFinanceCardStatement(form) {
         settlement.status = "canceled";
       }
     }
-    nextState.cardStatements.push(statement);
-    nextState.settlements.push({
-      id: financeEntityId("settlement"),
-      targetType: "card_statement",
-      targetId: statement.id,
-      expectedAmountKrw: statementAmountKrw,
-      scheduledOn: statement.scheduledOn,
-      status: "confirmed",
-    });
-  }, "카드사 명세서를 확정했습니다. 아직 계좌 잔액은 바뀌지 않았습니다.");
-}
-
-async function submitFinanceCardPayment(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const statement = nextState.cardStatements.find((item) => item.id === financeFormText(form, "statementId"));
-    if (!statement || statement.status !== "confirmed") throw new Error("아직 납부할 수 있는 카드 명세서가 아닙니다.");
-    const method = nextState.paymentMethods.find((item) => item.id === statement.paymentMethodId);
-    const paymentAccountId = statement.paymentAccountId || method?.paymentAccountId;
-    if (method?.type !== "credit_card" || !paymentAccountId) throw new Error("카드대금 출금 계좌를 확인해주세요.");
-    const settlement = nextState.settlements.find((item) => (
-      item.targetType === "card_statement"
-      && item.targetId === statement.id
-      && item.status === "confirmed"
-    ));
-    if (!settlement) throw new Error("확정된 카드대금 출금 일정을 찾을 수 없습니다.");
-    const movement = {
-      id: financeEntityId("movement"),
-      kind: "card_payment",
-      amountKrw: statement.statementAmountKrw,
-      postedOn: financeFormText(form, "postedOn"),
-      fromAccountId: paymentAccountId,
-      counterpartyType: "card",
-      counterpartyId: method.id,
-      status: "confirmed",
-    };
-    nextState.movements.push(movement);
-    statement.status = "paid";
-    settlement.status = "paid";
-    settlement.movementId = movement.id;
-    settlement.settledAmountKrw = movement.amountKrw;
-  }, "카드대금 실제 출금을 확인했습니다. 사용 지출은 다시 세지 않습니다.");
-}
-
-async function submitFinanceCardUsageTotal(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
-    if (method?.type !== "credit_card") throw new Error("신용카드를 다시 확인해주세요.");
-    const usageMonth = financeFormText(form, "usageMonth");
-    const existing = nextState.entries.find((entry) => (
-      entry.source === "card_month_total"
-      && entry.paymentMethodId === method.id
-      && entry.recognitionMonth === usageMonth
-    ));
-    const ordinaryEntries = nextState.entries.filter((entry) => (
-      entry.paymentMethodId === method.id
-      && entry.recognitionMonth === usageMonth
-      && entry.status !== "void"
-      && entry.source !== "card_month_total"
-    ));
-    if (!existing && ordinaryEntries.length) {
-      throw new Error("이미 개별 사용 기록이 있는 달에는 시작 사용액을 추가할 수 없습니다.");
-    }
-    if (existing && nextState.cardStatements.some((statement) => statement.items.some((item) => item.entryId === existing.id))) {
-      throw new Error("명세서에 포함된 시작 사용액은 수정할 수 없습니다.");
-    }
-    const amountKrw = financeFormPositiveMoney(form, "amountKrw");
-    const occurredOn = financeModel.dateForMonthDay(usageMonth, method.cycleEndDay || 31);
-    const scheduledOn = financeModel.scheduledCardPaymentOn(method, occurredOn);
-    if (!scheduledOn) throw new Error("카드 납부일 설정을 확인해주세요.");
-    if (existing) {
-      Object.assign(existing, { title: `${method.name} 시작 사용액`, amountKrw, occurredOn });
+    for (const statement of statements) {
+      if (statement.status === "paid") continue;
       const settlement = nextState.settlements.find((item) => (
-        item.targetType === "entry"
-        && item.targetId === existing.id
-        && ["estimated", "confirmed"].includes(item.status)
+        item.targetType === "card_statement"
+        && item.targetId === statement.id
+        && item.status === "confirmed"
       ));
-      if (!settlement) throw new Error("시작 사용액의 납부 일정을 찾을 수 없습니다.");
-      settlement.expectedAmountKrw = amountKrw;
-      settlement.scheduledOn = scheduledOn;
-      return;
+      if (!settlement) throw new Error("확정된 카드대금 납부 일정을 찾을 수 없습니다.");
+      statement.status = "paid";
+      settlement.status = "paid";
+      settlement.movementId = movement.id;
+      settlement.settledAmountKrw = statement.statementAmountKrw;
     }
-    const entry = {
-      id: financeEntityId("entry"),
-      kind: "expense",
-      title: `${method.name} 시작 사용액`,
-      amountKrw,
-      occurredOn,
-      recognitionMonth: usageMonth,
-      category: "신용카드 시작 금액",
-      paymentMethodId: method.id,
-      source: "card_month_total",
-      status: "confirmed",
-    };
-    nextState.entries.push(entry);
-    nextState.settlements.push({
-      id: financeEntityId("settlement"),
-      targetType: "entry",
-      targetId: entry.id,
-      expectedAmountKrw: amountKrw,
-      scheduledOn,
-      status: "estimated",
-    });
-  }, "카드 시작 사용액을 저장했습니다.");
-}
-
-async function submitFinanceCardInstallment(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
-    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("신용카드와 출금 계좌를 다시 확인해주세요.");
-    const totalAmountKrw = financeFormPositiveMoney(form, "totalAmountKrw");
-    const installmentCount = financeFormInteger(form, "installmentCount");
-    if (installmentCount < 1 || installmentCount > 120 || totalAmountKrw < installmentCount) {
-      throw new Error("남은 횟수는 1~120회이며 각 회차는 1원 이상이어야 합니다.");
-    }
-    const firstPaymentMonth = financeFormText(form, "firstPaymentMonth");
-    if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(firstPaymentMonth)) throw new Error("첫 납부 월을 다시 선택해주세요.");
-    const label = financeFormText(form, "label");
-    const planId = financeEntityId("installment-plan");
-    const amounts = financeModel.splitKrw(totalAmountKrw, installmentCount);
-    for (let index = 0; index < installmentCount; index += 1) {
-      const scheduledMonth = financeModel.shiftMonthKey(firstPaymentMonth, index);
-      const scheduledOn = financeModel.dateForMonthDay(scheduledMonth, method.dueDay || 1);
-      const statement = {
-        id: financeEntityId("statement"),
-        paymentMethodId: method.id,
-        paymentAccountId: method.paymentAccountId,
-        periodStart: `${firstPaymentMonth}-01`,
-        periodEnd: financeModel.dateForMonthDay(firstPaymentMonth, 31),
-        statementOn: dateKey(new Date()),
-        scheduledOn,
-        statementAmountKrw: amounts[index],
-        status: "confirmed",
-        source: "opening_installment",
-        planId,
-        label,
-        installmentNumber: index + 1,
-        installmentCount,
-        items: [],
-      };
-      nextState.cardStatements.push(statement);
-      nextState.settlements.push({
-        id: financeEntityId("settlement"),
-        targetType: "card_statement",
-        targetId: statement.id,
-        expectedAmountKrw: statement.statementAmountKrw,
-        scheduledOn,
-        status: "confirmed",
-      });
-    }
-  }, "기존 할부의 남은 납부 일정을 저장했습니다.");
+    nextState.movements.push(movement);
+  }, "카드대금을 출금했습니다. 사용 지출은 다시 세지 않습니다.");
 }
 
 
@@ -10338,18 +10281,6 @@ function handleSubmit(event) {
     submitFinanceCardStatement(form);
     return;
   }
-  if (form.dataset.form === "finance-card-payment") {
-    submitFinanceCardPayment(form);
-    return;
-  }
-  if (form.dataset.form === "finance-card-usage-total") {
-    submitFinanceCardUsageTotal(form);
-    return;
-  }
-  if (form.dataset.form === "finance-card-installment") {
-    submitFinanceCardInstallment(form);
-    return;
-  }
   if (form.dataset.form === "finance-fixed-cost-payment") {
     submitFinanceFixedCostPayment(form);
     return;
@@ -10392,6 +10323,14 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const financeStatementAdjustment = event.target.closest("[data-finance-statement-adjustment-amount]");
+  if (financeStatementAdjustment) {
+    const total = financeStatementAdjustment.form?.querySelector("[data-finance-statement-total]");
+    const amount = Number(financeStatementAdjustment.value || 0);
+    if (total) total.textContent = formatFinanceKrw(Number(total.dataset.baseAmount || 0) + (Number.isSafeInteger(amount) && amount > 0 ? amount : 0));
+    return;
+  }
+
   const todayBatchInput = event.target.closest("[data-today-batch-input]");
   if (todayBatchInput && ui.todayBatch?.phase === "input") {
     ui.todayBatch.draft = todayBatchInput.value;

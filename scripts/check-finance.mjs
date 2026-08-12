@@ -891,4 +891,14 @@ const excessiveInstallments = structuredClone(simpleManagementState);
 excessiveInstallments.cardStatements[0].installmentCount = 121;
 assert.ok(validateFinanceState(excessiveInstallments).some((issue) => issue.code === "installment_count_too_large"));
 
+const historicalInstallment = structuredClone(simpleManagementState);
+historicalInstallment.cardStatements[0].status = "historical_paid";
+assert.ok(validateFinanceState(historicalInstallment).some((issue) => issue.code === "historical_settlement_not_allowed"));
+historicalInstallment.settlements = historicalInstallment.settlements.filter((item) => item.targetType !== "card_statement");
+assert.deepEqual(validateFinanceState(historicalInstallment), []);
+
+const mismatchedStatementAdjustment = structuredClone(validState);
+mismatchedStatementAdjustment.cardStatements[0].adjustments = [{ label: "수수료", amountKrw: 1_000 }];
+assert.ok(validateFinanceState(mismatchedStatementAdjustment).some((issue) => issue.code === "statement_component_mismatch"));
+
 console.log("Finance auth, validation, balances, card, loan, fixed-cost, and month-boundary checks passed.");

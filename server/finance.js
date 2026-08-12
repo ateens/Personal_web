@@ -541,8 +541,12 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
   const entryById = new Map(entries.map((entry) => [entry.id, entry]));
   const installmentAllocations = new Map();
   const activeSettlementsByStatement = new Map();
+  const uncanceledSettlementsByStatement = new Map();
   const directSettlementsByEntry = new Map();
   settlements.forEach((settlement) => {
+    if (settlement.targetType === "card_statement" && settlement.status !== "canceled") {
+      appendToMapList(uncanceledSettlementsByStatement, settlement.targetId, settlement);
+    }
     if (
       settlement.targetType === "card_statement"
       && ["confirmed", "paid"].includes(settlement.status)
@@ -585,7 +589,13 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
     requireDate(statement.statementOn, `${path}.statementOn`, issues);
     requireDate(statement.scheduledOn, `${path}.scheduledOn`, issues);
     requirePositiveMoney(statement.statementAmountKrw, `${path}.statementAmountKrw`, issues);
-    requireEnum(statement.status, ["estimated", "confirmed", "paid"], `${path}.status`, issues);
+    requireEnum(statement.status, ["estimated", "confirmed", "paid", "historical_paid"], `${path}.status`, issues);
+    if (statement.status === "historical_paid" && statement.source !== "opening_installment") {
+      addIssue(issues, `${path}.status`, "opening_installment_required", "Historical card payments are allowed only for opening installments.");
+    }
+    if (statement.status === "historical_paid" && uncanceledSettlementsByStatement.has(statement.id)) {
+      addIssue(issues, path, "historical_settlement_not_allowed", "Historical card installments must not affect current settlements or balances.");
+    }
     if (["confirmed", "paid"].includes(statement.status)) {
       const activeSettlements = activeSettlementsByStatement.get(statement.id) || [];
       if (activeSettlements.length !== 1) {
@@ -606,6 +616,23 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
     }
     if (statement.source === "opening_installment" && statement.items.length) {
       addIssue(issues, `${path}.items`, "opening_installment_items_not_allowed", "Opening installment schedules do not link new expense entries.");
+    }
+    const adjustments = statement.adjustments ?? [];
+    if (!Array.isArray(adjustments)) {
+      addIssue(issues, `${path}.adjustments`, "invalid_collection", "Card statement adjustments must be an array.");
+    } else {
+      if (statement.source === "opening_installment" && adjustments.length) {
+        addIssue(issues, `${path}.adjustments`, "opening_installment_adjustments_not_allowed", "Opening installments cannot contain statement adjustments.");
+      }
+      adjustments.forEach((adjustment, adjustmentIndex) => {
+        const adjustmentPath = `${path}.adjustments[${adjustmentIndex}]`;
+        if (!isPlainObject(adjustment)) {
+          addIssue(issues, adjustmentPath, "invalid_entity", "Card statement adjustments must be objects.");
+          return;
+        }
+        requireText(adjustment.label, `${adjustmentPath}.label`, issues);
+        requirePositiveMoney(adjustment.amountKrw, `${adjustmentPath}.amountKrw`, issues);
+      });
     }
     statement.items.forEach((item, itemIndex) => {
       const itemPath = `${path}.items[${itemIndex}]`;
@@ -659,6 +686,16 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
         installmentAllocations.set(item.entryId, allocation);
       }
     });
+    if (statement.adjustments !== undefined && Array.isArray(adjustments) && statement.source !== "opening_installment") {
+      const itemTotal = statement.items.reduce((total, item) => {
+        const entry = entryById.get(item.entryId);
+        return total + (entry?.kind === "refund" ? -Number(item.amountKrw || 0) : Number(item.amountKrw || 0));
+      }, 0);
+      const adjustmentTotal = adjustments.reduce((total, item) => total + Number(item?.amountKrw || 0), 0);
+      if (itemTotal + adjustmentTotal !== statement.statementAmountKrw) {
+        addIssue(issues, `${path}.statementAmountKrw`, "statement_component_mismatch", "Statement items and adjustments must equal the statement amount.");
+      }
+    }
   });
   for (const [entryId, allocation] of installmentAllocations) {
     const entry = entryById.get(entryId);

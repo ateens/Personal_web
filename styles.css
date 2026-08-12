@@ -10365,39 +10365,6 @@ body.is-task-placement-open {
   font-variant-numeric: tabular-nums;
 }
 
-.finance-check-fieldset {
-  display: grid;
-  gap: 10px;
-}
-
-.finance-check-list {
-  display: grid;
-}
-
-.finance-check-list label {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  border-top: 1px solid var(--finance-line);
-  padding: 11px 0;
-  color: var(--finance-ink);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.finance-check-list label:first-child {
-  border-top: 0;
-}
-
-.finance-check-list input {
-  accent-color: var(--finance-teal);
-}
-
-.finance-check-list strong {
-  font-variant-numeric: tabular-nums;
-}
-
 .finance-payment-confirm-card {
   border-color: rgba(15, 118, 110, 0.28);
 }
@@ -10591,13 +10558,15 @@ body.is-task-placement-open {
 @supports selector(details::details-content) {
   .finance-entry-form-card,
   .finance-manage-details,
-  .finance-card-workspace {
+  .finance-card-workspace,
+  .finance-installment-plan {
     interpolate-size: allow-keywords;
   }
 
   .finance-entry-form-card::details-content,
   .finance-manage-details::details-content,
-  .finance-card-workspace::details-content {
+  .finance-card-workspace::details-content,
+  .finance-installment-plan::details-content {
     display: block;
     block-size: 0;
     overflow: hidden;
@@ -10612,7 +10581,8 @@ body.is-task-placement-open {
 
   .finance-entry-form-card[open]::details-content,
   .finance-manage-details[open]::details-content,
-  .finance-card-workspace[open]::details-content {
+  .finance-card-workspace[open]::details-content,
+  .finance-installment-plan[open]::details-content {
     block-size: auto;
     opacity: 1;
     transform: translateY(0);
@@ -10633,6 +10603,101 @@ body.is-task-placement-open {
   margin: 0;
   color: var(--ink);
   font-size: 18px;
+}
+
+.finance-statement-breakdown {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 18px 0;
+  background: var(--line);
+}
+
+.finance-statement-breakdown .finance-form-fact {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--panel);
+}
+
+.finance-statement-total {
+  margin-top: 18px;
+  font-size: 16px;
+}
+
+.finance-installment-plans {
+  display: grid;
+  gap: 1px;
+  margin-top: 14px;
+  background: var(--line);
+}
+
+.finance-installment-plan {
+  background: var(--panel);
+}
+
+.finance-installment-plan > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 14px;
+  min-height: 72px;
+  padding: 14px 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.finance-installment-plan > summary::-webkit-details-marker {
+  display: none;
+}
+
+.finance-installment-plan > summary::after {
+  content: "⌄";
+  color: var(--muted);
+  transition: transform 280ms var(--ease), color 180ms var(--ease);
+}
+
+.finance-installment-plan[open] > summary::after {
+  color: var(--blue);
+  transform: rotate(180deg);
+}
+
+.finance-installment-plan > summary strong,
+.finance-installment-plan > summary small {
+  display: block;
+}
+
+.finance-installment-plan > summary small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.finance-installment-plan-balance,
+.finance-installment-months strong {
+  font-weight: 820;
+  font-variant-numeric: tabular-nums;
+}
+
+.finance-installment-plan-body {
+  padding: 0 8px 18px;
+}
+
+.finance-installment-months {
+  display: grid;
+}
+
+.finance-installment-months > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  padding: 10px 0;
+  background-image: var(--divider-h);
+  background-position: center bottom;
+  background-repeat: no-repeat;
+}
+
+.finance-installment-months small {
+  color: var(--muted);
 }
 
 .finance-metric-grid-compact {
@@ -10946,7 +11011,8 @@ body.is-task-placement-open {
   }
 
   .finance-native-form .field-grid,
-  .finance-metric-grid-compact {
+  .finance-metric-grid-compact,
+  .finance-statement-breakdown {
     grid-template-columns: 1fr;
   }
 
