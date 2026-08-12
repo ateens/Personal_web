@@ -32,6 +32,7 @@ const sourceStaticFiles = new Set([
 ]);
 const STATE_VERSION = 4;
 const STATE_BODY_LIMIT = 5_000_000;
+const RESOURCE_IMAGE_BODY_LIMIT = 8 * 1024 * 1024;
 const FINANCE_BODY_LIMIT = 2_000_000;
 const FINANCE_LOGIN_BODY_LIMIT = 4_096;
 const STATE_EVENT_POLL_INTERVAL_MS = 1_000;
@@ -74,6 +75,9 @@ const SUPPORTED_BLOCK_TYPES = new Set([
   "heading1",
   "heading2",
   "heading3",
+  "heading4",
+  "heading5",
+  "heading6",
   "bullet",
   "numbered",
   "todo",
@@ -84,8 +88,10 @@ const SUPPORTED_BLOCK_TYPES = new Set([
   "code",
   "bookmark",
   "embed",
+  "image",
 ]);
 const URL_PREVIEW_BLOCK_TYPES = new Set(["bookmark", "embed"]);
+const RESOURCE_IMAGE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link"]);
 const SUPPORTED_INLINE_COLOR_KEYS = new Set(["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
 const SUPPORTED_RESOURCE_FONTS = new Set(["default", "serif", "mono"]);
@@ -146,6 +152,8 @@ const trustProxyIpHeaders = deploymentSecurity.isProductionTarget || envFlag("TR
 const apiRateLimitWindowMs = envInteger("API_RATE_LIMIT_WINDOW_MS", 60_000, 100, 3_600_000);
 const apiRateLimitStateReadMax = envInteger("API_RATE_LIMIT_STATE_READ_MAX", 240, 0, 100_000);
 const apiRateLimitStateWriteMax = envInteger("API_RATE_LIMIT_STATE_WRITE_MAX", 120, 0, 100_000);
+const apiRateLimitResourceImageWriteMax = envInteger("API_RATE_LIMIT_RESOURCE_IMAGE_WRITE_MAX", 12, 1, 1_000);
+const apiRateLimitResourceImageReadMax = envInteger("API_RATE_LIMIT_RESOURCE_IMAGE_READ_MAX", 60, 1, 10_000);
 const apiRateLimitGoogleReadMax = envInteger("API_RATE_LIMIT_GOOGLE_READ_MAX", 120, 0, 100_000);
 const apiRateLimitGoogleMutationMax = envInteger("API_RATE_LIMIT_GOOGLE_MUTATION_MAX", 20, 0, 100_000);
 const apiRateLimitFinanceLoginMax = envInteger("API_RATE_LIMIT_FINANCE_LOGIN_MAX", 8, 1, 1_000);
@@ -155,14 +163,23 @@ const apiRateLimitMaxKeys = envInteger("API_RATE_LIMIT_MAX_KEYS", 10_000, 1, 100
 const stateWriteMaxConcurrency = envInteger("STATE_WRITE_MAX_CONCURRENCY", 2, 1, 32);
 const stateWriteMaxQueue = envInteger("STATE_WRITE_MAX_QUEUE", 16, 0, 1_000);
 const stateWriteQueueTimeoutMs = envInteger("STATE_WRITE_QUEUE_TIMEOUT_MS", 10_000, 100, 120_000);
+const resourceImageStorageMaxBytes = envInteger("RESOURCE_IMAGE_STORAGE_MAX_BYTES", 256 * 1024 * 1024, 1, 10 * 1024 * 1024 * 1024);
+const resourceImageTransferMaxConcurrency = 2;
+const resourceImageTransferMaxQueue = 32;
+const resourceImageTransferMaxQueuePerClient = 8;
+const resourceImageTransferQueueTimeoutMs = 60_000;
+const resourceImageTransferTimeoutMs = 30_000;
 
 const requestIdSymbol = Symbol("requestId");
 const apiOperationSymbol = Symbol("apiOperation");
 const rateLimitBuckets = new Map();
 const stateWriteQueue = [];
+const resourceImageTransferQueue = [];
+const activeResourceImageTransfersByClient = new Map();
 const stateEventClients = new Set();
 let rateLimitChecks = 0;
 let activeStateWrites = 0;
+let activeResourceImageTransfers = 0;
 let stateEventPollTimer = null;
 let stateEventPollInFlight = false;
 let latestStateEventRevision = -1;
@@ -207,7 +224,7 @@ if (!productionGoogleOAuthConfigurationValid()) {
 }
 
 try {
-  storage = createStorage({ databaseUrl, appStateId, googleTokenFile });
+  storage = createStorage({ databaseUrl, appStateId, googleTokenFile, resourceImageMaxBytes: resourceImageStorageMaxBytes });
 } catch (error) {
   console.error(error.message || "PostgreSQL storage initialization failed.");
   process.exit(1);
@@ -295,6 +312,8 @@ function apiOperation(request, requestUrl) {
   if (method === "POST" && pathname === "/api/inbox-capture") return "state.write";
   if ((method === "PUT" || method === "POST") && pathname === "/api/state") return "state.write";
   if (method === "PUT" && /^\/api\/resources\/[^/]+$/.test(pathname)) return "resource.write";
+  if (method === "POST" && pathname === "/api/resource-images") return "resource.image.write";
+  if (method === "GET" && /^\/api\/resource-images\/[a-f0-9]{64}$/.test(pathname)) return "resource.image.read";
   if (method === "POST" && pathname === "/api/finance/login") return "finance.login";
   if (method === "POST" && pathname === "/api/finance/logout") return "finance.logout";
   if (method === "GET" && pathname === "/api/finance/session") return "finance.session";
@@ -311,6 +330,8 @@ function apiOperation(request, requestUrl) {
 
 function operationRateLimit(operation) {
   if (operation === "state.events" || operation === "state.status" || operation === "state.read") return apiRateLimitStateReadMax;
+  if (operation === "resource.image.read") return apiRateLimitResourceImageReadMax;
+  if (operation === "resource.image.write") return apiRateLimitResourceImageWriteMax;
   if (operation === "finance.login") return apiRateLimitFinanceLoginMax;
   if (operation === "finance.session" || operation === "finance.state.read") return apiRateLimitFinanceReadMax;
   if (operation === "finance.logout" || operation === "finance.state.write") return apiRateLimitFinanceWriteMax;
@@ -475,6 +496,112 @@ function acquireStateWriteSlot() {
   });
 }
 
+function resourceImageTransferCapacityError(reason) {
+  return Object.assign(
+    apiError(429, "RESOURCE_IMAGE_BUSY", "Resource image transfer capacity is temporarily busy."),
+    {
+      retryAfter: Math.max(1, Math.ceil(resourceImageTransferQueueTimeoutMs / 1_000)),
+      capacityReason: reason,
+    }
+  );
+}
+
+function resourceImageTransferClosed(request, response) {
+  return request.aborted || response.destroyed || response.closed;
+}
+
+function cleanupResourceImageTransferWaiter(waiter) {
+  clearTimeout(waiter.timer);
+  waiter.request.off("aborted", waiter.abort);
+  waiter.response.off("close", waiter.abort);
+}
+
+function resourceImageTransferClientActive(clientKey) {
+  return activeResourceImageTransfersByClient.get(clientKey) || 0;
+}
+
+function resourceImageTransferClientLimit(request) {
+  return request.method === "POST" ? 1 : resourceImageTransferMaxConcurrency;
+}
+
+function startResourceImageTransfer(clientKey) {
+  activeResourceImageTransfers += 1;
+  activeResourceImageTransfersByClient.set(clientKey, resourceImageTransferClientActive(clientKey) + 1);
+  return resourceImageTransferRelease(clientKey);
+}
+
+function dispatchResourceImageTransferQueue() {
+  while (activeResourceImageTransfers < resourceImageTransferMaxConcurrency) {
+    let eligibleIndex = -1;
+    for (let index = 0; index < resourceImageTransferQueue.length;) {
+      const queued = resourceImageTransferQueue[index];
+      if (resourceImageTransferClosed(queued.request, queued.response)) {
+        resourceImageTransferQueue.splice(index, 1);
+        cleanupResourceImageTransferWaiter(queued);
+        queued.reject(apiError(408, "RESOURCE_IMAGE_TRANSFER_ABORTED", "Resource image transfer was cancelled."));
+        continue;
+      }
+      const clientActive = resourceImageTransferClientActive(queued.clientKey);
+      if (clientActive < queued.clientLimit && (eligibleIndex < 0 || clientActive === 0)) eligibleIndex = index;
+      if (clientActive === 0) break;
+      index += 1;
+    }
+    if (eligibleIndex < 0) return;
+    const [next] = resourceImageTransferQueue.splice(eligibleIndex, 1);
+    cleanupResourceImageTransferWaiter(next);
+    next.resolve(startResourceImageTransfer(next.clientKey));
+  }
+}
+
+function resourceImageTransferRelease(clientKey) {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeResourceImageTransfers = Math.max(0, activeResourceImageTransfers - 1);
+    const remainingForClient = Math.max(0, resourceImageTransferClientActive(clientKey) - 1);
+    if (remainingForClient) activeResourceImageTransfersByClient.set(clientKey, remainingForClient);
+    else activeResourceImageTransfersByClient.delete(clientKey);
+    dispatchResourceImageTransferQueue();
+  };
+}
+
+function acquireResourceImageTransferSlot(request, response) {
+  if (resourceImageTransferClosed(request, response)) {
+    return Promise.reject(apiError(408, "RESOURCE_IMAGE_TRANSFER_ABORTED", "Resource image transfer was cancelled."));
+  }
+  const clientKey = requestClientKey(request);
+  const clientLimit = resourceImageTransferClientLimit(request);
+  if (activeResourceImageTransfers < resourceImageTransferMaxConcurrency && resourceImageTransferClientActive(clientKey) < clientLimit) {
+    return Promise.resolve(startResourceImageTransfer(clientKey));
+  }
+  if (resourceImageTransferQueue.length >= resourceImageTransferMaxQueue) {
+    return Promise.reject(resourceImageTransferCapacityError("queue_full"));
+  }
+  if (resourceImageTransferQueue.filter((waiter) => waiter.clientKey === clientKey).length >= resourceImageTransferMaxQueuePerClient) {
+    return Promise.reject(resourceImageTransferCapacityError("client_queue_full"));
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { request, response, clientKey, clientLimit, resolve, reject, timer: null, abort: null };
+    waiter.abort = () => {
+      const index = resourceImageTransferQueue.indexOf(waiter);
+      if (index !== -1) resourceImageTransferQueue.splice(index, 1);
+      cleanupResourceImageTransferWaiter(waiter);
+      reject(apiError(408, "RESOURCE_IMAGE_TRANSFER_ABORTED", "Resource image transfer was cancelled."));
+    };
+    waiter.timer = setTimeout(() => {
+      const index = resourceImageTransferQueue.indexOf(waiter);
+      if (index !== -1) resourceImageTransferQueue.splice(index, 1);
+      cleanupResourceImageTransferWaiter(waiter);
+      reject(resourceImageTransferCapacityError("queue_timeout"));
+    }, resourceImageTransferQueueTimeoutMs);
+    waiter.timer.unref?.();
+    request.once("aborted", waiter.abort);
+    response.once("close", waiter.abort);
+    resourceImageTransferQueue.push(waiter);
+  });
+}
+
 function applySecurityHeaders(request, response) {
   response.setHeader(
     "Content-Security-Policy",
@@ -556,6 +683,36 @@ function sendJson(response, status, payload, headers = {}) {
     ...headers,
   });
   response.end(JSON.stringify(payload));
+}
+
+function endBufferResponse(response, data) {
+  return new Promise((resolve, reject) => {
+    if (response.destroyed || response.closed || response.writableEnded) {
+      resolve();
+      return;
+    }
+    const cleanup = () => {
+      response.off("finish", complete);
+      response.off("close", complete);
+      response.off("error", fail);
+    };
+    const complete = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = (error) => {
+      cleanup();
+      reject(error);
+    };
+    response.once("finish", complete);
+    response.once("close", complete);
+    response.once("error", fail);
+    if (response.destroyed || response.closed || response.writableEnded) {
+      complete();
+      return;
+    }
+    response.end(data);
+  });
 }
 
 function redirect(response, location, headers = {}) {
@@ -701,6 +858,48 @@ async function readBody(request, limit = 1_000_000) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+async function readBufferBody(request, limit) {
+  const declaredLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    throw apiError(413, "REQUEST_BODY_TOO_LARGE", "Request body too large.");
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) throw apiError(413, "REQUEST_BODY_TOO_LARGE", "Request body too large.");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+function requestResourceImageContentType(request) {
+  const contentType = String(request.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+  if (!RESOURCE_IMAGE_CONTENT_TYPES.has(contentType)) {
+    throw apiError(415, "RESOURCE_IMAGE_CONTENT_TYPE_UNSUPPORTED", "Resource images must be PNG, JPEG, GIF, or WebP.");
+  }
+  return contentType;
+}
+
+function resourceImageSignatureMatches(data, contentType) {
+  if (!Buffer.isBuffer(data)) return false;
+  if (contentType === "image/png") {
+    return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (contentType === "image/jpeg") {
+    return data.length >= 4 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  }
+  if (contentType === "image/gif") {
+    return data.length >= 6 && ["GIF87a", "GIF89a"].includes(data.subarray(0, 6).toString("ascii"));
+  }
+  if (contentType === "image/webp") {
+    return data.length >= 12
+      && data.subarray(0, 4).toString("ascii") === "RIFF"
+      && data.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+  return false;
+}
+
 async function readJsonBody(request, limit) {
   const contentType = String(request.headers["content-type"] || "").toLowerCase();
   if (!contentType.startsWith("application/json")) {
@@ -810,6 +1009,12 @@ function isSafeHttpsBlockUrl(value) {
   }
 }
 
+function isSafeResourceImageUrl(value) {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.length > 4096) return false;
+  if (/^\/api\/resource-images\/[a-f0-9]{64}$/.test(value)) return true;
+  return isSafeHttpsBlockUrl(value);
+}
+
 function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
   const path = `state.${collectionKey}[${itemIndex}].blocks`;
   if (item.blocks === undefined && collectionKey !== "resources") return;
@@ -828,7 +1033,7 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       continue;
     }
     registerUniqueId(seenIds, issues, block.id, `${blockPath}.id`);
-    if (!SUPPORTED_BLOCK_TYPES.has(block.type)) {
+    if (!SUPPORTED_BLOCK_TYPES.has(block.type) || (block.type === "image" && collectionKey !== "resources")) {
       addValidationIssue(issues, `${blockPath}.type`, "unsupported_block_type", "Unsupported Resource block type.");
     }
     if (typeof block.text !== "string") addValidationIssue(issues, `${blockPath}.text`, "invalid_block_text", "Block text must be a string.");
@@ -838,6 +1043,14 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       } else if (block.text !== block.url) {
         addValidationIssue(issues, `${blockPath}.text`, "invalid_url_block_text", "Bookmark and embed block text must match block.url.");
       }
+    }
+    if (block.type === "image" && collectionKey === "resources" && !isSafeResourceImageUrl(block.url)) {
+      addValidationIssue(
+        issues,
+        `${blockPath}.url`,
+        "unsafe_image_url",
+        "Resource images require a same-origin uploaded image URL or a credential-free HTTPS URL.",
+      );
     }
     const indent = block.indent === undefined ? 0 : block.indent;
     if (!Number.isInteger(indent) || indent < 0 || indent > MAX_BLOCK_INDENT) {
@@ -1758,6 +1971,74 @@ async function handleFinanceStateWrite(request, response) {
   });
 }
 
+async function handleResourceImageWrite(request, response) {
+  const releaseTransfer = await acquireResourceImageTransferSlot(request, response);
+  const deadline = setTimeout(() => request.destroy(), resourceImageTransferTimeoutMs);
+  deadline.unref?.();
+  try {
+    const contentType = requestResourceImageContentType(request);
+    const data = await readBufferBody(request, RESOURCE_IMAGE_BODY_LIMIT);
+    if (!data.length) throw apiError(400, "RESOURCE_IMAGE_REQUIRED", "Resource image data is required.");
+    if (!resourceImageSignatureMatches(data, contentType)) {
+      throw apiError(422, "RESOURCE_IMAGE_MIME_MISMATCH", "Resource image bytes do not match the declared content type.");
+    }
+    const image = await storage.writeResourceImage(data, contentType);
+    const url = `/api/resource-images/${image.id}`;
+    auditEvent(request, "resource.image.write", {
+      status: 201,
+      outcome: "succeeded",
+      contentType: image.contentType,
+      size: image.byteSize,
+    });
+    sendJson(response, 201, {
+      ok: true,
+      id: image.id,
+      url,
+      contentType: image.contentType,
+      byteSize: image.byteSize,
+    });
+  } finally {
+    clearTimeout(deadline);
+    releaseTransfer();
+  }
+}
+
+async function handleResourceImageRead(request, response, requestUrl) {
+  const id = requestUrl.pathname.slice("/api/resource-images/".length);
+  let image = await storage.readResourceImage(id, { metadataOnly: true });
+  if (!image) throw apiError(404, "RESOURCE_IMAGE_NOT_FOUND", "Resource image not found.");
+  if (response.destroyed || response.closed) return;
+  const etag = `"resource-image-${image.id}"`;
+  const headers = {
+    "Content-Type": image.contentType,
+    "Content-Length": String(image.byteSize),
+    "Cache-Control": "public, max-age=31536000, immutable",
+    "Content-Disposition": "inline",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+    ETag: etag,
+  };
+  if (String(request.headers["if-none-match"] || "").split(",").map((value) => value.trim()).includes(etag)) {
+    delete headers["Content-Length"];
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  const releaseTransfer = await acquireResourceImageTransferSlot(request, response);
+  const deadline = setTimeout(() => response.destroy(), resourceImageTransferTimeoutMs);
+  deadline.unref?.();
+  try {
+    image = await storage.readResourceImage(id);
+    if (!image) throw apiError(404, "RESOURCE_IMAGE_NOT_FOUND", "Resource image not found.");
+    if (response.destroyed || response.closed) return;
+    response.writeHead(200, headers);
+    await endBufferResponse(response, image.data);
+  } finally {
+    clearTimeout(deadline);
+    releaseTransfer();
+  }
+}
+
 async function handleResourceWrite(request, response, requestUrl) {
   const pathId = resourcePathId(requestUrl);
   const body = await readJsonBody(request, STATE_BODY_LIMIT);
@@ -2018,6 +2299,15 @@ function auditApiFailure(request, error) {
     }
   }
 
+  if (operation === "resource.image.write" || operation === "resource.image.read") {
+    auditEvent(request, operation, {
+      status,
+      code,
+      outcome: status >= 500 ? "failed" : "rejected",
+    });
+    return;
+  }
+
   if (operation === "google.event.insert") {
     auditEvent(request, "google.mutation", {
       status,
@@ -2074,6 +2364,14 @@ async function handleApiRequest(request, response, requestUrl) {
     }
     if ((request.method === "PUT" || request.method === "POST") && requestUrl.pathname === "/api/state") {
       await handleStateWrite(request, response);
+      return true;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/api/resource-images") {
+      await handleResourceImageWrite(request, response);
+      return true;
+    }
+    if (request.method === "GET" && /^\/api\/resource-images\/[a-f0-9]{64}$/.test(requestUrl.pathname)) {
+      await handleResourceImageRead(request, response, requestUrl);
       return true;
     }
     if (request.method === "PUT" && /^\/api\/resources\/[^/]+$/.test(requestUrl.pathname)) {

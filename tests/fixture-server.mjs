@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,8 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const resetToken = "sygma-local-e2e-reset";
+const resourceImageBodyLimit = 8 * 1024 * 1024;
+const resourceImageContentTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const fixtureInlineColorKeys = new Set(["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
 const fixtureCollectionKeys = [
   "captures",
@@ -55,6 +58,7 @@ let resetGeneration = 1;
 let financeState = null;
 let financeRevision = 0;
 let financeWrites = [];
+let resourceImages = new Map();
 const stateEventClients = new Set();
 const financeFixturePassword = "finance-e2e-password";
 const financeFixtureSession = "finance-fixture-session";
@@ -199,6 +203,66 @@ const server = createServer(async (request, response) => {
         concurrency: baseRevision === null ? "fixture-unconditional" : "conditional",
         ...statePayload(),
       }, stateRevisionHeaders(baseRevision === null ? "fixture-unconditional" : "conditional"));
+      return;
+    }
+    if (request.method === "POST" && path === "/api/resource-images") {
+      const contentType = String(request.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+      if (!resourceImageContentTypes.has(contentType)) {
+        sendJson(response, 415, {
+          error: "Resource images must be PNG, JPEG, GIF, or WebP.",
+          code: "RESOURCE_IMAGE_CONTENT_TYPE_UNSUPPORTED",
+        });
+        return;
+      }
+      const data = await readBufferBody(request, resourceImageBodyLimit);
+      if (!data.length) {
+        sendJson(response, 400, { error: "Resource image data is required.", code: "RESOURCE_IMAGE_REQUIRED" });
+        return;
+      }
+      if (!fixtureResourceImageSignatureMatches(data, contentType)) {
+        sendJson(response, 422, {
+          error: "Resource image bytes do not match the declared content type.",
+          code: "RESOURCE_IMAGE_MIME_MISMATCH",
+        });
+        return;
+      }
+      const id = createHash("sha256").update(data).digest("hex");
+      if (!resourceImages.has(id)) resourceImages.set(id, { id, contentType, byteSize: data.byteLength, data: Buffer.from(data) });
+      sendJson(response, 201, {
+        ok: true,
+        id,
+        contentType,
+        byteSize: data.byteLength,
+        url: `/api/resource-images/${id}`,
+      });
+      return;
+    }
+    if (request.method === "GET" && /^\/api\/resource-images\/[a-f0-9]{64}$/.test(path)) {
+      const id = path.slice("/api/resource-images/".length);
+      const image = resourceImages.get(id);
+      if (!image) {
+        sendJson(response, 404, { error: "Resource image not found.", code: "RESOURCE_IMAGE_NOT_FOUND" });
+        return;
+      }
+      const etag = `"resource-image-${id}"`;
+      const headers = {
+        ...guardHeaders,
+        "Content-Type": image.contentType,
+        "Content-Length": String(image.byteSize),
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Disposition": "inline",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "X-Content-Type-Options": "nosniff",
+        ETag: etag,
+      };
+      if (String(request.headers["if-none-match"] || "").split(",").map((value) => value.trim()).includes(etag)) {
+        delete headers["Content-Length"];
+        response.writeHead(304, headers);
+        response.end();
+        return;
+      }
+      response.writeHead(200, headers);
+      response.end(image.data);
       return;
     }
     if (request.method === "PUT" && path.startsWith("/api/resources/")) {
@@ -407,6 +471,7 @@ const server = createServer(async (request, response) => {
       financeState = null;
       financeRevision = 0;
       financeWrites = [];
+      resourceImages = new Map();
       sendJson(response, 200, { ok: true, appStateId: FIXTURE_IDS.appState, resetGeneration });
       return;
     }
@@ -450,7 +515,10 @@ const server = createServer(async (request, response) => {
     response.writeHead(404, guardHeaders);
     response.end();
   } catch (error) {
-    sendJson(response, error.status || 500, { error: error.message || "Fixture server error." });
+    sendJson(response, error.status || 500, {
+      error: error.message || "Fixture server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 });
 
@@ -668,8 +736,19 @@ function fixtureUrlBlockIssues(incomingState) {
     const blocks = Array.isArray(resources[resourceIndex]?.blocks) ? resources[resourceIndex].blocks : [];
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
       const block = blocks[blockIndex];
-      if (!block || !["bookmark", "embed"].includes(block.type)) continue;
+      if (!block) continue;
       const path = `state.resources[${resourceIndex}].blocks[${blockIndex}]`;
+      if (block.type === "image") {
+        if (!fixtureSafeResourceImageUrl(block.url)) {
+          issues.push({
+            path: `${path}.url`,
+            code: "unsafe_image_url",
+            message: "Resource images require a same-origin uploaded image URL or a credential-free HTTPS URL.",
+          });
+        }
+        continue;
+      }
+      if (!["bookmark", "embed"].includes(block.type)) continue;
       if (!fixtureSafeHttpsBlockUrl(block.url)) {
         issues.push({
           path: `${path}.url`,
@@ -817,6 +896,26 @@ function fixtureSafeHttpsBlockUrl(value) {
   }
 }
 
+function fixtureSafeResourceImageUrl(value) {
+  if (typeof value !== "string" || !value || value !== value.trim() || value.length > 4096) return false;
+  return /^\/api\/resource-images\/[a-f0-9]{64}$/.test(value) || fixtureSafeHttpsBlockUrl(value);
+}
+
+function fixtureResourceImageSignatureMatches(data, contentType) {
+  if (!Buffer.isBuffer(data)) return false;
+  if (contentType === "image/png") {
+    return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (contentType === "image/jpeg") return data.length >= 4 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  if (contentType === "image/gif") return data.length >= 6 && ["GIF87a", "GIF89a"].includes(data.subarray(0, 6).toString("ascii"));
+  if (contentType === "image/webp") {
+    return data.length >= 12
+      && data.subarray(0, 4).toString("ascii") === "RIFF"
+      && data.subarray(8, 12).toString("ascii") === "WEBP";
+  }
+  return false;
+}
+
 function requestBaseRevision(request, body) {
   const ifMatch = String(request.headers["if-match"] || "").trim();
   const headerMatch = ifMatch.match(/^(?:W\/)?"?(?:state-)?(\d+)"?$/i);
@@ -926,6 +1025,29 @@ async function readJsonBody(request) {
     error.status = 400;
     throw error;
   }
+}
+
+async function readBufferBody(request, limit) {
+  const declaredLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    const error = new Error("Fixture request body is too large.");
+    error.status = 413;
+    error.code = "REQUEST_BODY_TOO_LARGE";
+    throw error;
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) {
+      const error = new Error("Fixture request body is too large.");
+      error.status = 413;
+      error.code = "REQUEST_BODY_TOO_LARGE";
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function sendSourceFile(request, response, relativePath, contentType) {

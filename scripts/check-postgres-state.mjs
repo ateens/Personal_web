@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { Pool } from "pg";
 import { createEmptyFinanceState, hashFinancePassword } from "../server/finance.js";
 import { createStorage } from "../server/storage.js";
@@ -40,6 +41,7 @@ const COLLECTION_KEYS = [
   "googleEvents",
   "links",
 ];
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 let serverProcess;
 let resourceServerProcess;
 let tokenStorage;
@@ -63,6 +65,8 @@ try {
       FINANCE_PASSWORD_HASH: financePasswordHash,
       FINANCE_SESSION_SECRET: financeSessionSecret,
       API_RATE_LIMIT_FINANCE_LOGIN_MAX: "4",
+      API_RATE_LIMIT_RESOURCE_IMAGE_WRITE_MAX: "50",
+      RESOURCE_IMAGE_STORAGE_MAX_BYTES: String(1024 * 1024),
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
     },
@@ -158,16 +162,14 @@ try {
   assert(firstRead.payload.state?.resources?.[0]?.locked === false, "Resource locked changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[0]?.replies?.[0]?.body === "PostgreSQL check reply", "Resource comment thread changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.resources?.[0]?.commentThreads?.[1]?.anchor?.blockId === "check-resource-block", "Resource inline comment anchor changed during PostgreSQL round trip");
-  assert(firstRead.payload.state?.settings?.viewControls?.resources?.searchScope === "database", "Resource searchScope changed during PostgreSQL round trip");
-  assert(
-    JSON.stringify(firstRead.payload.state?.settings?.openPagesIn) === JSON.stringify({ library: "full", list: "center", map: "side" }),
-    "Resource openPagesIn changed during PostgreSQL round trip",
-  );
-  assert(firstRead.payload.state?.settings?.notionParityMode === false, "Resource notionParityMode changed during PostgreSQL round trip");
-  assert(firstRead.payload.state?.settings?.advancedWindowMode === true, "Resource advancedWindowMode changed during PostgreSQL round trip");
+  assert(!("resources" in (firstRead.payload.state?.settings?.viewControls || {})), "retired Resource view controls survived the PostgreSQL round trip");
+  assert(!("openPagesIn" in (firstRead.payload.state?.settings || {})), "retired Resource open-page settings survived the PostgreSQL round trip");
+  assert(!("notionParityMode" in (firstRead.payload.state?.settings || {})), "retired Resource parity setting survived the PostgreSQL round trip");
+  assert(!("advancedWindowMode" in (firstRead.payload.state?.settings || {})), "retired Resource window setting survived the PostgreSQL round trip");
   assert(firstRead.payload.state?.tasks?.[0]?.status === "scheduled", "legacy someday task status did not migrate to scheduled during PostgreSQL round trip");
   assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
+  const resourceImage = await checkResourceImageApi();
   await checkFinanceApi();
 
   await pool.query("UPDATE tasks SET status = 'someday' WHERE app_state_id = $1 AND id = 'check-task'", [appStateId]);
@@ -279,6 +281,28 @@ try {
   secondState.resources[0].updatedAt = "2026-06-02T00:03:00.000Z";
   secondState.resources[0].revision = 2;
   secondState.resources[0].timestampSource = "server";
+  secondState.resources[0].blocks.push(
+    {
+      id: "check-resource-uploaded-image-block",
+      type: "image",
+      text: "Uploaded image",
+      url: resourceImage.url,
+      marks: [],
+      checked: false,
+      indent: 0,
+      collapsed: false,
+    },
+    {
+      id: "check-resource-remote-image-block",
+      type: "image",
+      text: "Remote image",
+      url: "https://example.com/resource-image.png",
+      marks: [],
+      checked: false,
+      indent: 0,
+      collapsed: false,
+    },
+  );
   const secondWrite = await requestJson("/api/state", {
     method: "POST",
     headers: {
@@ -297,6 +321,17 @@ try {
   assert(committedRead.payload.revision === 2 && committedRead.payload.state?.revision === 2, "committed state did not remain at revision 2");
   assert(committedRead.payload.state?.resources?.[0]?.title === "PostgreSQL updated resource", "committed Resource title was not readable");
   assert(committedRead.payload.state?.resources?.[0]?.timestampSource === "server", "committed Resource timestamp source was not readable");
+  assert(
+    committedRead.payload.state?.resources?.[0]?.blocks?.some((block) => block.type === "image" && block.url === resourceImage.url),
+    "same-origin Resource image block did not survive the PostgreSQL state round trip",
+  );
+  const imageAfterFullWrite = await fetch(`${baseUrl}${resourceImage.url}`);
+  assert(imageAfterFullWrite.ok, "full-state synchronization deleted a referenced Resource image");
+  const imageRowAfterFullWrite = await pool.query(
+    "SELECT count(*)::int AS count FROM resource_images WHERE app_state_id = $1 AND id = $2",
+    [appStateId, resourceImage.id],
+  );
+  assert(Number(imageRowAfterFullWrite.rows[0]?.count) === 1, "full-state synchronization removed the referenced Resource image row");
   await assertResourcePermanentDeleteRejectedDoesNotMutate();
   await assertInvalidWriteDoesNotMutate(
     "duplicate ID",
@@ -427,6 +462,23 @@ try {
         draft.resources[0].blocks[0].marks = [];
       },
       "unsafe_block_url"
+    );
+  }
+  for (const unsafeImageUrl of [
+    "data:image/png;base64,iVBORw0KGgo=",
+    "http://example.com/not-https.png",
+    "https://user:password@example.com/private.png",
+    "/api/resource-images/not-a-content-hash",
+  ]) {
+    await assertInvalidWriteDoesNotMutate(
+      `unsafe image URL ${unsafeImageUrl.split(":", 1)[0]}`,
+      (draft) => {
+        draft.resources[0].blocks[0].type = "image";
+        draft.resources[0].blocks[0].text = "unsafe image";
+        draft.resources[0].blocks[0].url = unsafeImageUrl;
+        draft.resources[0].blocks[0].marks = [];
+      },
+      "unsafe_image_url",
     );
   }
   await assertInvalidWriteDoesNotMutate(
@@ -741,7 +793,7 @@ try {
   assert(!("inbox" in (healedRead.payload.state?.settings?.viewControls || {})), "state read retained the removed Inbox view control");
   assert(healedRead.payload.state?.settings?.calendarSources?.tasks === true && healedRead.payload.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
   assert(!("primary" in healedRead.payload.state?.settings?.visibleGoogleCalendars) && healedRead.payload.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
-  assert(healedRead.payload.state?.settings?.viewControls?.resources?.mode === "list" && healedRead.payload.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedRead.payload.state.settings.viewControls.resources.panels.sort === true && !("type" in healedRead.payload.state.settings.viewControls.resources) && !("toggles" in healedRead.payload.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
+  assert(!("resources" in (healedRead.payload.state?.settings?.viewControls || {})), "state read retained retired Resource view controls");
   assert(!("appMode" in (healedRead.payload.state?.settings || {})), "state read returned deprecated settings from polluted storage");
 
   const healedRow = await pool.query(
@@ -872,11 +924,8 @@ function makeValidState() {
     updatedAt: createdAt,
     settings: {
       navOrder: ["database", "today"],
-      notionParityMode: false,
-      advancedWindowMode: true,
-      openPagesIn: { library: "full", list: "center", map: "side" },
       viewControls: {
-        resources: { search: "", searchScope: "database", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
+        resources: { search: "legacy", searchScope: "database", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
       },
     },
     captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", createdAt }],
@@ -1237,6 +1286,128 @@ async function checkFinanceApi() {
       "finance login rate limit did not return a JSON 429 with Retry-After",
     );
   }
+}
+
+async function checkResourceImageApi() {
+  const beforeState = await readState();
+  const fixtures = [
+    ["image/png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64")],
+    ["image/jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xd9])],
+    ["image/gif", Buffer.from("GIF89a", "ascii")],
+    ["image/webp", Buffer.from("RIFF\u0004\u0000\u0000\u0000WEBP", "binary")],
+  ];
+  const uploads = [];
+  for (const [contentType, data] of fixtures) {
+    const response = await fetch(`${baseUrl}/api/resource-images`, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: data,
+    });
+    const payload = await response.json();
+    assert(response.status === 201 && payload.ok === true, `${contentType} Resource image upload failed`);
+    assert(/^\/api\/resource-images\/[a-f0-9]{64}$/.test(payload.url), `${contentType} Resource image upload returned an unstable URL`);
+    assert(payload.contentType === contentType && payload.byteSize === data.byteLength, `${contentType} Resource image metadata is incorrect`);
+    uploads.push({ ...payload, data });
+  }
+
+  const uploaded = uploads[0];
+  const imageRead = await fetch(`${baseUrl}${uploaded.url}`);
+  const imageBytes = Buffer.from(await imageRead.arrayBuffer());
+  assert(imageRead.ok && imageRead.headers.get("content-type") === uploaded.contentType, "stored Resource image was not readable with its original content type");
+  assert(imageBytes.equals(uploaded.data), "stored Resource image bytes changed during the PostgreSQL round trip");
+  assert(imageRead.headers.get("cache-control") === "public, max-age=31536000, immutable", "Resource image is missing immutable caching");
+  assert(imageRead.headers.get("x-content-type-options") === "nosniff", "Resource image is missing nosniff");
+  assert(imageRead.headers.get("cross-origin-resource-policy") === "same-origin", "Resource image is missing same-origin resource isolation");
+  const imageEtag = imageRead.headers.get("etag");
+  assert(imageEtag === `"resource-image-${uploaded.id}"`, "Resource image ETag is not stable");
+  const conditionalRead = await fetch(`${baseUrl}${uploaded.url}`, { headers: { "If-None-Match": imageEtag } });
+  assert(conditionalRead.status === 304, "conditional Resource image read did not return 304");
+
+  const duplicate = await fetch(`${baseUrl}/api/resource-images`, {
+    method: "POST",
+    headers: { "Content-Type": uploaded.contentType },
+    body: uploaded.data,
+  });
+  const duplicatePayload = await duplicate.json();
+  assert(duplicate.status === 201 && duplicatePayload.url === uploaded.url, "identical Resource image upload did not return the stable URL");
+
+  const mismatched = await fetch(`${baseUrl}/api/resource-images`, {
+    method: "POST",
+    headers: { "Content-Type": "image/png" },
+    body: Buffer.from("not a PNG"),
+  });
+  const mismatchedPayload = await mismatched.json();
+  assert(mismatched.status === 422 && mismatchedPayload.code === "RESOURCE_IMAGE_MIME_MISMATCH", "spoofed Resource image content type was not rejected");
+
+  const unsupported = await fetch(`${baseUrl}/api/resource-images`, {
+    method: "POST",
+    headers: { "Content-Type": "image/svg+xml" },
+    body: Buffer.from("<svg></svg>"),
+  });
+  const unsupportedPayload = await unsupported.json();
+  assert(unsupported.status === 415 && unsupportedPayload.code === "RESOURCE_IMAGE_CONTENT_TYPE_UNSUPPORTED", "unsupported Resource image content type was not rejected");
+
+  const quotaData = Buffer.alloc(1024 * 1024);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(quotaData);
+  const quotaLimited = await fetch(`${baseUrl}/api/resource-images`, {
+    method: "POST",
+    headers: { "Content-Type": "image/png" },
+    body: quotaData,
+  });
+  const quotaPayload = await quotaLimited.json();
+  assert(quotaLimited.status === 507 && quotaPayload.code === "RESOURCE_IMAGE_STORAGE_LIMIT", "Resource image workspace quota was not enforced");
+
+  const oversizedData = Buffer.alloc((8 * 1024 * 1024) + 1);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(oversizedData);
+  const oversized = await fetch(`${baseUrl}/api/resource-images`, {
+    method: "POST",
+    headers: { "Content-Type": "image/png" },
+    body: oversizedData,
+  });
+  const oversizedPayload = await oversized.json();
+  assert(oversized.status === 413 && oversizedPayload.code === "REQUEST_BODY_TOO_LARGE", "Resource image larger than 8 MB was not rejected");
+
+  const stored = await pool.query(
+    "SELECT id, content_type, byte_size FROM resource_images WHERE app_state_id = $1 ORDER BY id",
+    [appStateId],
+  );
+  assert(stored.rowCount === fixtures.length, "rejected or duplicate Resource image upload changed stored image membership");
+  const storedPng = stored.rows.find((row) => row.id === uploaded.id);
+  assert(storedPng?.content_type === "image/png" && Number(storedPng.byte_size) === uploaded.data.byteLength, "PostgreSQL Resource image metadata is incorrect");
+  const afterState = await readState();
+  assert(afterState.payload.revision === beforeState.payload.revision, "Resource image upload changed the workspace state revision");
+
+  const slowUploads = Array.from({ length: 2 }, () => openSlowResourceImageUpload());
+  await delay(80);
+  const abandonedUploads = Array.from({ length: 2 }, () => openSlowResourceImageUpload());
+  await delay(80);
+  for (const upload of abandonedUploads) upload.destroy();
+  for (const upload of slowUploads) upload.destroy();
+  await delay(80);
+  const recoveredUpload = await Promise.race([
+    fetch(`${baseUrl}/api/resource-images`, {
+      method: "POST",
+      headers: { "Content-Type": uploaded.contentType },
+      body: uploaded.data,
+    }),
+    delay(3_000).then(() => { throw new Error("Resource image transfer slots did not recover after aborted clients"); }),
+  ]);
+  assert(recoveredUpload.status === 201, "Resource image transfer slots leaked after aborted clients");
+  return uploaded;
+}
+
+function openSlowResourceImageUpload() {
+  const target = new URL("/api/resource-images", baseUrl);
+  const request = httpRequest(target, {
+    method: "POST",
+    headers: {
+      "Content-Type": "image/png",
+      "Content-Length": "64",
+    },
+  });
+  request.on("error", () => {});
+  request.write(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  return request;
 }
 
 async function checkIncrementalResourceApi() {
@@ -1778,11 +1949,13 @@ async function cleanupCheckRows() {
 
 async function assertCleanupComplete() {
   const remainingState = await pool.query("SELECT count(*)::int AS count FROM app_state WHERE id = ANY($1)", [checkStateIds]);
+  const remainingResourceImages = await pool.query("SELECT count(*)::int AS count FROM resource_images WHERE app_state_id = ANY($1)", [checkStateIds]);
   const remainingPrivate = await pool.query("SELECT count(*)::int AS count FROM app_private_data WHERE id = ANY($1)", [checkStateIds]);
   const remainingFinance = await pool.query("SELECT count(*)::int AS count FROM finance_state WHERE id = ANY($1)", [checkStateIds]);
   const remainingFinanceHistory = await pool.query("SELECT count(*)::int AS count FROM finance_state_history WHERE finance_state_id = ANY($1)", [checkStateIds]);
   assert(
     Number(remainingState.rows[0]?.count) === 0
+      && Number(remainingResourceImages.rows[0]?.count) === 0
       && Number(remainingPrivate.rows[0]?.count) === 0
       && Number(remainingFinance.rows[0]?.count) === 0
       && Number(remainingFinanceHistory.rows[0]?.count) === 0,

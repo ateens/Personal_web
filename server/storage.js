@@ -38,19 +38,12 @@ const DEFAULT_VIEW_CONTROLS = {
   tasks: { filters: ["all"], sort: "date", mode: "board", panels: { filter: false, sort: false } },
   projects: { filters: ["all"], sort: "status", mode: "board", panels: { filter: false, sort: false } },
   boxes: { filters: ["all"], sort: "activity", mode: "columns", panels: { filter: false, sort: false } },
-  resources: { search: "", searchScope: "fullText", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
   habits: { filters: ["all"], sort: "progress", mode: "list", panels: { filter: false, sort: false } },
   journal: { filters: ["all"], sort: "date", mode: "cards", panels: { filter: false, sort: false } },
   calendar: { filters: ["all"], sort: "time", mode: "calendar", panels: { filter: false, sort: false } },
   database: { filters: ["all"], sort: "rows", mode: "grid", panels: { filter: false, sort: false } },
 };
-const RESOURCE_SEARCH_SCOPES = new Set(["database", "fullText"]);
-const RESOURCE_OPEN_PAGE_MODES = new Set(["center", "side", "full"]);
-const DEFAULT_RESOURCE_OPEN_PAGES_IN = {
-  library: "center",
-  list: "side",
-  map: "center",
-};
+const DEFAULT_RESOURCE_IMAGE_MAX_BYTES = 256 * 1024 * 1024;
 const RELATIONAL_DELETE_ORDER = [
   "task_resources",
   "collection_links",
@@ -78,9 +71,15 @@ const RELATIONAL_TABLES = [
   "google_calendars",
   "google_events",
   "collection_links",
+  "resource_images",
 ];
 
-export function createStorage({ databaseUrl = "", appStateId = "default", googleTokenFile = "" } = {}) {
+export function createStorage({
+  databaseUrl = "",
+  appStateId = "default",
+  googleTokenFile = "",
+  resourceImageMaxBytes = DEFAULT_RESOURCE_IMAGE_MAX_BYTES,
+} = {}) {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required for PostgreSQL persistence.");
   }
@@ -94,6 +93,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
   let appPrivateDataTableReady = null;
   let oauthTransactionsTableReady = null;
   let relationalTablesReady = null;
+  let resourceImagesTableReady = null;
   let financeTablesReady = null;
 
   async function ensureAppStateTable() {
@@ -197,6 +197,22 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
         ON finance_state_history(finance_state_id, created_at DESC)
     `);
     await financeTablesReady;
+  }
+
+  async function ensureResourceImagesTable() {
+    await ensureAppStateTable();
+    resourceImagesTableReady ||= dbPool.query(`
+      CREATE TABLE IF NOT EXISTS resource_images (
+        app_state_id text NOT NULL REFERENCES app_state(id) ON DELETE CASCADE,
+        id text NOT NULL,
+        content_type text NOT NULL,
+        byte_size integer NOT NULL,
+        data bytea NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (app_state_id, id)
+      )
+    `);
+    await resourceImagesTableReady;
   }
 
   async function ensureRelationalTables() {
@@ -449,6 +465,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     await ensureAppPrivateDataTable();
     await ensureOAuthTransactionsTable();
     await ensureRelationalTables();
+    await ensureResourceImagesTable();
     await ensureFinanceTables();
   }
 
@@ -930,6 +947,78 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     }
   }
 
+  async function writeResourceImage(data, contentType) {
+    await ensureResourceImagesTable();
+    if (!Buffer.isBuffer(data) || !data.length) {
+      throw storageError(400, "RESOURCE_IMAGE_REQUIRED", "Resource image data is required.");
+    }
+    const id = createHash("sha256").update(data).digest("hex");
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const workspace = await client.query("SELECT state FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      if (!workspace.rows[0]) {
+        throw storageError(409, "STATE_NOT_INITIALIZED", "Application state must be initialized before uploading a Resource image.");
+      }
+      const referencedIds = resourceImageIds(workspace.rows[0].state);
+      await client.query(
+        `DELETE FROM resource_images
+         WHERE app_state_id = $1
+           AND created_at < now() - interval '1 day'
+           AND NOT (id = ANY($2::text[]))`,
+        [appStateId, referencedIds],
+      );
+      const stored = await client.query(
+        "SELECT id, content_type, byte_size FROM resource_images WHERE app_state_id = $1 AND id = $2",
+        [appStateId, id],
+      );
+      if (stored.rows[0]) {
+        await client.query("COMMIT");
+        return {
+          id: stored.rows[0].id,
+          contentType: stored.rows[0].content_type,
+          byteSize: Number(stored.rows[0].byte_size),
+        };
+      }
+      const usage = await client.query(
+        "SELECT COALESCE(sum(byte_size), 0)::bigint AS bytes FROM resource_images WHERE app_state_id = $1",
+        [appStateId],
+      );
+      if (Number(usage.rows[0]?.bytes || 0) + data.byteLength > resourceImageMaxBytes) {
+        throw storageError(507, "RESOURCE_IMAGE_STORAGE_LIMIT", "Resource image storage limit reached.");
+      }
+      await client.query(
+        `INSERT INTO resource_images (app_state_id, id, content_type, byte_size, data)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [appStateId, id, contentType, data.byteLength, data],
+      );
+      await client.query("COMMIT");
+      return { id, contentType, byteSize: data.byteLength };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function readResourceImage(id, options = {}) {
+    await ensureResourceImagesTable();
+    const result = await dbPool.query(
+      `SELECT id, content_type, byte_size${options.metadataOnly === true ? "" : ", data"}
+       FROM resource_images WHERE app_state_id = $1 AND id = $2`,
+      [appStateId, id],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      contentType: row.content_type,
+      byteSize: Number(row.byte_size),
+      ...(options.metadataOnly === true ? {} : { data: Buffer.from(row.data) }),
+    };
+  }
+
   async function stateStatus() {
     await ready();
     const result = await dbPool.query("SELECT revision, updated_at FROM app_state WHERE id = $1", [appStateId]);
@@ -1154,6 +1243,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     listMigrationBackups,
     readAppState,
     readFinanceState,
+    readResourceImage,
     readToken,
     ready,
     restoreMigrationBackup,
@@ -1161,6 +1251,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     writeAppState,
     writeFinanceState,
     writeResource,
+    writeResourceImage,
     writeToken,
   };
 
@@ -1917,6 +2008,11 @@ function normalizeAppStateForStorage(state) {
     delete nextState.settings.notionSyncMode;
     changed = true;
   }
+  for (const key of ["notionParityMode", "advancedWindowMode", "openPagesIn", "resourceSideWidth"]) {
+    if (!Object.prototype.hasOwnProperty.call(nextState.settings, key)) continue;
+    delete nextState.settings[key];
+    changed = true;
+  }
   const normalizedNavOrder = normalizeNavOrder(nextState.settings.navOrder);
   if (!arraysEqual(nextState.settings.navOrder, normalizedNavOrder)) {
     nextState.settings.navOrder = normalizedNavOrder;
@@ -1942,23 +2038,6 @@ function normalizeAppStateForStorage(state) {
     changed = true;
   }
   nextState.settings.viewControls = normalizedViewControls;
-  const normalizedNotionParityMode = typeof nextState.settings.notionParityMode === "boolean"
-    ? nextState.settings.notionParityMode
-    : true;
-  if (nextState.settings.notionParityMode !== normalizedNotionParityMode) {
-    nextState.settings.notionParityMode = normalizedNotionParityMode;
-    changed = true;
-  }
-  const normalizedAdvancedWindowMode = nextState.settings.advancedWindowMode === true;
-  if (nextState.settings.advancedWindowMode !== normalizedAdvancedWindowMode) {
-    nextState.settings.advancedWindowMode = normalizedAdvancedWindowMode;
-    changed = true;
-  }
-  const normalizedOpenPagesIn = normalizeResourceOpenPagesIn(nextState.settings.openPagesIn);
-  if (!jsonValuesEqual(nextState.settings.openPagesIn, normalizedOpenPagesIn)) {
-    changed = true;
-  }
-  nextState.settings.openPagesIn = normalizedOpenPagesIn;
   for (const key of STRING_SETTING_KEYS) {
     if (typeof nextState.settings[key] !== "string") {
       nextState.settings[key] = "";
@@ -2144,6 +2223,19 @@ function calendarSourcesValid(sources) {
   return count === CALENDAR_SOURCE_KEYS.length;
 }
 
+function resourceImageIds(state) {
+  const ids = new Set();
+  for (const resource of Array.isArray(state?.resources) ? state.resources : []) {
+    for (const block of Array.isArray(resource?.blocks) ? resource.blocks : []) {
+      const match = typeof block?.url === "string"
+        ? block.url.match(/^\/api\/resource-images\/([a-f0-9]{64})$/)
+        : null;
+      if (match) ids.add(match[1]);
+    }
+  }
+  return [...ids];
+}
+
 function normalizeBooleanMap(map) {
   const normalized = {};
   if (!isPlainObject(map)) return normalized;
@@ -2158,6 +2250,7 @@ function normalizeBooleanMap(map) {
 function normalizeViewControls(value) {
   const controls = {};
   for (const key of DEFAULT_NAV_ORDER) {
+    if (key === "resources") continue;
     const defaults = DEFAULT_VIEW_CONTROLS[key];
     const saved = isPlainObject(value) && isPlainObject(value[key]) ? value[key] : {};
     controls[key] = {
@@ -2167,25 +2260,8 @@ function normalizeViewControls(value) {
       mode: typeof saved.mode === "string" ? saved.mode : defaults.mode,
       panels: normalizeViewControlPanels(saved.panels),
     };
-    if (key === "resources") {
-      controls[key].search = typeof saved.search === "string" ? saved.search : defaults.search;
-      controls[key].searchScope = normalizeResourceSearchScope(saved.searchScope);
-    }
   }
   return controls;
-}
-
-function normalizeResourceSearchScope(value) {
-  return RESOURCE_SEARCH_SCOPES.has(value) ? value : "fullText";
-}
-
-function normalizeResourceOpenPagesIn(value) {
-  const source = isPlainObject(value) ? value : {};
-  const normalized = {};
-  for (const [view, fallback] of Object.entries(DEFAULT_RESOURCE_OPEN_PAGES_IN)) {
-    normalized[view] = RESOURCE_OPEN_PAGE_MODES.has(source[view]) ? source[view] : fallback;
-  }
-  return normalized;
 }
 
 function normalizeViewControlFilters(saved, fallback = ["all"], view = "") {

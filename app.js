@@ -121,6 +121,9 @@ const BLOCK_TYPES = {
   heading1: ["제목 1", "H1"],
   heading2: ["제목 2", "H2"],
   heading3: ["제목 3", "H3"],
+  heading4: ["제목 4", "H4"],
+  heading5: ["제목 5", "H5"],
+  heading6: ["제목 6", "H6"],
   bullet: ["목록", "•"],
   numbered: ["번호 목록", "1."],
   todo: ["할 일 목록", "☑"],
@@ -134,6 +137,10 @@ const URL_BLOCK_TYPES = Object.freeze({
   bookmark: ["북마크", "↗"],
   embed: ["임베드", "◇"],
 });
+const IMAGE_BLOCK_TYPE = "image";
+const RESOURCE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_RESOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_RESOURCE_TITLE_LENGTH = 20_000;
 const URL_PASTE_CHOICE_ACTIONS = Object.freeze([
   { action: "link", label: "링크", hint: "URL을 편집 가능한 링크 텍스트로 유지", icon: "↗" },
   { action: "bookmark", label: "북마크", hint: "안전한 정적 북마크 미리보기", icon: "▤" },
@@ -150,6 +157,7 @@ const SELECTED_BLOCK_MENU_ACTIONS = [
   ["delete", ["삭제", "⌫", "선택한 블록 삭제"]],
 ];
 const SLASH_ACTION_ENTRIES = [
+  ["image:upload", ["이미지", "▧"]],
   ["duplicate", ["복제", "⧉"]],
   ["delete", ["삭제", "⌫"]],
 ];
@@ -158,6 +166,9 @@ const BLOCK_TYPE_HINTS = {
   heading1: "큰 섹션 제목",
   heading2: "중간 섹션 제목",
   heading3: "작은 섹션 제목",
+  heading4: "4단계 섹션 제목",
+  heading5: "5단계 섹션 제목",
+  heading6: "6단계 섹션 제목",
   bullet: "불릿 목록",
   numbered: "번호가 있는 목록",
   todo: "체크박스 할 일",
@@ -172,6 +183,9 @@ const BLOCK_TYPE_SEARCH_ALIASES = {
   heading1: ["h1", "heading1", "heading 1", "title", "제목1", "#"],
   heading2: ["h2", "heading2", "heading 2", "subtitle", "제목2", "##"],
   heading3: ["h3", "heading3", "heading 3", "제목3", "###"],
+  heading4: ["h4", "heading4", "heading 4", "제목4", "####"],
+  heading5: ["h5", "heading5", "heading 5", "제목5", "#####"],
+  heading6: ["h6", "heading6", "heading 6", "제목6", "######"],
   bullet: ["bullet", "bulleted", "list", "ul", "불릿"],
   numbered: ["number", "numbered", "ordered", "list", "ol", "번호", "번호목록"],
   todo: ["todo", "to-do", "check", "checkbox", "task", "할일", "할 일"],
@@ -199,10 +213,12 @@ const BLOCK_COLOR_ENTRIES = [
   ...BLOCK_COLOR_KEYS.map((key) => [`color:background:${key}`, [`${BLOCK_COLOR_OPTIONS[key].label} 배경`, "■"]]),
 ];
 const SLASH_ACTION_HINTS = {
+  "image:upload": "기기에서 이미지 삽입",
   duplicate: "현재 블록을 바로 아래에 복사",
   delete: "현재 블록 삭제",
 };
 const SLASH_ACTION_SEARCH_ALIASES = {
+  "image:upload": ["image", "photo", "picture", "사진", "그림", "이미지"],
   duplicate: ["duplicate", "copy", "dupe", "복제", "복사"],
   delete: ["delete", "remove", "trash", "삭제", "지우기"],
 };
@@ -308,6 +324,9 @@ const INLINE_MARK_DESCRIPTIONS = {
   link: "링크",
 };
 const MARKDOWN_SHORTCUTS = [
+  [/^######\s$/, "heading6", ""],
+  [/^#####\s$/, "heading5", ""],
+  [/^####\s$/, "heading4", ""],
   [/^#\s$/, "heading1", ""],
   [/^##\s$/, "heading2", ""],
   [/^###\s$/, "heading3", ""],
@@ -315,8 +334,8 @@ const MARKDOWN_SHORTCUTS = [
   [/^1[.)]\s$/, "numbered", ""],
   [/^[aAiI][.)]\s$/, "numbered", ""],
   [/^\[\s?\]\s$/, "todo", ""],
-  [/^>\s$/, "toggle", ""],
-  [/^["“]\s$/, "quote", ""],
+  [/^>\s$/, "quote", ""],
+  [/^>>\s$/, "toggle", ""],
   [/^!\s$/, "callout", ""],
   [/^```$/, "code", ""],
   [/^---$/, "divider", ""],
@@ -365,7 +384,7 @@ const FINANCE_WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"]
 const COMMAND_MENU_ITEMS = [
   ["new-task", "✓", "새 할 일", "실행 항목"],
   ["new-project", "▦", "새 프로젝트", "작업 묶음"],
-  ["new-resource", "≡", "새 자료", "새로 준비 중"],
+  ["new-resource", "≡", "새 자료", "빈 자료 페이지"],
   ["new-habit", "◌", "새 루틴", "반복 관리"],
   ["new-journal", "✎", "새 리뷰", "회고"],
   ["new-box", "□", "새 박스", "삶의 영역"],
@@ -590,6 +609,7 @@ let projectCalendarResizeTimer = 0;
 let taskDoneRenderTimer = 0;
 let taskDoneRenderVersion = 0;
 let inlineToolbarPositionFrame = 0;
+let preferredVerticalCaretX = null;
 let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
 const todayTaskPropertyResizeTimers = new Map();
@@ -661,6 +681,8 @@ let ui = {
   expandedHabitId: "",
   editingHabitId: "",
   habitDeleteConfirmId: "",
+  activeResourceId: "",
+  pendingResourceImage: null,
   habitDayCount: 0,
   draggedTaskId: "",
   pendingTodayTaskDrag: null,
@@ -1604,12 +1626,63 @@ function renderBoxes() {
 }
 
 function renderResources() {
+  const resources = state.resources.filter((resource) => !resource.trashedAt);
+  const activeResource = resources.find((resource) => resource.id === ui.activeResourceId) || null;
+  if (ui.activeResourceId && !activeResource) ui.activeResourceId = "";
   return `
-    <section class="view">
-      ${renderViewHeader("Resources", "자료", "새로 준비 중", `
+    <section class="view" data-resource-view>
+      ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
+      ${activeResource ? renderResourceDocument(activeResource) : renderResourceList(resources)}
     </section>
+  `;
+}
+
+function renderResourceList(resources) {
+  if (!resources.length) {
+    return `<section class="panel resource-list-panel" aria-label="자료 목록">${empty("자료가 없습니다. 새 자료를 만들어보세요.")}</section>`;
+  }
+  return `
+    <section class="panel resource-list-panel" aria-labelledby="resource-list-title">
+      <h2 class="panel-title" id="resource-list-title">자료 목록</h2>
+      <ul class="resource-list">
+        ${resources.map((resource) => `
+          <li>
+            <button class="resource-list-item" type="button" data-resource-open="${esc(resource.id)}">
+              ${esc(resource.title || "제목 없음")}
+            </button>
+          </li>
+        `).join("")}
+      </ul>
+    </section>
+  `;
+}
+
+function renderResourceDocument(resource) {
+  const blocksList = ensureEditableBlocks(resource, { save: false });
+  const readOnly = !resourceMutationAllowed(resource);
+  return `
+    <article class="panel resource-document" data-resource-document="${esc(resource.id)}">
+      <button class="resource-document-back" type="button" data-resource-back>← 자료 목록</button>
+      <label class="visually-hidden" for="resource-title-${esc(resource.id)}">자료 제목</label>
+      <textarea
+        class="resource-document-title"
+        id="resource-title-${esc(resource.id)}"
+        data-resource-title="${esc(resource.id)}"
+        rows="1"
+        maxlength="${MAX_RESOURCE_TITLE_LENGTH}"
+        placeholder="제목 없음"
+        ${readOnly ? "readonly aria-readonly=\"true\"" : ""}
+      >${esc(resource.title || "")}</textarea>
+      <hr class="resource-document-divider">
+      <section class="resource-document-body" aria-label="자료 내용">
+        <div class="block-editor" data-owner-type="resources" data-owner-id="${esc(resource.id)}">
+          ${renderBlocks(blocksList, "resources", resource.id)}
+        </div>
+      </section>
+      ${readOnly ? "" : `<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-resource-image-input hidden>`}
+    </article>
   `;
 }
 
@@ -7362,8 +7435,8 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
     ui.blockSelection.ownerId === ownerId &&
     ui.blockSelection.ids.includes(block.id);
   const indent = normalizedBlockIndent(meta.indent ?? block.indent);
-  const blockColor = normalizeBlockColorValue(block.color);
-  const blockBackgroundColor = normalizeBlockColorValue(block.backgroundColor);
+  const blockColor = ownerType === "resources" ? "" : normalizeBlockColorValue(block.color);
+  const blockBackgroundColor = ownerType === "resources" ? "" : normalizeBlockColorValue(block.backgroundColor);
   const hiddenAttr = meta.hidden ? ` data-hidden-by-toggle="true" hidden aria-hidden="true"` : ` data-hidden-by-toggle="false"`;
   const listMarkerAttr = meta.listMarker ? ` data-list-marker="${esc(meta.listMarker)}"` : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
@@ -7389,6 +7462,14 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
       blockStyle,
     });
   }
+  if (block.type === IMAGE_BLOCK_TYPE) {
+    return renderResourceImageBlock(block, {
+      isSelected,
+      indent,
+      hiddenAttr,
+      blockStyle,
+    });
+  }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
   return `
     <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
@@ -7406,7 +7487,22 @@ function isUrlPreviewBlockType(type = "") {
 }
 
 function isSupportedEditorBlockType(type = "") {
-  return Boolean(BLOCK_TYPES[type]) || isUrlPreviewBlockType(type);
+  return Boolean(BLOCK_TYPES[type]) || isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE;
+}
+
+function renderResourceImageBlock(block, meta = {}) {
+  const safeUrl = normalizeResourceImageUrl(block.url);
+  const alt = String(block.alt || block.text || "").trim();
+  return `
+    <div class="block resource-image-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="image" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
+      ${renderBlockDragHandle(block.id)}
+      <button class="block-tool" type="button" data-block-add="${esc(block.id)}" aria-label="블록 추가">+</button>
+      <figure class="resource-image-figure block-content" data-block-content="${esc(block.id)}" tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">
+        ${safeUrl ? `<img src="${esc(safeUrl)}" alt="${esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="resource-image-error" role="status">이미지를 불러올 수 없습니다.</span>`}
+        ${alt ? `<figcaption>${esc(alt)}</figcaption>` : ""}
+      </figure>
+    </div>
+  `;
 }
 
 function renderUrlPreviewBlock(block, meta = {}) {
@@ -7461,9 +7557,13 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
   if (block.type === "heading1") return `<h1 class="block-semantic-wrap">${editable}</h1>`;
   if (block.type === "heading2") return `<h2 class="block-semantic-wrap">${editable}</h2>`;
   if (block.type === "heading3") return `<h3 class="block-semantic-wrap">${editable}</h3>`;
+  if (block.type === "heading4") return `<h4 class="block-semantic-wrap">${editable}</h4>`;
+  if (block.type === "heading5") return `<h5 class="block-semantic-wrap">${editable}</h5>`;
+  if (block.type === "heading6") return `<h6 class="block-semantic-wrap">${editable}</h6>`;
   if (block.type === "quote") return `<blockquote class="block-semantic-wrap">${editable}</blockquote>`;
   if (block.type === "code") {
-    return `<pre class="block-semantic-wrap" aria-label="Plain text code block"><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="코드 블록 편집 (plain text)" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</code></pre>`;
+    const language = String(block.language || "").trim().slice(0, 64);
+    return `<pre class="block-semantic-wrap" aria-label="${esc(language ? `${language} 코드 블록` : "코드 블록")}"${language ? ` data-code-language="${esc(language)}"` : ""}><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `${language} 코드 블록 편집` : "코드 블록 편집")}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</code></pre>`;
   }
   return editable;
 }
@@ -7474,6 +7574,9 @@ function blockEditorAriaLabel(block) {
     heading1: "제목 1 블록 편집",
     heading2: "제목 2 블록 편집",
     heading3: "제목 3 블록 편집",
+    heading4: "제목 4 블록 편집",
+    heading5: "제목 5 블록 편집",
+    heading6: "제목 6 블록 편집",
     bullet: "글머리 기호 블록 편집",
     numbered: "번호 목록 블록 편집",
     todo: "할 일 블록 편집",
@@ -7533,6 +7636,33 @@ function normalizeEditableBlock(block) {
         changed = true;
       }
     }
+  } else if (block.type === IMAGE_BLOCK_TYPE) {
+    const safeUrl = normalizeResourceImageUrl(block.url);
+    if (!safeUrl) {
+      block.type = "paragraph";
+      block.text = String(block.alt || block.text || "");
+      delete block.url;
+      delete block.alt;
+      changed = true;
+    } else {
+      if (block.url !== safeUrl) {
+        block.url = safeUrl;
+        changed = true;
+      }
+      const alt = String(block.alt || block.text || "").slice(0, 2_000);
+      if (block.alt !== alt) {
+        block.alt = alt;
+        changed = true;
+      }
+      if (block.text !== alt) {
+        block.text = alt;
+        changed = true;
+      }
+      if (Array.isArray(block.marks) && block.marks.length) {
+        block.marks = [];
+        changed = true;
+      }
+    }
   } else if (!BLOCK_TYPES[block.type]) {
     block.type = "paragraph";
     changed = true;
@@ -7560,6 +7690,17 @@ function normalizeEditableBlock(block) {
   }
   if (typeof block.checked !== "boolean") {
     block.checked = false;
+    changed = true;
+  }
+  if (block.type === "code") {
+    const language = typeof block.language === "string" ? block.language.trim().split(/\s+/, 1)[0].slice(0, 64) : "";
+    if (block.language !== language) {
+      if (language) block.language = language;
+      else delete block.language;
+      changed = true;
+    }
+  } else if (Object.prototype.hasOwnProperty.call(block, "language")) {
+    delete block.language;
     changed = true;
   }
   const indent = normalizedBlockIndent(block.indent);
@@ -7951,6 +8092,7 @@ function normalizeInlineHref(value = "") {
   const raw = String(value || "").trim();
   if (!raw) return "";
   if (/^(https?:|mailto:|tel:)/i.test(raw)) return raw;
+  if (/^www\./i.test(raw)) return `https://${raw}`;
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return `mailto:${raw}`;
   if (/^[\w.-]+\.[a-z]{2,}(?:[/?#].*)?$/i.test(raw)) return `https://${raw}`;
   if (/^(?:\/(?!\/)|#|\?|\.\.?\/)/.test(raw)) return raw;
@@ -7961,6 +8103,9 @@ function blockPlaceholder(block) {
   if (block.type === "heading1") return "제목 1";
   if (block.type === "heading2") return "제목 2";
   if (block.type === "heading3") return "제목 3";
+  if (block.type === "heading4") return "제목 4";
+  if (block.type === "heading5") return "제목 5";
+  if (block.type === "heading6") return "제목 6";
   if (block.type === "todo") return "할 일";
   if (block.type === "toggle") return "토글";
   if (block.type === "quote") return "인용";
@@ -8787,6 +8932,7 @@ function renderSelectedBlocksMenuActions() {
 
 
 function renderSelectedBlocksColorActions() {
+  if (ui.blockSelection.ownerType === "resources") return "";
   const colorButtons = (mode) => BLOCK_COLOR_KEYS.map((key) => {
     const option = BLOCK_COLOR_OPTIONS[key];
     const action = `color:${mode}:${key}`;
@@ -8827,12 +8973,14 @@ function renderInlineFormatToolbar() {
     toolbar.activeTextColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeTextColor]?.label || toolbar.activeTextColor} 글자` : "",
     toolbar.activeBackgroundColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeBackgroundColor]?.label || toolbar.activeBackgroundColor} 배경` : "",
   ].filter(Boolean).join(", ");
+  const colorControls = toolbar.ownerType === "resources" ? "" : `
+      <button class="inline-format-button ${colorSummary ? "is-active" : ""}" id="${esc(`${colorMenuId}-trigger`)}" type="button" data-inline-color-menu-toggle aria-label="${esc(colorSummary ? `색상, ${colorSummary}` : "색상")}" aria-haspopup="menu" aria-expanded="${toolbar.colorMenuOpen ? "true" : "false"}" ${toolbar.colorMenuOpen ? `aria-controls="${esc(colorMenuId)}"` : ""} title="색상">A</button>
+      ${toolbar.colorMenuOpen ? renderInlineColorMenu(toolbar, colorMenuId) : ""}`;
   return `
     <div class="inline-format-toolbar" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" title="수식">∑</button>
-      <button class="inline-format-button ${colorSummary ? "is-active" : ""}" id="${esc(`${colorMenuId}-trigger`)}" type="button" data-inline-color-menu-toggle aria-label="${esc(colorSummary ? `색상, ${colorSummary}` : "색상")}" aria-haspopup="menu" aria-expanded="${toolbar.colorMenuOpen ? "true" : "false"}" ${toolbar.colorMenuOpen ? `aria-controls="${esc(colorMenuId)}"` : ""} title="색상">A</button>
-      ${toolbar.colorMenuOpen ? renderInlineColorMenu(toolbar, colorMenuId) : ""}
+      ${colorControls}
     </div>
   `;
 }
@@ -8990,9 +9138,12 @@ function slashMenuEntries(query = "", mode = "block") {
   if (hashType) return BLOCK_TYPE_ENTRIES.filter(([type]) => type === hashType);
   if (normalizedQuery === "turn") return BLOCK_TYPE_ENTRIES;
   const includeActions = mode !== "selection" || Boolean(normalizedQuery);
-  const entries = includeActions ? [...BLOCK_TYPE_ENTRIES, ...SLASH_ACTION_ENTRIES] : BLOCK_TYPE_ENTRIES;
+  const actions = ui.slash?.ownerType === "resources"
+    ? SLASH_ACTION_ENTRIES
+    : SLASH_ACTION_ENTRIES.filter(([action]) => action !== "image:upload");
+  const entries = includeActions ? [...BLOCK_TYPE_ENTRIES, ...actions] : BLOCK_TYPE_ENTRIES;
   if (!normalizedQuery) return entries;
-  const colorEntries = blockColorEntriesForQuery(normalizedQuery);
+  const colorEntries = ui.slash?.ownerType === "resources" ? [] : blockColorEntriesForQuery(normalizedQuery);
   const mentionEntries = mode === "selection" ? [] : mentionSlashEntriesForQuery(normalizedQuery);
   const emojiEntries = mode === "selection" ? [] : emojiSlashEntriesForQuery(normalizedQuery);
   const equationEntries = mode === "selection" ? [] : equationSlashEntriesForQuery(normalizedQuery);
@@ -9434,6 +9585,18 @@ function handleClick(event) {
       financeRecurringStatus.dataset.financeRecurringRuleId,
       financeRecurringStatus.dataset.financeRecurringStatus,
     );
+    return;
+  }
+  const resourceOpen = event.target.closest("[data-resource-open]");
+  if (resourceOpen) {
+    event.preventDefault();
+    openResourceDocument(resourceOpen.dataset.resourceOpen);
+    return;
+  }
+  const resourceBack = event.target.closest("[data-resource-back]");
+  if (resourceBack) {
+    event.preventDefault();
+    closeResourceDocument();
     return;
   }
   const urlPasteChoiceAction = event.target.closest("[data-url-paste-choice-action]");
@@ -10380,9 +10543,162 @@ function commitTodayBatchDrop(task, action) {
 }
 
 function createResourceFromAction() {
-  setView("resources");
-  showToast("자료 기능을 새로 준비 중입니다.");
-  return null;
+  return createResource();
+}
+
+function createResource(title = "새 자료") {
+  const createdAt = new Date().toISOString();
+  const resource = normalizeResourceRecord({
+    id: id(),
+    title,
+    type: "note",
+    importance: "normal",
+    pinned: false,
+    readLater: false,
+    url: "",
+    boxId: "",
+    projectId: "",
+    createdAt,
+    updatedAt: createdAt,
+    revision: 1,
+    timestampSource: "native",
+    blocks: [{ id: id(), type: "paragraph", text: "", marks: [], checked: false, indent: 0, collapsed: false }],
+  }, createdAt);
+  state.resources.push(resource);
+  dirtyResourceIds.add(resource.id);
+  ui.activeResourceId = resource.id;
+  if (ui.view !== "resources") {
+    ui.view = "resources";
+    updateNav();
+  }
+  saveState();
+  renderView({ soft: true });
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`)?.focus());
+  showToast("새 자료를 만들었습니다.");
+  return resource;
+}
+
+function openResourceDocument(resourceId) {
+  const resource = itemById("resources", resourceId);
+  if (!resource || resource.trashedAt) return false;
+  ui.activeResourceId = resource.id;
+  renderView({ soft: true });
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`)?.focus({ preventScroll: true }));
+  return true;
+}
+
+function closeResourceDocument() {
+  const resourceId = ui.activeResourceId;
+  ui.activeResourceId = "";
+  renderView({ soft: true });
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector(`[data-resource-open="${cssEscape(resourceId)}"]`)?.focus({ preventScroll: true }));
+}
+
+function updateResourceTitle(input) {
+  const resource = itemById("resources", input?.dataset.resourceTitle);
+  if (!resourceMutationAllowed(resource)) return;
+  const title = String(input.value || "").slice(0, MAX_RESOURCE_TITLE_LENGTH);
+  if (resource.title === title) return;
+  resource.title = title;
+  markResourceChanged(resource);
+  saveState();
+}
+
+function markResourceChanged(resourceOrId) {
+  const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
+  if (!resourceMutationAllowed(resource)) return null;
+  if (!dirtyResourceIds.has(resource.id)) return touchResource(resource);
+  resource.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(resource.updatedAt) + 1)).toISOString();
+  return resource;
+}
+
+function chooseResourceImage(ownerType, ownerId, blockId, slashRange = null) {
+  if (ownerType !== "resources" || !resourceMutationAllowed(ownerId)) return false;
+  const input = document.querySelector(`[data-resource-document="${cssEscape(ownerId)}"] [data-resource-image-input]`);
+  if (!input) return false;
+  ui.pendingResourceImage = { ownerType, ownerId, blockId, slashRange };
+  ui.slash = null;
+  renderOverlays();
+  input.value = "";
+  input.click();
+  return true;
+}
+
+async function uploadPendingResourceImage(input) {
+  const pending = ui.pendingResourceImage;
+  const file = input?.files?.[0] || null;
+  if (!pending || !file) {
+    ui.pendingResourceImage = null;
+    return false;
+  }
+  if (!RESOURCE_IMAGE_MIME_TYPES.has(file.type) || file.size < 1 || file.size > MAX_RESOURCE_IMAGE_BYTES) {
+    showToast("PNG, JPEG, GIF, WebP 이미지만 8MB까지 넣을 수 있습니다.");
+    ui.pendingResourceImage = null;
+    focusBlockContentAfterRender(pending.blockId);
+    return false;
+  }
+  try {
+    const url = await uploadResourceImageFile(file);
+    if (!url || !insertResourceImageBlock(pending, url, file.name.replace(/\.[^.]+$/, ""))) {
+      throw new Error("업로드한 이미지를 자료에 넣지 못했습니다.");
+    }
+    showToast("이미지를 넣었습니다.");
+    return true;
+  } catch (error) {
+    showToast(error?.message || "이미지 업로드에 실패했습니다.");
+    focusBlockContentAfterRender(pending.blockId);
+    return false;
+  } finally {
+    ui.pendingResourceImage = null;
+    if (input) input.value = "";
+  }
+}
+
+async function uploadResourceImageFile(file) {
+  const response = await fetch("/api/resource-images", {
+    method: "POST",
+    headers: { "Content-Type": file.type },
+    body: file,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "이미지 업로드에 실패했습니다.");
+  const url = normalizeResourceImageUrl(payload.url);
+  if (!url) throw new Error("서버가 안전하지 않은 이미지 주소를 반환했습니다.");
+  return url;
+}
+
+function insertResourceImageBlock(pending, url, alt = "") {
+  if (pending.ownerType !== "resources" || !resourceMutationAllowed(pending.ownerId)) return false;
+  const resource = itemById("resources", pending.ownerId);
+  const index = resource?.blocks?.findIndex((block) => block.id === pending.blockId) ?? -1;
+  if (index < 0) return false;
+  const block = resource.blocks[index];
+  const safeRange = normalizeTextRange(pending.slashRange, (block.text || "").length);
+  const replaceBlock = safeRange.start === 0 && safeRange.end === (block.text || "").length;
+  const safeAlt = String(alt || "").slice(0, 2_000);
+  const imageBlock = {
+    id: replaceBlock ? block.id : id(),
+    type: IMAGE_BLOCK_TYPE,
+    text: safeAlt,
+    alt: safeAlt,
+    url,
+    marks: [],
+    checked: false,
+    indent: blockIndent(block),
+    collapsed: false,
+  };
+  const history = beginEditorHistory("resources", resource.id, { blockId: block.id, position: "end" });
+  if (replaceBlock) resource.blocks.splice(index, 1, imageBlock);
+  else resource.blocks.splice(index + 1, 0, imageBlock);
+  markResourceChanged(resource);
+  commitEditorHistory(history, { blockId: imageBlock.id, position: "end" });
+  saveState();
+  renderEditorMutation("resources", resource.id);
+  requestAnimationFrame(() => document.querySelector(`[data-block-content="${cssEscape(imageBlock.id)}"]`)?.focus({ preventScroll: true }));
+  return true;
 }
 
 function handleSelectedBlocksMenuOutsideClick(event) {
@@ -10554,6 +10870,11 @@ if (financeInstallmentPayment && !event.isComposing) {
     return;
   }
 
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (resourceTitle) {
+    updateResourceTitle(resourceTitle);
+    return;
+  }
 
   const slashQuery = event.target.closest("[data-slash-query]");
   if (slashQuery) {
@@ -10622,6 +10943,11 @@ if (financeInstallmentEntry) {
   const financePaymentType = event.target.closest("[data-finance-payment-type]");
   if (financePaymentType) {
     syncFinancePaymentMethodFields(financePaymentType.closest("form"));
+    return;
+  }
+  const resourceImageInput = event.target.closest("[data-resource-image-input]");
+  if (resourceImageInput) {
+    uploadPendingResourceImage(resourceImageInput);
     return;
   }
   const financeMonth = event.target.closest("[data-finance-month]");
@@ -11089,7 +11415,7 @@ function focusEditorBottom(ownerType, ownerId) {
 
 function renderEditorMutation(ownerType, ownerId, options = {}) {
   const refreshed = refreshBlockEditorsAfterMutation(ownerType, ownerId);
-  if (!refreshed || options.forceView) renderView({ soft: true });
+  if (!refreshed || (options.forceView && ownerType !== "resources")) renderView({ soft: true });
 }
 
 
@@ -12048,6 +12374,7 @@ function commitEditorHistory(token, focus = null) {
   if (!item?.blocks) return false;
   const afterBlocks = cloneEditorBlocks(item.blocks);
   if (JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks)) return false;
+  if (token.ownerType === "resources") markResourceChanged(token.ownerId);
   return pushEditorHistoryEntry({
     ownerType: token.ownerType,
     ownerId: token.ownerId,
@@ -12104,6 +12431,7 @@ function restoreEditorHistoryEntry(entry, direction) {
   ui.pendingMarkdownTextTarget = null;
   item.blocks = cloneEditorBlocks(direction === "before" ? entry.beforeBlocks : entry.afterBlocks);
   ensureEditableBlocks(item, { save: false });
+  if (entry.ownerType === "resources") markResourceChanged(entry.ownerId);
   clearBlockSelection();
   saveState();
   renderEditorMutation(entry.ownerType, entry.ownerId, { forceView: true });
@@ -12388,12 +12716,15 @@ function duplicateEditorBlock(block) {
   const clone = cloneEditorBlocks([block])[0] || {};
   let type = isSupportedEditorBlockType(clone.type) ? clone.type : "paragraph";
   const text = typeof clone.text === "string" ? clone.text : "";
-  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(clone.url || text) : "";
-  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const safeUrl = type === IMAGE_BLOCK_TYPE
+    ? normalizeResourceImageUrl(clone.url)
+    : isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(clone.url || text) : "";
+  if ((isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE) && !safeUrl) type = "paragraph";
+  const imageAlt = type === IMAGE_BLOCK_TYPE ? String(clone.alt || text) : "";
   const duplicate = {
     id: id(),
     type,
-    text: safeUrl || text,
+    text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || text,
     marks: safeUrl ? [] : normalizeInlineMarks(text, clone.marks).filter((mark) => mark.type !== "comment"),
     checked: type === "todo" && clone.checked === true,
     indent: normalizedBlockIndent(clone.indent),
@@ -12402,6 +12733,8 @@ function duplicateEditorBlock(block) {
     backgroundColor: normalizeBlockColorValue(clone.backgroundColor),
   };
   if (safeUrl) duplicate.url = safeUrl;
+  if (type === IMAGE_BLOCK_TYPE) duplicate.alt = imageAlt;
+  if (type === "code" && typeof clone.language === "string") duplicate.language = clone.language.trim().split(/\s+/, 1)[0].slice(0, 64);
   return duplicate;
 }
 
@@ -12495,6 +12828,12 @@ function handleDocumentPaste(event) {
     event.preventDefault();
     return;
   }
+  const imageFile = resourceImageFileFromClipboard(event.clipboardData);
+  if (imageFile && target?.ownerType === "resources" && target.blockId) {
+    event.preventDefault();
+    pasteResourceImageFile(imageFile, target);
+    return;
+  }
   const customBlocks = readClipboardBlocks(event.clipboardData);
   const rawHtml = customBlocks.length ? "" : String(event.clipboardData.getData("text/html") || "");
   const parsedHtmlBlocks = rawHtml && htmlClipboardHasSafePasteContent(rawHtml) ? readHtmlClipboardBlocks(event.clipboardData) : [];
@@ -12538,6 +12877,36 @@ function handleDocumentPaste(event) {
   }
 }
 
+function resourceImageFileFromClipboard(clipboardData) {
+  for (const item of clipboardData?.items || []) {
+    if (item.kind !== "file" || !RESOURCE_IMAGE_MIME_TYPES.has(item.type)) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  return null;
+}
+
+async function pasteResourceImageFile(file, target) {
+  if (file.size < 1 || file.size > MAX_RESOURCE_IMAGE_BYTES) {
+    showToast("이미지는 8MB까지 붙여넣을 수 있습니다.");
+    return false;
+  }
+  try {
+    const url = await uploadResourceImageFile(file);
+    const blockContent = document.querySelector(`[data-block-content="${cssEscape(target.blockId)}"]`);
+    const range = selectionOffsetsInside(blockContent);
+    return insertResourceImageBlock(
+      { ownerType: target.ownerType, ownerId: target.ownerId, blockId: target.blockId, slashRange: range },
+      url,
+      file.name.replace(/\.[^.]+$/, ""),
+    );
+  } catch (error) {
+    showToast(error?.message || "이미지 붙여넣기에 실패했습니다.");
+    focusBlockContentAfterRender(target.blockId);
+    return false;
+  }
+}
+
 function clipboardBlocksHaveMeaningfulPasteContent(blocks = []) {
   return blocks.some((block) => block?.type === "divider" || String(block?.text || block?.url || "").length > 0);
 }
@@ -12545,8 +12914,11 @@ function clipboardBlocksHaveMeaningfulPasteContent(blocks = []) {
 function htmlClipboardHasSafePasteContent(rawHtml = "") {
   const template = document.createElement("template");
   template.innerHTML = String(rawHtml || "");
-  template.content.querySelectorAll("script, style, template, noscript, iframe, object, embed, img, svg, math, link, meta").forEach((node) => node.remove());
-  return Boolean(template.content.textContent?.trim() || template.content.querySelector("hr"));
+  template.content.querySelectorAll("script, style, template, noscript, iframe, object, embed, svg, math, link, meta").forEach((node) => node.remove());
+  for (const image of template.content.querySelectorAll("img")) {
+    if (!normalizeResourceImageUrl(image.getAttribute("src"))) image.remove();
+  }
+  return Boolean(template.content.textContent?.trim() || template.content.querySelector("hr,img"));
 }
 
 
@@ -12638,6 +13010,12 @@ function normalizeStandaloneHttpsUrl(value = "") {
   } catch (_) {
     return "";
   }
+}
+
+function normalizeResourceImageUrl(value = "") {
+  const raw = String(value || "").trim();
+  if (/^\/api\/resource-images\/[a-f0-9]{64}$/.test(raw)) return raw;
+  return normalizeStandaloneHttpsUrl(raw);
 }
 
 function openUrlPasteChoice(event, text = "") {
@@ -12959,11 +13337,14 @@ function selectedBlocksForClipboard() {
 
 function clipboardBlockFromBlock(block) {
   let type = isSupportedEditorBlockType(block.type) ? block.type : "paragraph";
-  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || block.text || "") : "";
-  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const safeUrl = type === IMAGE_BLOCK_TYPE
+    ? normalizeResourceImageUrl(block.url)
+    : isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || block.text || "") : "";
+  if ((isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE) && !safeUrl) type = "paragraph";
+  const imageAlt = type === IMAGE_BLOCK_TYPE ? String(block.alt || block.text || "") : "";
   const clipboardBlock = {
     type,
-    text: safeUrl || block.text || "",
+    text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || block.text || "",
     marks: safeUrl ? [] : normalizeInlineMarks(block.text || "", block.marks).filter((mark) => mark.type !== "comment"),
     checked: block.checked === true,
     indent: blockIndent(block),
@@ -12972,6 +13353,8 @@ function clipboardBlockFromBlock(block) {
     backgroundColor: normalizeBlockColorValue(block.backgroundColor),
   };
   if (safeUrl) clipboardBlock.url = safeUrl;
+  if (type === IMAGE_BLOCK_TYPE) clipboardBlock.alt = imageAlt;
+  if (type === "code" && typeof block.language === "string") clipboardBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
   return clipboardBlock;
 }
 
@@ -12994,8 +13377,14 @@ function clipboardBlocksPlainText(blocks) {
 function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block)) {
   const indent = "\t".repeat(block.indent || 0);
   const rawText = block.text || "";
+  if (block.type === IMAGE_BLOCK_TYPE) return `${indent}![${rawText}](${normalizeResourceImageUrl(block.url)})`;
   const rawLines = rawText.split("\n");
-  if (block.type === "code") return rawLines.map((line) => `${indent}${line}`).join("\n");
+  if (block.type === "code") {
+    const longestRun = Math.max(0, ...[...rawText.matchAll(/`+/g)].map((match) => match[0].length));
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    const language = String(block.language || "").trim().split(/\s+/, 1)[0].slice(0, 64);
+    return `${indent}${fence}${language}\n${rawLines.map((line) => `${indent}${line}`).join("\n")}\n${indent}${fence}`;
+  }
   return rawLines.map((line, index) => `${indent}${index === 0 ? prefix : ""}${line}`).join("\n");
 }
 
@@ -13015,11 +13404,14 @@ function clipboardBlockTextPrefix(block, numberedPrefix = "") {
   if (block.type === "heading1") return "# ";
   if (block.type === "heading2") return "## ";
   if (block.type === "heading3") return "### ";
+  if (block.type === "heading4") return "#### ";
+  if (block.type === "heading5") return "##### ";
+  if (block.type === "heading6") return "###### ";
   if (block.type === "bullet") return "- ";
   if (block.type === "numbered") return numberedPrefix || "1. ";
   if (block.type === "todo") return block.checked ? "[x] " : "[ ] ";
-  if (block.type === "toggle") return "> ";
-  if (block.type === "quote") return "\" ";
+  if (block.type === "toggle") return ">> ";
+  if (block.type === "quote") return "> ";
   if (block.type === "callout") return "! ";
   if (block.type === "code") return "``` ";
   if (block.type === "divider") return "---";
@@ -13035,11 +13427,13 @@ function clipboardBlocksHtml(blocks) {
     const prefix = clipboardBlockTextPrefix(block, clipboardNumberedPrefixForBlock(block, numberedCounters));
     const colorAttr = block.color ? ` data-block-color="${esc(block.color)}"` : "";
     const backgroundColorAttr = block.backgroundColor ? ` data-block-background="${esc(block.backgroundColor)}"` : "";
-    const urlAttr = isUrlPreviewBlockType(block.type) && normalizeStandaloneHttpsUrl(block.url || block.text || "")
-      ? ` data-block-url="${esc(normalizeStandaloneHttpsUrl(block.url || block.text || ""))}"`
+    const urlAttr = (isUrlPreviewBlockType(block.type) || block.type === IMAGE_BLOCK_TYPE) && normalizeResourceImageUrl(block.url || block.text || "")
+      ? ` data-block-url="${esc(normalizeResourceImageUrl(block.url || block.text || ""))}"`
       : "";
     if (block.type === "code") {
       html += `<pre data-block-type="${blockType}" data-block-indent="${blockIndent}"${colorAttr}${backgroundColorAttr}><code>${esc(block.text || "")}</code></pre>`;
+    } else if (block.type === IMAGE_BLOCK_TYPE) {
+      html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
     } else {
       const checkedAttr = block.type === "todo" ? ` data-block-checked="${block.checked ? "true" : "false"}"` : "";
       html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
@@ -13094,11 +13488,14 @@ function clipboardBlockFromHtmlElement(element) {
   const inline = htmlClipboardInlineData(element);
   const text = normalizeHtmlClipboardText(element.innerText || element.textContent || "");
   const stripped = stripClipboardBlockInlinePrefix(type, inline, checked);
-  const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(element.dataset.blockUrl || stripped.text) : "";
-  if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+  const safeUrl = type === IMAGE_BLOCK_TYPE
+    ? normalizeResourceImageUrl(element.dataset.blockUrl || element.querySelector("img")?.getAttribute("src") || "")
+    : isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(element.dataset.blockUrl || stripped.text) : "";
+  if ((isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE) && !safeUrl) type = "paragraph";
+  const imageAlt = type === IMAGE_BLOCK_TYPE ? String(element.querySelector("img")?.getAttribute("alt") || "") : "";
   const block = {
     type,
-    text: safeUrl || (type === "code" ? text : stripped.text),
+    text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || (type === "code" ? text : stripped.text),
     marks: type === "code" || safeUrl ? [] : stripped.marks,
     checked,
     indent: normalizedBlockIndent(element.dataset.blockIndent),
@@ -13107,6 +13504,7 @@ function clipboardBlockFromHtmlElement(element) {
     backgroundColor: normalizeBlockColorValue(element.dataset.blockBackground),
   };
   if (safeUrl) block.url = safeUrl;
+  if (type === IMAGE_BLOCK_TYPE) block.alt = imageAlt;
   return block;
 }
 
@@ -13137,6 +13535,11 @@ function appendHtmlClipboardElement(blocks, element, indent) {
   if (tag === "pre") {
     const text = normalizeHtmlClipboardText(element.innerText || element.textContent || "");
     blocks.push({ type: "code", text, marks: [], checked: false, indent, collapsed: false });
+    return;
+  }
+  if (tag === "img") {
+    const url = normalizeResourceImageUrl(element.getAttribute("src"));
+    if (url) blocks.push({ type: IMAGE_BLOCK_TYPE, text: element.getAttribute("alt") || "", alt: element.getAttribute("alt") || "", url, marks: [], checked: false, indent, collapsed: false });
     return;
   }
   if (tag === "ul" || tag === "ol") {
@@ -13192,7 +13595,10 @@ function appendHtmlClipboardListItem(blocks, itemElement, indent, ordered) {
 function htmlClipboardHeadingType(tag) {
   if (tag === "h1") return "heading1";
   if (tag === "h2") return "heading2";
-  if (["h3", "h4", "h5", "h6"].includes(tag)) return "heading3";
+  if (tag === "h3") return "heading3";
+  if (tag === "h4") return "heading4";
+  if (tag === "h5") return "heading5";
+  if (tag === "h6") return "heading6";
   return "";
 }
 
@@ -13202,7 +13608,7 @@ function htmlClipboardElementHasStructuredChildren(element) {
 
 function htmlClipboardElementIsStructured(element) {
   const tag = element.tagName.toLowerCase();
-  return ["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "main", "blockquote", "pre", "ul", "ol", "li"].includes(tag);
+  return ["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "main", "blockquote", "pre", "ul", "ol", "li", "img"].includes(tag);
 }
 
 function htmlClipboardInlineData(element, options = {}) {
@@ -13355,11 +13761,14 @@ function normalizeClipboardBlocks(blocks) {
     if (!block || typeof block !== "object") continue;
     let type = isSupportedEditorBlockType(block.type) ? block.type : "paragraph";
     const rawText = typeof block.text === "string" ? block.text : "";
-    const safeUrl = isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || rawText) : "";
-    if (isUrlPreviewBlockType(type) && !safeUrl) type = "paragraph";
+    const safeUrl = type === IMAGE_BLOCK_TYPE
+      ? normalizeResourceImageUrl(block.url)
+      : isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(block.url || rawText) : "";
+    if ((isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE) && !safeUrl) type = "paragraph";
+    const imageAlt = type === IMAGE_BLOCK_TYPE ? String(block.alt || rawText).slice(0, 2_000) : "";
     const normalizedBlock = {
       type,
-      text: safeUrl || rawText,
+      text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || rawText,
       marks: safeUrl ? [] : normalizeInlineMarks(rawText, block.marks).filter((mark) => mark.type !== "comment"),
       checked: block.checked === true,
       indent: normalizedBlockIndent(block.indent),
@@ -13368,6 +13777,8 @@ function normalizeClipboardBlocks(blocks) {
       backgroundColor: normalizeBlockColorValue(block.backgroundColor),
     };
     if (safeUrl) normalizedBlock.url = safeUrl;
+    if (type === IMAGE_BLOCK_TYPE) normalizedBlock.alt = imageAlt;
+    if (type === "code" && typeof block.language === "string") normalizedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     normalized.push(normalizedBlock);
   }
   return normalized;
@@ -13379,18 +13790,19 @@ function plainTextToClipboardBlocks(text) {
   const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const parts = clipboardPlainLineParts(lines[index]);
-    if (markdownFenceOpen(parts.text)) {
+    const fence = markdownFenceOpen(parts.text);
+    if (fence) {
       const codeLines = [];
       let closed = false;
       for (index += 1; index < lines.length; index += 1) {
         const nextParts = clipboardPlainLineParts(lines[index]);
-        if (markdownFenceClose(nextParts.text)) {
+        if (markdownFenceClose(nextParts.text, fence)) {
           closed = true;
           break;
         }
         codeLines.push(lines[index]);
       }
-      normalized.push({ type: "code", text: codeLines.join("\n"), checked: false, indent: parts.indent, collapsed: false });
+      normalized.push({ type: "code", text: codeLines.join("\n"), language: fence.language, checked: false, indent: parts.indent, collapsed: false });
       if (!closed) break;
     } else {
       normalized.push(clipboardBlockFromPlainLineParts(parts));
@@ -13424,6 +13836,11 @@ function clipboardBlockFromPlainLineParts(parts) {
 }
 
 function markdownBlockFromPlainText(text) {
+  const image = text.match(/^!\[([^\]\n]*)\]\((https:\/\/[^)\s]+)\)$/i);
+  if (image && normalizeResourceImageUrl(image[2])) return { type: IMAGE_BLOCK_TYPE, text: image[1], alt: image[1], url: normalizeResourceImageUrl(image[2]), checked: false, collapsed: false };
+  if (/^######\s+/.test(text)) return { type: "heading6", text: text.replace(/^######\s+/, ""), checked: false, collapsed: false };
+  if (/^#####\s+/.test(text)) return { type: "heading5", text: text.replace(/^#####\s+/, ""), checked: false, collapsed: false };
+  if (/^####\s+/.test(text)) return { type: "heading4", text: text.replace(/^####\s+/, ""), checked: false, collapsed: false };
   if (/^###\s+/.test(text)) return { type: "heading3", text: text.replace(/^###\s+/, ""), checked: false, collapsed: false };
   if (/^##\s+/.test(text)) return { type: "heading2", text: text.replace(/^##\s+/, ""), checked: false, collapsed: false };
   if (/^#\s+/.test(text)) return { type: "heading1", text: text.replace(/^#\s+/, ""), checked: false, collapsed: false };
@@ -13436,8 +13853,8 @@ function markdownBlockFromPlainText(text) {
   if (/^[aAiI][.)]\s+/.test(text)) return { type: "numbered", text: text.replace(/^[aAiI][.)]\s+/, ""), checked: false, collapsed: false };
   if (/^\[[xX]\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\[[xX]\]\s+/, ""), checked: true, collapsed: false };
   if (/^\[\s?\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\[\s?\]\s+/, ""), checked: false, collapsed: false };
-  if (/^["“]\s+/.test(text)) return { type: "quote", text: text.replace(/^["“]\s+/, ""), checked: false, collapsed: false };
-  if (/^>\s+/.test(text)) return { type: "toggle", text: text.replace(/^>\s+/, ""), checked: false, collapsed: false };
+  if (/^>>\s+/.test(text)) return { type: "toggle", text: text.replace(/^>>\s+/, ""), checked: false, collapsed: false };
+  if (/^>\s+/.test(text)) return { type: "quote", text: text.replace(/^>\s+/, ""), checked: false, collapsed: false };
   if (/^!\s+/.test(text)) return { type: "callout", text: text.replace(/^!\s+/, ""), checked: false, collapsed: false };
   if (/^```\s*/.test(text)) return { type: "code", text: text.replace(/^```\s*/, ""), checked: false, collapsed: false };
   if (/^---$/.test(text)) return { type: "divider", text: "", checked: false, collapsed: false };
@@ -13445,11 +13862,20 @@ function markdownBlockFromPlainText(text) {
 }
 
 function markdownFenceOpen(text = "") {
-  return /^```/.test(text);
+  const match = /^(?<fence>`{3,}|~{3,})(?<info>[^`]*)$/.exec(String(text || ""));
+  if (!match) return null;
+  return {
+    character: match.groups.fence[0],
+    length: match.groups.fence.length,
+    language: String(match.groups.info || "").trim().split(/\s+/, 1)[0].slice(0, 64),
+  };
 }
 
-function markdownFenceClose(text = "") {
-  return /^```\s*$/.test(text);
+function markdownFenceClose(text = "", fence = null) {
+  if (!fence) return false;
+  const character = fence.character === "~" ? "~" : "`";
+  const match = new RegExp(`^${character === "`" ? "`" : "~"}{${fence.length},}\\s*$`).exec(String(text || ""));
+  return Boolean(match);
 }
 
 function applyMarkdownInlineSyntax(block) {
@@ -13479,6 +13905,14 @@ function parseMarkdownInlineText(text = "") {
     sourceToOutput[index + 1] = output.length;
   };
   for (let index = 0; index < source.length;) {
+    if (source[index] === "\\" && index + 1 < source.length && /[\\`*{}\[\]()#+.!_>~-]/.test(source[index + 1])) {
+      sourceToOutput[index] = output.length;
+      output += source[index + 1];
+      sourceToOutput[index + 1] = output.length - 1;
+      sourceToOutput[index + 2] = output.length;
+      index += 2;
+      continue;
+    }
     const linkMatch = source.slice(index).match(/^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+|tel:[^)\s]+)\)/i);
     if (linkMatch) {
       const start = output.length;
@@ -13487,6 +13921,32 @@ function parseMarkdownInlineText(text = "") {
       markSourceRange(index, index + linkMatch[0].length, start, output.length);
       index += linkMatch[0].length;
       continue;
+    }
+    const angleLinkMatch = source.slice(index).match(/^<(https?:\/\/[^<>\s]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})>/i);
+    if (angleLinkMatch) {
+      const label = angleLinkMatch[1];
+      const start = output.length;
+      output += label;
+      marks.push({ type: "link", start, end: output.length, href: normalizeInlineHref(label) });
+      markSourceRange(index, index + angleLinkMatch[0].length, start, output.length);
+      index += angleLinkMatch[0].length;
+      continue;
+    }
+    const bareLinkMatch = source.slice(index).match(/^(https?:\/\/[^\s<>]+|www\.[^\s<>]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?=$|\s)/i);
+    if (bareLinkMatch && (index === 0 || /[\s(\[{]/.test(source[index - 1]))) {
+      let label = bareLinkMatch[1];
+      const trailing = label.match(/[.,!?;:]+$/)?.[0] || "";
+      if (trailing) label = label.slice(0, -trailing.length);
+      const href = normalizeInlineHref(label);
+      if (href && label) {
+        const start = output.length;
+        output += label;
+        marks.push({ type: "link", start, end: output.length, href });
+        if (trailing) output += trailing;
+        markSourceRange(index, index + bareLinkMatch[0].length, start, output.length);
+        index += bareLinkMatch[0].length;
+        continue;
+      }
     }
     const codeMatch = source.slice(index).match(/^`([^`\n]+)`/);
     if (codeMatch) {
@@ -13511,7 +13971,7 @@ function parseMarkdownInlineText(text = "") {
       index += 1;
       continue;
     }
-    const strikeMatch = source.slice(index).match(/^~(\S(?:[\s\S]*?\S)?)~/);
+    const strikeMatch = source.slice(index).match(/^~~(\S(?:[\s\S]*?\S)?)~~/);
     if (strikeMatch) {
       const start = output.length;
       output += strikeMatch[1];
@@ -13587,6 +14047,11 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       collapsed: block.type === "toggle" && block.collapsed === true,
     };
     if (isUrlPreviewBlockType(block.type)) pastedBlock.url = normalizeStandaloneHttpsUrl(block.url || block.text || "");
+    if (block.type === IMAGE_BLOCK_TYPE) {
+      pastedBlock.url = normalizeResourceImageUrl(block.url);
+      pastedBlock.alt = String(block.alt || block.text || "");
+    }
+    if (block.type === "code" && typeof block.language === "string") pastedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     pasted.push(pastedBlock);
   }
   if (!pasted.length) return null;
@@ -13925,6 +14390,7 @@ function canBypassBlockClickSuppressionForDrag(event) {
 
 
 function handlePointerDown(event) {
+  preferredVerticalCaretX = null;
   if (handleSelectedBlocksMenuOutsidePointerDown(event)) return;
 
   const todayBatchTask = event.target.closest("[data-today-batch-task]");
@@ -14890,6 +15356,7 @@ function trapTodayBatchFocus(event) {
 }
 
 function handleKeydown(event) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && !event.isComposing) preferredVerticalCaretX = null;
   if (handleFinancePickerKeydown(event)) return;
   if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
@@ -14923,6 +15390,14 @@ function handleKeydown(event) {
     return;
   }
 
+  const resourceTitle = event.target.closest("[data-resource-title]");
+  if (resourceTitle && event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    const resourceId = resourceTitle.dataset.resourceTitle;
+    document.querySelector(`.block-editor[data-owner-type="resources"][data-owner-id="${cssEscape(resourceId)}"] [data-block-content]`)?.focus();
+    return;
+  }
+
   const habitToggle = event.target.closest("[data-habit-toggle]");
   if (
     habitToggle &&
@@ -14951,6 +15426,9 @@ function handleKeydown(event) {
     }
     return;
   }
+
+  const currentBlock = itemById(ownerType, ownerId)?.blocks?.find((block) => block.id === blockId);
+  if (currentBlock?.type === IMAGE_BLOCK_TYPE && handleResourceImageBlockKeydown(event, ownerType, ownerId, currentBlock, blockContent)) return;
 
   if (isComposingInput(event, blockContent)) return;
   if (handleRecentCompositionEnter(event, ownerType, ownerId, blockId, blockContent)) return;
@@ -15203,6 +15681,46 @@ function handleKeydown(event) {
   if (event.key === "/" && blockContent.textContent === "") {
     requestAnimationFrame(() => openSlashMenu(blockContent, ownerType, ownerId, blockId));
   }
+}
+
+function handleResourceImageBlockKeydown(event, ownerType, ownerId, block, blockContent) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return false;
+  if (["ArrowUp", "ArrowLeft", "ArrowDown", "ArrowRight"].includes(event.key)) {
+    const direction = event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 1;
+    const target = adjacentBlockContent(blockContent, direction);
+    if (!target) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    preferredVerticalCaretX = null;
+    focusBlockContentAfterRender(target.dataset.blockContent, { position: direction < 0 ? "end" : "start" });
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    return insertParagraphAfterMediaBlock(ownerType, ownerId, block.id);
+  }
+  if (event.key === "Backspace" || event.key === "Delete") {
+    event.preventDefault();
+    event.stopPropagation();
+    selectSingleBlock(ownerType, ownerId, block.id);
+    return deleteSelectedBlocks();
+  }
+  return false;
+}
+
+function insertParagraphAfterMediaBlock(ownerType, ownerId, blockId) {
+  const item = itemById(ownerType, ownerId);
+  const index = item?.blocks?.findIndex((block) => block.id === blockId) ?? -1;
+  if (index < 0) return false;
+  const paragraph = { id: id(), type: "paragraph", text: "", marks: [], checked: false, indent: blockIndent(item.blocks[index]), collapsed: false };
+  const history = beginEditorHistory(ownerType, ownerId, { blockId, position: "end" });
+  item.blocks.splice(index + 1, 0, paragraph);
+  commitEditorHistory(history, { blockId: paragraph.id, start: 0, end: 0 });
+  saveState();
+  renderEditorMutation(ownerType, ownerId);
+  focusBlockContentAfterRender(paragraph.id, { position: "start" });
+  return true;
 }
 
 function blockTypeKeyboardShortcut(event) {
@@ -17885,8 +18403,8 @@ function resourceMutationAllowed(resourceOrId, options = {}) {
   return options.allowTrashed === true || !resource.trashedAt;
 }
 
-function editorOwnerMutationAllowed(ownerType) {
-  return ownerType !== "resources";
+function editorOwnerMutationAllowed(ownerType, ownerId) {
+  return ownerType !== "resources" || resourceMutationAllowed(ownerId);
 }
 
 function updateBlockText(blockContent, event = null) {
@@ -17897,6 +18415,7 @@ function updateBlockText(blockContent, event = null) {
   if (!block) return;
   const rawText = normalizeEditorPlainText(blockContent.textContent || "");
   const previousText = typeof block.text === "string" ? block.text : "";
+  if (rawText !== previousText && editor.dataset.ownerType === "resources") markResourceChanged(editor.dataset.ownerId);
   const pendingMarkdownText = ui.pendingMarkdownTextTarget;
   const extendsPendingMarkdownHistory = Boolean(
     pendingMarkdownText
@@ -18488,7 +19007,8 @@ function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
   const inline = parseMarkdownInlineText(rawText);
-  if (!inline.marks.length || inline.text === rawText) return false;
+  const currentMarks = normalizeInlineMarks(rawText, inlineMarksForContentUpdate(block, blockContent, rawText));
+  if (!inline.marks.length || (inline.text === rawText && inlineMarksEqual(inline.marks, currentMarks))) return false;
   const offsets = selectionOffsetsInside(blockContent) || { start: rawText.length, end: rawText.length };
   const start = markdownInlineMappedOffset(inline, offsets.start);
   const end = markdownInlineMappedOffset(inline, offsets.end);
@@ -18589,7 +19109,18 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
     activateBlockContent(blockContent);
     placeCaretAtEnd(blockContent);
   }
+  if (blockContent && applyMarkdownShortcut(blockContent, block, block.text, ownerType, ownerId)) {
+    const focusBlock = block.type === "divider" ? insertParagraphAfterDividerShortcut(item, block) || block : block;
+    schedulePendingMarkdownTextTarget(ownerType, ownerId, focusBlock);
+    refreshLatestEditorHistoryAfter(ownerType, ownerId, { blockId: focusBlock.id, position: "end" });
+    if (ownerType === "resources") markResourceChanged(ownerId);
+    saveState();
+    if (block.type === "divider") renderEditorMutation(ownerType, ownerId);
+    focusBlockContentAfterRender(focusBlock.id, { position: block.type === "divider" ? "start" : "end" });
+    return true;
+  }
   refreshPendingMarkdownTextHistory(ownerType, ownerId, blockId);
+  if (ownerType === "resources") markResourceChanged(ownerId);
   saveState();
   return true;
 }
@@ -19813,6 +20344,7 @@ function openSelectedBlockComment(selection) {
 
 function applySlashBlockAction(ownerType, ownerId, blockId, action, slashRange = null) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  if (action === "image:upload") return chooseResourceImage(ownerType, ownerId, blockId, slashRange);
   if (isEquationSlashAction(action)) {
     return openEquationPopoverForCommand(ownerType, ownerId, blockId, slashRange);
   }
@@ -20032,6 +20564,7 @@ function applyLastBlockColorAction(ownerType, ownerId, blockIds, options = {}) {
 }
 
 function applyBlockColorAction(ownerType, ownerId, blockIds, action, options = {}) {
+  if (ownerType === "resources") return false;
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const colorAction = blockColorAction(action);
   if (!colorAction) return false;
@@ -20738,7 +21271,8 @@ function moveCaretBetweenBlocks(blockContent, key) {
   const target = adjacentBlockContent(blockContent, direction);
   if (!target) return false;
   const caretRect = caretRectFor(blockContent);
-  requestAnimationFrame(() => focusBlockAtPoint(target, direction, caretRect?.left || 0));
+  if (!Number.isFinite(preferredVerticalCaretX)) preferredVerticalCaretX = caretRect?.left || 0;
+  requestAnimationFrame(() => focusBlockAtPoint(target, direction, preferredVerticalCaretX));
   return true;
 }
 
@@ -20927,8 +21461,11 @@ function placeCaretNearPoint(element, direction, x) {
 
 function rangeNearPointInBlock(element, direction, x) {
   const rect = element.getBoundingClientRect();
-  const targetX = Math.max(rect.left + 2, Math.min(x || rect.left + 2, rect.right - 2));
-  const targetY = direction < 0 ? rect.bottom - Math.min(8, rect.height / 2) : rect.top + Math.min(8, rect.height / 2);
+  const lines = textLineRectsFor(element);
+  const line = direction < 0 ? lines.at(-1) : lines[0];
+  const horizontalRect = line || rect;
+  const targetX = Math.max(horizontalRect.left + 1, Math.min(x || horizontalRect.left + 1, Math.max(horizontalRect.left + 1, horizontalRect.right - 1)));
+  const targetY = line ? line.top + line.height / 2 : direction < 0 ? rect.bottom - Math.min(8, rect.height / 2) : rect.top + Math.min(8, rect.height / 2);
   let range = null;
   if (document.caretPositionFromPoint) {
     const position = document.caretPositionFromPoint(targetX, targetY);
@@ -23402,7 +23939,7 @@ function isPlainObject(value) {
 function saveState(options = {}) {
   clearStateIndexes();
   state.version = APP_STATE_VERSION;
-  state.updatedAt = new Date().toISOString();
+  state.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(state.updatedAt) + 1)).toISOString();
   if (!dirtyResourceIds.size) {
     localWorkspaceOperationRequired = true;
     if (options.localScope === "resource-controls" && localWorkspaceOperationScope !== "workspace") {
