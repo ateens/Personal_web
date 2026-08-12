@@ -9,7 +9,7 @@ import UIKit
 import AppKit
 #endif
 
-private enum SYGMAWebRuntime {
+enum SYGMAWebRuntime {
     static let homeURL = URL(string: "https://personalweb-production-81a6.up.railway.app/")!
     static let mutationBridge = #"""
     (() => {
@@ -40,6 +40,21 @@ private enum SYGMAWebRuntime {
 
     static func isGoogleAuthStart(_ url: URL?) -> Bool {
         isInternal(url) && url?.path == "/api/google/auth/start"
+    }
+}
+
+@MainActor
+enum SYGMAWorkspaceBridge {
+    static var flushHandler: (@MainActor () async -> Bool)?
+    static var reloadHandler: (@MainActor () -> Void)?
+
+    static func flushPendingChanges() async -> Bool {
+        guard let flushHandler else { return true }
+        return await flushHandler()
+    }
+
+    static func reloadAfterMutation() {
+        reloadHandler?()
     }
 }
 
@@ -104,6 +119,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         mainWebView = webView
         configure(webView)
         observeAppActivation()
+        configureWorkspaceBridge(for: webView)
         webView.load(URLRequest(url: SYGMAWebRuntime.homeURL))
         return webView
     }
@@ -117,7 +133,53 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
             NotificationCenter.default.removeObserver(appActivationObserver)
             self.appActivationObserver = nil
         }
+        if mainWebView === webView {
+            SYGMAWorkspaceBridge.flushHandler = nil
+            SYGMAWorkspaceBridge.reloadHandler = nil
+            mainWebView = nil
+        }
         closeAllPopups()
+    }
+
+    private func configureWorkspaceBridge(for webView: WKWebView) {
+        SYGMAWorkspaceBridge.flushHandler = { [weak webView] in
+            guard let webView else { return true }
+            let script = #"""
+            if (typeof persistLocalResourceDraft !== "function" || typeof flushRemoteStateSave !== "function") return true;
+            await persistLocalResourceDraft();
+            const waitForSave = async () => {
+              const deadline = Date.now() + 12000;
+              while (remoteStateSaveInFlight && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 40));
+              }
+              return !remoteStateSaveInFlight;
+            };
+            if (!(await waitForSave())) return false;
+            if (typeof hasAutomaticallySaveableLocalOperations === "function" && hasAutomaticallySaveableLocalOperations()) {
+              remoteStateSavePending = true;
+            }
+            if (remoteStateSavePending) {
+              const saved = await flushRemoteStateSave({ singleAttempt: true, preserveConflict: true });
+              if (!saved) return false;
+            }
+            if (!(await waitForSave())) return false;
+            return !remoteStateSavePending && !remoteStateSaveBlocked;
+            """#
+            do {
+                let result = try await webView.callAsyncJavaScript(
+                    script,
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                )
+                return (result as? Bool) == true
+            } catch {
+                return false
+            }
+        }
+        SYGMAWorkspaceBridge.reloadHandler = { [weak webView] in
+            webView?.reload()
+        }
     }
 
     private func observeAppActivation() {

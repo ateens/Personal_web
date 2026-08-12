@@ -18,6 +18,13 @@ and keep pasted images inline as local PNG assets. Use `⌘N` for a new note, `�
 `⌘]` for previous/next, or `⌘1` through `⌘9` for direct selection. `Esc` hides the
 panel. The app's **Notes** menu is the fallback if another app already owns `⌥⌘N`.
 
+## Inbox 바로 추가
+
+Press `⌥Space` from any app to open the Spotlight-style Inbox bar on the monitor under
+the pointer without bringing the main SYGMA window forward. `Return` adds the text to
+Inbox. `⌘Return` expands the same floating window for Task date, Box, and Project, then
+`Return` creates the Task. Change either global shortcut in **SYGMA > Settings**.
+
 ## Build
 
 ```zsh

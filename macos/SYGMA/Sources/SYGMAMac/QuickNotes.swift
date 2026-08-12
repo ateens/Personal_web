@@ -6,6 +6,7 @@ import SwiftUI
 
 private let quickNotesPanelIdentifier = NSUserInterfaceItemIdentifier("SYGMAQuickNotesPanel")
 private let quickNotesHotKeySignature: OSType = 0x5359474E // SYGN
+private let inboxCaptureHotKeySignature: OSType = 0x53594942 // SYIB
 private let quickNotesTransparencyKey = "SYGMAQuickNotesBackgroundTransparency"
 private let quickNotesThemeKey = "SYGMAQuickNotesTheme"
 private let quickNotesThemeChanged = Notification.Name("SYGMAQuickNotesThemeChanged")
@@ -51,7 +52,7 @@ enum QuickNotesColorMode: String, CaseIterable, Identifiable {
 }
 
 enum QuickNoteShortcutAction: String, CaseIterable, Codable, Identifiable {
-    case togglePanel, newNote, previousNote, nextNote, togglePreview, hidePanel
+    case togglePanel, captureInbox, newNote, previousNote, nextNote, togglePreview, hidePanel
     case note1, note2, note3, note4, note5, note6, note7, note8, note9
 
     var id: String { rawValue }
@@ -59,6 +60,7 @@ enum QuickNoteShortcutAction: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .togglePanel: "열기 / 숨기기"
+        case .captureInbox: "Inbox 바로 추가"
         case .newNote: "새 노트"
         case .previousNote: "이전 노트"
         case .nextNote: "다음 노트"
@@ -222,21 +224,40 @@ final class QuickNoteShortcutSettings: ObservableObject {
         let legacyData = currentData == nil ? defaults.data(forKey: Self.legacyDefaultsKey) : nil
         if let data = currentData ?? legacyData,
            let stored = try? JSONDecoder().decode([String: QuickNoteShortcut].self, from: data) {
-            let decoded = Dictionary(uniqueKeysWithValues: QuickNoteShortcutAction.allCases.compactMap { action in
+            let previousActions = QuickNoteShortcutAction.allCases.filter { $0 != .captureInbox }
+            let previous = Dictionary(uniqueKeysWithValues: previousActions.compactMap { action in
                 stored[action.rawValue].map { (action, $0) }
             })
-            var loaded = decoded.count == QuickNoteShortcutAction.allCases.count
-                && Set(decoded.values).count == decoded.count
-                && decoded.values.allSatisfy(\.isSafe)
-                ? decoded
+            var loaded = previous.count == previousActions.count
+                && Set(previous.values).count == previous.count
+                && previous.values.allSatisfy(\.isSafe)
+                ? Self.defaultShortcuts.merging(previous) { _, saved in saved }
                 : Self.defaultShortcuts
+            if let saved = stored[QuickNoteShortcutAction.captureInbox.rawValue],
+               saved.isSafe,
+               !loaded.contains(where: { $0.key != .captureInbox && $0.value == saved }) {
+                loaded[.captureInbox] = saved
+            } else if loaded.contains(where: { $0.key != .captureInbox && $0.value == loaded[.captureInbox] }) {
+                let fallbackKeyCodes = [
+                    kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F,
+                    kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L,
+                    kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_O, kVK_ANSI_P,
+                ]
+                if let available = fallbackKeyCodes.lazy.map({ keyCode in
+                    QuickNoteShortcut(keyCode: UInt16(keyCode), modifiers: [.control, .option, .command], key: "Key")
+                }).first(where: { candidate in
+                    !loaded.contains(where: { $0.key != .captureInbox && $0.value == candidate })
+                }) {
+                    loaded[.captureInbox] = available
+                }
+            }
             if legacyData != nil,
                loaded[.hidePanel] == Self.legacyHideShortcut,
                !loaded.contains(where: { $0.key != .hidePanel && $0.value == Self.defaultShortcuts[.hidePanel] }) {
                 loaded[.hidePanel] = Self.defaultShortcuts[.hidePanel]
             }
             shortcuts = loaded
-            if legacyData != nil {
+            if legacyData != nil || stored[QuickNoteShortcutAction.captureInbox.rawValue] == nil {
                 let stored = Dictionary(uniqueKeysWithValues: loaded.map { ($0.key.rawValue, $0.value) })
                 if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.defaultsKey) }
             }
@@ -257,7 +278,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
     func cancelCapture() { capturingAction = nil }
 
     func validationMessage(for shortcut: QuickNoteShortcut, action: QuickNoteShortcutAction) -> String? {
-        if action == .togglePanel, !shortcut.hasPrimaryModifier {
+        if [.togglePanel, .captureInbox].contains(action), !shortcut.hasPrimaryModifier {
             return "전역 단축키에는 Command, Option 또는 Control이 필요합니다."
         }
         return shortcuts.contains(where: { $0.key != action && $0.value == shortcut }) ? "이미 사용 중인 단축키입니다." : nil
@@ -277,6 +298,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
         let command: NSEvent.ModifierFlags = .command
         return [
             .togglePanel: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: [.command, .option], key: "N"),
+            .captureInbox: QuickNoteShortcut(keyCode: UInt16(kVK_Space), modifiers: .option, key: "Space"),
             .newNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: command, key: "N"),
             .previousNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_LeftBracket), modifiers: command, key: "["),
             .nextNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_RightBracket), modifiers: command, key: "]"),
@@ -1148,8 +1170,8 @@ private struct QuickNotesSettingsView: View {
                         .foregroundStyle(.red)
                 }
 
-                shortcutSection(Array(QuickNoteShortcutAction.allCases.prefix(6)), title: "단축키")
-                shortcutSection(Array(QuickNoteShortcutAction.allCases.dropFirst(6)), title: "노트 바로 이동")
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.prefix(7)), title: "단축키")
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.dropFirst(7)), title: "노트 바로 이동")
             }
             .padding(18)
         }
@@ -1176,6 +1198,15 @@ private struct QuickNotesSettingsView: View {
                 }
             }
         }
+    }
+}
+
+struct SYGMASettingsView: View {
+    @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
+
+    var body: some View {
+        QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
     }
 }
 
@@ -1373,9 +1404,15 @@ private final class GlobalHotKeys {
     private var handler: EventHandlerRef?
     private var reference: EventHotKeyRef?
     private var shortcut: QuickNoteShortcut?
+    private let hotKeyID: EventHotKeyID
+    private let logName: String
     private let action: () -> Void
 
-    init(action: @escaping () -> Void) { self.action = action }
+    init(signature: OSType, id: UInt32, logName: String, action: @escaping () -> Void) {
+        hotKeyID = EventHotKeyID(signature: signature, id: id)
+        self.logName = logName
+        self.action = action
+    }
 
     func start(with shortcut: QuickNoteShortcut) -> Bool {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -1392,8 +1429,11 @@ private final class GlobalHotKeys {
                 &hotKeyID
             )
             guard result == noErr else { return result }
-            guard hotKeyID.id == 1 else { return OSStatus(eventNotHandledErr) }
-            Unmanaged<GlobalHotKeys>.fromOpaque(userData).takeUnretainedValue().action()
+            let owner = Unmanaged<GlobalHotKeys>.fromOpaque(userData).takeUnretainedValue()
+            guard hotKeyID.id == owner.hotKeyID.id, hotKeyID.signature == owner.hotKeyID.signature else {
+                return OSStatus(eventNotHandledErr)
+            }
+            owner.action()
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &handler)
         return update(shortcut)
@@ -1407,7 +1447,6 @@ private final class GlobalHotKeys {
     func update(_ shortcut: QuickNoteShortcut) -> Bool {
         guard self.shortcut != shortcut else { return true }
         var nextReference: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: quickNotesHotKeySignature, id: 1)
         guard RegisterEventHotKey(
             UInt32(shortcut.keyCode),
             shortcut.carbonModifiers,
@@ -1419,7 +1458,7 @@ private final class GlobalHotKeys {
         if let reference { UnregisterEventHotKey(reference) }
         reference = nextReference
         self.shortcut = shortcut
-        NSLog("SYGMA Quick Notes registered %@.", shortcut.display)
+        NSLog("SYGMA %@ registered %@.", logName, shortcut.display)
         return true
     }
 }
@@ -1430,11 +1469,15 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private let shortcuts: QuickNoteShortcutSettings
     private var panel: NSPanel?
     private var hotKeys: GlobalHotKeys?
+    private var inboxHotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
     private var contrastTimer: Timer?
     private var themeObserver: NSObjectProtocol?
     private var suppressLocalKeysUntil = Date.distantPast
     private var suppressedToggleKeyCode: UInt16?
+    var onCaptureInbox: ((QuickNoteShortcut) -> Void)?
+
+    var shortcutSettings: QuickNoteShortcutSettings { shortcuts }
 
     override init() {
         store = QuickNotesStore()
@@ -1454,8 +1497,9 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     }
 
     func start() {
-        let hotKeys = GlobalHotKeys { [weak self] in
+        let hotKeys = GlobalHotKeys(signature: quickNotesHotKeySignature, id: 1, logName: "Quick Notes") { [weak self] in
             DispatchQueue.main.async {
+                guard self?.shortcuts.capturingAction == nil else { return }
                 self?.suppressLocalKeysUntil = Date().addingTimeInterval(0.25)
                 self?.suppressedToggleKeyCode = self?.shortcuts.shortcut(for: .togglePanel).keyCode
                 self?.toggle()
@@ -1465,6 +1509,18 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             shortcuts.fail("전역 단축키를 등록하지 못했습니다. Notes 메뉴로 열 수 있습니다.")
         }
         self.hotKeys = hotKeys
+        let inboxHotKeys = GlobalHotKeys(signature: inboxCaptureHotKeySignature, id: 2, logName: "Inbox Capture") { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.shortcuts.capturingAction == nil else { return }
+                let shortcut = self.shortcuts.shortcut(for: .captureInbox)
+                self.onCaptureInbox?(shortcut)
+            }
+        }
+        if !inboxHotKeys.start(with: shortcuts.shortcut(for: .captureInbox)) {
+            shortcuts.fail("Inbox 전역 단축키를 등록하지 못했습니다. Notes 메뉴로 열 수 있습니다.")
+        }
+        self.inboxHotKeys = inboxHotKeys
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if self.isSuppressedGlobalDuplicate(event) { return nil }
@@ -1644,22 +1700,27 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
                 shortcuts.fail(message)
                 return true
             }
-            if action == .togglePanel, hotKeys?.update(shortcut) != true {
-                shortcuts.fail("이미 다른 앱에서 사용 중인 전역 단축키입니다.")
-                return true
+            if [.togglePanel, .captureInbox].contains(action) {
+                let updated = action == .togglePanel
+                    ? hotKeys?.update(shortcut)
+                    : inboxHotKeys?.update(shortcut)
+                if updated != true {
+                    shortcuts.fail("이미 다른 앱에서 사용 중인 전역 단축키입니다.")
+                    return true
+                }
             }
             shortcuts.save(shortcut, for: action)
             return true
         }
 
         guard let action = QuickNoteShortcutAction.allCases.first(where: {
-            $0 != .togglePanel && shortcuts.shortcut(for: $0).matches(event)
+            ![.togglePanel, .captureInbox].contains($0) && shortcuts.shortcut(for: $0).matches(event)
         }) else {
             return false
         }
         if event.isARepeat { return true }
         switch action {
-        case .togglePanel: break
+        case .togglePanel, .captureInbox: break
         case .newNote: store.createNote()
         case .previousNote: store.select(offset: -1)
         case .nextNote: store.select(offset: 1)

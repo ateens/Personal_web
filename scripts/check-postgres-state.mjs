@@ -1506,6 +1506,58 @@ async function checkIncrementalResourceApi() {
     relationalResources.rows.find((row) => row.id === "check-resource-peer")?.title === peerUpdate.title,
     "incremental Resource API did not preserve the unrelated relational Resource row"
   );
+
+  const captureItem = {
+    id: "check-native-capture",
+    title: "Native Inbox capture",
+    url: "",
+    status: "inbox",
+    convertedTo: "",
+    convertedId: "",
+    createdAt: "2026-06-02T00:13:00.000Z",
+    processedAt: "",
+  };
+  const captureWrite = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "capture", item: captureItem }),
+  });
+  assert(captureWrite.response.ok && captureWrite.payload.revision === 14 && captureWrite.payload.state === undefined, "native Inbox append was not compact or atomic");
+  const duplicateCapture = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "capture", item: captureItem }),
+  });
+  assert(duplicateCapture.response.ok && duplicateCapture.payload.revision === 14, "native Inbox retry was not idempotent");
+
+  const taskWrite = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "task",
+      item: {
+        id: "check-native-task",
+        title: "Native Task",
+        status: "scheduled",
+        boxId: "stale-box",
+        projectId: "check-project",
+        resourceId: "",
+        dueDate: "2026-06-03",
+        completedAt: "",
+        googleEventId: "",
+        blocks: [{ id: "check-native-task-block", type: "paragraph", text: "", checked: false, indent: 0, collapsed: false }],
+      },
+    }),
+  });
+  assert(taskWrite.response.ok && taskWrite.payload.revision === 15, "native Task append did not advance the workspace revision");
+  const nativeRead = await requestJsonAt(resourceBaseUrl, "/api/state");
+  const nativeTask = nativeRead.payload.state?.tasks?.find((task) => task.id === "check-native-task");
+  assert(
+    nativeRead.payload.revision === 15
+      && nativeRead.payload.state?.captures?.filter((capture) => capture.id === captureItem.id).length === 1
+      && nativeTask?.boxId === "check-box",
+    "native Inbox/Task append did not persist once or normalize the latest Project Box"
+  );
 }
 
 async function assertIncrementalHierarchy(baseUrl, expectedRevision, movedResourceId, expectedParentId, expectedOldChildOrder, expectedNewChildOrder) {

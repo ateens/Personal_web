@@ -21,7 +21,11 @@ struct SYGMAMacApp: App {
         .commands {
             CommandMenu("Notes") {
                 Button("Quick Notes 열기/숨기기") { appDelegate.toggleQuickNotes() }
+                Button("Inbox 바로 추가") { appDelegate.toggleInboxCapture() }
             }
+        }
+        Settings {
+            SYGMASettingsView(shortcuts: appDelegate.shortcutSettings)
         }
     }
 }
@@ -30,9 +34,16 @@ struct SYGMAMacApp: App {
 private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
     private var keyWindowObserver: NSObjectProtocol?
     private let quickNotes = QuickNotesController()
+    private let inboxCapture = InboxCaptureController()
+
+    var shortcutSettings: QuickNoteShortcutSettings { quickNotes.shortcutSettings }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        quickNotes.onCaptureInbox = { [weak self] shortcut in
+            self?.inboxCapture.toggle(triggeredBy: shortcut)
+        }
         quickNotes.start()
+        inboxCapture.start()
         keyWindowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -54,6 +65,10 @@ private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
 
     func toggleQuickNotes() {
         quickNotes.toggle()
+    }
+
+    func toggleInboxCapture() {
+        inboxCapture.toggle()
     }
 
     deinit {

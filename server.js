@@ -292,6 +292,7 @@ function apiOperation(request, requestUrl) {
   if (method === "GET" && pathname === "/api/state/events") return "state.events";
   if (method === "GET" && pathname === "/api/state/status") return "state.status";
   if (method === "GET" && pathname === "/api/state") return "state.read";
+  if (method === "POST" && pathname === "/api/inbox-capture") return "state.write";
   if ((method === "PUT" || method === "POST") && pathname === "/api/state") return "state.write";
   if (method === "PUT" && /^\/api\/resources\/[^/]+$/.test(pathname)) return "resource.write";
   if (method === "POST" && pathname === "/api/finance/login") return "finance.login";
@@ -1625,6 +1626,27 @@ async function handleStateRead(response) {
   }, stateRevisionHeaders(payload.revision, requireStatePrecondition ? "required" : "optional"));
 }
 
+async function handleInboxCaptureWrite(request, response) {
+  const body = await readJsonBody(request, STATE_BODY_LIMIT);
+  const kind = body.kind === "task" ? "tasks" : body.kind === "capture" ? "captures" : "";
+  if (!kind || !body.item || typeof body.item !== "object" || Array.isArray(body.item)) {
+    throw apiError(400, "INBOX_ITEM_REQUIRED", "kind and item are required.");
+  }
+  const releaseStateWrite = await acquireStateWriteSlot();
+  let saved;
+  try {
+    saved = await storage.appendWorkspaceItem(kind, body.item, validateIncomingState);
+  } finally {
+    releaseStateWrite();
+  }
+  broadcastStateEvent(saved.revision, saved.updatedAt);
+  sendJson(response, 200, {
+    ok: true,
+    revision: saved.revision,
+    updatedAt: saved.updatedAt,
+  }, stateRevisionHeaders(saved.revision, requireStatePrecondition ? "required" : "optional"));
+}
+
 async function handleStateWrite(request, response) {
   const body = await readJsonBody(request, STATE_BODY_LIMIT);
   if (!body.state || typeof body.state !== "object" || Array.isArray(body.state)) {
@@ -2054,6 +2076,10 @@ async function handleApiRequest(request, response, requestUrl) {
     }
     if (request.method === "GET" && requestUrl.pathname === "/api/state") {
       await handleStateRead(response);
+      return true;
+    }
+    if (request.method === "POST" && requestUrl.pathname === "/api/inbox-capture") {
+      await handleInboxCaptureWrite(request, response);
       return true;
     }
     if ((request.method === "PUT" || request.method === "POST") && requestUrl.pathname === "/api/state") {

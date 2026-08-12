@@ -726,6 +726,63 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     }
   }
 
+  async function appendWorkspaceItem(collectionKey, item, validateState) {
+    if (!["captures", "tasks"].includes(collectionKey) || !isPlainObject(item)) {
+      throw storageError(400, "INBOX_ITEM_REQUIRED", "A supported workspace item is required.");
+    }
+    await ensureAppStateTable();
+    await ensureRelationalTables();
+    const client = await dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const current = await client.query("SELECT state, revision FROM app_state WHERE id = $1 FOR UPDATE", [appStateId]);
+      const row = current.rows[0];
+      if (!row) throw storageError(503, "DATABASE_UNAVAILABLE", "Workspace state is not initialized.");
+      const authoritative = await authoritativeStateSnapshot(client, row.state);
+      const nextState = cloneJsonValue(authoritative.state);
+      const items = Array.isArray(nextState[collectionKey]) ? nextState[collectionKey] : [];
+      const itemId = typeof item.id === "string" ? item.id.trim() : "";
+      if (!itemId) throw storageError(400, "INBOX_ITEM_REQUIRED", "A workspace item ID is required.");
+      if (items.some((entry) => entry?.id === itemId)) {
+        await client.query("COMMIT");
+        return {
+          state: nextState,
+          revision: positiveRevision(row.revision, 1),
+          updatedAt: nextState.updatedAt || "",
+        };
+      }
+      const nextItem = cloneJsonValue(item);
+      if (collectionKey === "tasks" && typeof nextItem.projectId === "string" && nextItem.projectId) {
+        const project = nextState.projects?.find((entry) => entry?.id === nextItem.projectId);
+        if (project) nextItem.boxId = typeof project.boxId === "string" ? project.boxId : "";
+      }
+      items.push(nextItem);
+      nextState[collectionKey] = items;
+      validateState?.(nextState);
+      const revision = positiveRevision(row.revision, 1) + 1;
+      nextState.revision = revision;
+      nextState.updatedAt = new Date().toISOString();
+      await syncRelationalState(client, nextState);
+      const relationalState = await readRelationalAppState(client, nextState);
+      relationalState.revision = revision;
+      const saved = await client.query(
+        "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
+        [appStateId, JSON.stringify(relationalState), revision]
+      );
+      await client.query("COMMIT");
+      return {
+        state: relationalState,
+        revision,
+        updatedAt: saved.rows[0]?.updated_at?.toISOString?.() || relationalState.updatedAt,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function writeResource(resource, options = {}) {
     await ensureAppStateTable();
     await ensureAppStateBackupTables();
@@ -1035,6 +1092,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
 
   return {
     appStateId,
+    appendWorkspaceItem,
     claimOAuthTransaction,
     consumeOAuthTransaction,
     createMigrationBackup,

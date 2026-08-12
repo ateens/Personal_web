@@ -243,16 +243,132 @@ final class QuickNotesTests: XCTestCase {
     }
 
     @MainActor
+    func testInboxCaptureStateMutationPreservesWorkspace() throws {
+        let boxID = "box-one"
+        let projectID = "project-one"
+        var state: [String: Any] = [
+            "captures": [["id": "capture-existing", "title": "기존 Inbox"]],
+            "tasks": [["id": "task-existing", "title": "기존 Task"]],
+            "boxes": [["id": boxID, "name": "업무"]],
+            "projects": [["id": projectID, "name": "출시", "boxId": boxID]],
+            "futureField": ["keep": true],
+            "updatedAt": "2026-08-01T00:00:00.000Z",
+        ]
+        let captureID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let taskID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+        let blockID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+        let date = Date(timeIntervalSince1970: 1_786_426_800)
+
+        let capture = InboxStateMutation.capture(title: "문서 https://example.com/a", id: captureID, date: date)
+        XCTAssertTrue(try capture.apply(to: &state))
+        XCTAssertFalse(try capture.apply(to: &state))
+        let captures = try XCTUnwrap(state["captures"] as? [[String: Any]])
+        XCTAssertEqual(captures.count, 2)
+        XCTAssertEqual(captures.last?["status"] as? String, "inbox")
+        XCTAssertEqual(captures.last?["url"] as? String, "https://example.com/a")
+        XCTAssertEqual(captures.last?["convertedTo"] as? String, "")
+        XCTAssertEqual(captures.last?["processedAt"] as? String, "")
+
+        let task = InboxStateMutation.task(
+            title: "출시 확인",
+            boxID: boxID,
+            projectID: projectID,
+            dueDate: "2026-08-20",
+            id: taskID,
+            blockID: blockID,
+            date: date
+        )
+        XCTAssertTrue(try task.apply(to: &state))
+        let tasks = try XCTUnwrap(state["tasks"] as? [[String: Any]])
+        let savedTask = try XCTUnwrap(tasks.last)
+        XCTAssertEqual(savedTask["status"] as? String, "scheduled")
+        XCTAssertEqual(savedTask["boxId"] as? String, boxID)
+        XCTAssertEqual(savedTask["projectId"] as? String, projectID)
+        XCTAssertEqual(savedTask["dueDate"] as? String, "2026-08-20")
+        XCTAssertEqual(savedTask["resourceId"] as? String, "")
+        let block = try XCTUnwrap((savedTask["blocks"] as? [[String: Any]])?.first)
+        XCTAssertEqual(block["id"] as? String, blockID.uuidString.lowercased())
+        XCTAssertEqual(block["type"] as? String, "paragraph")
+        XCTAssertEqual(block["checked"] as? Bool, false)
+        XCTAssertEqual(block["indent"] as? Int, 0)
+        XCTAssertEqual((state["futureField"] as? [String: Bool])?["keep"], true)
+        XCTAssertEqual(InboxWorkspaceOptions(state: state).projects.first?.boxID, boxID)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(state))
+
+        let scheduled = InboxStateMutation.task(
+            title: "날짜 미정",
+            boxID: "",
+            projectID: "",
+            dueDate: "",
+            id: UUID(uuidString: "66666666-6666-4666-8666-666666666666")!,
+            blockID: UUID(uuidString: "77777777-7777-4777-8777-777777777777")!,
+            date: date
+        )
+        XCTAssertEqual(scheduled.item["status"] as? String, "scheduled")
+        XCTAssertEqual(scheduled.item["dueDate"] as? String, "")
+
+        var seoul = Calendar(identifier: .gregorian)
+        seoul.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Seoul"))
+        let reference = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-11T15:30:00Z"))
+        let timingModel = InboxCaptureModel()
+        timingModel.timing = .today
+        XCTAssertEqual(timingModel.dueDateKey(now: reference, calendar: seoul), "2026-08-12")
+        timingModel.timing = .tomorrow
+        XCTAssertEqual(timingModel.dueDateKey(now: reference, calendar: seoul), "2026-08-13")
+        timingModel.timing = .scheduled
+        XCTAssertEqual(timingModel.dueDateKey(now: reference, calendar: seoul), "")
+
+        timingModel.setOptions(InboxWorkspaceOptions(state: [
+            "boxes": [
+                ["id": "box-a", "name": "A"],
+                ["id": "box-b", "name": "B"],
+            ],
+            "projects": [
+                ["id": "project-a", "name": "A Project", "boxId": "box-a"],
+                ["id": "project-b", "name": "B Project", "boxId": "box-b"],
+            ],
+        ]))
+        XCTAssertEqual(timingModel.availableProjects.count, 2)
+        timingModel.setProject("project-a")
+        XCTAssertEqual(timingModel.selectedBoxID, "box-a")
+        XCTAssertEqual(timingModel.availableProjects.map(\.id), ["project-a"])
+        timingModel.setBox("box-b")
+        XCTAssertEqual(timingModel.selectedProjectID, "")
+        XCTAssertEqual(timingModel.availableProjects.map(\.id), ["project-b"])
+
+        var movedState = state
+        var movedProjects = try XCTUnwrap(movedState["projects"] as? [[String: Any]])
+        movedProjects[0]["boxId"] = "box-two"
+        movedState["projects"] = movedProjects
+        let movedTask = InboxStateMutation.task(
+            title: "이동 후 확인",
+            boxID: boxID,
+            projectID: projectID,
+            dueDate: "",
+            id: UUID(uuidString: "44444444-4444-4444-8444-444444444444")!,
+            blockID: UUID(uuidString: "55555555-5555-4555-8555-555555555555")!,
+            date: date
+        )
+        XCTAssertTrue(try movedTask.apply(to: &movedState))
+        XCTAssertEqual((movedState["tasks"] as? [[String: Any]])?.last?["boxId"] as? String, "box-two")
+    }
+
+    @MainActor
     func testShortcutSettingsAndAdaptiveTextColor() throws {
         let suite = "SYGMAQuickNotesTests.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         var legacy = Dictionary(uniqueKeysWithValues: QuickNoteShortcutSettings.defaultShortcuts.map { ($0.key.rawValue, $0.value) })
+        legacy.removeValue(forKey: QuickNoteShortcutAction.captureInbox.rawValue)
+        let customizedToggle = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_L), modifiers: [.command, .shift], key: "L")
+        legacy[QuickNoteShortcutAction.togglePanel.rawValue] = customizedToggle
         legacy[QuickNoteShortcutAction.hidePanel.rawValue] = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
         defaults.set(try JSONEncoder().encode(legacy), forKey: "SYGMAQuickNotesShortcutsV1")
         let settings = QuickNoteShortcutSettings(defaults: defaults)
 
         XCTAssertEqual(settings.shortcut(for: .hidePanel).display, "⌘W")
+        XCTAssertEqual(settings.shortcut(for: .togglePanel), customizedToggle)
+        XCTAssertEqual(settings.shortcut(for: .captureInbox).display, "⌥Space")
         XCTAssertNotNil(defaults.data(forKey: "SYGMAQuickNotesShortcutsV2"))
         XCTAssertEqual(settings.shortcut(for: .note1).display, "⌘1")
         XCTAssertEqual(settings.shortcut(for: .note9).display, "⌘9")

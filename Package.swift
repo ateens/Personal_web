@@ -31,6 +31,7 @@ let package = Package(
                 "ios/SYGMA/SYGMA/WebAppShell.swift",
                 "macos/SYGMA/Sources/SYGMAMac/SYGMAMacApp.swift",
                 "macos/SYGMA/Sources/SYGMAMac/QuickNotes.swift",
+                "macos/SYGMA/Sources/SYGMAMac/InboxCapture.swift",
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
