@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { fixtureSnapshot, resetFixture } from "./helpers.js";
 
-test("Inbox dates persist and Task drag placement commits immediately", async ({ page, request }) => {
+test("Today Inbox converts once and Task drag placement commits immediately", async ({ page, request }) => {
   await resetFixture(request);
   await page.goto("/");
   await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
@@ -14,12 +14,22 @@ test("Inbox dates persist and Task drag placement commits immediately", async ({
   await page.evaluate(() => {
     const capturedAt = new Date().toISOString();
     state.captures.push(
-      { id: "capture-task-date", title: "날짜를 고를 Inbox Task", url: "", status: "inbox", convertedTo: "", convertedId: "", createdAt: capturedAt, processedAt: "" },
-      { id: "capture-project-range", title: "기간을 고를 Inbox Project", url: "", status: "inbox", convertedTo: "", convertedId: "", createdAt: capturedAt, processedAt: "" },
+      { id: "capture-task-date", title: "날짜를 고를 Inbox Task", url: "", createdAt: capturedAt },
+      { id: "capture-project-range", title: "기간을 고를 Inbox Project", url: "", createdAt: capturedAt },
+      { id: "capture-sentinel", title: "남아 있을 Inbox", url: "", createdAt: capturedAt },
     );
     saveState();
+    renderView({ soft: true });
   });
-  await page.locator('[data-nav-key="inbox"]').evaluate((button) => button.click());
+  await expect(page.locator('[data-nav-key="inbox"]')).toHaveCount(0);
+  const inbox = page.locator("[data-today-inbox]");
+  await expect(inbox).toHaveAttribute("open", "");
+  await expect(inbox).toHaveCSS("grid-column-end", "-1");
+  await expect(page.getByText("최근 처리", { exact: true })).toHaveCount(0);
+  await inbox.locator("summary").click();
+  await expect(inbox).not.toHaveAttribute("open", "");
+  await inbox.locator("summary").click();
+  await expect(inbox).toHaveAttribute("open", "");
 
   const taskCapture = page.locator('[data-select-id="capture-task-date"]');
   await taskCapture.locator('[data-convert="tasks"]').click();
@@ -54,18 +64,25 @@ test("Inbox dates persist and Task drag placement commits immediately", async ({
 
   await expect.poll(async () => {
     const snapshot = await fixtureSnapshot(request);
-    const taskCaptureState = snapshot.state.captures.find((capture) => capture.id === "capture-task-date");
-    const projectCaptureState = snapshot.state.captures.find((capture) => capture.id === "capture-project-range");
-    const task = snapshot.state.tasks.find((entry) => entry.id === taskCaptureState?.convertedId);
-    const project = snapshot.state.projects.find((entry) => entry.id === projectCaptureState?.convertedId);
+    const task = snapshot.state.tasks.find((entry) => entry.title === "날짜를 고를 Inbox Task");
+    const project = snapshot.state.projects.find((entry) => entry.name === "기간을 고를 Inbox Project");
     return {
+      sourceIds: snapshot.state.captures.filter((capture) => ["capture-task-date", "capture-project-range"].includes(capture.id)).map((capture) => capture.id),
+      sentinel: snapshot.state.captures.some((capture) => capture.id === "capture-sentinel"),
       task: task && { dueDate: task.dueDate },
       project: project && { startDate: project.startDate, endDate: project.endDate },
     };
   }).toEqual({
+    sourceIds: [],
+    sentinel: true,
     task: { dueDate: dates.task },
     project: { startDate: dates.rangeEndClick, endDate: dates.rangeStartClick },
   });
+
+  await page.reload();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await expect(page.locator('[data-select-id="capture-task-date"], [data-select-id="capture-project-range"]')).toHaveCount(0);
+  await expect(page.locator('[data-select-id="capture-sentinel"]')).toBeVisible();
 
   const placement = await page.evaluate(() => {
     const task = createTask("즉시 사라질 미계획 Task", {

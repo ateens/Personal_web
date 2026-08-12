@@ -1333,16 +1333,6 @@ function validateIncomingState(state) {
   }
   validateResourceHierarchy(Array.isArray(state.resources) ? state.resources : [], resources, issues);
 
-  const captures = Array.isArray(state.captures) ? state.captures : [];
-  for (let index = 0; index < captures.length; index += 1) {
-    const capture = captures[index];
-    if (!isPlainObject(capture) || (!capture.convertedTo && !capture.convertedId)) continue;
-    const targetKey = relationCollectionKey(capture.convertedTo);
-    if (!targetKey || !idSets.get(targetKey)?.has(capture.convertedId)) {
-      addValidationIssue(issues, `state.captures[${index}].convertedId`, "broken_relation", "Converted capture target does not exist.");
-    }
-  }
-
   const links = Array.isArray(state.links) ? state.links : [];
   for (let index = 0; index < links.length; index += 1) {
     const link = links[index];

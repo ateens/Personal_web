@@ -264,10 +264,11 @@ final class QuickNotesTests: XCTestCase {
         XCTAssertFalse(try capture.apply(to: &state))
         let captures = try XCTUnwrap(state["captures"] as? [[String: Any]])
         XCTAssertEqual(captures.count, 2)
-        XCTAssertEqual(captures.last?["status"] as? String, "inbox")
         XCTAssertEqual(captures.last?["url"] as? String, "https://example.com/a")
-        XCTAssertEqual(captures.last?["convertedTo"] as? String, "")
-        XCTAssertEqual(captures.last?["processedAt"] as? String, "")
+        XCTAssertNil(captures.last?["status"])
+        XCTAssertNil(captures.last?["convertedTo"])
+        XCTAssertNil(captures.last?["convertedId"])
+        XCTAssertNil(captures.last?["processedAt"])
 
         let task = InboxStateMutation.task(
             title: "출시 확인",

@@ -18,7 +18,6 @@ const INLINE_MARK_TEXT = "Bold Italic Underline Strike Code Link Comment Mention
 
 const viewControls = () => ({
   today: control("date", "overview"),
-  inbox: control("recent", "board"),
   tasks: control("date", "board"),
   projects: control("status", "board"),
   boxes: control("activity", "columns"),
@@ -164,7 +163,7 @@ export function createFixtureState() {
     createdAt: FIXED_TIME,
     updatedAt: FIXED_TIME,
     settings: {
-      navOrder: ["today", "inbox", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"],
+      navOrder: ["today", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"],
       googleCalendarId: "primary",
       googleConnectedAt: "",
       lastGoogleFetchAt: "",

@@ -184,6 +184,67 @@ try {
       : "";
   assert(healedSomedayDateKey === "2026-06-02", "relational someday read-heal did not preserve due_date");
 
+  await pool.query(
+    "UPDATE captures SET data = data || $2::jsonb WHERE app_state_id = $1 AND id = 'check-capture'",
+    [appStateId, JSON.stringify({ status: "inbox", convertedTo: "", convertedId: "", processedAt: "" })]
+  );
+  await pool.query(
+    `
+      INSERT INTO captures (app_state_id, id, title, url, captured_at, position, data)
+      VALUES
+        ($1, 'check-capture-processed', 'Legacy processed capture', '', '2026-06-02T00:00:01.000Z', 1, $2::jsonb),
+        ($1, 'check-capture-archived', 'Legacy archived capture', '', '2026-06-02T00:00:02.000Z', 2, $3::jsonb)
+    `,
+    [
+      appStateId,
+      JSON.stringify({ id: "check-capture-processed", title: "Legacy processed capture", url: "", status: "processed", convertedTo: "tasks", convertedId: "check-task", createdAt: "2026-06-02T00:00:01.000Z", processedAt: "2026-06-02T00:01:00.000Z" }),
+      JSON.stringify({ id: "check-capture-archived", title: "Legacy archived capture", url: "", status: "archived", convertedTo: "", convertedId: "", createdAt: "2026-06-02T00:00:02.000Z", processedAt: "" }),
+    ]
+  );
+  await pool.query(
+    `
+      INSERT INTO collection_links (app_state_id, id, from_type, from_id, to_type, to_id, relation, position, data)
+      VALUES
+        ($1, 'check-processed-capture-link', 'capture', 'check-capture-processed', 'tasks', 'check-task', 'related', 1, $2::jsonb),
+        ($1, 'check-archived-capture-link', 'tasks', 'check-task', 'captures', 'check-capture-archived', 'related', 2, $3::jsonb)
+    `,
+    [
+      appStateId,
+      JSON.stringify({ id: "check-processed-capture-link", fromType: "capture", fromId: "check-capture-processed", toType: "tasks", toId: "check-task", relation: "related" }),
+      JSON.stringify({ id: "check-archived-capture-link", fromType: "tasks", fromId: "check-task", toType: "captures", toId: "check-capture-archived", relation: "related" }),
+    ]
+  );
+  const healedCapturesRead = await readState();
+  const healedCapture = healedCapturesRead.payload.state?.captures?.[0];
+  assert(
+    healedCapturesRead.payload.revision === 1
+      && healedCapturesRead.payload.state?.revision === 1
+      && healedCapturesRead.payload.state?.captures?.length === 1
+      && healedCapture?.id === "check-capture"
+      && !["status", "convertedTo", "convertedId", "processedAt"].some((field) => field in healedCapture),
+    "capture read-heal did not retain only canonical pending captures at the existing revision"
+  );
+  assert(
+    !healedCapturesRead.payload.state?.links?.some((link) => ["check-processed-capture-link", "check-archived-capture-link"].includes(link.id)),
+    "capture read-heal retained links to retired captures"
+  );
+  const healedCaptureRows = await pool.query(
+    "SELECT id, data FROM captures WHERE app_state_id = $1 ORDER BY id",
+    [appStateId]
+  );
+  assert(
+    healedCaptureRows.rowCount === 1
+      && healedCaptureRows.rows[0]?.id === "check-capture"
+      && !["status", "convertedTo", "convertedId", "processedAt"].some((field) => field in (healedCaptureRows.rows[0]?.data || {})),
+    "capture read-heal did not remove retired relational rows and legacy pending metadata"
+  );
+  const healedCaptureJson = await pool.query("SELECT state->'captures' AS captures FROM app_state WHERE id = $1", [appStateId]);
+  assert(
+    healedCaptureJson.rows[0]?.captures?.length === 1
+      && !["status", "convertedTo", "convertedId", "processedAt"].some((field) => field in healedCaptureJson.rows[0].captures[0]),
+    "capture read-heal did not persist the pending-only contract to app_state JSON"
+  );
+
   const missingPreconditionState = structuredClone(firstRead.payload.state);
   missingPreconditionState.updatedAt = "2026-06-02T00:01:00.000Z";
   missingPreconditionState.resources[0].title = "Missing precondition must not persist";
@@ -659,7 +720,7 @@ try {
       appMode: "legacy-local",
       calendarSources: { tasks: "polluted-tasks", projects: false, google: true },
       visibleGoogleCalendars: { primary: "polluted-primary", work: false },
-      viewControls: { resources: { mode: "list", filters: ["active", "pinned"], panels: { sort: true }, toggles: { readLater: true }, type: "article" }, today: "polluted-control" },
+      viewControls: { resources: { mode: "list", filters: ["active", "pinned"], panels: { sort: true }, toggles: { readLater: true }, type: "article" }, inbox: { filters: ["processed"] }, today: "polluted-control" },
     },
     goals: [{ id: "removed-parent" }],
     projects: [{ id: "polluted-project", status: "focus", goalId: "removed-parent" }],
@@ -676,7 +737,8 @@ try {
   assert(healedRead.payload.state?.projects?.[0]?.status === "active", "state read did not normalize the legacy Project status");
   assert(!("goals" in healedRead.payload.state) && !("goalId" in healedRead.payload.state.tasks[0]) && !("goalId" in healedRead.payload.state.projects[0]), "state read did not remove retired Goal data");
   assert(healedRead.payload.state?.journals?.length === 1 && !("kind" in healedRead.payload.state.journals[0]), "state read did not normalize polluted stored journals");
-  assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,inbox,tasks,projects,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
+  assert(healedRead.payload.state?.settings?.navOrder?.join(",") === "calendar,today,tasks,projects,boxes,resources,habits,journal,database", "state read did not normalize polluted stored navOrder entries");
+  assert(!("inbox" in (healedRead.payload.state?.settings?.viewControls || {})), "state read retained the removed Inbox view control");
   assert(healedRead.payload.state?.settings?.calendarSources?.tasks === true && healedRead.payload.state.settings.calendarSources.projects === false, "state read did not normalize polluted calendar sources");
   assert(!("primary" in healedRead.payload.state?.settings?.visibleGoogleCalendars) && healedRead.payload.state.settings.visibleGoogleCalendars.work === false, "state read did not normalize polluted visible Google calendars");
   assert(healedRead.payload.state?.settings?.viewControls?.resources?.mode === "list" && healedRead.payload.state.settings.viewControls.resources.filters.join(",") === "active,pinned" && healedRead.payload.state.settings.viewControls.resources.panels.sort === true && !("type" in healedRead.payload.state.settings.viewControls.resources) && !("toggles" in healedRead.payload.state.settings.viewControls.resources), "state read did not normalize polluted view controls");
@@ -688,7 +750,7 @@ try {
   );
   assert(Number(healedRow.rows[0]?.revision) === 2 && healedRow.rows[0]?.state_revision === "2", "state read did not preserve the revision while healing PostgreSQL");
   assert(healedRow.rows[0]?.version === "4", "state read did not heal invalid stored version to v4 in PostgreSQL");
-  assert(healedRow.rows[0]?.tasks_type === "array" && healedRow.rows[0]?.nav_order === "calendar,today,inbox,tasks,projects,boxes,resources,habits,journal,database", "state read did not heal polluted PostgreSQL collections/settings");
+  assert(healedRow.rows[0]?.tasks_type === "array" && healedRow.rows[0]?.nav_order === "calendar,today,tasks,projects,boxes,resources,habits,journal,database", "state read did not heal polluted PostgreSQL collections/settings");
   assert(healedRow.rows[0]?.calendar_sources?.tasks === true && healedRow.rows[0]?.calendar_sources?.projects === false, "state read did not heal polluted calendar sources in PostgreSQL");
   assert(!("primary" in healedRow.rows[0]?.visible_google_calendars) && healedRow.rows[0]?.visible_google_calendars?.work === false, "state read did not heal polluted visible Google calendars in PostgreSQL");
   assert(Number(healedRow.rows[0]?.task_count) === 1 && Number(healedRow.rows[0]?.journal_count) === 1, "state read did not remove polluted collection items from PostgreSQL");
@@ -722,6 +784,15 @@ try {
   assert(
     createdTables === "app_private_data,app_state,boxes,captures,collection_links,finance_state,finance_state_history,google_calendars,google_events,habit_instances,habits,journals,projects,resources,task_resources,tasks",
     "required PostgreSQL tables were not created"
+  );
+  const captureColumns = await pool.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'captures'"
+  );
+  const captureColumnNames = new Set(captureColumns.rows.map((column) => column.column_name));
+  assert(
+    ["app_state_id", "id", "title", "url", "captured_at", "position", "data", "created_at", "updated_at"].every((column) => captureColumnNames.has(column))
+      && ["status", "converted_to", "converted_id", "processed_at"].every((column) => !captureColumnNames.has(column)),
+    "captures table did not migrate to the pending-only column contract"
   );
 
   tokenStorage = createStorage({ databaseUrl, appStateId: tokenStateId });
@@ -808,7 +879,7 @@ function makeValidState() {
         resources: { search: "", searchScope: "database", filters: ["active"], sort: "updated", mode: "library", panels: { filter: false, sort: false } },
       },
     },
-    captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", convertedTo: "resources", convertedId: "check-resource", createdAt }],
+    captures: [{ id: "check-capture", title: "PostgreSQL check capture", url: "https://example.com/capture", createdAt }],
     boxes: [{ id: "check-box", name: "PostgreSQL check box" }],
     projects: [{ id: "check-project", name: "PostgreSQL check project", status: "planned", boxId: "check-box" }],
     tasks: [{ id: "check-task", title: "PostgreSQL check task", status: "someday", boxId: "check-box", projectId: "check-project", resourceId: "check-resource", dueDate: "2026-06-02" }],
@@ -1511,24 +1582,38 @@ async function checkIncrementalResourceApi() {
     id: "check-native-capture",
     title: "Native Inbox capture",
     url: "",
-    status: "inbox",
-    convertedTo: "",
-    convertedId: "",
     createdAt: "2026-06-02T00:13:00.000Z",
-    processedAt: "",
   };
   const captureWrite = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "capture", item: captureItem }),
+    body: JSON.stringify({
+      kind: "capture",
+      item: { ...captureItem, status: "inbox", convertedTo: "", convertedId: "", processedAt: "" },
+    }),
   });
   assert(captureWrite.response.ok && captureWrite.payload.revision === 14 && captureWrite.payload.state === undefined, "native Inbox append was not compact or atomic");
   const duplicateCapture = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "capture", item: captureItem }),
+    body: JSON.stringify({
+      kind: "capture",
+      item: { ...captureItem, status: "inbox", convertedTo: "", convertedId: "", processedAt: "" },
+    }),
   });
   assert(duplicateCapture.response.ok && duplicateCapture.payload.revision === 14, "native Inbox retry was not idempotent");
+  const retiredCapture = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "capture",
+      item: { ...captureItem, id: "check-native-retired-capture", status: "processed" },
+    }),
+  });
+  assert(
+    retiredCapture.response.status === 422 && retiredCapture.payload.code === "RETIRED_CAPTURE",
+    "native append accepted a retired capture into the pending-only collection"
+  );
 
   const taskWrite = await requestJsonAt(resourceBaseUrl, "/api/inbox-capture", {
     method: "POST",
@@ -1552,9 +1637,12 @@ async function checkIncrementalResourceApi() {
   assert(taskWrite.response.ok && taskWrite.payload.revision === 15, "native Task append did not advance the workspace revision");
   const nativeRead = await requestJsonAt(resourceBaseUrl, "/api/state");
   const nativeTask = nativeRead.payload.state?.tasks?.find((task) => task.id === "check-native-task");
+  const nativeCapture = nativeRead.payload.state?.captures?.find((capture) => capture.id === captureItem.id);
   assert(
     nativeRead.payload.revision === 15
       && nativeRead.payload.state?.captures?.filter((capture) => capture.id === captureItem.id).length === 1
+      && nativeCapture
+      && !["status", "convertedTo", "convertedId", "processedAt"].some((field) => field in nativeCapture)
       && nativeTask?.boxId === "check-box",
     "native Inbox/Task append did not persist once or normalize the latest Project Box"
   );
@@ -1580,12 +1668,6 @@ async function assertResourcePermanentDeleteRejectedDoesNotMutate() {
   draft.resources = draft.resources.filter((resource) => resource.id !== removedResourceId);
   for (const task of draft.tasks) {
     if (task.resourceId === removedResourceId) task.resourceId = "";
-  }
-  for (const capture of draft.captures) {
-    if (capture.convertedId === removedResourceId) {
-      capture.convertedTo = "";
-      capture.convertedId = "";
-    }
   }
   draft.links = draft.links.filter((link) => !(
     (link.fromType === "resources" && link.fromId === removedResourceId)

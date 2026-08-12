@@ -2239,6 +2239,120 @@ button:focus-visible {
   position: relative;
 }
 
+.today-inbox-panel {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 0;
+}
+
+.today-inbox-panel:hover {
+  transform: none;
+}
+
+.today-inbox-summary {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 86px;
+  padding: 26px 44px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+}
+
+.today-inbox-summary::-webkit-details-marker {
+  display: none;
+}
+
+.today-inbox-summary:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -3px;
+}
+
+.today-inbox-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.today-inbox-heading .panel-title {
+  margin: 0;
+}
+
+.today-inbox-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.today-inbox-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 20px;
+  transition: transform 220ms var(--ease);
+}
+
+.today-inbox-panel[open] .today-inbox-chevron {
+  transform: rotate(180deg);
+}
+
+.today-inbox-body {
+  min-width: 0;
+  margin: 0 44px;
+  border-top: 1px solid var(--line-soft);
+  padding: 18px 0 38px;
+}
+
+.today-inbox-grid,
+.today-inbox-section {
+  display: grid;
+  min-width: 0;
+}
+
+@supports selector(details::details-content) {
+  .today-inbox-panel {
+    interpolate-size: allow-keywords;
+  }
+
+  .today-inbox-panel::details-content {
+    display: block;
+    block-size: 0;
+    overflow: hidden;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition:
+      block-size 360ms cubic-bezier(0.16, 0.92, 0.22, 1),
+      content-visibility 360ms allow-discrete,
+      opacity 220ms var(--ease),
+      transform 360ms cubic-bezier(0.16, 0.92, 0.22, 1);
+  }
+
+  .today-inbox-panel[open]::details-content {
+    block-size: auto;
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 560px) {
+  .today-inbox-summary {
+    min-height: 72px;
+    gap: 10px;
+    padding: 20px 22px;
+  }
+
+  .today-inbox-body {
+    margin-inline: 22px;
+    padding-bottom: 28px;
+  }
+
+  .today-inbox-panel .capture-card {
+    --hover-bleed-x: 22px;
+  }
+}
+
 .today-dashboard-grid .task-inline-item {
   --hover-surface:
     linear-gradient(90deg, rgba(255, 255, 255, 0.78) 0%, rgba(255, 255, 255, 0.58) 34%, rgba(var(--hover-accent-rgb), 0.018) 58%, rgba(var(--hover-accent-rgb), 0.04) 100%),

@@ -21,8 +21,10 @@ const STRING_SETTING_KEYS = ["googleCalendarId", "googleConnectedAt", "lastGoogl
 const LEGACY_KIND_COLLECTION_KEYS = new Set(["tasks", "journals"]);
 const LEGACY_TASK_TIME_FIELDS = ["scheduledStart", "scheduledEnd", "estimatedMinutes", "actualMinutes"];
 const LEGACY_TASK_SOMEDAY_STATUS = "someday";
+const LEGACY_CAPTURE_FIELDS = ["status", "convertedTo", "convertedId", "processedAt"];
+const RETIRED_CAPTURE_STATUSES = new Set(["processed", "archived"]);
 const PROJECT_STATUSES = new Set(["planned", "active", "completed", "paused"]);
-const DEFAULT_NAV_ORDER = ["today", "inbox", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"];
+const DEFAULT_NAV_ORDER = ["today", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"];
 const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 const DEFAULT_CALENDAR_SOURCES = {
   tasks: true,
@@ -33,7 +35,6 @@ const CALENDAR_SOURCE_KEYS = Object.keys(DEFAULT_CALENDAR_SOURCES);
 const CALENDAR_SOURCE_KEY_SET = new Set(CALENDAR_SOURCE_KEYS);
 const DEFAULT_VIEW_CONTROLS = {
   today: { filters: ["all"], sort: "date", mode: "overview", panels: { filter: false, sort: false } },
-  inbox: { filters: ["all"], sort: "recent", mode: "board", panels: { filter: false, sort: false } },
   tasks: { filters: ["all"], sort: "date", mode: "board", panels: { filter: false, sort: false } },
   projects: { filters: ["all"], sort: "status", mode: "board", panels: { filter: false, sort: false } },
   boxes: { filters: ["all"], sort: "activity", mode: "columns", panels: { filter: false, sort: false } },
@@ -319,11 +320,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
         id text NOT NULL,
         title text NOT NULL DEFAULT '',
         url text NOT NULL DEFAULT '',
-        status text NOT NULL DEFAULT '',
-        converted_to text NOT NULL DEFAULT '',
-        converted_id text NOT NULL DEFAULT '',
         captured_at timestamptz,
-        processed_at timestamptz,
         position integer NOT NULL DEFAULT 0,
         data jsonb NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
@@ -405,6 +402,38 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       CREATE INDEX IF NOT EXISTS collection_links_app_from_idx ON collection_links(app_state_id, from_type, from_id);
       CREATE INDEX IF NOT EXISTS collection_links_app_to_idx ON collection_links(app_state_id, to_type, to_id);
       CREATE INDEX IF NOT EXISTS google_events_app_calendar_idx ON google_events(app_state_id, calendar_id);
+
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'captures' AND column_name = 'status'
+        ) THEN
+          EXECUTE 'UPDATE captures SET data = data || jsonb_build_object(''status'', status)';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'captures' AND column_name = 'converted_to'
+        ) THEN
+          EXECUTE 'UPDATE captures SET data = data || jsonb_build_object(''convertedTo'', converted_to)';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'captures' AND column_name = 'converted_id'
+        ) THEN
+          EXECUTE 'UPDATE captures SET data = data || jsonb_build_object(''convertedId'', converted_id)';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'captures' AND column_name = 'processed_at'
+        ) THEN
+          EXECUTE 'UPDATE captures SET data = data || jsonb_build_object(''processedAt'', processed_at)';
+        END IF;
+      END $$;
+      ALTER TABLE captures DROP COLUMN IF EXISTS status;
+      ALTER TABLE captures DROP COLUMN IF EXISTS converted_to;
+      ALTER TABLE captures DROP COLUMN IF EXISTS converted_id;
+      ALTER TABLE captures DROP COLUMN IF EXISTS processed_at;
 
       ALTER TABLE projects DROP COLUMN IF EXISTS goal_id;
       ALTER TABLE tasks DROP COLUMN IF EXISTS goal_id;
@@ -730,7 +759,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
     if (!["captures", "tasks"].includes(collectionKey) || !isPlainObject(item)) {
       throw storageError(400, "INBOX_ITEM_REQUIRED", "A supported workspace item is required.");
     }
-    await ensureAppStateTable();
+    await ensureAppStateBackupTables();
     await ensureRelationalTables();
     const client = await dbPool.connect();
     try {
@@ -739,19 +768,43 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       const row = current.rows[0];
       if (!row) throw storageError(503, "DATABASE_UNAVAILABLE", "Workspace state is not initialized.");
       const authoritative = await authoritativeStateSnapshot(client, row.state);
-      const nextState = cloneJsonValue(authoritative.state);
+      const normalized = normalizeAppStateForStorage(cloneJsonValue(authoritative.state));
+      const nextState = normalized.state;
       const items = Array.isArray(nextState[collectionKey]) ? nextState[collectionKey] : [];
       const itemId = typeof item.id === "string" ? item.id.trim() : "";
       if (!itemId) throw storageError(400, "INBOX_ITEM_REQUIRED", "A workspace item ID is required.");
+      const currentRevision = positiveRevision(row.revision, 1);
+      if (normalized.changed) {
+        await insertMigrationBackup(client, authoritative.state, row.revision, "automatic_read_heal_before_inbox_append");
+      }
       if (items.some((entry) => entry?.id === itemId)) {
+        let returnedState = nextState;
+        let updatedAt = nextState.updatedAt || "";
+        if (normalized.changed || !authoritative.hasRelationalRows) {
+          nextState.revision = currentRevision;
+          await syncRelationalState(client, nextState);
+          returnedState = await readRelationalAppState(client, nextState);
+          returnedState.revision = currentRevision;
+          const healed = await client.query(
+            "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
+            [appStateId, JSON.stringify(returnedState), currentRevision]
+          );
+          updatedAt = healed.rows[0]?.updated_at?.toISOString?.() || updatedAt;
+        }
         await client.query("COMMIT");
         return {
-          state: nextState,
-          revision: positiveRevision(row.revision, 1),
-          updatedAt: nextState.updatedAt || "",
+          state: returnedState,
+          revision: currentRevision,
+          updatedAt,
         };
       }
-      const nextItem = cloneJsonValue(item);
+      let nextItem = cloneJsonValue(item);
+      if (collectionKey === "captures") {
+        nextItem = normalizeCaptureForStorage(nextItem);
+        if (!nextItem) {
+          throw storageError(422, "RETIRED_CAPTURE", "Only pending Inbox captures can be appended.");
+        }
+      }
       if (collectionKey === "tasks" && typeof nextItem.projectId === "string" && nextItem.projectId) {
         const project = nextState.projects?.find((entry) => entry?.id === nextItem.projectId);
         if (project) nextItem.boxId = typeof project.boxId === "string" ? project.boxId : "";
@@ -759,7 +812,7 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       items.push(nextItem);
       nextState[collectionKey] = items;
       validateState?.(nextState);
-      const revision = positiveRevision(row.revision, 1) + 1;
+      const revision = currentRevision + 1;
       nextState.revision = revision;
       nextState.updatedAt = new Date().toISOString();
       await syncRelationalState(client, nextState);
@@ -1264,18 +1317,14 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
   }
 
   async function readCaptures(client) {
-    const rows = await readRows(client, "captures", "id, title, url, status, converted_to, converted_id, captured_at, processed_at, data");
+    const rows = await readRows(client, "captures", "id, title, url, captured_at, data");
     const items = [];
     for (const row of rows) {
       const item = dataObject(row.data);
       item.id = row.id;
       item.title = textValue(row.title);
       item.url = textValue(row.url);
-      item.status = textValue(row.status);
-      item.convertedTo = textValue(row.converted_to);
-      item.convertedId = textValue(row.converted_id);
       item.createdAt = databaseTimestampString(row.captured_at);
-      item.processedAt = databaseTimestampString(row.processed_at);
       items.push(item);
     }
     return items;
@@ -1524,8 +1573,8 @@ export function createStorage({ databaseUrl = "", appStateId = "default", google
       const capture = captures[index];
       if (!relationalId(capture)) continue;
       await client.query(
-        "INSERT INTO captures (app_state_id, id, title, url, status, converted_to, converted_id, captured_at, processed_at, position, data) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)",
-        [appStateId, capture.id, textValue(capture.title), textValue(capture.url), textValue(capture.status), textValue(capture.convertedTo), textValue(capture.convertedId), timestampValue(capture.createdAt), timestampValue(capture.processedAt), index, jsonValue(capture)]
+        "INSERT INTO captures (app_state_id, id, title, url, captured_at, position, data) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+        [appStateId, capture.id, textValue(capture.title), textValue(capture.url), timestampValue(capture.createdAt), index, jsonValue(capture)]
       );
     }
   }
@@ -1920,6 +1969,7 @@ function normalizeAppStateForStorage(state) {
     nextState.settings.statsDemoDataSeeded = false;
     changed = true;
   }
+  const retiredCaptureIds = new Set();
   for (const key of COLLECTION_KEYS) {
     const items = nextState[key];
     if (!Array.isArray(items)) {
@@ -1955,6 +2005,21 @@ function normalizeAppStateForStorage(state) {
         changed = true;
         continue;
       }
+      if (key === "captures") {
+        const normalizedCapture = normalizeCaptureForStorage(cleanItem);
+        if (!normalizedCapture) {
+          if (typeof cleanItem.id === "string" && cleanItem.id) retiredCaptureIds.add(cleanItem.id);
+          if (!normalizedItems) normalizedItems = items.slice(0, index);
+          changed = true;
+          continue;
+        }
+        cleanItem = normalizedCapture;
+      }
+      if (key === "links" && linkReferencesRetiredCapture(cleanItem, retiredCaptureIds)) {
+        if (!normalizedItems) normalizedItems = items.slice(0, index);
+        changed = true;
+        continue;
+      }
       if (key === "projects") cleanItem = normalizeProjectForStorage(cleanItem);
       if (key === "tasks") cleanItem = normalizeTaskForStorage(cleanItem);
       if (cleanItem !== item) {
@@ -1968,6 +2033,27 @@ function normalizeAppStateForStorage(state) {
     if (normalizedItems) nextState[key] = normalizedItems;
   }
   return { state: nextState, changed };
+}
+
+function normalizeCaptureForStorage(capture) {
+  const legacyStatus = typeof capture.status === "string" ? capture.status.trim().toLowerCase() : "";
+  if (RETIRED_CAPTURE_STATUSES.has(legacyStatus)) return null;
+  let cleanCapture = capture;
+  for (const field of LEGACY_CAPTURE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(cleanCapture, field)) continue;
+    if (cleanCapture === capture) cleanCapture = { ...capture };
+    delete cleanCapture[field];
+  }
+  return cleanCapture;
+}
+
+function linkReferencesRetiredCapture(link, retiredCaptureIds) {
+  if (!retiredCaptureIds.size) return false;
+  return (
+    (link.fromType === "capture" || link.fromType === "captures") && retiredCaptureIds.has(link.fromId)
+  ) || (
+    (link.toType === "capture" || link.toType === "captures") && retiredCaptureIds.has(link.toId)
+  );
 }
 
 function normalizeTaskForStorage(task) {

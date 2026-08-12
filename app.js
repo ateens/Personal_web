@@ -56,7 +56,6 @@ const financeSessionChannel = typeof BroadcastChannel === "function"
 
 const NAV_ITEMS = [
   ["today", "오늘", "⌁"],
-  ["inbox", "Inbox", "↧"],
   ["tasks", "할 일 배치", "✓"],
   ["projects", "Projects", "▦"],
   ["boxes", "Boxes", "□"],
@@ -82,10 +81,9 @@ const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 const VIEW_KEY_SET = new Set([...DEFAULT_NAV_ORDER, FINANCE_NAV_ITEM[0]]);
 
 const NAV_SHORTCUT_HOLD_MS = 500;
-const NAV_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "q"];
+const NAV_SHORTCUT_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 const VIEW_CONTROL_DEFAULTS = {
   today: { filters: ["all"], sort: "date", mode: "overview", panels: { filter: false, sort: false } },
-  inbox: { filters: ["all"], sort: "recent", mode: "board", panels: { filter: false, sort: false } },
   tasks: { filters: ["all"], sort: "date", mode: "board", panels: { filter: false, sort: false } },
   projects: { filters: ["all"], sort: "status", mode: "board", panels: { filter: false, sort: false } },
   boxes: { filters: ["all"], sort: "activity", mode: "columns", panels: { filter: false, sort: false } },
@@ -96,7 +94,6 @@ const VIEW_CONTROL_DEFAULTS = {
 };
 const VIEW_FILTER_OPTIONS = {
   today: [["all", "전체"], ["active", "진행"], ["overdue", "지연"], ["done", "완료"]],
-  inbox: [["all", "전체"], ["inbox", "미분류"], ["processed", "처리됨"]],
   tasks: [["all", "전체"], ["unplanned", "미계획"], ["today", "오늘"], ["tomorrow", "내일"], ["scheduled", "예정"], ["overdue", "지연"], ["done", "완료"]],
   projects: [["all", "전체"], ["planned", "예정"], ["active", "진행"], ["completed", "완료"], ["paused", "중단"]],
   boxes: [["all", "전체"], ["pinned", "고정"], ["normal", "일반"], ["archived", "아카이브"]],
@@ -107,7 +104,6 @@ const VIEW_FILTER_OPTIONS = {
 };
 const VIEW_SORT_OPTIONS = {
   today: [["date", "날짜순"], ["title", "이름순"], ["status", "상태순"]],
-  inbox: [["recent", "최근순"], ["title", "이름순"], ["status", "상태순"]],
   tasks: [["date", "날짜순"], ["status", "상태순"], ["title", "이름순"], ["project", "프로젝트순"]],
   projects: [["status", "상태순"], ["end", "종료일순"], ["name", "이름순"], ["progress", "진행률순"]],
   boxes: [["activity", "활동순"], ["visibility", "표시순"], ["name", "이름순"], ["progress", "진행률순"]],
@@ -397,8 +393,8 @@ const DB_SCHEMA = [
   {
     key: "captures",
     label: "Captures",
-    fields: ["id", "title", "url", "status", "convertedTo", "convertedId", "createdAt", "processedAt"],
-    relations: ["convertedTo/convertedId -> Task, Project, Box"],
+    fields: ["id", "title", "url", "createdAt"],
+    relations: [],
   },
   {
     key: "boxes",
@@ -675,6 +671,7 @@ let ui = {
   scheduleHoldTaskId: "",
   pendingScheduleDrag: null,
   suppressTaskClickUntil: 0,
+  todayInboxOpen: true,
   lastScheduleDragEndedAt: 0,
   lastSchedulePointerAt: 0,
   captureDrafts: {},
@@ -1192,7 +1189,6 @@ function decorateButtons(root = app) {
 function renderView({ transition = false, soft = false, animateCards = false } = {}) {
   const renderers = {
     today: renderToday,
-    inbox: renderInbox,
     tasks: renderTasks,
     projects: renderProjects,
     boxes: renderBoxes,
@@ -1206,6 +1202,8 @@ function renderView({ transition = false, soft = false, animateCards = false } =
   const cardRects = animateCards ? captureCardRects() : null;
   const previousChipMeta = captureViewControlChipMeta(ui.view);
   const calendarControlsOpen = Boolean(els.viewRoot.querySelector(".calendar-control-panel")?.open);
+  const todayInbox = els.viewRoot.querySelector("[data-today-inbox]");
+  if (todayInbox) ui.todayInboxOpen = todayInbox.open;
   els.viewRoot.innerHTML = renderers[ui.view]();
   if (calendarControlsOpen) {
     const calendarControls = els.viewRoot.querySelector(".calendar-control-panel");
@@ -1339,6 +1337,7 @@ function animateCardReorder(previousRects) {
 function renderToday() {
   const today = dateKey(new Date());
   const tomorrow = dateKey(addDays(new Date(), 1));
+  const inboxCaptures = [...state.captures].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   const controlledTasks = controlledItems("tasks", state.tasks, "today", { today, tomorrow });
   const { activeTodayTasks, completedTodayTasks, tomorrowTasks, overdue, doneToday } = todayTaskBuckets(today, tomorrow, controlledTasks);
   const todayTasks = [...activeTodayTasks, ...completedTodayTasks];
@@ -1360,6 +1359,23 @@ function renderToday() {
         ${renderMetric("진행 프로젝트", activeProjectCount, "진행 상태")}
       </div>
       <div class="grid cols-2 today-dashboard-grid">
+        <details class="panel today-inbox-panel" data-today-inbox ${ui.todayInboxOpen ? "open" : ""}>
+          <summary class="today-inbox-summary">
+            <span class="today-inbox-heading">
+              <span class="panel-title">Inbox</span>
+              <small>수집과 분류</small>
+            </span>
+            <span class="today-inbox-count">${inboxCaptures.length}개 대기</span>
+            <span class="today-inbox-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="today-inbox-body">
+            <div class="today-inbox-grid">
+              <section class="today-inbox-section" aria-label="분류할 Inbox 항목">
+                <div class="stack">${renderCaptureCards(inboxCaptures, "분류할 수집 항목이 없습니다.")}</div>
+              </section>
+            </div>
+          </div>
+        </details>
         <div class="panel today-drop-zone" data-today-task-zone="today" data-drop-date="${today}">
           ${panelHeader("오늘 할 일", "날짜순", `
             <button class="button secondary today-batch-add" type="button" data-action="new-today-batch" aria-label="오늘 할 일 여러 개 추가">+</button>
@@ -1377,30 +1393,6 @@ function renderToday() {
         <div class="panel today-drop-zone" data-today-task-zone="tomorrow" data-drop-date="${tomorrow}">
           ${panelHeader("내일 할 일", compactDateLabel(tomorrow))}
           <div class="stack">${renderTaskCards(tomorrowTasks, { todayInline: true }, "내일 할 일이 없습니다.")}</div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderInbox() {
-  const captures = controlledItems("captures", state.captures, "inbox");
-  const captureBuckets = captureStatusBuckets(captures);
-
-  return `
-    <section class="view">
-      ${renderViewHeader("Inbox", "수집과 분류", `${captureBuckets.inbox.length}개 대기`, `
-        <button class="button secondary" type="button" data-action="new-capture">수집 추가</button>
-      `)}
-      ${renderViewControls("inbox", { count: captures.length, total: state.captures.length })}
-      <div class="grid cols-2">
-        <div class="panel">
-          ${panelHeader("미분류", `${captureBuckets.inbox.length}개`)}
-          <div class="stack">${renderCaptureCards(captureBuckets.inbox, "분류할 수집 항목이 없습니다.")}</div>
-        </div>
-        <div class="panel">
-          ${panelHeader("최근 처리", "변환 기록")}
-          <div class="stack">${renderCaptureCards(captureBuckets.processed, "처리된 항목이 없습니다.")}</div>
         </div>
       </div>
     </section>
@@ -5234,7 +5226,6 @@ function matchesControlledFilter(type, item, control, context = {}) {
 
 function matchesSingleControlledFilter(type, item, filter, context = {}) {
   if (type === "tasks") return matchesTaskFilter(item, filter, context);
-  if (type === "captures") return item.status === filter;
   if (type === "projects") return item.status === filter;
   if (type === "boxes") return item.visibility === filter || (filter === "normal" && !item.visibility);
   if (type === "habits") return item.status === filter || item.cadence === filter;
@@ -5273,7 +5264,6 @@ function sortControlledItems(type, items, sort, context = {}) {
     return;
   }
   if (type === "tasks") sortTasks(items, sort, context);
-  if (type === "captures") sortCaptures(items, sort);
   if (type === "projects") sortProjects(items, sort, context.statsByProjectId);
   if (type === "boxes") sortBoxes(items, sort, context.statsByBoxId);
   if (type === "habits") sortHabits(items, sort, context.today || dateKey(new Date()));
@@ -5292,11 +5282,6 @@ function sortTasks(tasks, sort, context = {}) {
   if (sort === "status") tasks.sort((a, b) => (a.status || "").localeCompare(b.status || "") || bySchedule(a, b));
   else if (sort === "project") tasks.sort((a, b) => nameOf("projects", a.projectId).localeCompare(nameOf("projects", b.projectId)) || bySchedule(a, b));
   else tasks.sort(bySchedule);
-}
-
-function sortCaptures(captures, sort) {
-  if (sort === "status") captures.sort((a, b) => (a.status || "").localeCompare(b.status || "") || (b.processedAt || b.createdAt || "").localeCompare(a.processedAt || a.createdAt || ""));
-  else captures.sort((a, b) => (b.processedAt || b.createdAt || "").localeCompare(a.processedAt || a.createdAt || ""));
 }
 
 function sortProjects(projects, sort, statsByProjectId = projectStatsIndex()) {
@@ -5341,20 +5326,6 @@ function databaseModelGroup(node) {
   if (node.key === "googleCalendars" || node.key === "googleEvents" || node.key === "links") return "integration";
   if (node.key === "captures" || node.key === "tasks" || node.key === "habitInstances" || node.key === "journals") return "activity";
   return "core";
-}
-
-function captureStatusBuckets(captures = state.captures) {
-  const buckets = { inbox: [], processed: [] };
-  for (const capture of captures) {
-    if (capture.status === "processed") {
-      buckets.processed.push(capture);
-    } else if (capture.status === "inbox") {
-      buckets.inbox.push(capture);
-    }
-  }
-  buckets.processed.sort((a, b) => (b.processedAt || "").localeCompare(a.processedAt || ""));
-  buckets.processed = buckets.processed.slice(0, 8);
-  return buckets;
 }
 
 function todayDashboardCollections(habits = state.habits, projects = state.projects) {
@@ -5973,21 +5944,15 @@ function renderJournalCard(journal) {
 }
 
 function renderCaptureCard(capture) {
-  const processed = capture.status === "processed";
   const draft = getCaptureDraft(capture.id);
   return `
     <article class="card capture-card ${draft ? "is-configuring" : ""}" data-select-type="captures" data-select-id="${capture.id}" data-delete-drag-type="captures" data-delete-drag-id="${capture.id}">
       <h3 class="card-title">${esc(capture.title)}</h3>
       ${capture.url ? `<p class="entity-preview">${esc(capture.url)}</p>` : ""}
       <div class="card-meta">
-        ${badge(processed ? "처리됨" : "Inbox", processed ? "teal" : "blue")}
-        ${capture.convertedTo ? badge(capture.convertedTo, "violet") : ""}
+        ${badge("Inbox", "blue")}
       </div>
-      ${
-        processed
-          ? ""
-          : `${renderCaptureConvertActions(capture, draft)}${draft ? renderTaskCaptureFlow(capture, draft) : ""}`
-      }
+      ${renderCaptureConvertActions(capture, draft)}${draft ? renderTaskCaptureFlow(capture, draft) : ""}
     </article>
   `;
 }
@@ -7089,15 +7054,6 @@ function renderDetailFields(type, item) {
       <div class="field-grid">
         ${dateField("날짜", "date", item.date)}
         ${numberField("만족도", "satisfaction", item.satisfaction || 0)}
-      </div>
-    `;
-  }
-  if (type === "captures") {
-    return `
-      <div class="field-grid">
-        ${selectField("상태", "status", item.status, { inbox: "Inbox", processed: "처리됨", archived: "보관" })}
-        ${textField("URL", "url", item.url || "")}
-        ${textField("변환 대상", "convertedTo", item.convertedTo || "")}
       </div>
     `;
   }
@@ -9952,11 +9908,7 @@ function handleClick(event) {
   const convert = event.target.closest("[data-convert]");
   if (convert) {
     event.stopPropagation();
-    if (["tasks", "projects", "boxes"].includes(convert.dataset.convert)) {
-      startTaskFlow(convert.dataset.captureId, convert.dataset.convert);
-    } else {
-      convertCapture(convert.dataset.captureId, convert.dataset.convert);
-    }
+    startTaskFlow(convert.dataset.captureId, convert.dataset.convert);
     return;
   }
 
@@ -10356,16 +10308,13 @@ function handleSubmit(event) {
       id: id(),
       title,
       url: title.match(/https?:\/\/\S+/)?.[0] || "",
-      status: "inbox",
-      convertedTo: "",
-      convertedId: "",
       createdAt: new Date().toISOString(),
-      processedAt: "",
     });
+    ui.todayInboxOpen = true;
     input.value = "";
     saveState();
     showToast("Inbox에 수집했습니다.");
-    if (["inbox", "today", "database"].includes(ui.view)) renderView({ soft: true });
+    if (["today", "database"].includes(ui.view)) renderView({ soft: true });
   }
 }
 
@@ -13897,7 +13846,7 @@ function handlePointerDown(event) {
   }
 
   const deleteDragCard = event.target.closest("[data-delete-drag-type][data-delete-drag-id]");
-  if (deleteDragCard && ["inbox", "projects", "boxes"].includes(ui.view) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
+  if (deleteDragCard && (["projects", "boxes"].includes(ui.view) || (ui.view === "today" && deleteDragCard.closest("[data-today-inbox]"))) && !event.target.closest("button, input, select, textarea, [contenteditable='true']")) {
     if (!canStartCustomPointerDrag(event)) return;
     window.getSelection()?.removeAllRanges();
     ui.pendingDeleteDrag = {
@@ -15862,10 +15811,6 @@ function handleDragStart(event) {
     return;
   }
   if (handleNavDragStart(event)) return;
-  if (["inbox", "boxes"].includes(ui.view) && event.target.closest("[data-delete-drag-type][data-delete-drag-id]")) {
-    event.preventDefault();
-    return;
-  }
   if (ui.view === "today" && event.target.closest("[data-today-task-id]")) {
     event.preventDefault();
     return;
@@ -16215,14 +16160,11 @@ function createCapture(title = "새 수집", options = {}) {
     id: id(),
     title,
     url: "",
-    status: "inbox",
-    convertedTo: "",
-    convertedId: "",
     createdAt: new Date().toISOString(),
-    processedAt: "",
   };
   state.captures.push(capture);
-  afterCreate("captures", capture.id, options.navigate === false ? ui.view : "inbox");
+  ui.todayInboxOpen = true;
+  afterCreate("captures", capture.id, options.navigate === false ? ui.view : "today");
   return capture;
 }
 
@@ -16583,24 +16525,6 @@ function confirmHabitDelete(habitId) {
   renderOverlays();
 }
 
-function convertCapture(captureId, targetType) {
-  const capture = itemById("captures", captureId);
-  if (!capture) return;
-  const createOptions = { navigate: false };
-  let created;
-  if (targetType === "tasks") created = createTask(capture.title, createOptions);
-  if (targetType === "projects") created = createProject(capture.title, createOptions);
-  if (targetType === "boxes") created = createBox(capture.title, createOptions);
-  if (!created) return;
-  capture.status = "processed";
-  capture.convertedTo = targetType;
-  capture.convertedId = created?.id || "";
-  capture.processedAt = new Date().toISOString();
-  saveState();
-  showToast("분류했습니다.");
-  renderView({ soft: true });
-}
-
 function startTaskFlow(captureId, targetType = "tasks") {
   const existing = getCaptureDraft(captureId);
   ui.captureDrafts[captureId] = existing?.type === targetType
@@ -16740,11 +16664,7 @@ function saveTaskFlow(captureId) {
   if (targetType === "projects") created = createProject(capture.title, createOptions);
   if (targetType === "boxes") created = createBox(capture.title, createOptions);
   if (!created) return;
-  capture.status = "processed";
-  capture.convertedTo = targetType;
-  capture.convertedId = created.id;
-  capture.processedAt = new Date().toISOString();
-  delete ui.captureDrafts[captureId];
+  deleteEntity("captures", captureId);
   saveState();
   showToast(`${captureTargetLabel(targetType)}로 저장했습니다.`);
   const finish = () => {
@@ -17624,12 +17544,6 @@ function cleanupDeletedEntityReferences(type, itemId) {
     if (ui.habitDeleteConfirmId === itemId) ui.habitDeleteConfirmId = "";
   }
   removeDeletedEntityLinks(type, itemId);
-  for (const capture of state.captures) {
-    if (capture.convertedTo === type && capture.convertedId === itemId) {
-      capture.convertedTo = "";
-      capture.convertedId = "";
-    }
-  }
 }
 
 function removeDeletedEntityLinks(type, itemId) {
@@ -23006,7 +22920,7 @@ function normalizeState(next) {
     createdAt: next.createdAt || fallbackState().createdAt,
     updatedAt: next.updatedAt || fallbackState().updatedAt,
     settings,
-    captures: objectArrayOrFallback(next.captures, fallbackCollection(fallbackState, "captures")),
+    captures: normalizeCaptureRecords(next.captures, fallbackCollection(fallbackState, "captures")),
     boxes: objectArrayOrFallback(next.boxes, fallbackCollection(fallbackState, "boxes")),
     projects,
     tasks,
@@ -23150,6 +23064,16 @@ function objectArrayWithoutLegacyKind(value, fallback) {
     cleaned.push(cleanItem);
   }
   return cleaned || source;
+}
+
+function normalizeCaptureRecords(value, fallback) {
+  const captures = [];
+  for (const item of objectArrayOrFallback(value, fallback)) {
+    if (item.status === "processed" || item.status === "archived") continue;
+    const { status, convertedTo, convertedId, processedAt, ...capture } = item;
+    captures.push(capture);
+  }
+  return captures;
 }
 
 function objectArrayWithoutGoalId(value, fallback) {
@@ -23296,11 +23220,7 @@ function createMinimalSeedState() {
         id: id(),
         title: "Task로 옮길 수집 항목",
         url: "",
-        status: "inbox",
-        convertedTo: "",
-        convertedId: "",
         createdAt,
-        processedAt: "",
       },
     ],
     boxes: [

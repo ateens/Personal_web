@@ -89,11 +89,7 @@ struct InboxStateMutation {
                 "id": id.uuidString.lowercased(),
                 "title": title,
                 "url": url,
-                "status": "inbox",
-                "convertedTo": "",
-                "convertedId": "",
                 "createdAt": timestamp,
-                "processedAt": "",
             ],
             updatedAt: timestamp
         )
