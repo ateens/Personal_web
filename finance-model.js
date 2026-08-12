@@ -241,7 +241,8 @@
     const year = Math.floor(dueMonthIndex / 12);
     const monthIndex = dueMonthIndex % 12;
     const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
-    return `${String(year).padStart(4, "0")}-${String(monthIndex + 1).padStart(2, "0")}-${String(Math.min(dueDay, lastDay)).padStart(2, "0")}`;
+    const scheduledOn = `${String(year).padStart(4, "0")}-${String(monthIndex + 1).padStart(2, "0")}-${String(Math.min(dueDay, lastDay)).padStart(2, "0")}`;
+    return scheduledOn > occurredOn ? scheduledOn : dateForMonthDay(shiftMonthKey(scheduledOn.slice(0, 7), 1), dueDay);
   }
 
   function boundedDay(value, fallback) {

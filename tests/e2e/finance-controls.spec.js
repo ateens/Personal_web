@@ -465,6 +465,108 @@ test("credit-card workspace shows current debt and pays a confirmed statement on
   });
 });
 
+test("card usage dates drive direct and installment payment schedules", async ({ page, request }) => {
+  await createAccount(page, request);
+  await createCreditCard(page, request, { name: "현대신용", dueDay: "12" });
+  const cardId = (await fixtureSnapshot(request)).financeState.paymentMethods[0].id;
+
+  await page.locator('.finance-tabs [data-finance-tab="entries"]').click();
+  const saveExpense = async ({ title, amount, paymentType }) => {
+    const form = page.locator('form[data-form="finance-expense"]');
+    await form.locator("xpath=..").locator(":scope > summary").click();
+    await form.locator('[name="title"]').fill(title);
+    await form.locator('[name="amountKrw"]').fill(amount);
+    await form.locator('[name="occurredOn"]').evaluate((input) => {
+      input.value = "2026-07-01";
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await form.locator('select[name="paymentMethodId"]').selectOption(cardId);
+    await expect(form.locator("[data-finance-expense-card-fields]")).not.toHaveAttribute("disabled", "");
+    await form.locator('select[name="cardPaymentType"]').selectOption(paymentType);
+    await form.getByRole("button", { name: "쓴 기록 저장" }).click();
+    await expect.poll(async () => (await fixtureSnapshot(request)).financeState.entries.find((entry) => entry.title === title)?.id).toBeTruthy();
+    return (await fixtureSnapshot(request)).financeState.entries.find((entry) => entry.title === title);
+  };
+
+  const singleEntry = await saveExpense({ title: "7월 일시불", amount: "50000", paymentType: "single" });
+  let state = (await fixtureSnapshot(request)).financeState;
+  expect(singleEntry).toMatchObject({
+    occurredOn: "2026-07-01",
+    recognitionMonth: "2026-07",
+    cardPaymentType: "single",
+  });
+  expect(state.settlements.filter((item) => item.targetType === "entry" && item.targetId === singleEntry.id)).toEqual([
+    expect.objectContaining({ expectedAmountKrw: 50_000, scheduledOn: "2026-08-12", status: "estimated" }),
+  ]);
+
+  const installmentEntry = await saveExpense({ title: "7월 할부", amount: "100000", paymentType: "installment" });
+  state = (await fixtureSnapshot(request)).financeState;
+  expect(installmentEntry).toMatchObject({
+    amountKrw: 100_000,
+    occurredOn: "2026-07-01",
+    recognitionMonth: "2026-07",
+    cardPaymentType: "installment",
+  });
+  expect(state.settlements.filter((item) => item.targetType === "entry" && item.targetId === installmentEntry.id)).toHaveLength(0);
+
+  await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
+  const setupForm = page.locator(`[data-finance-card="${cardId}"] form[data-form="finance-card-installment-setup"]`);
+  await setupForm.locator("xpath=..").locator(":scope > summary").click();
+  await expect(setupForm.locator('[name="entryId"]')).toHaveValue(installmentEntry.id);
+  await setupForm.locator('[name="installmentCount"]').fill("3");
+  const paymentAmounts = setupForm.locator('[name="paymentAmountKrw"]');
+  await expect(paymentAmounts).toHaveCount(3);
+  for (const [index, [amount, formatted]] of [["41000", "41,000"], ["35500", "35,500"], ["25000", "25,000"]].entries()) {
+    await paymentAmounts.nth(index).fill(amount);
+    await expect(paymentAmounts.nth(index)).toHaveValue(formatted);
+  }
+  await expect(setupForm.locator("[data-finance-installment-principal]")).toHaveText("₩100,000");
+  await expect(setupForm.locator("[data-finance-installment-fee]")).toHaveText("₩1,500");
+  await expect(setupForm.locator("[data-finance-installment-total]")).toHaveText("₩101,500");
+  await setupForm.getByRole("button", { name: "할부 일정 저장" }).click();
+
+  await expect.poll(async () => {
+    const current = (await fixtureSnapshot(request)).financeState;
+    const statements = current.cardStatements
+      .filter((item) => item.source === "opening_installment" && item.purchaseEntryId === installmentEntry.id)
+      .sort((left, right) => left.installmentNumber - right.installmentNumber);
+    const statementSettlements = statements.map((statement) => current.settlements.find((item) => (
+      item.targetType === "card_statement" && item.targetId === statement.id
+    )));
+    return {
+      directSettlements: current.settlements.filter((item) => item.targetType === "entry" && item.targetId === installmentEntry.id).length,
+      planCount: new Set(statements.map((item) => item.planId)).size,
+      rows: statements.map((item) => ({
+        installmentNumber: item.installmentNumber,
+        installmentCount: item.installmentCount,
+        scheduledOn: item.scheduledOn,
+        statementAmountKrw: item.statementAmountKrw,
+        purchaseEntryId: item.purchaseEntryId,
+      })),
+      totalKrw: statements.reduce((total, item) => total + item.statementAmountKrw, 0),
+      principals: statements.filter((item) => Object.hasOwn(item, "planPrincipalKrw")).map((item) => item.planPrincipalKrw),
+      settlementCount: statementSettlements.filter(Boolean).length,
+      settlementsMatch: statementSettlements.every((settlement, index) => (
+        settlement?.status === "confirmed"
+        && settlement.scheduledOn === statements[index].scheduledOn
+        && settlement.expectedAmountKrw === statements[index].statementAmountKrw
+      )),
+    };
+  }).toEqual({
+    directSettlements: 0,
+    planCount: 1,
+    rows: [
+      { installmentNumber: 1, installmentCount: 3, scheduledOn: "2026-08-12", statementAmountKrw: 41_000, purchaseEntryId: installmentEntry.id },
+      { installmentNumber: 2, installmentCount: 3, scheduledOn: "2026-09-12", statementAmountKrw: 35_500, purchaseEntryId: installmentEntry.id },
+      { installmentNumber: 3, installmentCount: 3, scheduledOn: "2026-10-12", statementAmountKrw: 25_000, purchaseEntryId: installmentEntry.id },
+    ],
+    totalKrw: 101_500,
+    principals: [100_000],
+    settlementCount: 3,
+    settlementsMatch: true,
+  });
+});
+
 test("statistics calendar follows occurrence dates and keeps finance headings concise", async ({ page }) => {
   const seeded = await page.evaluate(async (state) => {
     const currentResponse = await fetch("/api/finance/state");

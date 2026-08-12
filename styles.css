@@ -10438,6 +10438,10 @@ body.is-task-placement-open {
   display: none;
 }
 
+.finance-native-form [data-finance-expense-card-fields]:not([hidden]) {
+  display: contents;
+}
+
 .finance-native-form .button {
   justify-self: start;
 }

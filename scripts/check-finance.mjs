@@ -18,6 +18,7 @@ const {
   financeMonthSummary,
   loanSchedule,
   loanPrincipalKrw,
+  scheduledCardPaymentOn,
   shiftMonthKey,
   splitKrw,
   upcomingSettlements,
@@ -33,6 +34,7 @@ assert.doesNotMatch(financeAppSource, /비용 기준 월|수입 기준 월|환�
 assert.match(financeAppSource, /recognitionMonth:\s*occurredOn\.slice\(0,\s*7\)/, "entry recognition month must follow its occurrence date");
 
 assert.deepEqual(splitKrw(1_000_001, 3), [333_334, 333_334, 333_333]);
+assert.equal(scheduledCardPaymentOn({ cycleEndDay: 31, dueDay: 12, dueMonthOffset: 0 }, "2026-07-20"), "2026-08-12");
 const zeroRateLoanSchedule = loanSchedule({
   openingPrincipalKrw: 12_000_000,
   termMonths: 24,
@@ -900,5 +902,106 @@ assert.deepEqual(validateFinanceState(historicalInstallment), []);
 const mismatchedStatementAdjustment = structuredClone(validState);
 mismatchedStatementAdjustment.cardStatements[0].adjustments = [{ label: "수수료", amountKrw: 1_000 }];
 assert.ok(validateFinanceState(mismatchedStatementAdjustment).some((issue) => issue.code === "statement_component_mismatch"));
+
+const linkedInstallmentState = {
+  ...createEmptyFinanceState(),
+  accounts: [{
+    id: "account-linked-installment",
+    name: "할부 결제 계좌",
+    type: "bank",
+    openingBalanceKrw: 1_000_000,
+    openingOn: "2026-08-01",
+  }],
+  paymentMethods: [{
+    id: "card-linked-installment",
+    name: "할부 카드",
+    type: "credit_card",
+    paymentAccountId: "account-linked-installment",
+  }],
+  entries: [{
+    id: "entry-linked-installment",
+    kind: "expense",
+    title: "노트북",
+    amountKrw: 100_000,
+    occurredOn: "2026-08-01",
+    recognitionMonth: "2026-08",
+    paymentMethodId: "card-linked-installment",
+    cardPaymentType: "installment",
+    status: "confirmed",
+  }],
+  settlements: [{
+    id: "settlement-linked-direct",
+    targetType: "entry",
+    targetId: "entry-linked-installment",
+    expectedAmountKrw: 100_000,
+    scheduledOn: "2026-09-12",
+    status: "canceled",
+  }],
+  cardStatements: [34_000, 34_000, 34_000].map((statementAmountKrw, index) => ({
+    id: `statement-linked-${index + 1}`,
+    paymentMethodId: "card-linked-installment",
+    paymentAccountId: "account-linked-installment",
+    periodStart: "2026-08-01",
+    periodEnd: "2026-08-31",
+    statementOn: "2026-08-31",
+    scheduledOn: `2026-${String(index + 9).padStart(2, "0")}-12`,
+    statementAmountKrw,
+    status: "estimated",
+    source: "opening_installment",
+    planId: "plan-linked-installment",
+    label: "노트북",
+    purchaseEntryId: "entry-linked-installment",
+    ...(index === 0 ? { planPrincipalKrw: 100_000 } : {}),
+    installmentNumber: index + 1,
+    installmentCount: 3,
+    items: [],
+  })),
+};
+assert.deepEqual(validateFinanceState(linkedInstallmentState), []);
+
+const pendingInstallmentState = structuredClone(linkedInstallmentState);
+pendingInstallmentState.cardStatements = [];
+pendingInstallmentState.settlements[0].status = "estimated";
+assert.deepEqual(validateFinanceState(pendingInstallmentState), []);
+
+const invalidCardPaymentTypeContext = structuredClone(pendingInstallmentState);
+invalidCardPaymentTypeContext.entries[0].status = "draft";
+assert.ok(validateFinanceState(invalidCardPaymentTypeContext).some((issue) => issue.code === "invalid_card_payment_type_context"));
+
+const invalidCardPaymentType = structuredClone(pendingInstallmentState);
+invalidCardPaymentType.entries[0].cardPaymentType = "revolving";
+assert.ok(validateFinanceState(invalidCardPaymentType).some((issue) => issue.path.endsWith("cardPaymentType") && issue.code === "invalid_value"));
+
+const incompleteLinkedInstallment = structuredClone(linkedInstallmentState);
+incompleteLinkedInstallment.cardStatements.pop();
+assert.ok(validateFinanceState(incompleteLinkedInstallment).some((issue) => issue.code === "incomplete_opening_installment_plan"));
+
+const inconsistentLinkedInstallmentCount = structuredClone(linkedInstallmentState);
+inconsistentLinkedInstallmentCount.cardStatements[1].installmentCount = 4;
+assert.ok(validateFinanceState(inconsistentLinkedInstallmentCount).some((issue) => issue.code === "installment_count_mismatch"));
+
+const linkedInstallmentWithDirectSettlement = structuredClone(linkedInstallmentState);
+linkedInstallmentWithDirectSettlement.settlements[0].status = "estimated";
+assert.ok(validateFinanceState(linkedInstallmentWithDirectSettlement).some((issue) => issue.code === "direct_settlement_not_canceled"));
+
+const underfundedLinkedInstallment = structuredClone(linkedInstallmentState);
+underfundedLinkedInstallment.cardStatements.forEach((statement) => { statement.statementAmountKrw = 30_000; });
+assert.ok(validateFinanceState(underfundedLinkedInstallment).some((issue) => issue.code === "installment_plan_total_too_small"));
+
+const mismatchedLinkedPrincipal = structuredClone(linkedInstallmentState);
+mismatchedLinkedPrincipal.cardStatements[0].planPrincipalKrw = 99_999;
+assert.ok(validateFinanceState(mismatchedLinkedPrincipal).some((issue) => issue.code === "plan_principal_mismatch"));
+
+const duplicateLinkedPrincipal = structuredClone(linkedInstallmentState);
+duplicateLinkedPrincipal.cardStatements[1].planPrincipalKrw = 100_000;
+assert.ok(validateFinanceState(duplicateLinkedPrincipal).some((issue) => issue.code === "duplicate_plan_principal"));
+
+const duplicateLinkedPlan = structuredClone(linkedInstallmentState);
+duplicateLinkedPlan.cardStatements.push(...linkedInstallmentState.cardStatements.map((statement, index) => ({
+  ...structuredClone(statement),
+  id: `statement-linked-copy-${index + 1}`,
+  planId: "plan-linked-installment-copy",
+})));
+assert.ok(validateFinanceState(duplicateLinkedPlan).some((issue) => issue.code === "multiple_installment_plans"));
 
 console.log("Finance auth, validation, balances, card, loan, fixed-cost, and month-boundary checks passed.");

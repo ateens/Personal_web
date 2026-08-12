@@ -325,6 +325,21 @@ function validateEntries(entries, entryIds, paymentMethods, recurringRuleIds, is
     optionalReference(entry.paymentMethodId, paymentMethodIds, `${path}.paymentMethodId`, issues);
     optionalReference(entry.originalEntryId, entryIds, `${path}.originalEntryId`, issues);
     optionalReference(entry.recurringRuleId, recurringRuleIds, `${path}.recurringRuleId`, issues);
+    if (entry.cardPaymentType !== undefined) {
+      requireEnum(entry.cardPaymentType, ["single", "installment"], `${path}.cardPaymentType`, issues);
+      if (
+        entry.kind !== "expense"
+        || entry.status !== "confirmed"
+        || paymentMethodById.get(entry.paymentMethodId)?.type !== "credit_card"
+      ) {
+        addIssue(
+          issues,
+          `${path}.cardPaymentType`,
+          "invalid_card_payment_type_context",
+          "Card payment type is allowed only on confirmed credit-card expenses.",
+        );
+      }
+    }
     if (entry.source !== undefined) requireEnum(entry.source, ["card_month_total"], `${path}.source`, issues);
     if (entry.source === "card_month_total") {
       if (entry.kind !== "expense" || entry.status !== "confirmed" || paymentMethodById.get(entry.paymentMethodId)?.type !== "credit_card") {
@@ -543,6 +558,7 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
   const activeSettlementsByStatement = new Map();
   const uncanceledSettlementsByStatement = new Map();
   const directSettlementsByEntry = new Map();
+  const openingPlans = new Map();
   settlements.forEach((settlement) => {
     if (settlement.targetType === "card_statement" && settlement.status !== "canceled") {
       appendToMapList(uncanceledSettlementsByStatement, settlement.targetId, settlement);
@@ -580,6 +596,22 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
       ) {
         addIssue(issues, path, "invalid_installment", "Installment number cannot exceed installment count.");
       }
+      if (typeof statement.planId === "string" && statement.planId.trim()) {
+        appendToMapList(openingPlans, statement.planId, { statement, path });
+      }
+    }
+    if (statement.purchaseEntryId !== undefined) {
+      if (statement.source !== "opening_installment") {
+        addIssue(issues, `${path}.purchaseEntryId`, "opening_installment_required", "Linked purchases require an opening installment plan.");
+      } else {
+        requireReference(statement.purchaseEntryId, entryIds, `${path}.purchaseEntryId`, issues);
+      }
+    }
+    if (statement.planPrincipalKrw !== undefined) {
+      if (statement.source !== "opening_installment") {
+        addIssue(issues, `${path}.planPrincipalKrw`, "opening_installment_required", "Plan principal is allowed only on opening installments.");
+      }
+      requirePositiveMoney(statement.planPrincipalKrw, `${path}.planPrincipalKrw`, issues);
     }
     requireDate(statement.periodStart, `${path}.periodStart`, issues);
     requireDate(statement.periodEnd, `${path}.periodEnd`, issues);
@@ -704,6 +736,114 @@ function validateCardStatements(statements, paymentMethods, entries, settlements
     }
     if (!Number.isSafeInteger(allocation.total) || allocation.total !== entry?.amountKrw) {
       addIssue(issues, "state.cardStatements", "installment_total_mismatch", "Installment amounts must equal the linked entry amount.");
+    }
+  }
+  const linkedPlanIdsByEntry = new Map();
+  for (const [planId, rows] of openingPlans) {
+    const firstPath = rows[0].path;
+    const principalRows = rows.filter(({ statement }) => statement.planPrincipalKrw !== undefined);
+    if (principalRows.length > 1) {
+      addIssue(
+        issues,
+        `${principalRows[1].path}.planPrincipalKrw`,
+        "duplicate_plan_principal",
+        "An installment plan may store its principal only once.",
+      );
+    }
+
+    const linkedRows = rows.filter(({ statement }) => statement.purchaseEntryId !== undefined);
+    if (!linkedRows.length) continue;
+
+    const purchaseEntryIds = new Set(rows.map(({ statement }) => statement.purchaseEntryId));
+    const planPaymentMethodIds = new Set(rows.map(({ statement }) => statement.paymentMethodId));
+    const installmentCounts = new Set(rows.map(({ statement }) => statement.installmentCount));
+    if (purchaseEntryIds.size !== 1 || purchaseEntryIds.has(undefined)) {
+      addIssue(issues, firstPath, "installment_purchase_mismatch", "Every row in a linked installment plan must reference the same purchase.");
+    }
+    if (planPaymentMethodIds.size !== 1) {
+      addIssue(issues, firstPath, "installment_method_mismatch", "Every row in an installment plan must use the same credit card.");
+    }
+    if (installmentCounts.size !== 1) {
+      addIssue(issues, firstPath, "installment_count_mismatch", "Installment counts must remain consistent within a plan.");
+    }
+
+    const purchaseEntryId = purchaseEntryIds.size === 1 ? [...purchaseEntryIds][0] : undefined;
+    const purchaseEntry = entryById.get(purchaseEntryId);
+    const paymentMethodId = planPaymentMethodIds.size === 1 ? [...planPaymentMethodIds][0] : undefined;
+    if (
+      purchaseEntry
+      && (
+        purchaseEntry.kind !== "expense"
+        || purchaseEntry.status !== "confirmed"
+        || purchaseEntry.cardPaymentType !== "installment"
+      )
+    ) {
+      addIssue(
+        issues,
+        `${firstPath}.purchaseEntryId`,
+        "installment_purchase_required",
+        "Linked plans require a confirmed expense marked as a card installment.",
+      );
+    }
+    if (purchaseEntry && paymentMethodId !== undefined && purchaseEntry.paymentMethodId !== paymentMethodId) {
+      addIssue(
+        issues,
+        `${firstPath}.purchaseEntryId`,
+        "card_entry_method_mismatch",
+        "The linked purchase and installment plan must use the same credit card.",
+      );
+    }
+
+    const installmentCount = installmentCounts.size === 1 ? [...installmentCounts][0] : undefined;
+    if (Number.isSafeInteger(installmentCount) && installmentCount > 0 && installmentCount <= 120) {
+      const installmentNumbers = rows.map(({ statement }) => statement.installmentNumber);
+      const uniqueNumbers = new Set(installmentNumbers);
+      if (uniqueNumbers.size !== installmentNumbers.length) {
+        addIssue(issues, firstPath, "duplicate_installment", "An installment number may appear only once within a plan.");
+      }
+      if (
+        rows.length !== installmentCount
+        || !Array.from({ length: installmentCount }, (_, index) => index + 1).every((number) => uniqueNumbers.has(number))
+      ) {
+        addIssue(issues, firstPath, "incomplete_opening_installment_plan", "Linked installment plans require every installment from 1 through the installment count.");
+      }
+    }
+
+    if (purchaseEntry) {
+      let statementTotalKrw = 0;
+      for (const { statement } of rows) {
+        statementTotalKrw += statement.statementAmountKrw;
+      }
+      if (!Number.isSafeInteger(statementTotalKrw) || statementTotalKrw < purchaseEntry.amountKrw) {
+        addIssue(
+          issues,
+          firstPath,
+          "installment_plan_total_too_small",
+          "Installment payments must cover at least the original purchase amount.",
+        );
+      }
+      if (principalRows.length === 1 && principalRows[0].statement.planPrincipalKrw !== purchaseEntry.amountKrw) {
+        addIssue(
+          issues,
+          `${principalRows[0].path}.planPrincipalKrw`,
+          "plan_principal_mismatch",
+          "The stored plan principal must equal the linked purchase amount.",
+        );
+      }
+      appendToMapList(linkedPlanIdsByEntry, purchaseEntry.id, planId);
+      if (directSettlementsByEntry.has(purchaseEntry.id)) {
+        addIssue(
+          issues,
+          `${firstPath}.purchaseEntryId`,
+          "direct_settlement_not_canceled",
+          "Linked installment purchases must not retain an active direct settlement.",
+        );
+      }
+    }
+  }
+  for (const planIds of linkedPlanIdsByEntry.values()) {
+    if (planIds.length > 1) {
+      addIssue(issues, "state.cardStatements", "multiple_installment_plans", "A purchase may belong to only one installment plan.");
     }
   }
 }
