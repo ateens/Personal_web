@@ -17,6 +17,7 @@ async function createAccount(page, request, { name = "생활비 통장", balance
   await form.locator('[name="name"]').fill(name);
   await form.locator('[name="institution"]').fill("테스트 은행");
   await form.locator('[name="openingBalanceKrw"]').fill(balance);
+  await expect(form.locator('[name="openingBalanceKrw"]')).toHaveValue(Number(balance).toLocaleString("ko-KR"));
   await form.getByRole("button", { name: "계좌 저장" }).click();
   await expect.poll(async () => (await fixtureSnapshot(request)).financeState.accounts.some((item) => item.name === name)).toBe(true);
   await expect(page.locator('[data-finance-screen="dashboard"]')).toHaveAttribute("aria-busy", "false");
@@ -369,6 +370,15 @@ test("credit-card workspace shows current debt and pays a confirmed statement on
   await expect(plan).not.toHaveAttribute("open", "");
   await plan.locator("[data-finance-installment-toggle]").click();
   await expect(plan).toHaveAttribute("open", "");
+  const installmentVisual = await plan.evaluate((element) => ({
+    listBackground: getComputedStyle(element.parentElement).backgroundColor,
+    planBackground: getComputedStyle(element).backgroundColor,
+    rowDividers: [...element.querySelectorAll(".finance-installment-months > div")].map((row) => getComputedStyle(row).backgroundImage),
+  }));
+  expect(installmentVisual.listBackground).toBe("rgba(0, 0, 0, 0)");
+  expect(installmentVisual.planBackground).toBe("rgba(0, 0, 0, 0)");
+  expect(installmentVisual.rowDividers.slice(0, -1).every((background) => background !== "none")).toBe(true);
+  expect(installmentVisual.rowDividers.at(-1)).toBe("none");
   await expect(plan.getByText("총 금액", { exact: true })).toBeVisible();
   await expect(plan).toContainText("₩600,000");
   await expect(plan.getByText("남은 금액", { exact: true })).toBeVisible();
@@ -378,10 +388,18 @@ test("credit-card workspace shows current debt and pays a confirmed statement on
   await expect(plan).toContainText(/3\/3[\s\S]*2026-09-12[\s\S]*₩200,000/);
 
   const statementForm = card.locator('form[data-form="finance-card-statement"]');
+  const [workspaceBox, statementBox] = await Promise.all([
+    card.locator(".finance-card-workspace-body").boundingBox(),
+    statementForm.locator("xpath=..").boundingBox(),
+  ]);
+  expect(Math.abs(statementBox.x - workspaceBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(statementBox.width - workspaceBox.width)).toBeLessThanOrEqual(1);
   await statementForm.locator("xpath=..").locator(":scope > summary").click();
+  await expect(card.locator('input[type="number"]')).toHaveCount(0);
   await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "7월 일시불 이용액" }).locator("strong")).toHaveText("₩150,000");
   await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "할부 총합" }).locator("strong")).toHaveText("₩200,000");
   await statementForm.locator("[data-finance-statement-adjustment-amount]").fill("10000");
+  await expect(statementForm.locator("[data-finance-statement-adjustment-amount]")).toHaveValue("10,000");
   await expect(statementForm.locator(".finance-form-fact").filter({ hasText: "총 납부액" }).locator("strong")).toHaveText("₩360,000");
 
   const beforePay = await fixtureSnapshot(request);

@@ -10626,13 +10626,21 @@ body.is-task-placement-open {
 
 .finance-installment-plans {
   display: grid;
-  gap: 1px;
+  gap: 0;
   margin-top: 14px;
-  background: var(--line);
+  background: transparent;
 }
 
 .finance-installment-plan {
-  background: var(--panel);
+  background-color: transparent;
+  background-image: var(--divider-h);
+  background-position: center bottom;
+  background-repeat: no-repeat;
+  background-size: 54% 1px;
+}
+
+.finance-installment-plan:last-child {
+  background-image: none;
 }
 
 .finance-installment-plan > summary {
@@ -10694,6 +10702,11 @@ body.is-task-placement-open {
   background-image: var(--divider-h);
   background-position: center bottom;
   background-repeat: no-repeat;
+  background-size: 54% 1px;
+}
+
+.finance-installment-months > div:last-child {
+  background-image: none;
 }
 
 .finance-installment-months small {

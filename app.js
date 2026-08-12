@@ -2374,10 +2374,7 @@ function renderFinanceCardStatementForm(state, method) {
           ${financeDateInput("사용 기간 끝", "periodEnd", periodEnd)}
           ${financeDateInput("실제 출금일", "postedOn", scheduledOn)}
           ${financeTextInput("기타 항목", "adjustmentLabel", { placeholder: "예: 카드론·수수료" })}
-          <label class="field">
-            <span>기타 금액</span>
-            <input class="input" type="number" name="adjustmentAmountKrw" min="1" max="9007199254740991" step="1" inputmode="numeric" data-finance-statement-adjustment-amount>
-          </label>
+          ${financeMoneyInput("기타 금액", "adjustmentAmountKrw", { required: false, attributes: "data-finance-statement-adjustment-amount" })}
         </div>
         <p class="finance-form-fact finance-statement-total">
           <span>총 납부액</span>
@@ -2441,9 +2438,7 @@ function renderFinanceCardWorkspace(state, method, open) {
           ${renderFinanceMetric("이번달 현황", formatFinanceKrw(currentUsageKrw), `${financePickerMonthLabel(financeModel.shiftMonthKey(month, 1))} 납부 예정`, "spent")}
           ${renderFinanceMetric("총 사용액", formatFinanceKrw(totalUsageKrw), "미납 일시불 · 할부", "scheduled")}
         </div>
-        <div class="finance-form-grid">
-          ${renderFinanceCardStatementForm(state, method)}
-        </div>
+        ${renderFinanceCardStatementForm(state, method)}
         <section class="finance-card-section" aria-labelledby="finance-card-records-${esc(method.id)}">
           <h3 id="finance-card-records-${esc(method.id)}">사용 내역</h3>
           <div class="finance-record-list">
@@ -3016,6 +3011,51 @@ function formatFinanceKrw(value) {
   return `₩${FINANCE_KRW_FORMATTER.format(Number(value) || 0)}`;
 }
 
+function formatFinanceInteger(value) {
+  const raw = String(value ?? "").replaceAll(",", "").trim();
+  if (!/^-?\d*$/.test(raw) || raw === "" || raw === "-") return raw;
+  const sign = raw.startsWith("-") ? "-" : "";
+  const digits = raw.replace("-", "").replace(/^0+(?=\d)/, "");
+  return `${sign}${digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
+}
+
+function financeIntegerValue(value) {
+  const raw = String(value ?? "").replaceAll(",", "").trim();
+  if (!/^-?\d+$/.test(raw)) return NaN;
+  const number = Number(raw);
+  return Number.isSafeInteger(number) ? number : NaN;
+}
+
+function formatFinanceIntegerInput(input) {
+  const current = input.value;
+  const caret = input.selectionStart;
+  const raw = current.replaceAll(",", "");
+  const valid = (input.hasAttribute("data-finance-allow-negative") ? /^-?\d*$/ : /^\d*$/).test(raw);
+  if (!valid) {
+    input.setCustomValidity("숫자만 입력해주세요.");
+    return;
+  }
+  input.value = formatFinanceInteger(raw);
+  const value = financeIntegerValue(input.value);
+  const min = Number(input.dataset.financeMin);
+  const max = Number(input.dataset.financeMax);
+  input.setCustomValidity(
+    input.value && input.value !== "-" && (
+      !Number.isSafeInteger(value)
+      || (Number.isFinite(min) && value < min)
+      || (Number.isFinite(max) && value > max)
+    ) ? "입력 가능한 숫자 범위를 확인해주세요." : "",
+  );
+  if (!Number.isInteger(caret)) return;
+  let digits = current.slice(0, caret).replace(/\D/g, "").length;
+  let nextCaret = current.slice(0, caret).includes("-") ? 1 : 0;
+  while (digits > 0 && nextCaret < input.value.length) {
+    if (/\d/.test(input.value[nextCaret])) digits -= 1;
+    nextCaret += 1;
+  }
+  input.setSelectionRange(nextCaret, nextCaret);
+}
+
 function financeAccountTypeLabel(type) {
   return { bank: "은행 계좌", cash: "현금", e_money: "간편결제 잔액" }[type] || "계좌";
 }
@@ -3124,10 +3164,12 @@ function financeTextInput(label, name, options = {}) {
 }
 
 function financeMoneyInput(label, name, options = {}) {
+  const min = options.allowNegative ? -Number.MAX_SAFE_INTEGER : 1;
+  const required = options.required ?? true;
   return `
     <label class="field">
       <span>${esc(label)}</span>
-      <input class="input" type="number" name="${esc(name)}" value="${esc(options.value ?? "")}" min="${options.allowNegative ? "-9007199254740991" : "1"}" max="9007199254740991" step="1" inputmode="numeric" required>
+      <input class="input" type="text" name="${esc(name)}" value="${esc(formatFinanceInteger(options.value ?? ""))}" inputmode="${options.allowNegative ? "decimal" : "numeric"}" pattern="${options.allowNegative ? "-?[0-9,]+" : "[0-9,]+"}" data-finance-integer-input data-finance-min="${esc(min)}" data-finance-max="${esc(Number.MAX_SAFE_INTEGER)}" ${options.allowNegative ? "data-finance-allow-negative" : ""} ${required ? "required" : ""} ${options.attributes || ""}>
     </label>
   `;
 }
@@ -3136,7 +3178,7 @@ function financeNumberInput(label, name, value, min, max) {
   return `
     <label class="field">
       <span>${esc(label)}</span>
-      <input class="input" type="number" name="${esc(name)}" value="${esc(value)}" min="${esc(min)}" max="${esc(max)}" step="1" inputmode="numeric" required>
+      <input class="input" type="text" name="${esc(name)}" value="${esc(formatFinanceInteger(value))}" inputmode="numeric" pattern="[0-9,]+" data-finance-integer-input data-finance-min="${esc(min)}" data-finance-max="${esc(max)}" required>
     </label>
   `;
 }
@@ -3813,7 +3855,7 @@ async function submitFinanceCardStatement(form) {
     ), 0);
     const adjustmentLabelInput = financeFormText(form, "adjustmentLabel");
     const adjustmentRaw = financeFormText(form, "adjustmentAmountKrw");
-    const adjustmentAmountKrw = adjustmentRaw ? Number(adjustmentRaw) : 0;
+    const adjustmentAmountKrw = adjustmentRaw ? financeIntegerValue(adjustmentRaw) : 0;
     const adjustmentLabel = adjustmentLabelInput || "기타";
     if (adjustmentLabelInput && !adjustmentRaw) throw new Error("기타 항목의 금액을 입력해주세요.");
     if (adjustmentRaw && (!Number.isSafeInteger(adjustmentAmountKrw) || adjustmentAmountKrw <= 0)) {
@@ -4186,9 +4228,14 @@ function financeFormTexts(form, name) {
 }
 
 function financeFormInteger(form, name) {
-  const raw = financeFormText(form, name);
-  const value = Number(raw);
+  const value = financeIntegerValue(financeFormText(form, name));
   if (!Number.isSafeInteger(value)) throw new Error("금액과 숫자는 원 단위 정수로 입력해주세요.");
+  const control = form.elements.namedItem(name);
+  const min = Number(control?.dataset?.financeMin);
+  const max = Number(control?.dataset?.financeMax);
+  if ((Number.isFinite(min) && value < min) || (Number.isFinite(max) && value > max)) {
+    throw new Error("입력 가능한 숫자 범위를 확인해주세요.");
+  }
   return value;
 }
 
@@ -10323,10 +10370,13 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const financeIntegerInput = event.target.closest("[data-finance-integer-input]");
+  if (financeIntegerInput && !event.isComposing) formatFinanceIntegerInput(financeIntegerInput);
+
   const financeStatementAdjustment = event.target.closest("[data-finance-statement-adjustment-amount]");
   if (financeStatementAdjustment) {
     const total = financeStatementAdjustment.form?.querySelector("[data-finance-statement-total]");
-    const amount = Number(financeStatementAdjustment.value || 0);
+    const amount = financeIntegerValue(financeStatementAdjustment.value);
     if (total) total.textContent = formatFinanceKrw(Number(total.dataset.baseAmount || 0) + (Number.isSafeInteger(amount) && amount > 0 ? amount : 0));
     return;
   }
@@ -10477,6 +10527,22 @@ function applyTaskFieldValue(task, fieldName, value) {
 }
 
 function handleBeforeInput(event) {
+  const financeIntegerInput = event.target.closest("[data-finance-integer-input]");
+  if (
+    financeIntegerInput
+    && event.inputType === "deleteContentBackward"
+    && financeIntegerInput.selectionStart === financeIntegerInput.selectionEnd
+    && financeIntegerInput.selectionStart > 1
+    && financeIntegerInput.value[financeIntegerInput.selectionStart - 1] === ","
+  ) {
+    event.preventDefault();
+    const end = financeIntegerInput.selectionStart;
+    financeIntegerInput.value = `${financeIntegerInput.value.slice(0, end - 2)}${financeIntegerInput.value.slice(end)}`;
+    financeIntegerInput.setSelectionRange(end - 2, end - 2);
+    financeIntegerInput.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+
   if (handleSlashMenuBeforeInput(event)) return;
 
   const blockContent = event.target.closest("[data-block-content]");
@@ -22353,12 +22419,13 @@ async function flushRemoteStateSave(options = {}) {
     || remoteStateSaveBlocked
     || remoteStateSaveInFlight
     || !remoteStateSavePending
-  ) return;
+  ) return null;
   remoteStateSavePending = false;
   remoteStateSaveInFlight = true;
   let retryLater = false;
+  let saved = null;
   try {
-    const saved = await saveStateRemoteNow(options);
+    saved = await saveStateRemoteNow(options);
     if (!saved && databaseBackendStatus.connected) {
       remoteStateSavePending = hasAutomaticallySaveableLocalOperations();
       retryLater = Boolean(
@@ -22380,6 +22447,7 @@ async function flushRemoteStateSave(options = {}) {
       queueRemoteStateSave({ immediate: true });
     }
   }
+  return saved;
 }
 
 function handleVisibilityStateSave() {
@@ -22491,7 +22559,9 @@ async function saveStateRemoteNow(options = {}) {
     };
     if (terminalConflict) {
       if (operation?.entityType !== "resource") {
-        await reloadRemoteStateAfterConflict({ force: true, silent: true });
+        if (options.preserveConflict !== true) {
+          await reloadRemoteStateAfterConflict({ force: true, silent: true });
+        }
         return null;
       }
       await markLocalResourceOperations("conflict", {
