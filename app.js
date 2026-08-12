@@ -2434,6 +2434,7 @@ function renderFinanceCardWorkspace(state, method, open) {
           ${renderFinanceMetric("이번달 현황", formatFinanceKrw(currentUsageKrw), `${financePickerMonthLabel(financeModel.shiftMonthKey(month, 1))} 납부 예정`, "spent")}
           ${renderFinanceMetric("총 사용액", formatFinanceKrw(totalUsageKrw), "미납 일시불 · 할부", "scheduled")}
         </div>
+        ${renderFinanceCardInstallmentSetup(state, method)}
         ${renderFinanceCardStatementForm(state, method)}
         <section class="finance-card-section" aria-labelledby="finance-card-records-${esc(method.id)}">
           <h3 id="finance-card-records-${esc(method.id)}">사용 내역</h3>
@@ -2452,85 +2453,6 @@ function renderFinanceCardWorkspace(state, method, open) {
   `;
 }
 
-function renderFinanceInstallmentPlan(plan) {
-  return `
-    <details class="finance-installment-plan" data-finance-installment-plan="${esc(plan.planId)}">
-      <summary data-finance-installment-toggle>
-        <span><strong>${esc(plan.label)}</strong><small>${plan.remainingCount}회 남음 · ${esc(plan.firstOn)}~${esc(plan.lastOn)}</small></span>
-        <span class="finance-installment-plan-balance">${esc(formatFinanceKrw(plan.remainingKrw))}</span>
-      </summary>
-      <div class="finance-installment-plan-body">
-        <div class="finance-statement-breakdown">
-          ${plan.principalKrw === null ? financeFormFact("총 금액", formatFinanceKrw(plan.totalKrw)) : `
-            ${financeFormFact("원금", formatFinanceKrw(plan.principalKrw))}
-            ${financeFormFact("수수료", formatFinanceKrw(plan.feeKrw))}
-            ${financeFormFact("총 납부액", formatFinanceKrw(plan.totalKrw))}
-          `}
-        </div>
-        <div>
-          ${financeFormFact("납부 금액", formatFinanceKrw(plan.paidKrw))}
-          ${financeFormFact("남은 금액", formatFinanceKrw(plan.remainingKrw))}
-        </div>
-        <div class="finance-installment-months">
-          ${plan.statements.map((statement) => `
-            <div>
-              <span>${esc(`${statement.installmentNumber}/${statement.installmentCount}`)} · ${esc(statement.scheduledOn)}</span>
-              <small>${esc(financeSettlementStatusLabel(statement.status))}</small>
-              <strong>${esc(formatFinanceKrw(statement.statementAmountKrw))}</strong>
-            </div>
-          `).join("")}
-        </div>
-      </div>
-    </details>
-  `;
-}
-
-function financeCardInstallmentPlans(state, methodId) {
-  const plans = new Map();
-  for (const statement of state.cardStatements.filter((item) => item.paymentMethodId === methodId && item.source === "opening_installment")) {
-    const plan = plans.get(statement.planId) || { planId: statement.planId, label: statement.label || "할부", statements: [] };
-    plan.statements.push(statement);
-    plans.set(statement.planId, plan);
-  }
-  return [...plans.values()].map((plan) => {
-    plan.statements.sort((left, right) => left.installmentNumber - right.installmentNumber || left.scheduledOn.localeCompare(right.scheduledOn));
-    plan.totalKrw = plan.statements.reduce((total, item) => total + item.statementAmountKrw, 0);
-    plan.paidKrw = plan.statements.filter((item) => ["paid", "historical_paid"].includes(item.status)).reduce((total, item) => total + item.statementAmountKrw, 0);
-    plan.remainingKrw = plan.totalKrw - plan.paidKrw;
-    plan.remainingCount = plan.statements.filter((item) => ["estimated", "confirmed"].includes(item.status)).length;
-    plan.firstOn = plan.statements[0]?.scheduledOn || "";
-    plan.lastOn = plan.statements.at(-1)?.scheduledOn || "";
-    return plan;
-  }).sort((left, right) => left.firstOn.localeCompare(right.firstOn) || left.planId.localeCompare(right.planId));
-}
-
-function financeCardUsageEntries(state, methodId, month) {
-  return state.entries
-    .filter((entry) => (
-      entry.paymentMethodId === methodId
-      && entry.recognitionMonth === month
-      && entry.status === "confirmed"
-      && ["expense", "refund"].includes(entry.kind)
-    ))
-        ${renderFinanceCardInstallmentSetup(state, method)}
-    .sort((left, right) => right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id));
-}
-
-function financeCardUsageKrw(state, methodId, month) {
-  return financeCardUsageEntries(state, methodId, month).reduce((total, entry) => (
-    total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
-  ), 0);
-}
-
-function financeCardTotalUsageKrw(state, methodId) {
-  const entryById = new Map(state.entries.map((entry) => [entry.id, entry]));
-  const entryTotal = state.settlements.filter((settlement) => (
-    settlement.targetType === "entry"
-    && ["estimated", "confirmed"].includes(settlement.status)
-    && entryById.get(settlement.targetId)?.paymentMethodId === methodId
-  )).reduce((total, settlement) => {
-    const entry = entryById.get(settlement.targetId);
-    return total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw);
 function renderFinanceCardInstallmentSetup(state, method) {
   const entries = financePendingCardInstallmentEntries(state, method.id);
   if (!entries.length) return "";
@@ -2587,6 +2509,104 @@ function financeCardInstallmentRows(method, entry, count, amounts) {
   });
 }
 
+function renderFinanceInstallmentPlan(plan) {
+  return `
+    <details class="finance-installment-plan" data-finance-installment-plan="${esc(plan.planId)}">
+      <summary data-finance-installment-toggle>
+        <span><strong>${esc(plan.label)}</strong><small>${plan.remainingCount}회 남음 · ${esc(plan.firstOn)}~${esc(plan.lastOn)}</small></span>
+        <span class="finance-installment-plan-balance">${esc(formatFinanceKrw(plan.remainingKrw))}</span>
+      </summary>
+      <div class="finance-installment-plan-body">
+        <div class="finance-statement-breakdown">
+          ${plan.principalKrw === null ? financeFormFact("총 금액", formatFinanceKrw(plan.totalKrw)) : `
+            ${financeFormFact("원금", formatFinanceKrw(plan.principalKrw))}
+            ${financeFormFact("수수료", formatFinanceKrw(plan.feeKrw))}
+            ${financeFormFact("총 납부액", formatFinanceKrw(plan.totalKrw))}
+          `}
+        </div>
+        <div>
+          ${financeFormFact("납부 금액", formatFinanceKrw(plan.paidKrw))}
+          ${financeFormFact("남은 금액", formatFinanceKrw(plan.remainingKrw))}
+        </div>
+        <div class="finance-installment-months">
+          ${plan.statements.map((statement) => `
+            <div>
+              <span>${esc(`${statement.installmentNumber}/${statement.installmentCount}`)} · ${esc(statement.scheduledOn)}</span>
+              <small>${esc(financeSettlementStatusLabel(statement.status))}</small>
+              <strong>${esc(formatFinanceKrw(statement.statementAmountKrw))}</strong>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function financeCardInstallmentPlans(state, methodId) {
+  const plans = new Map();
+  for (const statement of state.cardStatements.filter((item) => item.paymentMethodId === methodId && item.source === "opening_installment")) {
+    const plan = plans.get(statement.planId) || { planId: statement.planId, label: statement.label || "할부", statements: [] };
+    plan.statements.push(statement);
+    plans.set(statement.planId, plan);
+  }
+  return [...plans.values()].map((plan) => {
+    plan.statements.sort((left, right) => left.installmentNumber - right.installmentNumber || left.scheduledOn.localeCompare(right.scheduledOn));
+    plan.totalKrw = plan.statements.reduce((total, item) => total + item.statementAmountKrw, 0);
+    const principalStatement = plan.statements.find((item) => Number.isSafeInteger(item.planPrincipalKrw));
+    const purchaseEntryId = plan.statements.find((item) => item.purchaseEntryId)?.purchaseEntryId;
+    const purchaseEntry = state.entries.find((item) => item.id === purchaseEntryId);
+    plan.principalKrw = principalStatement?.planPrincipalKrw ?? purchaseEntry?.amountKrw ?? null;
+    plan.feeKrw = plan.principalKrw === null ? null : plan.totalKrw - plan.principalKrw;
+    plan.paidKrw = plan.statements.filter((item) => ["paid", "historical_paid"].includes(item.status)).reduce((total, item) => total + item.statementAmountKrw, 0);
+    plan.remainingKrw = plan.totalKrw - plan.paidKrw;
+    plan.remainingCount = plan.statements.filter((item) => ["estimated", "confirmed"].includes(item.status)).length;
+    plan.firstOn = plan.statements[0]?.scheduledOn || "";
+    plan.lastOn = plan.statements.at(-1)?.scheduledOn || "";
+    return plan;
+  }).sort((left, right) => left.firstOn.localeCompare(right.firstOn) || left.planId.localeCompare(right.planId));
+}
+
+function financeCardUsageEntries(state, methodId, month) {
+  return state.entries
+    .filter((entry) => (
+      entry.paymentMethodId === methodId
+      && entry.recognitionMonth === month
+      && entry.status === "confirmed"
+      && ["expense", "refund"].includes(entry.kind)
+    ))
+    .sort((left, right) => right.occurredOn.localeCompare(left.occurredOn) || right.id.localeCompare(left.id));
+}
+
+function financeCardUsageKrw(state, methodId, month) {
+  return financeCardUsageEntries(state, methodId, month).reduce((total, entry) => (
+    total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw)
+  ), 0);
+}
+
+function financePendingCardInstallmentEntries(state, methodId) {
+  const configuredEntryIds = new Set(state.cardStatements
+    .filter((statement) => statement.source === "opening_installment" && statement.purchaseEntryId)
+    .map((statement) => statement.purchaseEntryId));
+  return state.entries
+    .filter((entry) => (
+      entry.paymentMethodId === methodId
+      && entry.kind === "expense"
+      && entry.status === "confirmed"
+      && entry.cardPaymentType === "installment"
+      && !configuredEntryIds.has(entry.id)
+    ))
+    .sort((left, right) => left.occurredOn.localeCompare(right.occurredOn) || left.id.localeCompare(right.id));
+}
+
+function financeCardTotalUsageKrw(state, methodId) {
+  const entryById = new Map(state.entries.map((entry) => [entry.id, entry]));
+  const entryTotal = state.settlements.filter((settlement) => (
+    settlement.targetType === "entry"
+    && ["estimated", "confirmed"].includes(settlement.status)
+    && entryById.get(settlement.targetId)?.paymentMethodId === methodId
+  )).reduce((total, settlement) => {
+    const entry = entryById.get(settlement.targetId);
+    return total + (entry.kind === "refund" ? -entry.amountKrw : entry.amountKrw);
   }, 0);
   const statementTotal = state.cardStatements.filter((statement) => (
     statement.paymentMethodId === methodId
@@ -2626,11 +2646,6 @@ function renderFinancePaymentMethodForm(state, method = null, group = "direct") 
     ? [["credit_card", "신용카드"]]
     : [["debit_card", "체크카드"], ["cash", "현금"], ["bank_transfer", "계좌이체"], ["other", "기타 수단"]];
   return `
-    const principalStatement = plan.statements.find((item) => Number.isSafeInteger(item.planPrincipalKrw));
-    const purchaseEntryId = plan.statements.find((item) => item.purchaseEntryId)?.purchaseEntryId;
-    const purchaseEntry = state.entries.find((item) => item.id === purchaseEntryId);
-    plan.principalKrw = principalStatement?.planPrincipalKrw ?? purchaseEntry?.amountKrw ?? null;
-    plan.feeKrw = plan.principalKrw === null ? null : plan.totalKrw - plan.principalKrw;
     <form data-form="finance-payment-method" class="finance-native-form">
       <input type="hidden" name="entityId" value="${esc(method?.id || "")}">
       <div class="field-grid">
@@ -2657,21 +2672,6 @@ function renderFinancePaymentMethodForm(state, method = null, group = "direct") 
 
 function renderFinanceLoanForm(loan = null) {
   return `
-function financePendingCardInstallmentEntries(state, methodId) {
-  const configuredEntryIds = new Set(state.cardStatements
-    .filter((statement) => statement.source === "opening_installment" && statement.purchaseEntryId)
-    .map((statement) => statement.purchaseEntryId));
-  return state.entries
-    .filter((entry) => (
-      entry.paymentMethodId === methodId
-      && entry.kind === "expense"
-      && entry.status === "confirmed"
-      && entry.cardPaymentType === "installment"
-      && !configuredEntryIds.has(entry.id)
-    ))
-    .sort((left, right) => left.occurredOn.localeCompare(right.occurredOn) || left.id.localeCompare(right.id));
-}
-
     <form data-form="finance-loan" class="finance-native-form">
       <input type="hidden" name="entityId" value="${esc(loan?.id || "")}">
       <p class="finance-form-note">남은 대출 규모를 확인하기 위한 항목입니다. 실제 납입은 고정비에서 관리합니다.</p>
@@ -3755,6 +3755,10 @@ async function submitFinanceExpense(form) {
     if (!method) throw new Error("결제수단을 다시 선택해주세요.");
     const amountKrw = financeFormPositiveMoney(form, "amountKrw");
     const occurredOn = financeFormText(form, "occurredOn");
+    const cardPaymentType = method.type === "credit_card" ? financeFormText(form, "cardPaymentType") : "";
+    if (method.type === "credit_card" && !["single", "installment"].includes(cardPaymentType)) {
+      throw new Error("카드 결제 방식을 다시 선택해주세요.");
+    }
     const entry = compactFinanceEntity({
       id: financeEntityId("entry"),
       kind: "expense",
@@ -3764,6 +3768,7 @@ async function submitFinanceExpense(form) {
       recognitionMonth: occurredOn.slice(0, 7),
       category: financeFormText(form, "category"),
       paymentMethodId: method.id,
+      cardPaymentType,
       status: "confirmed",
     });
     nextState.entries.push(entry);
@@ -3827,10 +3832,6 @@ async function submitFinanceRefund(form) {
   return runFinanceFormMutation(form, (nextState) => {
     const original = nextState.entries.find((item) => item.id === financeFormText(form, "originalEntryId"));
     if (!original || original.kind !== "expense") throw new Error("원래 쓴 기록을 다시 선택해주세요.");
-    const cardPaymentType = method.type === "credit_card" ? financeFormText(form, "cardPaymentType") : "";
-    if (method.type === "credit_card" && !["single", "installment"].includes(cardPaymentType)) {
-      throw new Error("카드 결제 방식을 다시 선택해주세요.");
-    }
     const amountKrw = financeFormPositiveMoney(form, "amountKrw");
     if (amountKrw > financeRefundableAmount(nextState, original)) {
       throw new Error("남은 환불 가능 금액보다 큰 금액은 저장할 수 없습니다.");
@@ -3840,7 +3841,6 @@ async function submitFinanceRefund(form) {
     const entry = compactFinanceEntity({
       id: financeEntityId("entry"),
       kind: "refund",
-      cardPaymentType,
       title: `${original.title} 환불`,
       amountKrw,
       occurredOn,
@@ -3902,6 +3902,71 @@ async function submitFinanceTransfer(form) {
       status: "confirmed",
     }));
   }, "계좌 이동을 저장했습니다. 수입·지출 통계에는 넣지 않습니다.");
+}
+
+async function submitFinanceCardInstallmentSetup(form) {
+  return runFinanceFormMutation(form, (nextState) => {
+    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
+    const entry = nextState.entries.find((item) => item.id === financeFormText(form, "entryId"));
+    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("신용카드와 출금 계좌를 다시 확인해주세요.");
+    if (
+      entry?.kind !== "expense"
+      || entry.status !== "confirmed"
+      || entry.paymentMethodId !== method.id
+      || entry.cardPaymentType !== "installment"
+    ) {
+      throw new Error("할부로 등록한 사용 내역을 다시 선택해주세요.");
+    }
+    if (nextState.cardStatements.some((statement) => statement.source === "opening_installment" && statement.purchaseEntryId === entry.id)) {
+      throw new Error("이미 할부 일정이 설정된 사용 내역입니다.");
+    }
+    if (nextState.settlements.some((settlement) => settlement.targetType === "entry" && settlement.targetId === entry.id && settlement.status !== "canceled")) {
+      throw new Error("할부 사용 내역에는 개별 출금 일정이 없어야 합니다.");
+    }
+    const installmentCount = financeFormInteger(form, "installmentCount");
+    if (installmentCount < 2 || installmentCount > 120) throw new Error("할부 개월은 2~120개월이어야 합니다.");
+    const amounts = financeFormTexts(form, "paymentAmountKrw").map(financeIntegerValue);
+    if (amounts.length !== installmentCount || amounts.some((amount) => !Number.isSafeInteger(amount) || amount <= 0)) {
+      throw new Error("각 월의 수수료 포함 납부액을 모두 입력해주세요.");
+    }
+    const totalAmountKrw = amounts.reduce((total, amount) => total + amount, 0);
+    if (!Number.isSafeInteger(totalAmountKrw) || totalAmountKrw < entry.amountKrw) {
+      throw new Error("총 납부액은 원금보다 작을 수 없습니다.");
+    }
+    const rows = financeCardInstallmentRows(method, entry, installmentCount, amounts);
+    if (rows.length !== installmentCount) throw new Error("카드 납부일 설정을 확인해주세요.");
+    const planId = financeEntityId("installment-plan");
+    for (const row of rows) {
+      const statement = {
+        id: financeEntityId("statement"),
+        paymentMethodId: method.id,
+        paymentAccountId: method.paymentAccountId,
+        periodStart: entry.occurredOn,
+        periodEnd: entry.occurredOn,
+        statementOn: dateKey(new Date()),
+        scheduledOn: row.scheduledOn,
+        statementAmountKrw: row.amountKrw,
+        status: "confirmed",
+        source: "opening_installment",
+        planId,
+        label: entry.title,
+        purchaseEntryId: entry.id,
+        ...(row.installmentNumber === 1 ? { planPrincipalKrw: entry.amountKrw } : {}),
+        installmentNumber: row.installmentNumber,
+        installmentCount,
+        items: [],
+      };
+      nextState.cardStatements.push(statement);
+      nextState.settlements.push({
+        id: financeEntityId("settlement"),
+        targetType: "card_statement",
+        targetId: statement.id,
+        expectedAmountKrw: statement.statementAmountKrw,
+        scheduledOn: statement.scheduledOn,
+        status: "confirmed",
+      });
+    }
+  }, "할부 납부 일정을 저장했습니다.");
 }
 
 async function submitFinanceCardStatement(form) {
@@ -3976,71 +4041,6 @@ async function submitFinanceCardStatement(form) {
       status: "confirmed",
     };
     const statements = [...installments];
-async function submitFinanceCardInstallmentSetup(form) {
-  return runFinanceFormMutation(form, (nextState) => {
-    const method = nextState.paymentMethods.find((item) => item.id === financeFormText(form, "paymentMethodId"));
-    const entry = nextState.entries.find((item) => item.id === financeFormText(form, "entryId"));
-    if (method?.type !== "credit_card" || !method.paymentAccountId) throw new Error("신용카드와 출금 계좌를 다시 확인해주세요.");
-    if (
-      entry?.kind !== "expense"
-      || entry.status !== "confirmed"
-      || entry.paymentMethodId !== method.id
-      || entry.cardPaymentType !== "installment"
-    ) {
-      throw new Error("할부로 등록한 사용 내역을 다시 선택해주세요.");
-    }
-    if (nextState.cardStatements.some((statement) => statement.source === "opening_installment" && statement.purchaseEntryId === entry.id)) {
-      throw new Error("이미 할부 일정이 설정된 사용 내역입니다.");
-    }
-    if (nextState.settlements.some((settlement) => settlement.targetType === "entry" && settlement.targetId === entry.id && settlement.status !== "canceled")) {
-      throw new Error("할부 사용 내역에는 개별 출금 일정이 없어야 합니다.");
-    }
-    const installmentCount = financeFormInteger(form, "installmentCount");
-    if (installmentCount < 2 || installmentCount > 120) throw new Error("할부 개월은 2~120개월이어야 합니다.");
-    const amounts = financeFormTexts(form, "paymentAmountKrw").map(financeIntegerValue);
-    if (amounts.length !== installmentCount || amounts.some((amount) => !Number.isSafeInteger(amount) || amount <= 0)) {
-      throw new Error("각 월의 수수료 포함 납부액을 모두 입력해주세요.");
-    }
-    const totalAmountKrw = amounts.reduce((total, amount) => total + amount, 0);
-    if (!Number.isSafeInteger(totalAmountKrw) || totalAmountKrw < entry.amountKrw) {
-      throw new Error("총 납부액은 원금보다 작을 수 없습니다.");
-    }
-    const rows = financeCardInstallmentRows(method, entry, installmentCount, amounts);
-    if (rows.length !== installmentCount) throw new Error("카드 납부일 설정을 확인해주세요.");
-    const planId = financeEntityId("installment-plan");
-    for (const row of rows) {
-      const statement = {
-        id: financeEntityId("statement"),
-        paymentMethodId: method.id,
-        paymentAccountId: method.paymentAccountId,
-        periodStart: entry.occurredOn,
-        periodEnd: entry.occurredOn,
-        statementOn: dateKey(new Date()),
-        scheduledOn: row.scheduledOn,
-        statementAmountKrw: row.amountKrw,
-        status: "confirmed",
-        source: "opening_installment",
-        planId,
-        label: entry.title,
-        purchaseEntryId: entry.id,
-        ...(row.installmentNumber === 1 ? { planPrincipalKrw: entry.amountKrw } : {}),
-        installmentNumber: row.installmentNumber,
-        installmentCount,
-        items: [],
-      };
-      nextState.cardStatements.push(statement);
-      nextState.settlements.push({
-        id: financeEntityId("settlement"),
-        targetType: "card_statement",
-        targetId: statement.id,
-        expectedAmountKrw: statement.statementAmountKrw,
-        scheduledOn: statement.scheduledOn,
-        status: "confirmed",
-      });
-    }
-  }, "할부 납부 일정을 저장했습니다.");
-}
-
     if (existingStatement) {
       const existingAdjustments = existingStatement.adjustments || [];
       const existingItemTotal = existingStatement.items.reduce((total, item) => {
@@ -4482,6 +4482,48 @@ function syncFinancePaymentMethodFields(form) {
   }
 }
 
+function syncFinanceExpensePaymentFields(form) {
+  if (!(form instanceof HTMLFormElement)) return;
+  const method = financeWorkspace.state?.paymentMethods.find((item) => item.id === form.elements.paymentMethodId?.value);
+  const fields = form.querySelector("[data-finance-expense-card-fields]");
+  const isCredit = method?.type === "credit_card";
+  if (!fields) return;
+  fields.hidden = !isCredit;
+  fields.disabled = !isCredit;
+}
+
+function syncFinanceCardInstallmentSetup(form) {
+  if (!(form instanceof HTMLFormElement)) return;
+  const method = financeWorkspace.state?.paymentMethods.find((item) => item.id === form.elements.paymentMethodId?.value);
+  const entry = financeWorkspace.state?.entries.find((item) => item.id === form.elements.entryId?.value);
+  const installmentCount = financeIntegerValue(form.elements.installmentCount?.value);
+  const payments = form.querySelector("[data-finance-installment-payments]");
+  const preview = form.querySelector("[data-finance-installment-preview]");
+  if (!method || !entry || !payments || !preview) return;
+  payments.innerHTML = installmentCount >= 2 && installmentCount <= 120
+    ? renderFinanceCardInstallmentPayments(method, entry, installmentCount)
+    : "";
+  preview.dataset.principalKrw = entry.amountKrw;
+  const principal = preview.querySelector("[data-finance-installment-principal]");
+  if (principal) principal.textContent = formatFinanceKrw(entry.amountKrw);
+  syncFinanceCardInstallmentPreview(form);
+}
+
+function syncFinanceCardInstallmentPreview(form) {
+  const preview = form?.querySelector("[data-finance-installment-preview]");
+  if (!preview) return;
+  const principalKrw = Number(preview.dataset.principalKrw || 0);
+  const totalKrw = [...form.querySelectorAll("[data-finance-installment-payment]")]
+    .reduce((total, input) => {
+      const amount = financeIntegerValue(input.value);
+      return total + (Number.isSafeInteger(amount) && amount > 0 ? amount : 0);
+    }, 0);
+  const fee = preview.querySelector("[data-finance-installment-fee]");
+  const total = preview.querySelector("[data-finance-installment-total]");
+  if (fee) fee.textContent = formatFinanceKrw(totalKrw - principalKrw);
+  if (total) total.textContent = formatFinanceKrw(totalKrw);
+}
+
 function toggleFinanceSelect(control) {
   if (!(control instanceof HTMLElement)) return;
   if (control.classList.contains("is-open")) closeFinanceSelect(control);
@@ -4554,48 +4596,6 @@ function chooseFinanceSelectOption(option) {
   const control = option.closest("[data-finance-select]");
   const select = control?.querySelector(".finance-select-native");
   const trigger = control?.querySelector("[data-finance-select-trigger]");
-function syncFinanceExpensePaymentFields(form) {
-  if (!(form instanceof HTMLFormElement)) return;
-  const method = financeWorkspace.state?.paymentMethods.find((item) => item.id === form.elements.paymentMethodId?.value);
-  const fields = form.querySelector("[data-finance-expense-card-fields]");
-  const isCredit = method?.type === "credit_card";
-  if (!fields) return;
-  fields.hidden = !isCredit;
-  fields.disabled = !isCredit;
-}
-
-function syncFinanceCardInstallmentSetup(form) {
-  if (!(form instanceof HTMLFormElement)) return;
-  const method = financeWorkspace.state?.paymentMethods.find((item) => item.id === form.elements.paymentMethodId?.value);
-  const entry = financeWorkspace.state?.entries.find((item) => item.id === form.elements.entryId?.value);
-  const installmentCount = financeIntegerValue(form.elements.installmentCount?.value);
-  const payments = form.querySelector("[data-finance-installment-payments]");
-  const preview = form.querySelector("[data-finance-installment-preview]");
-  if (!method || !entry || !payments || !preview) return;
-  payments.innerHTML = installmentCount >= 2 && installmentCount <= 120
-    ? renderFinanceCardInstallmentPayments(method, entry, installmentCount)
-    : "";
-  preview.dataset.principalKrw = entry.amountKrw;
-  const principal = preview.querySelector("[data-finance-installment-principal]");
-  if (principal) principal.textContent = formatFinanceKrw(entry.amountKrw);
-  syncFinanceCardInstallmentPreview(form);
-}
-
-function syncFinanceCardInstallmentPreview(form) {
-  const preview = form?.querySelector("[data-finance-installment-preview]");
-  if (!preview) return;
-  const principalKrw = Number(preview.dataset.principalKrw || 0);
-  const totalKrw = [...form.querySelectorAll("[data-finance-installment-payment]")]
-    .reduce((total, input) => {
-      const amount = financeIntegerValue(input.value);
-      return total + (Number.isSafeInteger(amount) && amount > 0 ? amount : 0);
-    }, 0);
-  const fee = preview.querySelector("[data-finance-installment-fee]");
-  const total = preview.querySelector("[data-finance-installment-total]");
-  if (fee) fee.textContent = formatFinanceKrw(totalKrw - principalKrw);
-  if (total) total.textContent = formatFinanceKrw(totalKrw);
-}
-
   const label = option.querySelector("span")?.textContent?.trim() || "";
   if (!control || !select || !trigger) return;
   select.value = option.dataset.financeSelectOption || "";
@@ -10477,6 +10477,10 @@ function handleSubmit(event) {
     submitFinanceTransfer(form);
     return;
   }
+  if (form.dataset.form === "finance-card-installment-setup") {
+    submitFinanceCardInstallmentSetup(form);
+    return;
+  }
   if (form.dataset.form === "finance-card-statement") {
     submitFinanceCardStatement(form);
     return;
@@ -10523,6 +10527,19 @@ function handleInput(event) {
   const financeIntegerInput = event.target.closest("[data-finance-integer-input]");
   if (financeIntegerInput && !event.isComposing) formatFinanceIntegerInput(financeIntegerInput);
 
+  const financeInstallmentCount = event.target.closest('form[data-form="finance-card-installment-setup"] [name="installmentCount"]');
+
+if (financeInstallmentCount && !event.isComposing) {
+    syncFinanceCardInstallmentSetup(financeInstallmentCount.form);
+    return;
+  }
+
+const financeInstallmentPayment = event.target.closest("[data-finance-installment-payment]");
+
+if (financeInstallmentPayment && !event.isComposing) {
+    syncFinanceCardInstallmentPreview(financeInstallmentPayment.form);
+    return;
+  }
   const financeStatementAdjustment = event.target.closest("[data-finance-statement-adjustment-amount]");
   if (financeStatementAdjustment) {
     const total = financeStatementAdjustment.form?.querySelector("[data-finance-statement-total]");
@@ -10589,6 +10606,19 @@ function handleInput(event) {
 }
 
 function handleChange(event) {
+  const financeExpensePayment = event.target.closest("[data-finance-expense-payment-method], [data-finance-expense-card-payment-type]");
+
+if (financeExpensePayment) {
+    syncFinanceExpensePaymentFields(financeExpensePayment.closest("form"));
+    return;
+  }
+
+const financeInstallmentEntry = event.target.closest("[data-finance-installment-entry]");
+
+if (financeInstallmentEntry) {
+    syncFinanceCardInstallmentSetup(financeInstallmentEntry.closest("form"));
+    return;
+  }
   const financePaymentType = event.target.closest("[data-finance-payment-type]");
   if (financePaymentType) {
     syncFinancePaymentMethodFields(financePaymentType.closest("form"));
@@ -10687,10 +10717,6 @@ function handleBeforeInput(event) {
   ) {
     event.preventDefault();
     const end = financeIntegerInput.selectionStart;
-  if (form.dataset.form === "finance-card-installment-setup") {
-    submitFinanceCardInstallmentSetup(form);
-    return;
-  }
     financeIntegerInput.value = `${financeIntegerInput.value.slice(0, end - 2)}${financeIntegerInput.value.slice(end)}`;
     financeIntegerInput.setSelectionRange(end - 2, end - 2);
     financeIntegerInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -10737,17 +10763,6 @@ function handleBeforeInput(event) {
     return;
   }
   stageEditorTextHistoryBeforeInput(event, blockContent);
-  const financeInstallmentCount = event.target.closest('form[data-form="finance-card-installment-setup"] [name="installmentCount"]');
-  if (financeInstallmentCount && !event.isComposing) {
-    syncFinanceCardInstallmentSetup(financeInstallmentCount.form);
-    return;
-  }
-  const financeInstallmentPayment = event.target.closest("[data-finance-installment-payment]");
-  if (financeInstallmentPayment && !event.isComposing) {
-    syncFinanceCardInstallmentPreview(financeInstallmentPayment.form);
-    return;
-  }
-
   if (event.inputType === "insertText" && event.data === "/" && blockContent.textContent === "") {
     const editor = blockContent.closest(".block-editor");
     requestAnimationFrame(() => openSlashMenu(blockContent, editor.dataset.ownerType, editor.dataset.ownerId, blockContent.dataset.blockContent));
@@ -10820,16 +10835,6 @@ function handleCompositionUpdate(event) {
   if (!blockContent) return;
   const editor = blockContent.closest(".block-editor");
   if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
-  const financeExpensePayment = event.target.closest("[data-finance-expense-payment-method], [data-finance-expense-card-payment-type]");
-  if (financeExpensePayment) {
-    syncFinanceExpensePaymentFields(financeExpensePayment.closest("form"));
-    return;
-  }
-  const financeInstallmentEntry = event.target.closest("[data-finance-installment-entry]");
-  if (financeInstallmentEntry) {
-    syncFinanceCardInstallmentSetup(financeInstallmentEntry.closest("form"));
-    return;
-  }
   syncComposingBlockEmptyState(blockContent, event);
 }
 
