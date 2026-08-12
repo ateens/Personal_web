@@ -2523,6 +2523,7 @@ function renderFinanceCards(state) {
 
 function renderFinanceCardWorkspace(state, method, open) {
   const month = financeWorkspace.month;
+  const previousMonth = financeModel.shiftMonthKey(month, -1);
   const entries = financeCardUsageEntries(state, method.id, month);
   const plans = financeCardInstallmentPlans(state, method.id);
   const account = state.accounts.find((item) => item.id === method.paymentAccountId);
@@ -2536,8 +2537,8 @@ function renderFinanceCardWorkspace(state, method, open) {
       </summary>
       <div class="finance-card-workspace-body">
         <div class="finance-metric-grid metric-grid finance-metric-grid-compact">
-          ${renderFinanceMetric("이번달 현황", formatFinanceKrw(currentUsageKrw), `${financePickerMonthLabel(financeModel.shiftMonthKey(month, 1))} 납부 예정`, "spent")}
-          ${renderFinanceMetric("총 사용액", formatFinanceKrw(totalUsageKrw), "미납 일시불 · 할부", "scheduled")}
+          ${renderFinanceMetric(`${month} 사용액`, formatFinanceKrw(currentUsageKrw), `${entries.length}개 기록`, "spent")}
+          ${renderFinanceMetric(`${previousMonth} 사용액`, formatFinanceKrw(financeCardUsageKrw(state, method.id, previousMonth)), "이전 달", "scheduled")}
         </div>
         ${renderFinanceCardInstallmentSetup(state, method)}
         ${renderFinanceCardStatementForm(state, method)}

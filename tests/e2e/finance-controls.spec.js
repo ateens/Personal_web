@@ -359,11 +359,12 @@ test("credit-card workspace shows current debt and pays a confirmed statement on
   await page.locator('.finance-tabs [data-finance-tab="cards"]').click();
 
   const card = page.locator(`[data-finance-card="${cardId}"]`);
-  await expect(card.locator(".finance-metric .metric-label")).toHaveText(["이번달 현황", "총 사용액"]);
-  await expect(card.locator(".finance-metric").filter({ hasText: "이번달 현황" }).locator(".metric-value")).toHaveText("₩80,000");
-  await expect(card.locator(".finance-metric").filter({ hasText: "총 사용액" }).locator(".metric-value")).toHaveText("₩630,000");
+  await expect(card.locator(":scope > summary > span").last()).toHaveText("₩630,000");
+  await expect(card.locator(".finance-metric .metric-label")).toHaveText(["2026-08 사용액", "2026-07 사용액"]);
+  await expect(card.locator(".finance-metric").filter({ hasText: "2026-08 사용액" }).locator(".metric-value")).toHaveText("₩80,000");
+  await expect(card.locator(".finance-metric").filter({ hasText: "2026-07 사용액" }).locator(".metric-value")).toHaveText("₩150,000");
   await expect(card.locator('form[data-form="finance-card-usage-total"], form[data-form="finance-card-installment"], form[data-form="finance-card-payment"]')).toHaveCount(0);
-  await expect(card).not.toContainText(/이전 달|시작 사용액|기존 할부 일정 등록|실제 출금 확인/);
+  await expect(card).not.toContainText(/시작 사용액|기존 할부 일정 등록|실제 출금 확인/);
 
   const plan = card.locator(`[data-finance-installment-plan="${planId}"]`);
   await expect(plan).toHaveCount(1);
