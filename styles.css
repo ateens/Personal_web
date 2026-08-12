@@ -2272,7 +2272,7 @@ button:focus-visible {
 .today-inbox-count {
   flex: 0 0 auto;
   margin-left: auto;
-  color: var(--ink);
+  color: #000;
   font-size: 12px;
   font-weight: 850;
 }
