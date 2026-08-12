@@ -67,6 +67,12 @@ async function setCaret(content, offset) {
   }, offset);
 }
 
+async function settleAnimationFrames(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+}
+
 async function activeCaret(page) {
   return page.evaluate(() => {
     const element = document.activeElement?.closest?.("[data-block-content]");
@@ -85,6 +91,15 @@ async function activeCaret(page) {
       viewportHeight: window.innerHeight,
     };
   });
+}
+
+async function pastePng(content) {
+  await content.evaluate((element, bytes) => {
+    element.focus();
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(new File([new Uint8Array(bytes)], "clipboard.png", { type: "image/png" }));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  }, [...PIXEL_PNG]);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -125,12 +140,37 @@ test("Markdown 목록, 인용, 토글과 Tab 계층 이동이 같은 편집기�
   let content = editor.locator("[data-block-content]").first();
 
   await content.type("- ");
-  await expect(content.locator("xpath=ancestor::*[@data-block-id][1]")).toHaveAttribute("data-type", "bullet");
-  expect(await content.evaluate((element) => getComputedStyle(element, "::before").content)).toContain("•");
+  let block = content.locator("xpath=ancestor::*[@data-block-id][1]");
+  await expect(block).toHaveAttribute("data-type", "bullet");
+  await expect(block).toHaveAttribute("role", "listitem");
+  await expect(block.locator("xpath=parent::*")).toHaveAttribute("role", "list");
+  await expect(content).toHaveAttribute("aria-label", "글머리 기호 블록 편집");
+  const marker = block.locator(".block-list-marker");
+  await expect(marker).toHaveText("•");
+  await expect(marker).toHaveAttribute("aria-hidden", "true");
+  const emptyBulletGeometry = await content.evaluate((element) => {
+    const markerElement = element.closest("[data-block-id]").querySelector(".block-list-marker");
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const rangeRect = range?.getClientRects()[0] || range?.getBoundingClientRect();
+    const contentRect = element.getBoundingClientRect();
+    const markerRect = markerElement.getBoundingClientRect();
+    const caretLeft = rangeRect && (rangeRect.width || rangeRect.height) ? rangeRect.left : contentRect.left + 4;
+    return { caretLeft, markerRight: markerRect.right };
+  });
+  expect(emptyBulletGeometry.caretLeft).toBeGreaterThanOrEqual(emptyBulletGeometry.markerRight - 1);
+
   await content.type("부모 항목");
+  const parentId = await block.getAttribute("data-block-id");
   await content.press("Enter");
 
   content = editor.locator("[data-block-content]:focus");
+  block = content.locator("xpath=ancestor::*[@data-block-id][1]");
+  const continuationId = await block.getAttribute("data-block-id");
+  await expect(editor.locator(`[data-block-id="${parentId}"] + [data-block-id="${continuationId}"]`)).toHaveCount(1);
+  await expect(block).toHaveAttribute("data-type", "bullet");
+  await expect(content).toBeFocused();
+  await expect.poll(async () => (await activeCaret(page))?.offset).toBe(0);
   await content.type("자식 항목");
   await content.press("Tab");
   await expect(content.locator("xpath=ancestor::*[@data-block-id][1]")).toHaveAttribute("data-indent", "1");
@@ -161,7 +201,84 @@ test("Markdown 목록, 인용, 토글과 Tab 계층 이동이 같은 편집기�
   ]);
 });
 
+test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 순서대로 다시 매겨진다", async ({ page, request }) => {
+  const firstId = "numbered-enter-first";
+  const secondId = "numbered-enter-second";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { id: firstId, type: "numbered", text: "첫째 항목", marks: [], checked: false, indent: 0, collapsed: false, listStart: 1 },
+    { id: secondId, type: "numbered", text: "둘째 항목", marks: [], checked: false, indent: 0, collapsed: false },
+  ]);
+  let editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const markers = () => editor.locator(".block-list-marker");
+  await expect(markers()).toHaveText(["1.", "2."]);
+
+  const first = editor.locator(`[data-block-content="${firstId}"]`);
+  await setCaret(first, 0);
+  await page.keyboard.press("Enter");
+  await expect(markers()).toHaveText(["1.", "2.", "3."]);
+  await expect(first).toBeFocused();
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(3);
+  await settleAnimationFrames(page);
+
+  const second = editor.locator(`[data-block-content="${secondId}"]`);
+  await setCaret(second, 2);
+  await expect.poll(() => activeCaret(page)).toMatchObject({ blockId: secondId, offset: 2 });
+  await page.keyboard.press("Enter");
+  await expect(markers()).toHaveText(["1.", "2.", "3.", "4."]);
+  const renderedMarkers = await markers().allTextContents();
+  expect(new Set(renderedMarkers).size).toBe(renderedMarkers.length);
+
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
+    return resource?.blocks.map((block) => ({
+      type: block.type,
+      text: block.text,
+      listStart: block.listStart || 0,
+    }));
+  }).toEqual([
+    { type: "numbered", text: "", listStart: 1 },
+    { type: "numbered", text: "첫째 항목", listStart: 0 },
+    { type: "numbered", text: "둘째", listStart: 0 },
+    { type: "numbered", text: " 항목", listStart: 0 },
+  ]);
+
+  editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(markers()).toHaveText(["1.", "2.", "3.", "4."]);
+});
+
 test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여넣을 수 있다", async ({ page, request }) => {
+  const { editor: liveEditor } = await createEmptyResource(page);
+  let liveContent = liveEditor.locator("[data-block-content]").first();
+  await liveContent.type("# ");
+  let liveBlock = liveContent.locator("xpath=ancestor::*[@data-block-id][1]");
+  await expect(liveBlock).toHaveAttribute("data-type", "heading1");
+  await expect(liveContent.locator("xpath=parent::h1")).toHaveCount(1);
+  await expect(liveContent).toHaveAttribute("aria-label", "제목 1 블록 편집");
+  await liveContent.type("즉시 제목");
+  await liveContent.press("Enter");
+
+  liveContent = liveEditor.locator("[data-block-content]:focus");
+  await liveContent.type("- [x] ");
+  liveBlock = liveContent.locator("xpath=ancestor::*[@data-block-id][1]");
+  await expect(liveBlock).toHaveAttribute("data-type", "todo");
+  await expect(liveBlock).toHaveAttribute("data-checked", "true");
+  await liveContent.type("완료 항목");
+  await liveContent.press("Enter");
+
+  liveContent = liveEditor.locator("[data-block-content]:focus");
+  await liveContent.type("1. [ ] ");
+  liveBlock = liveContent.locator("xpath=ancestor::*[@data-block-id][1]");
+  await expect(liveBlock).toHaveAttribute("data-type", "todo");
+  await expect(liveBlock).toHaveAttribute("data-checked", "false");
+  await liveContent.type("미완료 항목");
+  await liveContent.press("Enter");
+  await liveEditor.locator("[data-block-content]:focus").press("Enter");
+
+  liveContent = liveEditor.locator("[data-block-content]:focus");
+  await liveContent.type("~~~python");
+  await liveContent.press("Enter");
+  await expect(liveEditor.locator('pre[data-code-language="python"] code:focus')).toBeVisible();
+
   const { editor, resourceId } = await createEmptyResource(page);
   const markdown = [
     "#### 제목 4",
@@ -173,7 +290,14 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
     "~~~python",
     "print('tilde')",
     "~~~~",
-    "**굵게** *기울임* ~~취소선~~ [링크](https://example.com/markdown)",
+    "5. 다섯 번째 항목",
+    "Setext 제목",
+    "=====",
+    "연속 첫 줄",
+    "연속 둘째 줄",
+    "",
+    "**굵게** *기울임* ~~취소선~~ ***굵고 기울임*** [링크](https://example.com/markdown) [참조 링크][docs]",
+    "[docs]: https://example.com/reference",
   ].join("\n");
   await editor.locator("[data-block-content]").first().evaluate((element, text) => {
     element.focus();
@@ -187,11 +311,19 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
   await expect(editor.locator('h6 [data-block-content]')).toHaveText("제목 6");
   await expect(editor.locator('pre[data-code-language="javascript"] code')).toHaveText("const backtick = true;");
   await expect(editor.locator('pre[data-code-language="python"] code')).toHaveText("print('tilde')");
+  const numbered = editor.locator('.block[data-type="numbered"]');
+  await expect(numbered.locator(".block-list-marker")).toHaveText("5.");
+  await expect(numbered.locator("[data-block-content]")).toHaveText("다섯 번째 항목");
+  await expect(editor.locator('h1 [data-block-content]')).toHaveText("Setext 제목");
+  await expect(editor.locator('.block[data-type="paragraph"] [data-block-content]').filter({ hasText: "연속 첫 줄" })).toHaveText("연속 첫 줄\n연속 둘째 줄");
   const inline = editor.locator('.block[data-type="paragraph"]').last();
-  await expect(inline.locator('[data-inline-mark="bold"]')).toHaveText("굵게");
-  await expect(inline.locator('[data-inline-mark="italic"]')).toHaveText("기울임");
+  await expect(inline.locator('[data-inline-mark="bold"]').filter({ hasText: /^굵게$/ })).toHaveText("굵게");
+  await expect(inline.locator('[data-inline-mark="italic"]').filter({ hasText: /^기울임$/ })).toHaveText("기울임");
   await expect(inline.locator('[data-inline-mark="strike"]')).toHaveText("취소선");
-  await expect(inline.locator('a[data-inline-mark="link"]')).toHaveAttribute("href", "https://example.com/markdown");
+  const nested = inline.locator('[data-inline-mark="bold"]', { hasText: "굵고 기울임" });
+  await expect(nested.locator('[data-inline-mark="italic"]')).toHaveText("굵고 기울임");
+  await expect(inline.locator('a[data-inline-mark="link"]').filter({ hasText: /^링크$/ })).toHaveAttribute("href", "https://example.com/markdown");
+  await expect(inline.locator('a[data-inline-mark="link"]', { hasText: "참조 링크" })).toHaveAttribute("href", "https://example.com/reference");
 
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);
@@ -199,15 +331,19 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
       type: block.type,
       text: block.text,
       language: block.language || "",
+      listStart: block.listStart || 0,
       marks: block.marks.map((mark) => mark.type),
     }));
   }).toEqual([
-    { type: "heading4", text: "제목 4", language: "", marks: [] },
-    { type: "heading5", text: "제목 5", language: "", marks: [] },
-    { type: "heading6", text: "제목 6", language: "", marks: [] },
-    { type: "code", text: "const backtick = true;", language: "javascript", marks: [] },
-    { type: "code", text: "print('tilde')", language: "python", marks: [] },
-    { type: "paragraph", text: "굵게 기울임 취소선 링크", language: "", marks: ["bold", "italic", "strike", "link"] },
+    { type: "heading4", text: "제목 4", language: "", listStart: 0, marks: [] },
+    { type: "heading5", text: "제목 5", language: "", listStart: 0, marks: [] },
+    { type: "heading6", text: "제목 6", language: "", listStart: 0, marks: [] },
+    { type: "code", text: "const backtick = true;", language: "javascript", listStart: 0, marks: [] },
+    { type: "code", text: "print('tilde')", language: "python", listStart: 0, marks: [] },
+    { type: "numbered", text: "다섯 번째 항목", language: "", listStart: 5, marks: [] },
+    { type: "heading1", text: "Setext 제목", language: "", listStart: 0, marks: [] },
+    { type: "paragraph", text: "연속 첫 줄\n연속 둘째 줄", language: "", listStart: 0, marks: [] },
+    { type: "paragraph", text: "굵게 기울임 취소선 굵고 기울임 링크 참조 링크", language: "", listStart: 0, marks: ["bold", "italic", "strike", "bold", "italic", "link", "link"] },
   ]);
 });
 
@@ -239,6 +375,30 @@ test("이미지를 업로드하면 안전한 이미지 블록으로 저장되고
 
   const reloadedEditor = await openResource(page, resourceId);
   await expect(reloadedEditor.locator(`.block[data-type="image"] img[src="${src}"]`)).toBeVisible();
+});
+
+test("붙여넣은 PNG 이미지는 클릭 선택 후 Backspace로 DOM과 저장 상태에서 제거된다", async ({ page, request }) => {
+  const { editor, resourceId } = await createEmptyResource(page);
+  await pastePng(editor.locator("[data-block-content]").first());
+
+  const imageBlock = editor.locator('.block[data-type="image"]');
+  const image = imageBlock.locator("img");
+  await expect(image).toBeVisible();
+  const src = await image.getAttribute("src");
+  expect(src).toMatch(/^\/api\/resource-images\/[a-zA-Z0-9_-]+$/);
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, resourceId);
+    return resource?.blocks.some((block) => block.type === "image" && block.url === src);
+  }).toBe(true);
+
+  await image.click();
+  await expect(imageBlock).toHaveClass(/\bis-selected\b/);
+  await page.keyboard.press("Backspace");
+  await expect(imageBlock).toHaveCount(0);
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, resourceId);
+    return resource?.blocks.some((block) => block.type === "image" && block.url === src);
+  }).toBe(false);
 });
 
 test("Resource 저장 중 붙여넣은 PNG는 이전 저장 응답에 덮이지 않는다", async ({ page, request }) => {
@@ -276,12 +436,7 @@ test("Resource 저장 중 붙여넣은 PNG는 이전 저장 응답에 덮이지 
   await firstSaveCommittedPromise;
 
   const content = editor.locator("[data-block-content]").first();
-  await content.evaluate((element, bytes) => {
-    element.focus();
-    const clipboardData = new DataTransfer();
-    clipboardData.items.add(new File([new Uint8Array(bytes)], "clipboard.png", { type: "image/png" }));
-    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
-  }, [...PIXEL_PNG]);
+  await pastePng(content);
   const localImage = editor.locator('.block[data-type="image"] img');
   await expect(localImage).toBeVisible();
   const src = await localImage.getAttribute("src");
@@ -317,7 +472,7 @@ test("긴 문서에서 위아래 이동은 선호 열을 유지하고 커서를 
   expect(restored.offset).toBeGreaterThanOrEqual(12);
   expect(restored.bottom).toBeLessThanOrEqual(restored.viewportHeight);
   expect(restored.top).toBeGreaterThanOrEqual(0);
-  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  expect(await page.locator("[data-resource-document]").evaluate((document) => document.scrollTop)).toBeGreaterThan(0);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await editor.locator('[data-block-content="mobile-overflow"]').scrollIntoViewIfNeeded();

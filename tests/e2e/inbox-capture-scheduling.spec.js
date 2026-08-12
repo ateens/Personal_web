@@ -28,7 +28,7 @@ test("Today Inbox converts once and Task drag placement commits immediately", as
   await expect(inbox.getByRole("heading", { name: "수집함" })).toBeVisible();
   await expect(inbox.getByText("수집과 분류", { exact: true })).toHaveCount(0);
   await expect(inbox.locator(".today-inbox-count")).toHaveText("3개");
-  await expect(inbox.locator(".today-inbox-count")).toHaveCSS("color", "rgb(23, 32, 47)");
+  await expect(inbox.locator(".today-inbox-count")).toHaveCSS("color", "rgb(0, 0, 0)");
   await expect(page.getByText("최근 처리", { exact: true })).toHaveCount(0);
   await inbox.locator("summary").click();
   await expect(inbox).not.toHaveAttribute("open", "");

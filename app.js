@@ -331,14 +331,14 @@ const MARKDOWN_SHORTCUTS = [
   [/^##\s$/, "heading2", ""],
   [/^###\s$/, "heading3", ""],
   [/^[-*+]\s$/, "bullet", ""],
-  [/^1[.)]\s$/, "numbered", ""],
+  [/^\d{1,6}[.)]\s$/, "numbered", ""],
   [/^[aAiI][.)]\s$/, "numbered", ""],
+  [/^\[[xX]\]\s$/, "todo", "", true],
   [/^\[\s?\]\s$/, "todo", ""],
   [/^>\s$/, "quote", ""],
   [/^>>\s$/, "toggle", ""],
   [/^!\s$/, "callout", ""],
-  [/^```$/, "code", ""],
-  [/^---$/, "divider", ""],
+  [/^(?:---|\*\*\*|___)$/, "divider", ""],
 ];
 const CONTINUED_BLOCK_TYPES = new Set(["bullet", "numbered", "todo"]);
 const MAX_BLOCK_INDENT = 6;
@@ -925,9 +925,11 @@ function setWorkspaceAuthorityMode(mode = "ready") {
 
 function syncWorkspaceAuthorityGate() {
   const blocked = app.dataset.workspaceAuthority !== "ready" && ui.view !== "finance";
+  const resourceDocumentOpen = ui.view === "resources" && Boolean(ui.activeResourceId);
   app.classList.toggle("is-workspace-authority-blocked", blocked);
-  for (const element of [app.querySelector(".layout"), els.fab, els.detailRoot, els.overlayRoot]) {
-    if (element) element.inert = blocked;
+  const layout = app.querySelector(".layout");
+  for (const element of [layout, els.fab, els.detailRoot, els.overlayRoot]) {
+    if (element) element.inert = blocked || (resourceDocumentOpen && (element === layout || element === els.fab));
   }
   const gate = app.querySelector("[data-workspace-authority-gate]");
   if (!gate) return;
@@ -1021,6 +1023,7 @@ function setView(view, options = {}) {
     return;
   }
   if (view === "finance") financeWorkspace.status = "idle";
+  if (view !== "resources") ui.activeResourceId = "";
   ui.view = view;
   ui.slash = null;
   ui.mention = null;
@@ -1243,6 +1246,7 @@ function renderView({ transition = false, soft = false, animateCards = false } =
     window.setTimeout(() => transitionTarget.classList.remove("is-entering"), 320);
   }
   syncViewChrome();
+  syncResourceDocumentDialog();
   if (ui.view === "finance" && financeWorkspace.status === "idle") {
     requestAnimationFrame(() => loadFinanceWorkspace());
   }
@@ -1634,7 +1638,7 @@ function renderResources() {
       ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      ${activeResource ? renderResourceDocument(activeResource) : renderResourceList(resources)}
+      ${renderResourceList(resources)}
     </section>
   `;
 }
@@ -1663,8 +1667,16 @@ function renderResourceDocument(resource) {
   const blocksList = ensureEditableBlocks(resource, { save: false });
   const readOnly = !resourceMutationAllowed(resource);
   return `
-    <article class="panel resource-document" data-resource-document="${esc(resource.id)}">
-      <button class="resource-document-back" type="button" data-resource-back>← 자료 목록</button>
+    <div class="resource-document-backdrop" data-resource-back aria-hidden="true"></div>
+    <article
+      class="panel resource-document"
+      data-resource-document="${esc(resource.id)}"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="resource-dialog-label-${esc(resource.id)}"
+    >
+      <h2 class="visually-hidden" id="resource-dialog-label-${esc(resource.id)}">자료 편집</h2>
+      <button class="resource-document-close" type="button" data-resource-back aria-label="자료 닫기">×</button>
       <label class="visually-hidden" for="resource-title-${esc(resource.id)}">자료 제목</label>
       <textarea
         class="resource-document-title"
@@ -1684,6 +1696,26 @@ function renderResourceDocument(resource) {
       ${readOnly ? "" : `<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-resource-image-input hidden>`}
     </article>
   `;
+}
+
+function syncResourceDocumentDialog() {
+  const resource = ui.view === "resources" ? itemById("resources", ui.activeResourceId) : null;
+  const open = Boolean(resource && !resource.trashedAt);
+  if (open) {
+    if (els.detailRoot.dataset.resourceDialog !== resource.id) {
+      els.detailRoot.innerHTML = renderResourceDocument(resource);
+      els.detailRoot.dataset.resourceDialog = resource.id;
+    }
+  } else {
+    els.detailRoot.innerHTML = "";
+    delete els.detailRoot.dataset.resourceDialog;
+  }
+  els.detailRoot.hidden = !open;
+  els.detailRoot.classList.toggle("resource-document-root", open);
+  app.querySelector(".layout")?.toggleAttribute("inert", open);
+  els.fab?.toggleAttribute("inert", open);
+  document.documentElement.classList.toggle("is-resource-document-open", open);
+  document.body.classList.toggle("is-resource-document-open", open);
 }
 
 function renderHabits() {
@@ -7420,9 +7452,14 @@ function numberedListMarkerForBlock(block, indent, counters) {
     counters[indent] = 0;
     return "";
   }
-  const nextNumber = (counters[indent] || 0) + 1;
+  const nextNumber = numberedBlockStart(block) || (counters[indent] || 0) + 1;
   counters[indent] = nextNumber;
   return `${nextNumber}.`;
+}
+
+function numberedBlockStart(block) {
+  const value = Number.parseInt(block?.listStart, 10);
+  return Number.isInteger(value) && value > 0 && value <= 999_999 ? value : 0;
 }
 
 function blockAnchorId(blockId) {
@@ -7438,7 +7475,12 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const blockColor = ownerType === "resources" ? "" : normalizeBlockColorValue(block.color);
   const blockBackgroundColor = ownerType === "resources" ? "" : normalizeBlockColorValue(block.backgroundColor);
   const hiddenAttr = meta.hidden ? ` data-hidden-by-toggle="true" hidden aria-hidden="true"` : ` data-hidden-by-toggle="false"`;
-  const listMarkerAttr = meta.listMarker ? ` data-list-marker="${esc(meta.listMarker)}"` : "";
+  const blockTools = ownerType === "resources"
+    ? ""
+    : `${renderBlockDragHandle(block.id)}<button class="block-tool" type="button" data-block-add="${esc(block.id)}" aria-label="블록 추가">+</button>`;
+  const listMarker = meta.listItem
+    ? `<span class="block-list-marker" aria-hidden="true">${esc(block.type === "numbered" ? meta.listMarker : "•")}</span>`
+    : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
   const backgroundColorAttr = blockBackgroundColor ? ` data-block-background="${blockBackgroundColor}"` : "";
   const listSemanticAttr = meta.listItem ? ` role="listitem" aria-level="${indent + 1}"` : "";
@@ -7446,8 +7488,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   if (block.type === "divider") {
     return `
       <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${hiddenAttr}${blockStyle}>
-        ${renderBlockDragHandle(block.id)}
-        <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
+        ${blockTools}
         <div class="block-divider" role="separator"></div>
       </div>
     `;
@@ -7460,6 +7501,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
       backgroundColorAttr,
       hiddenAttr,
       blockStyle,
+      blockTools,
     });
   }
   if (block.type === IMAGE_BLOCK_TYPE) {
@@ -7468,16 +7510,17 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
       indent,
       hiddenAttr,
       blockStyle,
+      blockTools,
     });
   }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
   return `
     <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
-      ${renderBlockDragHandle(block.id)}
-      <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
+      ${blockTools}
       ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}"></button>` : ""}
       ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}">▸</button>` : ""}
-      ${renderEditableBlockContent(block, listMarkerAttr, ownerType, ownerId)}
+      ${listMarker}
+      ${renderEditableBlockContent(block, "", ownerType, ownerId)}
     </div>
   `;
 }
@@ -7495,9 +7538,8 @@ function renderResourceImageBlock(block, meta = {}) {
   const alt = String(block.alt || block.text || "").trim();
   return `
     <div class="block resource-image-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="image" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
-      ${renderBlockDragHandle(block.id)}
-      <button class="block-tool" type="button" data-block-add="${esc(block.id)}" aria-label="블록 추가">+</button>
-      <figure class="resource-image-figure block-content" data-block-content="${esc(block.id)}" tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">
+      ${meta.blockTools || ""}
+      <figure class="resource-image-figure block-content" data-block-content="${esc(block.id)}" data-resource-image-select tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">
         ${safeUrl ? `<img src="${esc(safeUrl)}" alt="${esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="resource-image-error" role="status">이미지를 불러올 수 없습니다.</span>`}
         ${alt ? `<figcaption>${esc(alt)}</figcaption>` : ""}
       </figure>
@@ -7514,8 +7556,7 @@ function renderUrlPreviewBlock(block, meta = {}) {
     : "원격 메타데이터를 가져오지 않는 안전한 북마크입니다.";
   return `
     <div class="block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="false" data-indent="${meta.indent}"${meta.colorAttr || ""}${meta.backgroundColorAttr || ""}${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
-      ${renderBlockDragHandle(block.id)}
-      <button class="block-tool" type="button" data-block-add="${block.id}" aria-label="블록 추가">+</button>
+      ${meta.blockTools || ""}
       <div
         class="block-content block-url-preview-content"
         data-block-content="${block.id}"
@@ -7701,6 +7742,21 @@ function normalizeEditableBlock(block) {
     }
   } else if (Object.prototype.hasOwnProperty.call(block, "language")) {
     delete block.language;
+    changed = true;
+  }
+  if (block.type === "numbered") {
+    const listStart = numberedBlockStart(block);
+    if (listStart) {
+      if (block.listStart !== listStart) {
+        block.listStart = listStart;
+        changed = true;
+      }
+    } else if (Object.prototype.hasOwnProperty.call(block, "listStart")) {
+      delete block.listStart;
+      changed = true;
+    }
+  } else if (Object.prototype.hasOwnProperty.call(block, "listStart")) {
+    delete block.listStart;
     changed = true;
   }
   const indent = normalizedBlockIndent(block.indent);
@@ -8402,6 +8458,7 @@ function updateTaskSchedulingMode() {
   const taskPlacementOpen = Boolean(ui.taskPlacement);
   const todayBatchOpen = Boolean(ui.todayBatch);
   const modalOpen = taskPlacementOpen || todayBatchOpen;
+  const resourceDocumentOpen = ui.view === "resources" && Boolean(ui.activeResourceId);
   const relationPlacementOpen = taskPlacementOpen && Number(ui.taskPlacement?.phaseIndex || 0) > 0;
   app.classList.toggle("is-task-scheduling", Boolean(ui.scheduler?.dragging && ui.view === "tasks"));
   app.classList.toggle("is-task-placement", taskPlacementOpen);
@@ -8410,8 +8467,8 @@ function updateTaskSchedulingMode() {
   els.overlayRoot?.classList.toggle("has-relation-placement", relationPlacementOpen || ui.todayBatch?.phase === "place");
   document.documentElement.classList.toggle("is-task-placement-open", modalOpen);
   document.body.classList.toggle("is-task-placement-open", modalOpen);
-  app.querySelector(".layout")?.toggleAttribute("inert", modalOpen);
-  els.fab?.toggleAttribute("inert", modalOpen);
+  app.querySelector(".layout")?.toggleAttribute("inert", modalOpen || resourceDocumentOpen);
+  els.fab?.toggleAttribute("inert", modalOpen || resourceDocumentOpen);
   app.classList.toggle("is-delete-dragging", Boolean(ui.deleteDrag));
   app.classList.toggle("is-block-dragging", Boolean(ui.blockDrag?.active));
 }
@@ -9677,6 +9734,15 @@ function handleClick(event) {
     return;
   }
 
+  const clickedResourceImage = event.target.closest("[data-resource-image-select]");
+  if (clickedResourceImage) {
+    event.preventDefault();
+    event.stopPropagation();
+    const editor = clickedResourceImage.closest(".block-editor");
+    selectSingleBlock(editor?.dataset.ownerType, editor?.dataset.ownerId, clickedResourceImage.dataset.blockContent);
+    return;
+  }
+
   const mentionItem = event.target.closest("[data-mention-index]");
   if (mentionItem) {
     event.preventDefault();
@@ -10592,9 +10658,36 @@ function openResourceDocument(resourceId) {
 function closeResourceDocument() {
   const resourceId = ui.activeResourceId;
   ui.activeResourceId = "";
+  ui.slash = null;
+  ui.inlineToolbar = null;
+  ui.linkPopover = null;
+  ui.commentPopover = null;
   renderView({ soft: true });
   renderOverlays();
   requestAnimationFrame(() => document.querySelector(`[data-resource-open="${cssEscape(resourceId)}"]`)?.focus({ preventScroll: true }));
+}
+
+function trapResourceDocumentFocus(event) {
+  const dialog = els.detailRoot?.querySelector("[data-resource-document]");
+  if (!dialog || event.key !== "Tab" || event.target.closest?.("[data-block-content][contenteditable='true']")) return false;
+  const selector = "a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type='file']), select:not([disabled]), [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
+  const focusable = [dialog, els.overlayRoot]
+    .flatMap((scope) => [...scope.querySelectorAll(selector)])
+    .filter((element) => !element.hidden && element.getClientRects().length);
+  if (!focusable.length) return false;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (
+    !focusable.includes(document.activeElement)
+    || (!event.shiftKey && document.activeElement === last)
+    || (event.shiftKey && document.activeElement === first)
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    (event.shiftKey ? last : first).focus({ preventScroll: true });
+    return true;
+  }
+  return false;
 }
 
 function updateResourceTitle(input) {
@@ -11962,7 +12055,7 @@ function patchBlockEditorStructure(editor, blocksHtml) {
     const nextContent = nextBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content]");
     if (!currentContent || !nextContent || !currentContent.isEqualNode(nextContent)) return nextBlock.cloneNode(true);
     syncElementAttributes(currentBlock, nextBlock);
-    for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
+    for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-list-marker", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
       const currentControl = currentBlock.querySelector(selector);
       const nextControl = nextBlock.querySelector(selector);
       if (currentControl && nextControl) {
@@ -13354,6 +13447,7 @@ function clipboardBlockFromBlock(block) {
   };
   if (safeUrl) clipboardBlock.url = safeUrl;
   if (type === IMAGE_BLOCK_TYPE) clipboardBlock.alt = imageAlt;
+  if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
   if (type === "code" && typeof block.language === "string") clipboardBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
   return clipboardBlock;
 }
@@ -13395,7 +13489,7 @@ function clipboardNumberedPrefixForBlock(block, counters) {
     counters[indent] = 0;
     return "";
   }
-  const nextNumber = (counters[indent] || 0) + 1;
+  const nextNumber = numberedBlockStart(block) || (counters[indent] || 0) + 1;
   counters[indent] = nextNumber;
   return `${nextNumber}. `;
 }
@@ -13409,7 +13503,7 @@ function clipboardBlockTextPrefix(block, numberedPrefix = "") {
   if (block.type === "heading6") return "###### ";
   if (block.type === "bullet") return "- ";
   if (block.type === "numbered") return numberedPrefix || "1. ";
-  if (block.type === "todo") return block.checked ? "[x] " : "[ ] ";
+  if (block.type === "todo") return block.checked ? "- [x] " : "- [ ] ";
   if (block.type === "toggle") return ">> ";
   if (block.type === "quote") return "> ";
   if (block.type === "callout") return "! ";
@@ -13778,6 +13872,7 @@ function normalizeClipboardBlocks(blocks) {
     };
     if (safeUrl) normalizedBlock.url = safeUrl;
     if (type === IMAGE_BLOCK_TYPE) normalizedBlock.alt = imageAlt;
+    if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
     if (type === "code" && typeof block.language === "string") normalizedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     normalized.push(normalizedBlock);
   }
@@ -13788,10 +13883,29 @@ function plainTextToClipboardBlocks(text) {
   if (!text) return [];
   const normalized = [];
   const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+  const references = markdownReferenceDefinitions(lines);
+  let paragraph = null;
+  const flushParagraph = () => {
+    if (!paragraph) return;
+    normalized.push(clipboardBlockFromPlainLineParts({
+      indent: paragraph.indent,
+      text: paragraph.lines.join("\n"),
+    }, references));
+    paragraph = null;
+  };
   for (let index = 0; index < lines.length; index += 1) {
+    if (markdownReferenceDefinition(lines[index])) {
+      flushParagraph();
+      continue;
+    }
     const parts = clipboardPlainLineParts(lines[index]);
+    if (!parts.text.trim()) {
+      flushParagraph();
+      continue;
+    }
     const fence = markdownFenceOpen(parts.text);
     if (fence) {
+      flushParagraph();
       const codeLines = [];
       let closed = false;
       for (index += 1; index < lines.length; index += 1) {
@@ -13805,9 +13919,30 @@ function plainTextToClipboardBlocks(text) {
       normalized.push({ type: "code", text: codeLines.join("\n"), language: fence.language, checked: false, indent: parts.indent, collapsed: false });
       if (!closed) break;
     } else {
-      normalized.push(clipboardBlockFromPlainLineParts(parts));
+      const setext = /^(=+|-+)\s*$/.exec(parts.text);
+      if (setext && paragraph && paragraph.indent === parts.indent) {
+        const heading = clipboardBlockFromPlainLineParts({ indent: paragraph.indent, text: paragraph.lines.join("\n") }, references);
+        heading.type = setext[1][0] === "=" ? "heading1" : "heading2";
+        normalized.push(heading);
+        paragraph = null;
+        continue;
+      }
+      const block = markdownBlockFromPlainText(parts.text);
+      if (block.type === "paragraph") {
+        if (!paragraph || paragraph.indent !== parts.indent) {
+          flushParagraph();
+          paragraph = { indent: parts.indent, lines: [] };
+        }
+        paragraph.lines.push(parts.text);
+      } else {
+        flushParagraph();
+        applyMarkdownInlineSyntax(block, references);
+        block.indent = parts.indent;
+        normalized.push(block);
+      }
     }
   }
+  flushParagraph();
   while (normalized.length > 1 && normalized[normalized.length - 1].text === "" && normalized[normalized.length - 1].type === "paragraph") {
     normalized.pop();
   }
@@ -13828,9 +13963,9 @@ function clipboardPlainLineParts(line) {
   return { indent: normalizedBlockIndent(indent), text };
 }
 
-function clipboardBlockFromPlainLineParts(parts) {
+function clipboardBlockFromPlainLineParts(parts, references = null) {
   const parsed = markdownBlockFromPlainText(parts.text);
-  applyMarkdownInlineSyntax(parsed);
+  applyMarkdownInlineSyntax(parsed, references);
   parsed.indent = parts.indent;
   return parsed;
 }
@@ -13849,7 +13984,8 @@ function markdownBlockFromPlainText(text) {
   if (/^\d+[.)]\s+\[[xX]\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\d+[.)]\s+\[[xX]\]\s+/, ""), checked: true, collapsed: false };
   if (/^\d+[.)]\s+\[\s?\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\d+[.)]\s+\[\s?\]\s+/, ""), checked: false, collapsed: false };
   if (/^[-*+]\s+/.test(text)) return { type: "bullet", text: text.replace(/^[-*+]\s+/, ""), checked: false, collapsed: false };
-  if (/^\d+[.)]\s+/.test(text)) return { type: "numbered", text: text.replace(/^\d+[.)]\s+/, ""), checked: false, collapsed: false };
+  const numbered = /^(\d+)[.)]\s+/.exec(text);
+  if (numbered) return { type: "numbered", text: text.slice(numbered[0].length), listStart: Number(numbered[1]), checked: false, collapsed: false };
   if (/^[aAiI][.)]\s+/.test(text)) return { type: "numbered", text: text.replace(/^[aAiI][.)]\s+/, ""), checked: false, collapsed: false };
   if (/^\[[xX]\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\[[xX]\]\s+/, ""), checked: true, collapsed: false };
   if (/^\[\s?\]\s+/.test(text)) return { type: "todo", text: text.replace(/^\[\s?\]\s+/, ""), checked: false, collapsed: false };
@@ -13857,8 +13993,36 @@ function markdownBlockFromPlainText(text) {
   if (/^>\s+/.test(text)) return { type: "quote", text: text.replace(/^>\s+/, ""), checked: false, collapsed: false };
   if (/^!\s+/.test(text)) return { type: "callout", text: text.replace(/^!\s+/, ""), checked: false, collapsed: false };
   if (/^```\s*/.test(text)) return { type: "code", text: text.replace(/^```\s*/, ""), checked: false, collapsed: false };
-  if (/^---$/.test(text)) return { type: "divider", text: "", checked: false, collapsed: false };
+  if (/^(?:---|\*\*\*|___)$/.test(text)) return { type: "divider", text: "", checked: false, collapsed: false };
   return { type: "paragraph", text, checked: false, collapsed: false };
+}
+
+function markdownReferenceDefinitions(lines = []) {
+  const references = new Map();
+  let fence = null;
+  for (const line of lines) {
+    const parts = clipboardPlainLineParts(line);
+    if (fence) {
+      if (markdownFenceClose(parts.text, fence)) fence = null;
+      continue;
+    }
+    fence = markdownFenceOpen(parts.text);
+    if (fence) continue;
+    const definition = markdownReferenceDefinition(line);
+    if (definition) references.set(definition.label, definition.href);
+  }
+  return references;
+}
+
+function markdownReferenceDefinition(line = "") {
+  const match = /^\s{0,3}\[([^\]\n]+)\]:\s*(?:<([^>\s]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/.exec(String(line));
+  if (!match) return null;
+  const href = normalizeInlineHref(match[2] || match[3] || "");
+  return href ? { label: markdownReferenceLabel(match[1]), href } : null;
+}
+
+function markdownReferenceLabel(label = "") {
+  return String(label).trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function markdownFenceOpen(text = "") {
@@ -13878,18 +14042,18 @@ function markdownFenceClose(text = "", fence = null) {
   return Boolean(match);
 }
 
-function applyMarkdownInlineSyntax(block) {
+function applyMarkdownInlineSyntax(block, references = null) {
   if (!block || ["code", "divider"].includes(block.type)) {
     if (block) block.marks = [];
     return block;
   }
-  const inline = parseMarkdownInlineText(block.text || "");
+  const inline = parseMarkdownInlineText(block.text || "", references);
   block.text = inline.text;
   block.marks = inline.marks;
   return block;
 }
 
-function parseMarkdownInlineText(text = "") {
+function parseMarkdownInlineText(text = "", references = null) {
   const source = String(text || "");
   const marks = [];
   let output = "";
@@ -13904,6 +14068,14 @@ function parseMarkdownInlineText(text = "") {
     output += source[index];
     sourceToOutput[index + 1] = output.length;
   };
+  const appendNested = (nestedSource, wrapper = null) => {
+    const start = output.length;
+    const nested = parseMarkdownInlineText(nestedSource, references);
+    output += nested.text;
+    for (const mark of nested.marks) marks.push({ ...mark, start: mark.start + start, end: mark.end + start });
+    if (wrapper && output.length > start) marks.push({ ...wrapper, start, end: output.length });
+    return { start, end: output.length };
+  };
   for (let index = 0; index < source.length;) {
     if (source[index] === "\\" && index + 1 < source.length && /[\\`*{}\[\]()#+.!_>~-]/.test(source[index + 1])) {
       sourceToOutput[index] = output.length;
@@ -13913,14 +14085,27 @@ function parseMarkdownInlineText(text = "") {
       index += 2;
       continue;
     }
-    const linkMatch = source.slice(index).match(/^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+|tel:[^)\s]+)\)/i);
-    if (linkMatch) {
-      const start = output.length;
-      output += linkMatch[1];
-      marks.push({ type: "link", start, end: output.length, href: linkMatch[2] });
-      markSourceRange(index, index + linkMatch[0].length, start, output.length);
+    const linkMatch = source.slice(index).match(/^\[([^\]\n]+)\]\((?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/i);
+    const linkHref = linkMatch ? normalizeInlineHref(linkMatch[2] || linkMatch[3] || "") : "";
+    if (linkMatch && linkHref) {
+      const nested = appendNested(linkMatch[1], { type: "link", href: linkHref });
+      markSourceRange(index, index + linkMatch[0].length, nested.start, nested.end);
       index += linkMatch[0].length;
       continue;
+    }
+    const referenceMatch = references?.size
+      ? source.slice(index).match(/^\[([^\]\n]+)\](?:\[([^\]\n]*)\])?/)
+      : null;
+    if (referenceMatch) {
+      const label = referenceMatch[1];
+      const key = markdownReferenceLabel(referenceMatch[2] || label);
+      const href = references.get(key) || "";
+      if (href) {
+        const nested = appendNested(label, { type: "link", href });
+        markSourceRange(index, index + referenceMatch[0].length, nested.start, nested.end);
+        index += referenceMatch[0].length;
+        continue;
+      }
     }
     const angleLinkMatch = source.slice(index).match(/^<(https?:\/\/[^<>\s]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})>/i);
     if (angleLinkMatch) {
@@ -13948,21 +14133,30 @@ function parseMarkdownInlineText(text = "") {
         continue;
       }
     }
-    const codeMatch = source.slice(index).match(/^`([^`\n]+)`/);
-    if (codeMatch) {
+    const codeFence = source[index] === "`" ? /^`+/.exec(source.slice(index))?.[0] || "" : "";
+    const codeEnd = codeFence ? source.indexOf(codeFence, index + codeFence.length) : -1;
+    if (codeFence && codeEnd >= 0) {
+      let codeText = source.slice(index + codeFence.length, codeEnd).replace(/\n/g, " ");
+      if (/^\s[\s\S]*\s$/.test(codeText) && /\S/.test(codeText)) codeText = codeText.slice(1, -1);
       const start = output.length;
-      output += codeMatch[1];
+      output += codeText;
       marks.push({ type: "code", start, end: output.length });
-      markSourceRange(index, index + codeMatch[0].length, start, output.length);
-      index += codeMatch[0].length;
+      markSourceRange(index, codeEnd + codeFence.length, start, output.length);
+      index = codeEnd + codeFence.length;
+      continue;
+    }
+    const boldItalicMatch = source.slice(index).match(/^(\*\*\*|___)(\S(?:[\s\S]*?\S)?)\1/);
+    if (boldItalicMatch) {
+      const nested = appendNested(boldItalicMatch[2], { type: "bold" });
+      if (nested.end > nested.start) marks.push({ type: "italic", start: nested.start, end: nested.end });
+      markSourceRange(index, index + boldItalicMatch[0].length, nested.start, nested.end);
+      index += boldItalicMatch[0].length;
       continue;
     }
     const boldMatch = source.slice(index).match(/^(\*\*|__)(\S(?:[\s\S]*?\S)?)\1/);
     if (boldMatch) {
-      const start = output.length;
-      output += boldMatch[2];
-      marks.push({ type: "bold", start, end: output.length });
-      markSourceRange(index, index + boldMatch[0].length, start, output.length);
+      const nested = appendNested(boldMatch[2], { type: "bold" });
+      markSourceRange(index, index + boldMatch[0].length, nested.start, nested.end);
       index += boldMatch[0].length;
       continue;
     }
@@ -13973,10 +14167,8 @@ function parseMarkdownInlineText(text = "") {
     }
     const strikeMatch = source.slice(index).match(/^~~(\S(?:[\s\S]*?\S)?)~~/);
     if (strikeMatch) {
-      const start = output.length;
-      output += strikeMatch[1];
-      marks.push({ type: "strike", start, end: output.length });
-      markSourceRange(index, index + strikeMatch[0].length, start, output.length);
+      const nested = appendNested(strikeMatch[1], { type: "strike" });
+      markSourceRange(index, index + strikeMatch[0].length, nested.start, nested.end);
       index += strikeMatch[0].length;
       continue;
     }
@@ -13987,10 +14179,8 @@ function parseMarkdownInlineText(text = "") {
       continue;
     }
     if (italicMatch) {
-      const start = output.length;
-      output += italicMatch[2];
-      marks.push({ type: "italic", start, end: output.length });
-      markSourceRange(index, index + italicMatch[0].length, start, output.length);
+      const nested = appendNested(italicMatch[2], { type: "italic" });
+      markSourceRange(index, index + italicMatch[0].length, nested.start, nested.end);
       index += italicMatch[0].length;
       continue;
     }
@@ -14051,6 +14241,7 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       pastedBlock.url = normalizeResourceImageUrl(block.url);
       pastedBlock.alt = String(block.alt || block.text || "");
     }
+    if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
     if (block.type === "code" && typeof block.language === "string") pastedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     pasted.push(pastedBlock);
   }
@@ -15360,6 +15551,7 @@ function handleKeydown(event) {
   if (handleFinancePickerKeydown(event)) return;
   if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
+  if (trapResourceDocumentFocus(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (handleInlineColorMenuKeydown(event)) return;
   if (handleSlashMenuDocumentKeydown(event)) return;
@@ -15647,6 +15839,16 @@ function handleKeydown(event) {
     !event.ctrlKey &&
     !event.altKey &&
     moveCaretHorizontallyBetweenBlocks(blockContent, event.key)
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
+  if (
+    event.key === "Enter"
+    && !event.shiftKey
+    && applyMarkdownFenceShortcutOnEnter(blockContent, currentBlock, ownerType, ownerId)
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -16100,6 +16302,11 @@ function handleDocumentKeydown(event) {
       ui.inlineToolbar = null;
       ui.equationPopover = null;
       renderOverlays();
+      return;
+    }
+    if (ui.activeResourceId) {
+      event.preventDefault();
+      closeResourceDocument();
       return;
     }
   }
@@ -18434,7 +18641,7 @@ function updateBlockText(blockContent, event = null) {
     block.marks = [];
     markdownHistory = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start: rawText.length, end: rawText.length });
   }
-  if (applyMarkdownShortcut(blockContent, block, rawText, editor.dataset.ownerType, editor.dataset.ownerId)) {
+  if (applyMarkdownShortcut(block, rawText, editor.dataset.ownerType, editor.dataset.ownerId)) {
     ui.slash = null;
     ui.mention = null;
     ui.pageCommand = null;
@@ -18445,8 +18652,8 @@ function updateBlockText(blockContent, event = null) {
     schedulePendingMarkdownTextTarget(editor.dataset.ownerType, editor.dataset.ownerId, focusBlock);
     commitEditorHistory(markdownHistory, { blockId: focusBlock.id, start: (focusBlock.text || "").length, end: (focusBlock.text || "").length });
     saveState();
+    renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: block.type === "divider" });
     if (block.type === "divider") {
-      renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: true });
       renderOverlays();
       focusBlockContentAfterRender(focusBlock.id, { position: "start", transaction: true });
       return;
@@ -18904,103 +19111,40 @@ function modifyCurrentBlockFromKeyboard(ownerType, ownerId, blockId) {
   return false;
 }
 
-function applyMarkdownShortcut(blockContent, block, rawText, ownerType = "", ownerId = "") {
+function applyMarkdownShortcut(block, rawText, ownerType = "", ownerId = "") {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
-  for (const [pattern, type, text] of MARKDOWN_SHORTCUTS) {
+  for (const [pattern, type, text, checked = false] of MARKDOWN_SHORTCUTS) {
     if (!pattern.test(rawText)) continue;
-    block.type = type;
+    applyBlockType(block, type);
+    if (type === "numbered") {
+      const listStart = Number.parseInt(/^\d+/.exec(rawText)?.[0] || "", 10);
+      if (listStart > 1) block.listStart = listStart;
+      else delete block.listStart;
+    }
     block.text = text;
     block.marks = [];
-    block.checked = false;
+    block.checked = checked;
     block.collapsed = false;
-    refreshBlockElementAfterShortcut(blockContent, block, ownerType, ownerId);
-    blockContent.textContent = block.text;
-    blockContent.classList.toggle("is-empty", block.text === "");
-    placeCaretAtEnd(blockContent);
-    if (block.type === "divider") blockContent.blur();
     return true;
   }
   return false;
 }
 
-function refreshBlockElementAfterShortcut(blockContent, block, ownerType = "", ownerId = "") {
-  const blockElement = blockContent.closest(".block");
-  if (!blockElement) return;
-  blockElement.dataset.type = block.type;
-  blockElement.dataset.checked = block.checked ? "true" : "false";
-  blockElement.dataset.toggleCollapsed = block.type === "toggle" && block.collapsed === true ? "true" : "false";
-  blockElement.dataset.toggleHasChildren = block.type === "toggle" && blockHasRenderedToggleChildren(ownerType, ownerId, block.id) ? "true" : "false";
-  blockElement.querySelectorAll(".block-check, .block-toggle").forEach((control) => control.remove());
-  if (block.type === "todo") {
-    insertBlockInlineControl(blockElement, blockCheckButton(block));
-  } else if (block.type === "toggle") {
-    insertBlockInlineControl(blockElement, blockToggleButton(block, ownerType, ownerId));
-  }
-  if (block.type === "numbered") {
-    blockContent.dataset.listMarker = renderedNumberedMarker(ownerType, ownerId, block.id);
-  } else {
-    blockContent.removeAttribute("data-list-marker");
-  }
-  blockContent.dataset.placeholder = blockPlaceholder(block);
-}
-
-function insertBlockInlineControl(blockElement, control) {
-  const tool = blockElement.querySelector(".block-tool");
-  if (tool?.parentElement === blockElement) {
-    tool.insertAdjacentElement("afterend", control);
-    return;
-  }
-  const content = blockElement.querySelector("[data-block-content]");
-  if (content?.parentElement === blockElement) {
-    content.insertAdjacentElement("beforebegin", control);
-  }
-}
-
-function blockCheckButton(block) {
-  const button = document.createElement("button");
-  button.className = `block-check ${block.checked ? "is-done" : ""}`.trim();
-  button.type = "button";
-  button.dataset.blockCheck = block.id;
-  button.setAttribute("aria-label", "체크");
-  button.setAttribute("aria-pressed", block.checked ? "true" : "false");
-  return button;
-}
-
-function blockToggleButton(block, ownerType = "", ownerId = "") {
-  const button = document.createElement("button");
-  const collapsed = block.collapsed === true;
-  button.className = "block-toggle";
-  button.type = "button";
-  button.dataset.blockToggle = block.id;
-  button.setAttribute("aria-label", collapsed ? "토글 펼치기" : "토글 접기");
-  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  button.textContent = "▸";
-  if (!blockHasRenderedToggleChildren(ownerType, ownerId, block.id)) button.style.color = "rgba(55, 53, 47, 0.28)";
-  return button;
-}
-
-function blockHasRenderedToggleChildren(ownerType = "", ownerId = "", blockId = "") {
-  const item = itemById(ownerType, ownerId);
-  const index = item?.blocks?.findIndex((entry) => entry.id === blockId) ?? -1;
-  return index >= 0 ? blockHasToggleChildren(item.blocks, index) : false;
-}
-
-function renderedNumberedMarker(ownerType = "", ownerId = "", blockId = "") {
-  const item = itemById(ownerType, ownerId);
-  const index = item?.blocks?.findIndex((entry) => entry.id === blockId) ?? -1;
-  if (index < 0) return "1.";
-  const block = item.blocks[index];
-  const indent = blockIndent(block);
-  let number = 1;
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const previous = item.blocks[cursor];
-    const previousIndent = blockIndent(previous);
-    if (previousIndent < indent) break;
-    if (previousIndent > indent) continue;
-    if (previous.type !== "numbered") break;
-    number += 1;
-  }
-  return `${number}.`;
+function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, ownerId) {
+  if (!block || block.type !== "paragraph" || !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  const fence = markdownFenceOpen(normalizeEditorPlainText(blockContent.textContent || ""));
+  if (!fence) return false;
+  const history = beginEditorHistory(ownerType, ownerId, { blockId: block.id, position: "end" });
+  applyBlockType(block, "code");
+  block.text = "";
+  block.marks = [];
+  block.language = fence.language;
+  ui.pendingMarkdownTextTarget = null;
+  commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
+  saveState();
+  renderEditorMutation(ownerType, ownerId);
+  focusBlockContentAfterRender(block.id, { position: "start" });
+  return true;
 }
 
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
@@ -19109,13 +19253,13 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
     activateBlockContent(blockContent);
     placeCaretAtEnd(blockContent);
   }
-  if (blockContent && applyMarkdownShortcut(blockContent, block, block.text, ownerType, ownerId)) {
+  if (blockContent && applyMarkdownShortcut(block, block.text, ownerType, ownerId)) {
     const focusBlock = block.type === "divider" ? insertParagraphAfterDividerShortcut(item, block) || block : block;
     schedulePendingMarkdownTextTarget(ownerType, ownerId, focusBlock);
     refreshLatestEditorHistoryAfter(ownerType, ownerId, { blockId: focusBlock.id, position: "end" });
     if (ownerType === "resources") markResourceChanged(ownerId);
     saveState();
-    if (block.type === "divider") renderEditorMutation(ownerType, ownerId);
+    renderEditorMutation(ownerType, ownerId);
     focusBlockContentAfterRender(focusBlock.id, { position: block.type === "divider" ? "start" : "end" });
     return true;
   }
@@ -19858,7 +20002,7 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
   }
 
   if (rawText && block.type !== "paragraph") {
-    block.type = "paragraph";
+    applyBlockType(block, "paragraph");
     block.checked = false;
     block.collapsed = false;
     commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
@@ -19869,7 +20013,7 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
   }
 
   if (!rawText && block.type !== "paragraph") {
-    block.type = "paragraph";
+    applyBlockType(block, "paragraph");
     block.checked = false;
     block.collapsed = false;
     commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
@@ -19997,7 +20141,7 @@ function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
   if (currentIndent > 0) {
     index = moveExitingBlockAfterContainingParentSubtree(item.blocks, index, Math.max(0, currentIndent - 1));
     if (!CONTINUED_BLOCK_TYPES.has(block.type)) {
-      block.type = "paragraph";
+      applyBlockType(block, "paragraph");
       block.marks = [];
       block.checked = false;
       block.collapsed = false;
@@ -20016,7 +20160,7 @@ function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
     focusBlockContentAfterRender(block.id);
     return true;
   }
-  block.type = "paragraph";
+  applyBlockType(block, "paragraph");
   block.marks = [];
   block.checked = false;
   block.collapsed = false;
@@ -20046,7 +20190,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const history = beginEditorHistory(ownerType, ownerId, { blockId, start: splitOffsets.start, end: splitOffsets.end });
   if (!split.before && !split.after && currentIndent > 0) {
     const nextIndex = moveExitingBlockAfterContainingParentSubtree(item.blocks, index, Math.max(0, currentIndent - 1));
-    if (!CONTINUED_BLOCK_TYPES.has(current.type)) current.type = "paragraph";
+    if (!CONTINUED_BLOCK_TYPES.has(current.type)) applyBlockType(current, "paragraph");
     current.marks = [];
     current.checked = false;
     current.collapsed = false;
@@ -20061,7 +20205,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     return;
   }
   if (!split.before && !split.after && current.type !== "paragraph" && !blockHasIndentedDescendants(item.blocks, index)) {
-    current.type = "paragraph";
+    applyBlockType(current, "paragraph");
     current.marks = [];
     current.checked = false;
     current.collapsed = false;
@@ -20194,7 +20338,7 @@ function changeBlockType(ownerType, ownerId, blockId, type, options = {}) {
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block) return null;
   const history = beginEditorHistory(ownerType, ownerId, { blockId, position: "end" });
-  block.type = type;
+  applyBlockType(block, type);
   let focusBlock = block;
   if (type === "divider") {
     block.text = "";
@@ -20615,6 +20759,8 @@ function applyBlockColorAction(ownerType, ownerId, blockIds, action, options = {
 
 function applyBlockType(block, type) {
   block.type = type;
+  if (type !== "numbered") delete block.listStart;
+  if (type !== "code") delete block.language;
   if (type === "divider") {
     block.text = "";
     block.marks = [];

@@ -1052,6 +1052,9 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
         "Resource images require a same-origin uploaded image URL or a credential-free HTTPS URL.",
       );
     }
+    if (block.listStart !== undefined && (block.type !== "numbered" || !Number.isInteger(block.listStart) || block.listStart < 1 || block.listStart > 999_999)) {
+      addValidationIssue(issues, `${blockPath}.listStart`, "invalid_list_start", "Numbered list start must be an integer between 1 and 999999.");
+    }
     const indent = block.indent === undefined ? 0 : block.indent;
     if (!Number.isInteger(indent) || indent < 0 || indent > MAX_BLOCK_INDENT) {
       addValidationIssue(issues, `${blockPath}.indent`, "invalid_indent", `Block indent must be between 0 and ${MAX_BLOCK_INDENT}.`);
