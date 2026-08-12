@@ -1361,16 +1361,13 @@ function renderToday() {
       <div class="grid cols-2 today-dashboard-grid">
         <details class="panel today-inbox-panel" data-today-inbox ${ui.todayInboxOpen ? "open" : ""}>
           <summary class="today-inbox-summary">
-            <span class="today-inbox-heading">
-              <span class="panel-title">Inbox</span>
-              <small>수집과 분류</small>
-            </span>
-            <span class="today-inbox-count">${inboxCaptures.length}개 대기</span>
+            <h2 class="panel-title">수집함</h2>
+            <span class="today-inbox-count">${inboxCaptures.length}개</span>
             <span class="today-inbox-chevron" aria-hidden="true">⌄</span>
           </summary>
           <div class="today-inbox-body">
             <div class="today-inbox-grid">
-              <section class="today-inbox-section" aria-label="분류할 Inbox 항목">
+              <section class="today-inbox-section" aria-label="분류할 수집 항목">
                 <div class="stack">${renderCaptureCards(inboxCaptures, "분류할 수집 항목이 없습니다.")}</div>
               </section>
             </div>
@@ -5950,7 +5947,7 @@ function renderCaptureCard(capture) {
       <h3 class="card-title">${esc(capture.title)}</h3>
       ${capture.url ? `<p class="entity-preview">${esc(capture.url)}</p>` : ""}
       <div class="card-meta">
-        ${badge("Inbox", "blue")}
+        ${badge("수집함", "blue")}
       </div>
       ${renderCaptureConvertActions(capture, draft)}${draft ? renderTaskCaptureFlow(capture, draft) : ""}
     </article>
@@ -10313,7 +10310,7 @@ function handleSubmit(event) {
     ui.todayInboxOpen = true;
     input.value = "";
     saveState();
-    showToast("Inbox에 수집했습니다.");
+    showToast("수집함에 추가했습니다.");
     if (["today", "database"].includes(ui.view)) renderView({ soft: true });
   }
 }
