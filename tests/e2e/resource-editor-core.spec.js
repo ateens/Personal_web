@@ -180,14 +180,14 @@ test("Markdown 목록, 인용, 토글과 Tab 계층 이동이 같은 편집기�
   await content.press("Enter");
   await editor.locator("[data-block-content]:focus").press("Enter");
   content = editor.locator("[data-block-content]:focus");
-  await content.type("> ");
+  await content.type("| ");
   await expect(content.locator("xpath=ancestor::*[@data-block-id][1]")).toHaveAttribute("data-type", "quote");
   await content.type("인용문");
 
   await content.press("Enter");
   await editor.locator("[data-block-content]:focus").press("Enter");
   content = editor.locator("[data-block-content]:focus");
-  await content.type(">> ");
+  await content.type("> ");
   const toggleBlock = content.locator("xpath=ancestor::*[@data-block-id][1]");
   await expect(toggleBlock).toHaveAttribute("data-type", "toggle");
   await expect(toggleBlock.locator("[data-block-toggle]")).toBeVisible();
@@ -277,7 +277,7 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
   liveContent = liveEditor.locator("[data-block-content]:focus");
   await liveContent.type("~~~python");
   await liveContent.press("Enter");
-  await expect(liveEditor.locator('pre[data-code-language="python"] code:focus')).toBeVisible();
+  await expect(liveEditor.locator('pre[data-code-language="python"] [data-block-content]:focus')).toBeVisible();
 
   const { editor, resourceId } = await createEmptyResource(page);
   const markdown = [
@@ -347,34 +347,65 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
   ]);
 });
 
-test("이미지를 업로드하면 안전한 이미지 블록으로 저장되고 다시 열어도 보인다", async ({ page, request }) => {
+test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공한다", async ({ page, request }) => {
   const { editor, resourceId } = await createEmptyResource(page);
   const content = editor.locator("[data-block-content]").first();
-  await content.type("/image");
-  const imageAction = page.locator('[data-slash-action="image:upload"]');
-  await expect(imageAction).toBeVisible();
+  await content.type("```javascript");
+  await content.press("Enter");
 
-  const chooserPromise = page.waitForEvent("filechooser");
-  await imageAction.click();
-  const chooser = await chooserPromise;
-  await chooser.setFiles({ name: "pixel.png", mimeType: "image/png", buffer: PIXEL_PNG });
+  const codeSpace = editor.locator(".code-space");
+  const code = codeSpace.locator("[data-block-content]");
+  await expect(codeSpace).toBeVisible();
+  await expect(codeSpace.locator(".code-space-title")).toHaveText("Code Space");
+  await expect(codeSpace.locator("[data-code-language-trigger]")).toContainText("JavaScript");
+  await expect(codeSpace.locator("[data-code-copy]")).toHaveText("복사");
 
-  const image = editor.locator('.block[data-type="image"] img');
-  await expect(image).toBeVisible();
-  const src = await image.getAttribute("src");
-  expect(src).toMatch(/^\/api\/resource-images\/[a-zA-Z0-9_-]+$/);
-  const imageResponse = await request.get(src);
-  expect(imageResponse.ok()).toBeTruthy();
-  expect(imageResponse.headers()["content-type"]).toContain("image/png");
+  await code.pressSequentially("const one = 1;");
+  await code.press("Enter");
+  await code.pressSequentially("const two = 2;");
+  await expect(codeSpace.locator("[data-code-line-numbers] i")).toHaveCount(2);
+  await expect(codeSpace.locator("[data-code-line-summary]")).toHaveText("2줄");
+
+  const languageTrigger = codeSpace.locator("[data-code-language-trigger]");
+  await languageTrigger.focus();
+  await languageTrigger.press("ArrowDown");
+  await expect(codeSpace.locator(".code-language-menu")).toBeVisible();
+  await expect(codeSpace.locator("[data-code-language-value]").first()).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(codeSpace.locator(".code-language-menu")).not.toBeVisible();
+  await expect(languageTrigger).toBeFocused();
+
+  await languageTrigger.click();
+  await codeSpace.locator('[data-code-language-value="typescript"]').click();
+  await expect(editor.locator('pre[data-code-language="typescript"]')).toBeVisible();
+  await expect(editor.locator("[data-code-language-trigger]")).toContainText("TypeScript");
 
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);
-    const block = resource?.blocks.find((entry) => entry.type === "image");
-    return block ? { type: block.type, url: block.url } : null;
-  }).toEqual({ type: "image", url: src });
+    const block = resource?.blocks.find((entry) => entry.type === "code");
+    return block ? { text: block.text, language: block.language } : null;
+  }).toEqual({ text: "const one = 1;\nconst two = 2;", language: "typescript" });
 
   const reloadedEditor = await openResource(page, resourceId);
-  await expect(reloadedEditor.locator(`.block[data-type="image"] img[src="${src}"]`)).toBeVisible();
+  await expect(reloadedEditor.locator('pre[data-code-language="typescript"] [data-block-content]')).toHaveText("const one = 1;\nconst two = 2;");
+  await expect(reloadedEditor.locator("[data-code-language-trigger]")).toContainText("TypeScript");
+});
+
+test("슬래시 입력은 메뉴를 열지 않고 일반 텍스트로 저장된다", async ({ page, request }) => {
+  const { editor, resourceId } = await createEmptyResource(page);
+  const content = editor.locator("[data-block-content]").first();
+  await content.type("/image");
+
+  await expect(page.locator(".selected-block-menu")).toHaveCount(0);
+  await expect(content).toHaveText("/image");
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, resourceId);
+    return resource?.blocks[0]?.text;
+  }).toBe("/image");
+
+  await content.press("Enter");
+  await expect(editor.locator("[data-block-content]").first()).toHaveText("/image");
+  await expect(editor.locator("[data-block-content]:focus")).toHaveText("");
 });
 
 test("붙여넣은 PNG 이미지는 클릭 선택 후 Backspace로 DOM과 저장 상태에서 제거된다", async ({ page, request }) => {

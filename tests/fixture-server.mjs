@@ -149,11 +149,12 @@ const server = createServer(async (request, response) => {
       const validationIssues = [
         ...fixtureGlobalDuplicateIdIssues(body.state),
         ...fixtureResourceHierarchyIssues(body.state),
+        ...fixtureResourceLinkIssues(body.state),
         ...fixtureInlineColorIssues(body.state),
         ...fixtureUrlBlockIssues(body.state),
         ...fixtureCommentAnchorIssues(body.state),
         ...fixtureCommentReferenceIssues(body.state),
-      ];
+      ].slice(0, 24);
       if (validationIssues.length) {
         attempt.outcome = "invalid-state";
         sendJson(response, 422, {
@@ -324,11 +325,12 @@ const server = createServer(async (request, response) => {
       const validationIssues = [
         ...fixtureGlobalDuplicateIdIssues(nextState),
         ...fixtureResourceHierarchyIssues(nextState),
+        ...fixtureResourceLinkIssues(nextState),
         ...fixtureInlineColorIssues(nextState),
         ...fixtureUrlBlockIssues(nextState),
         ...fixtureCommentAnchorIssues(nextState),
         ...fixtureCommentReferenceIssues(nextState),
-      ];
+      ].slice(0, 24);
       if (validationIssues.length) {
         attempt.outcome = "invalid-state";
         sendJson(response, 422, {
@@ -700,6 +702,68 @@ function fixtureResourceHierarchyIssues(incomingState) {
       ancestors.add(cursor.parentId);
       cursor = resourcesById.get(cursor.parentId);
       if (!cursor) break;
+    }
+  }
+  return issues;
+}
+
+function fixtureResourceLinkIssues(incomingState) {
+  const issues = [];
+  const addIssue = (path, code, message) => {
+    if (issues.length < 24) issues.push({ path, code, message });
+  };
+  const resources = Array.isArray(incomingState?.resources) ? incomingState.resources : [];
+  const resourceIds = new Set(resources.map((resource) => resource?.id).filter((resourceId) => typeof resourceId === "string" && resourceId));
+  const collections = ["boxes", "projects", "tasks", "resources", "habits", "journals"];
+  for (const collection of collections) {
+    const items = Array.isArray(incomingState?.[collection]) ? incomingState[collection] : [];
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      const blocks = Array.isArray(items[itemIndex]?.blocks) ? items[itemIndex].blocks : [];
+      for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+        const block = blocks[blockIndex];
+        const marks = Array.isArray(block?.marks) ? block.marks : [];
+        const rangedResourceLinks = [];
+        for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
+          const mark = marks[markIndex];
+          if (mark?.type !== "resourceLink") continue;
+          const markPath = `state.${collection}[${itemIndex}].blocks[${blockIndex}].marks[${markIndex}]`;
+          if (collection !== "resources") {
+            addIssue(markPath, "resource_link_outside_resource", "Resource links may only appear inside Resource blocks.");
+          }
+          if (["code", "divider", "bookmark", "embed", "image"].includes(block?.type)) {
+            addIssue(markPath, "resource_link_unsupported_block", "Resource links require an editable text block.");
+          }
+          if (collection === "resources" && Number.isInteger(mark.start) && Number.isInteger(mark.end) && mark.end > mark.start) {
+            rangedResourceLinks.push({ mark, markIndex });
+          }
+          const validResourceId = typeof mark.resourceId === "string"
+            && mark.resourceId.trim()
+            && mark.resourceId.length <= 256
+            && !/[\u0000-\u001f\u007f]/.test(mark.resourceId);
+          if (!validResourceId) {
+            addIssue(`${markPath}.resourceId`, "invalid_resource_link_target", "Resource link target must be a non-empty string of at most 256 characters.");
+            continue;
+          }
+          if (collection !== "resources") continue;
+          if (mark.resourceId === items[itemIndex]?.id) {
+            addIssue(`${markPath}.resourceId`, "self_resource_link", "A Resource may not cite itself.");
+          } else if (!resourceIds.has(mark.resourceId)) {
+            addIssue(`${markPath}.resourceId`, "broken_resource_link", "Resource link target does not exist.");
+          }
+        }
+        rangedResourceLinks.sort((left, right) => left.mark.start - right.mark.start || left.mark.end - right.mark.end || left.markIndex - right.markIndex);
+        let coveredUntil = -1;
+        for (const { mark, markIndex } of rangedResourceLinks) {
+          if (mark.start < coveredUntil) {
+            addIssue(
+              `state.resources[${itemIndex}].blocks[${blockIndex}].marks[${markIndex}]`,
+              "overlapping_resource_links",
+              "Resource link ranges may not overlap.",
+            );
+          }
+          coveredUntil = Math.max(coveredUntil, mark.end);
+        }
+      }
     }
   }
   return issues;

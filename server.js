@@ -92,7 +92,7 @@ const SUPPORTED_BLOCK_TYPES = new Set([
 ]);
 const URL_PREVIEW_BLOCK_TYPES = new Set(["bookmark", "embed"]);
 const RESOURCE_IMAGE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link"]);
+const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link", "resourceLink"]);
 const SUPPORTED_INLINE_COLOR_KEYS = new Set(["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
 const SUPPORTED_RESOURCE_FONTS = new Set(["default", "serif", "mono"]);
 const SUPPORTED_COMMENT_SCOPES = new Set(["page", "inline"]);
@@ -1082,6 +1082,17 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       if (mark.type === "link" && !isSafeStoredUrl(mark.href || mark.url || "")) {
         addValidationIssue(issues, `${markPath}.href`, "unsafe_url_protocol", "Link URL uses an unsupported or unsafe protocol.");
       }
+      if (mark.type === "resourceLink") {
+        if (collectionKey !== "resources") {
+          addValidationIssue(issues, markPath, "resource_link_outside_resource", "Resource links may only appear inside Resource blocks.");
+        }
+        if (["code", "divider", "bookmark", "embed", "image"].includes(block.type)) {
+          addValidationIssue(issues, markPath, "resource_link_unsupported_block", "Resource links require an editable text block.");
+        }
+        if (!validEntityId(mark.resourceId)) {
+          addValidationIssue(issues, `${markPath}.resourceId`, "invalid_resource_link_target", `Resource link target must be a non-empty string of at most ${MAX_ID_LENGTH} characters.`);
+        }
+      }
       if (["textColor", "backgroundColor"].includes(mark.type) && !SUPPORTED_INLINE_COLOR_KEYS.has(mark.color)) {
         addValidationIssue(issues, `${markPath}.color`, "unsupported_inline_color", "Inline color must use a supported palette key.");
       }
@@ -1459,6 +1470,45 @@ function validateResourceHierarchy(items, resourceIds, issues) {
   }
 }
 
+function validateResourceLinkReferences(items, resourceIds, issues) {
+  for (let itemIndex = 0; itemIndex < items.length && issues.length < MAX_VALIDATION_ISSUES; itemIndex += 1) {
+    const item = items[itemIndex];
+    if (!isPlainObject(item) || !Array.isArray(item.blocks)) continue;
+    for (let blockIndex = 0; blockIndex < item.blocks.length && issues.length < MAX_VALIDATION_ISSUES; blockIndex += 1) {
+      const block = item.blocks[blockIndex];
+      if (!isPlainObject(block) || !Array.isArray(block.marks)) continue;
+      const rangedResourceLinks = [];
+      for (let markIndex = 0; markIndex < block.marks.length && issues.length < MAX_VALIDATION_ISSUES; markIndex += 1) {
+        const mark = block.marks[markIndex];
+        if (!isPlainObject(mark) || mark.type !== "resourceLink") continue;
+        if (Number.isInteger(mark.start) && Number.isInteger(mark.end) && mark.end > mark.start) {
+          rangedResourceLinks.push({ mark, markIndex });
+        }
+        if (!validEntityId(mark.resourceId)) continue;
+        const path = `state.resources[${itemIndex}].blocks[${blockIndex}].marks[${markIndex}].resourceId`;
+        if (mark.resourceId === item.id) {
+          addValidationIssue(issues, path, "self_resource_link", "A Resource may not cite itself.");
+        } else if (!resourceIds?.has(mark.resourceId)) {
+          addValidationIssue(issues, path, "broken_resource_link", "Resource link target does not exist.");
+        }
+      }
+      rangedResourceLinks.sort((left, right) => left.mark.start - right.mark.start || left.mark.end - right.mark.end || left.markIndex - right.markIndex);
+      let coveredUntil = -1;
+      for (const { mark, markIndex } of rangedResourceLinks) {
+        if (mark.start < coveredUntil) {
+          addValidationIssue(
+            issues,
+            `state.resources[${itemIndex}].blocks[${blockIndex}].marks[${markIndex}]`,
+            "overlapping_resource_links",
+            "Resource link ranges may not overlap.",
+          );
+        }
+        coveredUntil = Math.max(coveredUntil, mark.end);
+      }
+    }
+  }
+}
+
 function validateOptionalReference(item, field, targetIds, issues, path) {
   const value = item[field];
   if (value === undefined || value === null || value === "") return;
@@ -1548,6 +1598,7 @@ function validateIncomingState(state) {
     }
   }
   validateResourceHierarchy(Array.isArray(state.resources) ? state.resources : [], resources, issues);
+  validateResourceLinkReferences(Array.isArray(state.resources) ? state.resources : [], resources, issues);
 
   const links = Array.isArray(state.links) ? state.links : [];
   for (let index = 0; index < links.length; index += 1) {

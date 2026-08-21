@@ -189,5 +189,5 @@ test("checking a collapsed Today task ignores hidden editor drag handles", async
   await target.locator(".check").click();
 
   await expect.poll(() => page.evaluate((taskId) => window.itemById("tasks", taskId)?.status, taskIds[2])).toBe("done");
-  await expect(page.locator(".slash-menu.is-selection-menu")).toHaveCount(0);
+  await expect(page.locator(".selected-block-menu")).toHaveCount(0);
 });
