@@ -5,6 +5,41 @@ import XCTest
 
 final class QuickNotesTests: XCTestCase {
     @MainActor
+    func testWorkspaceBridgeReloadFlushesBeforeInvokingCurrentWebViewHandler() async {
+        var events: [String] = []
+        SYGMAWorkspaceBridge.flushHandler = {
+            events.append("flush")
+            return true
+        }
+        SYGMAWorkspaceBridge.reloadHandler = { events.append("reload") }
+        defer {
+            SYGMAWorkspaceBridge.flushHandler = nil
+            SYGMAWorkspaceBridge.reloadHandler = nil
+        }
+
+        let reloaded = await SYGMAWorkspaceBridge.reloadCurrentPage()
+
+        XCTAssertTrue(reloaded)
+        XCTAssertEqual(events, ["flush", "reload"])
+    }
+
+    @MainActor
+    func testWorkspaceBridgeReloadStopsWhenFlushFails() async {
+        var reloadCount = 0
+        SYGMAWorkspaceBridge.flushHandler = { false }
+        SYGMAWorkspaceBridge.reloadHandler = { reloadCount += 1 }
+        defer {
+            SYGMAWorkspaceBridge.flushHandler = nil
+            SYGMAWorkspaceBridge.reloadHandler = nil
+        }
+
+        let reloaded = await SYGMAWorkspaceBridge.reloadCurrentPage()
+
+        XCTAssertFalse(reloaded)
+        XCTAssertEqual(reloadCount, 0)
+    }
+
+    @MainActor
     func testImagePasteboardDecoderHandlesImageDataAndFileURLs() throws {
         let image = NSImage(size: NSSize(width: 4, height: 4))
         image.lockFocus()
