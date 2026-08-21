@@ -531,3 +531,250 @@ test("긴 문서에서 위아래 이동은 선호 열을 유지하고 커서를 
   expect(geometry.blockWidth).toBeGreaterThan(220);
   expect(geometry.pageOverflow).toBeLessThanOrEqual(1);
 });
+
+
+test("Resource 왼쪽 여백을 세로로 드래그하면 지나간 줄 블록이 연속 선택된다", async ({ page, request }) => {
+  const blockIds = ["marquee-line-1", "marquee-line-2", "marquee-line-3", "marquee-line-4", "marquee-line-5"];
+  await seedResourceBlocks(
+    request,
+    FIXTURE_IDS.bodySearchResource,
+    blockIds.map((id, index) => paragraph(id, `드래그 선택 줄 ${index + 1}`)),
+  );
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const resourceDocument = page.locator(`[data-resource-document="${FIXTURE_IDS.bodySearchResource}"]`);
+  const editorBox = await editor.boundingBox();
+  const documentBox = await resourceDocument.boundingBox();
+  const firstBox = await editor.locator(`[data-block-id="${blockIds[0]}"]`).boundingBox();
+  const thirdBox = await editor.locator(`[data-block-id="${blockIds[2]}"]`).boundingBox();
+  expect(editorBox && documentBox && firstBox && thirdBox).toBeTruthy();
+
+  const gutterX = Math.max(documentBox.x + 8, editorBox.x - 18);
+  await page.mouse.move(gutterX, firstBox.y + firstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(gutterX, thirdBox.y + thirdBox.height / 2, { steps: 8 });
+  await expect(page.locator(".editor-marquee")).toBeVisible();
+  await page.mouse.up();
+
+  await expect(page.locator(".editor-marquee")).toHaveCount(0);
+  await expect(editor.locator(".block.is-selected")).toHaveCount(3);
+  await expect.poll(() => editor.locator(".block.is-selected").evaluateAll((elements) => elements.map((element) => element.dataset.blockId))).toEqual(blockIds.slice(0, 3));
+  const announcements = resourceDocument.locator("[data-resource-announcements]");
+  await expect(announcements).toHaveText("3개 블록 선택됨");
+  expect(await announcements.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(false);
+
+  await page.mouse.move(gutterX, firstBox.y + firstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(gutterX, thirdBox.y + thirdBox.height / 2, { steps: 4 });
+  await expect(page.locator(".editor-marquee")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".editor-marquee")).toHaveCount(0);
+  await expect(editor.locator(".block.is-selected")).toHaveCount(0);
+  await page.mouse.up();
+
+  await page.mouse.move(gutterX, firstBox.y + firstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(gutterX, thirdBox.y + thirdBox.height / 2, { steps: 4 });
+  await expect(page.locator(".editor-marquee")).toBeVisible();
+  await resourceDocument.locator(".resource-document-close").evaluate((button) => button.click());
+  await expect(resourceDocument).toHaveCount(0);
+  await expect(page.locator(".editor-marquee")).toHaveCount(0);
+  await page.waitForTimeout(40);
+  await expect(page.locator("#appAnnouncements")).not.toHaveText("블록 선택 해제됨");
+  await page.mouse.up();
+
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.bodySearchResource}"]`).click();
+  const reopenedEditorBox = await editor.boundingBox();
+  const reopenedDocumentBox = await resourceDocument.boundingBox();
+  const reopenedFirstBox = await editor.locator(`[data-block-id="${blockIds[0]}"]`).boundingBox();
+  const reopenedThirdBox = await editor.locator(`[data-block-id="${blockIds[2]}"]`).boundingBox();
+  const reopenedGutterX = Math.max(reopenedDocumentBox.x + 8, reopenedEditorBox.x - 18);
+  await page.mouse.move(reopenedGutterX, reopenedFirstBox.y + reopenedFirstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(reopenedGutterX, reopenedThirdBox.y + reopenedThirdBox.height / 2, { steps: 4 });
+  await page.mouse.up();
+  await expect(editor.locator(".block.is-selected")).toHaveCount(3);
+  await resourceDocument.locator(".resource-document-close").click();
+  await expect(resourceDocument).toHaveCount(0);
+  await expect(page.locator(".block.is-selected")).toHaveCount(0);
+  await page.keyboard.press("Delete");
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(blockIds.length);
+
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.bodySearchResource}"]`).click();
+  const switchEditorBox = await editor.boundingBox();
+  const switchDocumentBox = await resourceDocument.boundingBox();
+  const switchFirstBox = await editor.locator(`[data-block-id="${blockIds[0]}"]`).boundingBox();
+  const switchThirdBox = await editor.locator(`[data-block-id="${blockIds[2]}"]`).boundingBox();
+  const switchGutterX = Math.max(switchDocumentBox.x + 8, switchEditorBox.x - 18);
+  await page.mouse.move(switchGutterX, switchFirstBox.y + switchFirstBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(switchGutterX, switchThirdBox.y + switchThirdBox.height / 2, { steps: 4 });
+  await page.mouse.up();
+  await expect(editor.locator(".block.is-selected")).toHaveCount(3);
+  await page.evaluate((resourceId) => openResourceDocument(resourceId), FIXTURE_IDS.titleSearchResource);
+  await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.titleSearchResource}"]`)).toBeVisible();
+  await expect(page.locator(".block.is-selected")).toHaveCount(0);
+  await page.keyboard.press("Delete");
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(blockIds.length);
+});
+
+test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 한 줄 여유가 남는다", async ({ page, request }) => {
+  const blocks = Array.from({ length: 34 }, (_, index) => paragraph(`caret-scroll-${index + 1}`, `스크롤 확인 줄 ${index + 1}`));
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, blocks);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const lastContent = editor.locator(`[data-block-content="${blocks.at(-1).id}"]`);
+  await setCaret(lastContent, blocks.at(-1).text.length);
+  const beforeScrollTop = await page.locator(`[data-resource-document="${FIXTURE_IDS.bodySearchResource}"]`).evaluate((element) => element.scrollTop);
+  await page.keyboard.press("Enter");
+
+  const focusedContent = editor.locator("[data-block-content]:focus");
+  await expect(focusedContent).toBeVisible();
+  await expect(focusedContent).not.toHaveAttribute("data-block-content", blocks.at(-1).id);
+  await expect(editor.locator("[data-block-content]")).toHaveCount(blocks.length + 1);
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(blocks.length + 1);
+  await expect.poll(async () => page.evaluate(() => {
+    const content = document.activeElement?.closest?.("[data-block-content]");
+    const resourceDocument = content?.closest?.(".resource-document");
+    const selection = window.getSelection();
+    if (!content || !resourceDocument || !selection?.rangeCount) return false;
+    const range = selection.getRangeAt(0).cloneRange();
+    const rawCaret = range.getClientRects()[0] || range.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const caretBottom = rawCaret && (rawCaret.width || rawCaret.height)
+      ? rawCaret.bottom
+      : Math.min(contentRect.bottom, contentRect.top + 24);
+    const panel = resourceDocument.getBoundingClientRect();
+    const style = getComputedStyle(content);
+    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.55;
+    return resourceDocument.scrollTop > 0 && panel.bottom - caretBottom >= lineHeight - 2;
+  })).toBe(true);
+
+  const geometry = await page.evaluate(() => {
+    const content = document.activeElement.closest("[data-block-content]");
+    const resourceDocument = content.closest(".resource-document");
+    const selection = window.getSelection();
+    const rawCaret = selection.getRangeAt(0).getClientRects()[0] || selection.getRangeAt(0).getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const caretBottom = rawCaret && (rawCaret.width || rawCaret.height)
+      ? rawCaret.bottom
+      : Math.min(contentRect.bottom, contentRect.top + 24);
+    const panel = resourceDocument.getBoundingClientRect();
+    const style = getComputedStyle(content);
+    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.55;
+    return { scrollTop: resourceDocument.scrollTop, bottomGap: panel.bottom - caretBottom, lineHeight };
+  });
+  expect(geometry.scrollTop).toBeGreaterThan(beforeScrollTop);
+  expect(geometry.bottomGap).toBeGreaterThanOrEqual(geometry.lineHeight - 2);
+});
+
+test("Resource 토글은 첫 줄 중앙에 맞고 list 자식도 펼침과 접힘이 부드럽게 이어진다", async ({ page, request }) => {
+  const toggleId = "animated-toggle-parent";
+  const bulletId = "animated-toggle-bullet";
+  const childId = "animated-toggle-paragraph";
+  const siblingId = "animated-toggle-list-sibling";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { id: toggleId, type: "toggle", text: "정렬된 토글", marks: [], checked: false, indent: 0, collapsed: false },
+    { id: childId, type: "paragraph", text: "일반 자식", marks: [], checked: false, indent: 1, collapsed: false },
+    { id: bulletId, type: "bullet", text: "목록 자식", marks: [], checked: false, indent: 1, collapsed: false },
+    { id: siblingId, type: "bullet", text: "비자식 목록 형제", marks: [], checked: false, indent: 0, collapsed: false },
+    paragraph("animated-toggle-after", "토글 다음 줄"),
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const toggle = editor.locator(`[data-block-id="${toggleId}"]`);
+  const button = editor.locator(`[data-block-toggle="${toggleId}"]`);
+  const child = editor.locator(`[data-block-id="${bulletId}"]`);
+  const sibling = editor.locator(`[data-block-id="${siblingId}"]`);
+
+  const alignment = await toggle.evaluate((element) => {
+    const control = element.querySelector("[data-block-toggle]");
+    const content = element.querySelector("[data-block-content]");
+    const range = document.createRange();
+    range.setStart(content.firstChild, 0);
+    range.setEnd(content.firstChild, 1);
+    const line = range.getBoundingClientRect();
+    const controlRect = control.getBoundingClientRect();
+    return Math.abs((controlRect.top + controlRect.height / 2) - (line.top + line.height / 2));
+  });
+  expect(alignment).toBeLessThanOrEqual(2);
+  await expect(child.locator("xpath=parent::*")).toHaveAttribute("role", "list");
+  const horizontalIndent = await Promise.all([
+    toggle.locator("[data-block-content]").boundingBox(),
+    child.locator("[data-block-content]").boundingBox(),
+  ]);
+  expect(horizontalIndent.every(Boolean)).toBe(true);
+  expect(horizontalIndent[1].x).toBeGreaterThan(horizontalIndent[0].x);
+
+  await page.evaluate(() => {
+    window.__resourceToggleMotionProbe = [];
+    window.__resourceToggleMotionObserver?.disconnect();
+    window.__resourceToggleMotionObserver = new MutationObserver(() => {
+      for (const element of document.querySelectorAll(".toggle-child-animation-group")) {
+        const key = element.className;
+        if (window.__resourceToggleMotionProbe.some((entry) => entry.key === key)) continue;
+        window.__resourceToggleMotionProbe.push({
+          key,
+          animations: element.getAnimations().map((animation) => animation.animationName),
+          hasList: Boolean(element.querySelector('[role="list"]')),
+          blockIds: [...element.querySelectorAll(".block[data-block-id]")].map((block) => block.dataset.blockId),
+        });
+      }
+    });
+    window.__resourceToggleMotionObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  });
+
+  await button.click();
+  await expect(child).toBeHidden();
+  await expect(sibling).toBeVisible();
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(() => page.evaluate(() => window.__resourceToggleMotionProbe)).toContainEqual(expect.objectContaining({
+    key: expect.stringContaining("is-toggle-group-collapsing"),
+    animations: expect.arrayContaining(["toggle-group-collapse"]),
+    hasList: true,
+    blockIds: expect.not.arrayContaining([siblingId]),
+  }));
+
+  await button.click();
+  await expect(child).toBeVisible();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect.poll(() => page.evaluate(() => window.__resourceToggleMotionProbe)).toContainEqual(expect.objectContaining({
+    key: expect.stringContaining("is-toggle-group-revealing"),
+    animations: expect.arrayContaining(["toggle-group-reveal"]),
+    hasList: true,
+    blockIds: expect.not.arrayContaining([siblingId]),
+  }));
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+
+  await button.click();
+  await page.waitForTimeout(50);
+  await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect(child).toBeVisible();
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+
+  await button.click();
+  await expect(child).toBeHidden();
+  await page.evaluate((id) => {
+    window.__resourceToggleMotionProbe = [];
+    document.querySelector(`[data-block-toggle="${id}"]`).click();
+    document.querySelector(`[data-block-toggle="${id}"]`).click();
+  }, toggleId);
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(child).toBeHidden();
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__resourceToggleMotionProbe.some((entry) => entry.key.includes("is-toggle-group-revealing")))).toBe(false);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await button.click();
+  await expect(child).toBeVisible();
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+  await button.click();
+  await expect(child).toBeHidden();
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+  await button.click();
+  await expect(child).toBeVisible();
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.find((block) => block.id === toggleId)?.collapsed).toBe(false);
+});

@@ -70,13 +70,52 @@ test("새 자료 버튼은 빈 문서를 만들고 제목에서 Enter를 누르�
   await expect(document.locator('[data-block-content]').first()).toBeFocused();
 });
 
-test("Resource 링크 popover의 마지막 버튼에서 Tab을 누르면 dialog 첫 컨트롤로 순환한다", async ({ page }) => {
+test("Resource 일반 링크는 새 창으로 열리고 명시적 링크 도구의 focus는 dialog 안에서 순환한다", async ({ page }) => {
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   await openResourceList(page);
   const opener = page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`);
   await opener.click();
 
   const document = page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
-  await document.locator('a[data-inline-mark="link"][href="https://example.com/e2e"]').click();
+  const link = document.locator('a[data-inline-mark="link"][href="https://example.com/e2e"]');
+  await page.context().route("https://example.com/e2e", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/html",
+    body: "<!doctype html><title>External fixture</title>",
+  }));
+  const popupPromise = page.waitForEvent("popup");
+  await link.click();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL("https://example.com/e2e");
+  await expect(page.locator("#overlayRoot [data-inline-link-popover]")).toHaveCount(0);
+  await popup.close();
+
+  await link.focus();
+  const keyboardPopupPromise = page.waitForEvent("popup");
+  await link.press("Enter");
+  const keyboardPopup = await keyboardPopupPromise;
+  await expect(keyboardPopup).toHaveURL("https://example.com/e2e");
+  await keyboardPopup.close();
+
+  await link.focus();
+  const spacePopupPromise = page.waitForEvent("popup");
+  await link.press("Space");
+  const spacePopup = await spacePopupPromise;
+  await expect(spacePopup).toHaveURL("https://example.com/e2e");
+  await spacePopup.close();
+
+  const content = link.locator("xpath=ancestor::*[@data-block-content][1]");
+  await content.evaluate((element) => {
+    const anchor = element.querySelector('a[data-inline-mark="link"]');
+    const range = document.createRange();
+    range.selectNodeContents(anchor);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.locator('[data-inline-mark-toggle="link"]').click();
   const popover = page.locator("#overlayRoot [data-inline-link-popover]");
   await expect(popover).toBeVisible();
 
@@ -97,4 +136,5 @@ test("Resource 링크 popover의 마지막 버튼에서 Tab을 누르면 dialog 
   await page.keyboard.press("Escape");
   await expect(document).toHaveCount(0);
   await expect(opener).toBeFocused();
+  expect(pageErrors).toEqual([]);
 });
