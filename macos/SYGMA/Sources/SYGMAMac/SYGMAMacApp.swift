@@ -19,6 +19,14 @@ struct SYGMAMacApp: App {
         .defaultSize(width: 1440, height: 920)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .toolbar) {
+                Button("새로고침") {
+                    Task { @MainActor in
+                        if !(await SYGMAWorkspaceBridge.reloadCurrentPage()) { NSSound.beep() }
+                    }
+                }
+                .keyboardShortcut("r", modifiers: .command)
+            }
             CommandMenu("Notes") {
                 Button("Quick Notes 열기/숨기기") { appDelegate.toggleQuickNotes() }
                 Button("Inbox 바로 추가") { appDelegate.toggleInboxCapture() }
