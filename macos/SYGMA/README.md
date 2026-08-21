@@ -8,7 +8,8 @@ The signed app also embeds the native `SYGMA Calendar` WidgetKit extension. It
 provides the large four-week calendar and small, medium, or large Today Tasks widget.
 
 The main window has no visible title bar or traffic-light buttons. Its invisible top
-24-point strip remains draggable.
+24-point strip remains draggable. Use `⌘R` or **View > 새로고침** to save pending web
+changes and then reload the current page.
 
 ## Quick Notes
 
