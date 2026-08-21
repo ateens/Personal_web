@@ -53,6 +53,13 @@ enum SYGMAWorkspaceBridge {
         return await flushHandler()
     }
 
+    @discardableResult
+    static func reloadCurrentPage() async -> Bool {
+        guard await flushPendingChanges() else { return false }
+        reloadHandler?()
+        return true
+    }
+
     static func reloadAfterMutation() {
         reloadHandler?()
     }
@@ -146,7 +153,8 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
             guard let webView else { return true }
             let script = #"""
             if (typeof persistLocalResourceDraft !== "function" || typeof flushRemoteStateSave !== "function") return true;
-            await persistLocalResourceDraft();
+            const locallyPersisted = await persistLocalResourceDraft();
+            if (locallyPersisted !== true) return false;
             const waitForSave = async () => {
               const deadline = Date.now() + 12000;
               while (remoteStateSaveInFlight && Date.now() < deadline) {
