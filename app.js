@@ -343,6 +343,11 @@ const INLINE_TOOLBAR_ESTIMATED_HEIGHT = 42;
 const BLOCK_HANDLE_DRAG_ACTIVATION_DISTANCE = 6;
 const BLOCK_BODY_DRAG_ACTIVATION_DISTANCE = 10;
 const POINTER_DRAG_ACTIVATION_DISTANCE = 12;
+const EDITOR_MARQUEE_ACTIVATION_DISTANCE = 5;
+const EDITOR_MARQUEE_GUTTER_WIDTH = 42;
+const EDITOR_MARQUEE_AUTOSCROLL_EDGE = 52;
+const RESOURCE_CARET_RESERVE_LINES = 1;
+const RESOURCE_CARET_ENTER_RESERVE_LINES = 1;
 const BLOCK_TYPE_KEYBOARD_SHORTCUTS = {
   "0": "paragraph",
   "1": "heading1",
@@ -604,6 +609,9 @@ let taskDoneRenderTimer = 0;
 let taskDoneRenderVersion = 0;
 let inlineToolbarPositionFrame = 0;
 let preferredVerticalCaretX = null;
+let resourceCaretScrollFrame = 0;
+const toggleBlockAnimationTimers = new Map();
+const toggleBlockAnimationFrames = new Map();
 let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
 const todayTaskPropertyResizeTimers = new Map();
@@ -750,17 +758,20 @@ function init() {
   document.addEventListener("wheel", cancelPendingPointerDrags, { passive: true, capture: true });
   document.addEventListener("scroll", cancelPendingPointerDrags, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
+  document.addEventListener(pointerMoveEvent, handleEditorMarqueePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleBlockPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleTodayTaskPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleDeleteDragPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleSchedulePointerMove, true);
   document.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
+  document.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
   document.addEventListener(pointerUpEvent, finishBlockDrag, true);
   document.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
   document.addEventListener(pointerUpEvent, finishDeleteDrag, true);
   document.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   if (pointerEventsSupported) {
     document.addEventListener("pointercancel", cancelNavPointerDrag, true);
+    document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
     document.addEventListener("pointercancel", cancelBlockDrag, true);
     document.addEventListener("pointercancel", cancelTodayTaskDrag, true);
     document.addEventListener("pointercancel", cancelDeleteDrag, true);
@@ -781,6 +792,7 @@ function init() {
   window.visualViewport?.addEventListener("scroll", scheduleInlineToolbarPositionSync);
   window.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   window.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
+  window.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
   window.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
   window.addEventListener(pointerUpEvent, finishDeleteDrag, true);
   window.addEventListener("blur", cancelScheduleDrag);
@@ -1674,6 +1686,7 @@ function renderResourceDocument(resource) {
       aria-labelledby="resource-dialog-label-${esc(resource.id)}"
     >
       <h2 class="visually-hidden" id="resource-dialog-label-${esc(resource.id)}">자료 편집</h2>
+      <div class="visually-hidden" data-resource-announcements role="status" aria-live="polite" aria-atomic="true"></div>
       <button class="resource-document-close" type="button" data-resource-back aria-label="자료 닫기">×</button>
       <label class="visually-hidden" for="resource-title-${esc(resource.id)}">자료 제목</label>
       <textarea
@@ -1700,10 +1713,16 @@ function syncResourceDocumentDialog() {
   const open = Boolean(resource && !resource.trashedAt);
   if (open) {
     if (els.detailRoot.dataset.resourceDialog !== resource.id) {
+      if (els.detailRoot.dataset.resourceDialog) {
+        cancelEditorMarqueeDrag();
+        clearBlockSelection();
+      }
       els.detailRoot.innerHTML = renderResourceDocument(resource);
       els.detailRoot.dataset.resourceDialog = resource.id;
     }
   } else {
+    if (ui.pendingEditorMarquee || ui.editorMarquee?.ownerType === "resources") cancelEditorMarqueeDrag();
+    if (ui.blockSelection.ownerType === "resources") clearBlockSelection();
     els.detailRoot.innerHTML = "";
     delete els.detailRoot.dataset.resourceDialog;
   }
@@ -7396,20 +7415,22 @@ function renderInlineBlockEditor(type, ownerId, blocksList) {
 function renderBlocks(blocksList, ownerType, ownerId) {
   let html = "";
   let openListType = "";
+  let openListIndent = -1;
   const toggleStack = [];
   const numberedCounters = [];
   for (let index = 0; index < blocksList.length; index += 1) {
     const block = blocksList[index];
+    const indent = blockIndent(block);
     const listType = block.type === "bullet" || block.type === "numbered" ? block.type : "";
-    if (listType !== openListType) {
+    if (listType !== openListType || (listType && indent !== openListIndent)) {
       if (openListType) html += "</div>";
       if (listType) {
         const label = listType === "numbered" ? "번호 목록" : "글머리 기호 목록";
-        html += `<div class="block-list" role="list" aria-label="${label}">`;
+        html += `<div class="block-list" role="list" aria-label="${label}" data-list-indent="${indent}">`;
       }
       openListType = listType;
+      openListIndent = listType ? indent : -1;
     }
-    const indent = blockIndent(block);
     while (toggleStack.length && indent <= toggleStack[toggleStack.length - 1].indent) {
       toggleStack.pop();
     }
@@ -7899,7 +7920,7 @@ function renderInlineSegment(text, activeMarks) {
     } else if (type === "link") {
       const href = normalizeInlineHref(mark.href || "");
       if (!href) continue;
-      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.link}" data-inline-mark="link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${html}</a>`;
+      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.link}" data-inline-mark="link" href="${esc(href)}" target="_blank" rel="noopener noreferrer" tabindex="0">${html}</a>`;
     } else if (type === "textColor" || type === "backgroundColor") {
       const color = normalizeBlockColorValue(mark.color);
       if (!color) continue;
@@ -8282,6 +8303,14 @@ function normalizeInlineHref(value = "") {
   if (/^[\w.-]+\.[a-z]{2,}(?:[/?#].*)?$/i.test(raw)) return `https://${raw}`;
   if (/^(?:\/(?!\/)|#|\?|\.\.?\/)/.test(raw)) return raw;
   return "";
+}
+
+function openInlineLinkExternally(linkElement) {
+  const href = normalizeInlineHref(linkElement?.dataset?.inlineHref || linkElement?.getAttribute?.("href") || "");
+  if (!href) return false;
+  const openedWindow = window.open(href, "_blank", "noopener,noreferrer");
+  if (openedWindow) openedWindow.opener = null;
+  return true;
 }
 
 function blockPlaceholder(block) {
@@ -9799,7 +9828,10 @@ function handleClick(event) {
   }
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
 
-  if (ui.suppressBlockClickUntil > Date.now() && event.target.closest(".block, .block-editor")) {
+  if (
+    ui.suppressBlockClickUntil > Date.now()
+    && (event.target.closest(".block, .block-editor") || (ui.blockSelection.ids.length && event.target.closest(".resource-document")))
+  ) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -9818,8 +9850,13 @@ function handleClick(event) {
   if (clickedInlineLink && clickedLinkBlock) {
     event.preventDefault();
     event.stopPropagation();
-    activateBlockContent(clickedLinkBlock);
     const editor = clickedLinkBlock.closest(".block-editor");
+    if (editor?.dataset.ownerType === "resources") {
+      clearInlineEditingOverlaysForBlockSelection();
+      openInlineLinkExternally(clickedInlineLink);
+      return;
+    }
+    activateBlockContent(clickedLinkBlock);
     const range = textRangeForInlineElement(clickedLinkBlock, clickedInlineLink);
     openLinkPopover(
       editor.dataset.ownerType,
@@ -10781,6 +10818,10 @@ function createResource(title = "새 자료") {
 function openResourceDocument(resourceId) {
   const resource = itemById("resources", resourceId);
   if (!resource || resource.trashedAt) return false;
+  if (ui.activeResourceId && ui.activeResourceId !== resource.id) {
+    cancelEditorMarqueeDrag();
+    clearBlockSelection();
+  }
   ui.activeResourceId = resource.id;
   ui.selectedBlockMenu = null;
   ui.inlineToolbar = null;
@@ -10796,6 +10837,8 @@ function openResourceDocument(resourceId) {
 
 function closeResourceDocument() {
   const resourceId = ui.activeResourceId;
+  cancelEditorMarqueeDrag();
+  clearBlockSelection();
   ui.activeResourceId = "";
   ui.selectedBlockMenu = null;
   ui.inlineToolbar = null;
@@ -11845,6 +11888,8 @@ function customPointerDragPendingOrActive() {
     ui.navPointerDrag ||
     ui.pendingBlockToolDrag ||
     ui.blockDrag ||
+    ui.pendingEditorMarquee ||
+    ui.editorMarquee ||
     ui.pendingTodayTaskDrag ||
     ui.todayTaskDrag ||
     ui.pendingDeleteDrag ||
@@ -11862,6 +11907,10 @@ function handleCustomPointerDragSelectStart(event) {
 function cancelPendingPointerDrags() {
   ui.pendingNavDrag = null;
   ui.pendingBlockToolDrag = null;
+  if (ui.pendingEditorMarquee) {
+    releaseEditorMarqueePointerCapture(ui.pendingEditorMarquee);
+    ui.pendingEditorMarquee = null;
+  }
   ui.pendingTodayTaskDrag = null;
   ui.pendingDeleteDrag = null;
   ui.pendingScheduleDrag = null;
@@ -12315,12 +12364,14 @@ function blockSelectionAnnouncementKey(selection = {}) {
 }
 
 function announceAppStatus(message) {
-  const target = els.appAnnouncements || document.querySelector("#appAnnouncements");
+  const target = document.querySelector(".resource-document [data-resource-announcements]")
+    || els.appAnnouncements
+    || document.querySelector("#appAnnouncements");
   if (!target) return;
   window.clearTimeout(appAnnouncementTimer);
   target.textContent = "";
   appAnnouncementTimer = window.setTimeout(() => {
-    target.textContent = message;
+    if (target.isConnected) target.textContent = message;
   }, 20);
 }
 
@@ -12343,22 +12394,234 @@ function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
 
 
 
-function cancelEditorMarqueeDrag(event) {
-  const pointerId = event ? eventPointerId(event) : null;
-  let cancelledAnyMarquee = false;
-  if (ui.pendingEditorMarquee && (!event || ui.pendingEditorMarquee.pointerId === pointerId)) {
+function resourceEditorMarqueeTarget(event) {
+  if (!(event?.target instanceof Element) || !canStartCustomPointerDrag(event)) return null;
+  if (event.target.closest("button, input, select, textarea, summary, a, [contenteditable='true'], .selected-block-menu, .inline-format-toolbar")) return null;
+  const documentPanel = event.target.closest(".resource-document");
+  const editor = documentPanel?.querySelector('.block-editor[data-owner-type="resources"]');
+  if (!documentPanel || !editor) return null;
+  const panelRect = documentPanel.getBoundingClientRect();
+  const editorRect = editor.getBoundingClientRect();
+  const gutterLeft = Math.max(panelRect.left + 4, editorRect.left - EDITOR_MARQUEE_GUTTER_WIDTH);
+  const gutterRight = editorRect.left + 10;
+  const verticalBottom = Math.max(editorRect.bottom + 72, panelRect.bottom - 24);
+  if (event.clientX < gutterLeft || event.clientX > gutterRight) return null;
+  if (event.clientY < editorRect.top - 8 || event.clientY > verticalBottom) return null;
+  return { documentPanel, editor };
+}
+
+function beginPendingEditorMarquee(event) {
+  const target = resourceEditorMarqueeTarget(event);
+  if (!target) return false;
+  cancelEditorMarqueeDrag();
+  const captureTarget = event.target instanceof Element ? event.target : target.documentPanel;
+  ui.pendingEditorMarquee = {
+    editor: target.editor,
+    documentPanel: target.documentPanel,
+    ownerType: target.editor.dataset.ownerType,
+    ownerId: target.editor.dataset.ownerId,
+    pointerId: eventPointerId(event),
+    startX: event.clientX,
+    startY: event.clientY,
+    captureTarget,
+  };
+  try {
+    if (event.pointerId !== undefined && captureTarget.setPointerCapture) captureTarget.setPointerCapture(event.pointerId);
+  } catch (_) {}
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function releaseEditorMarqueePointerCapture(drag) {
+  if (!drag?.captureTarget?.releasePointerCapture || drag.pointerId === "mouse") return;
+  try {
+    drag.captureTarget.releasePointerCapture(drag.pointerId);
+  } catch (_) {}
+}
+
+function visibleEditorMarqueeBlocks(editor) {
+  return [...(editor?.querySelectorAll(".block[data-block-id]") || [])].filter((block) => (
+    !block.hidden && block.getAttribute("aria-hidden") !== "true" && block.getClientRects().length
+  ));
+}
+
+function nearestEditorMarqueeBlock(blocks, clientY) {
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const block of blocks) {
+    const rect = block.getBoundingClientRect();
+    const distance = clientY < rect.top
+      ? rect.top - clientY
+      : clientY > rect.bottom
+        ? clientY - rect.bottom
+        : 0;
+    if (distance < nearestDistance) {
+      nearest = block;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function sameEditorMarqueeSelection(ownerType, ownerId, ids) {
+  return ui.blockSelection.ownerType === ownerType
+    && ui.blockSelection.ownerId === ownerId
+    && ui.blockSelection.ids.length === ids.length
+    && ui.blockSelection.ids.every((id, index) => id === ids[index]);
+}
+
+function renderEditorMarqueeRect(drag, selectedBlocks) {
+  const marquee = drag.marqueeElement;
+  if (!marquee || !selectedBlocks.length) return;
+  const scrollerRect = drag.documentPanel.getBoundingClientRect();
+  const editorRect = drag.editor.getBoundingClientRect();
+  const firstRect = selectedBlocks[0].getBoundingClientRect();
+  const lastRect = selectedBlocks[selectedBlocks.length - 1].getBoundingClientRect();
+  const left = Math.max(scrollerRect.left + 2, editorRect.left - EDITOR_MARQUEE_GUTTER_WIDTH + 2);
+  const right = Math.min(scrollerRect.right - 2, editorRect.right + 2);
+  const top = Math.max(scrollerRect.top + 2, Math.min(firstRect.top, lastRect.top) - 1);
+  const bottom = Math.min(scrollerRect.bottom - 2, Math.max(firstRect.bottom, lastRect.bottom) + 1);
+  marquee.style.left = `${Math.round(left)}px`;
+  marquee.style.top = `${Math.round(top)}px`;
+  marquee.style.width = `${Math.max(1, Math.round(right - left))}px`;
+  marquee.style.height = `${Math.max(1, Math.round(bottom - top))}px`;
+}
+
+function updateEditorMarqueeSelection(drag, clientY, options = {}) {
+  if (!drag?.editor?.isConnected || !drag.documentPanel?.isConnected) return;
+  drag.lastY = clientY;
+  const blocks = visibleEditorMarqueeBlocks(drag.editor);
+  if (!blocks.length) return;
+  const anchorIndex = Math.max(0, blocks.findIndex((block) => block.dataset.blockId === drag.anchorBlockId));
+  const focusBlock = nearestEditorMarqueeBlock(blocks, clientY);
+  const focusIndex = Math.max(0, blocks.indexOf(focusBlock));
+  const start = Math.min(anchorIndex, focusIndex);
+  const end = Math.max(anchorIndex, focusIndex);
+  const selectedBlocks = blocks.slice(start, end + 1);
+  const ids = selectedBlocks.map((block) => block.dataset.blockId).filter(Boolean);
+  const expandedIds = expandedBlockSelectionIds(drag.ownerType, drag.ownerId, ids);
+  if (ids.length && !sameEditorMarqueeSelection(drag.ownerType, drag.ownerId, expandedIds)) {
+    restoreBlockSelection(drag.ownerType, drag.ownerId, ids);
+  }
+  renderEditorMarqueeRect(drag, selectedBlocks);
+  if (!options.skipAutoScroll) updateEditorMarqueeAutoScroll(drag);
+}
+
+function updateEditorMarqueeAutoScroll(drag) {
+  const rect = drag.documentPanel.getBoundingClientRect();
+  const y = drag.lastY;
+  let velocity = 0;
+  if (y < rect.top + EDITOR_MARQUEE_AUTOSCROLL_EDGE) {
+    velocity = -Math.max(2, Math.min(16, (rect.top + EDITOR_MARQUEE_AUTOSCROLL_EDGE - y) * 0.32));
+  } else if (y > rect.bottom - EDITOR_MARQUEE_AUTOSCROLL_EDGE) {
+    velocity = Math.max(2, Math.min(16, (y - (rect.bottom - EDITOR_MARQUEE_AUTOSCROLL_EDGE)) * 0.32));
+  }
+  if (!velocity) {
+    stopDragAutoScroll("marquee");
+    return;
+  }
+  if (ui.dragAutoScroll?.mode === "marquee") {
+    ui.dragAutoScroll.velocity = velocity;
+    return;
+  }
+  stopDragAutoScroll();
+  const autoScroll = { mode: "marquee", velocity, frame: 0 };
+  const step = () => {
+    if (ui.dragAutoScroll !== autoScroll || ui.editorMarquee !== drag) return;
+    const before = drag.documentPanel.scrollTop;
+    drag.documentPanel.scrollTop += autoScroll.velocity;
+    updateEditorMarqueeSelection(drag, drag.lastY, { skipAutoScroll: true });
+    if (Math.abs(drag.documentPanel.scrollTop - before) < 0.5) {
+      stopDragAutoScroll("marquee");
+      return;
+    }
+    autoScroll.frame = requestAnimationFrame(step);
+  };
+  ui.dragAutoScroll = autoScroll;
+  autoScroll.frame = requestAnimationFrame(step);
+}
+
+function activatePendingEditorMarquee(pending, event) {
+  const blocks = visibleEditorMarqueeBlocks(pending.editor);
+  const anchorBlock = nearestEditorMarqueeBlock(blocks, pending.startY);
+  if (!anchorBlock) {
     ui.pendingEditorMarquee = null;
+    return null;
+  }
+  const marqueeElement = document.createElement("div");
+  marqueeElement.className = "editor-marquee";
+  marqueeElement.setAttribute("aria-hidden", "true");
+  document.body.append(marqueeElement);
+  const drag = {
+    ...pending,
+    active: true,
+    anchorBlockId: anchorBlock.dataset.blockId,
+    lastY: event.clientY,
+    marqueeElement,
+  };
+  ui.pendingEditorMarquee = null;
+  ui.editorMarquee = drag;
+  clearBlockSelection();
+  clearInlineEditingOverlaysForBlockSelection();
+  window.getSelection()?.removeAllRanges();
+  deactivateActiveBlockContent(true);
+  updateEditorMarqueeSelection(drag, event.clientY);
+  return drag;
+}
+
+function handleEditorMarqueePointerMove(event) {
+  const pending = ui.pendingEditorMarquee;
+  if (pending && sameMouseLikePointer(pending.pointerId, event)) {
+    const distance = Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY);
+    if (distance < EDITOR_MARQUEE_ACTIVATION_DISTANCE) return;
+    activatePendingEditorMarquee(pending, event);
+  }
+  const drag = ui.editorMarquee;
+  if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  updateEditorMarqueeSelection(drag, event.clientY);
+}
+
+function finishEditorMarqueeDrag(event) {
+  const pending = ui.pendingEditorMarquee;
+  if (pending && (!event || sameMouseLikePointer(pending.pointerId, event))) {
+    ui.pendingEditorMarquee = null;
+    releaseEditorMarqueePointerCapture(pending);
+    return;
+  }
+  const drag = ui.editorMarquee;
+  if (!drag || (event && !sameMouseLikePointer(drag.pointerId, event))) return;
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  stopDragAutoScroll("marquee");
+  drag.marqueeElement?.remove();
+  ui.editorMarquee = null;
+  ui.suppressBlockClickUntil = Date.now() + 260;
+  releaseEditorMarqueePointerCapture(drag);
+}
+
+function cancelEditorMarqueeDrag(event) {
+  const carriesPointerIdentity = Boolean(event && (event.pointerId !== undefined || /^(?:mouse|pointer)/.test(event.type || "")));
+  let cancelledAnyMarquee = false;
+  if (ui.pendingEditorMarquee && (!event || !carriesPointerIdentity || sameMouseLikePointer(ui.pendingEditorMarquee.pointerId, event))) {
+    const pending = ui.pendingEditorMarquee;
+    ui.pendingEditorMarquee = null;
+    releaseEditorMarqueePointerCapture(pending);
     cancelledAnyMarquee = true;
   }
   if (!ui.editorMarquee) {
     if (cancelledAnyMarquee) ui.suppressBlockClickUntil = Date.now() + 260;
     return;
   }
-  if (event && ui.editorMarquee.pointerId !== pointerId) return;
-  const wasActive = ui.editorMarquee.active === true;
+  if (event && carriesPointerIdentity && !sameMouseLikePointer(ui.editorMarquee.pointerId, event)) return;
+  const drag = ui.editorMarquee;
+  const wasActive = drag.active === true;
   stopDragAutoScroll("marquee");
-  document.querySelector(".editor-marquee")?.remove();
+  drag.marqueeElement?.remove();
   ui.editorMarquee = null;
+  releaseEditorMarqueePointerCapture(drag);
   if (wasActive) {
     clearBlockSelection();
     window.getSelection()?.removeAllRanges();
@@ -14791,10 +15054,12 @@ function handlePointerDown(event) {
   }
   if (
     event.type === "mousedown" &&
-    (ui.blockDrag || ui.pendingBlockToolDrag || ui.pendingNavDrag || ui.navPointerDrag)
+    (ui.blockDrag || ui.pendingBlockToolDrag || ui.pendingNavDrag || ui.navPointerDrag || ui.pendingEditorMarquee || ui.editorMarquee)
   ) {
     return;
   }
+
+  if (beginPendingEditorMarquee(event)) return;
 
   const navButton = event.target.closest("[data-nav-key]");
   if (navButton && !navButton.hasAttribute("data-nav-fixed") && (ui.navOpen || ui.navDocked)) {
@@ -15726,6 +15991,42 @@ function handleKeydown(event) {
     closeCalendarSpanEvents();
     return;
   }
+  if (event.key === "Escape" && (ui.pendingEditorMarquee || ui.editorMarquee)) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelEditorMarqueeDrag();
+    return;
+  }
+  const externalInlineLink = event.target.closest("a[data-inline-mark='link']");
+  if (
+    externalInlineLink
+    && !event.isComposing
+    && !event.metaKey
+    && !event.ctrlKey
+    && !event.altKey
+    && (event.key === "Enter" || event.key === " ")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const blockContent = externalInlineLink.closest("[data-block-content]");
+    const editor = blockContent?.closest(".block-editor");
+    if (editor?.dataset.ownerType === "resources") {
+      clearInlineEditingOverlaysForBlockSelection();
+      openInlineLinkExternally(externalInlineLink);
+      return;
+    }
+    if (blockContent && editor) {
+      activateBlockContent(blockContent);
+      openLinkPopover(
+        editor.dataset.ownerType,
+        editor.dataset.ownerId,
+        blockContent.dataset.blockContent,
+        textRangeForInlineElement(blockContent, externalInlineLink),
+        externalInlineLink.getBoundingClientRect(),
+      );
+    }
+    return;
+  }
   const resourceCitation = event.target.closest("a[data-inline-mark='resourceLink'][data-resource-citation]");
   if (
     resourceCitation &&
@@ -16261,6 +16562,12 @@ function isPrintableBlockReplacementKey(event) {
 
 function handleDocumentKeydown(event) {
   if (app.dataset.workspaceAuthority !== "ready") return;
+  if (event.key === "Escape" && (ui.pendingEditorMarquee || ui.editorMarquee)) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelEditorMarqueeDrag();
+    return;
+  }
   if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
@@ -18821,6 +19128,7 @@ function updateBlockText(blockContent, event = null) {
   }
   const mentionCommand = mentionCommandFromText(rawText);
   if (mentionCommand) {
+    ensureResourceCaretVisible(blockContent);
     const mentionAnchorRect = commandMenuAnchorRectFor(blockContent);
     block.text = rawText;
     block.marks = mentionCommand.range.start > 0 ? inlineMarksForContentUpdate(block, blockContent, rawText) : [];
@@ -18837,6 +19145,7 @@ function updateBlockText(blockContent, event = null) {
   }
   const pageCommand = pageCommandFromText(rawText);
   if (pageCommand) {
+    ensureResourceCaretVisible(blockContent);
     const pageCommandAnchorRect = commandMenuAnchorRectFor(blockContent);
     block.text = rawText;
     block.marks = pageCommand.range.start > 0 ? inlineMarksForContentUpdate(block, blockContent, rawText) : [];
@@ -18854,6 +19163,7 @@ function updateBlockText(blockContent, event = null) {
   }
   const emojiCommand = emojiCommandFromText(rawText);
   if (emojiCommand) {
+    ensureResourceCaretVisible(blockContent);
     const emojiAnchorRect = commandMenuAnchorRectFor(blockContent);
     block.text = rawText;
     block.marks = emojiCommand.range.start > 0 ? inlineMarksForContentUpdate(block, blockContent, rawText) : [];
@@ -18875,6 +19185,7 @@ function updateBlockText(blockContent, event = null) {
   const previousMarks = normalizeInlineMarks(previousText, block.marks || []);
   if (rawText === previousText && inlineMarksEqual(nextMarks, previousMarks)) {
     syncBlockContentMarkupFromState(blockContent, block);
+    scheduleEnsureResourceCaretVisible(blockContent);
     return;
   }
   block.text = rawText;
@@ -18894,6 +19205,7 @@ function updateBlockText(blockContent, event = null) {
   if (ui.emojiCommand?.blockId === block.id) {
     closeEmojiMenu();
   }
+  scheduleEnsureResourceCaretVisible(blockContent);
 }
 
 function normalizeEditorPlainText(value = "") {
@@ -19030,16 +19342,17 @@ function rememberEditableControlFocusRangeFromFocusOut(blockContent, relatedTarg
 }
 
 function toggleDescendantBlockElements(toggleBlockElement) {
-  if (!toggleBlockElement) return [];
+  const editor = toggleBlockElement?.closest(".block-editor");
+  if (!editor) return [];
+  const blocks = [...editor.querySelectorAll(".block[data-block-id]")];
+  const startIndex = blocks.indexOf(toggleBlockElement);
   const parentIndent = Number.parseInt(toggleBlockElement.dataset.indent || "0", 10);
-  if (!Number.isFinite(parentIndent)) return [];
+  if (startIndex < 0 || !Number.isFinite(parentIndent)) return [];
   const descendants = [];
-  let sibling = toggleBlockElement.nextElementSibling;
-  while (sibling?.classList?.contains("block")) {
-    const indent = Number.parseInt(sibling.dataset.indent || "0", 10);
+  for (const blockElement of blocks.slice(startIndex + 1)) {
+    const indent = Number.parseInt(blockElement.dataset.indent || "0", 10);
     if (!Number.isFinite(indent) || indent <= parentIndent) break;
-    descendants.push(sibling);
-    sibling = sibling.nextElementSibling;
+    descendants.push(blockElement);
   }
   return descendants;
 }
@@ -19052,6 +19365,21 @@ function clearToggleChildAnimation(blockElement) {
 
 function visibleToggleDescendantBlockElements(toggleBlockElement) {
   return toggleDescendantBlockElements(toggleBlockElement).filter((entry) => !entry.hidden && entry.getAttribute("aria-hidden") !== "true");
+}
+
+function toggleDescendantAnimationTargets(toggleBlockElement, blockElements) {
+  const editor = toggleBlockElement?.closest(".block-editor");
+  if (!editor) return [];
+  const targets = [];
+  const seen = new Set();
+  for (const blockElement of blockElements) {
+    let target = blockElement;
+    while (target.parentElement && target.parentElement !== editor) target = target.parentElement;
+    if (target.parentElement !== editor || target.contains(toggleBlockElement) || seen.has(target)) continue;
+    seen.add(target);
+    targets.push(target);
+  }
+  return targets;
 }
 
 const TOGGLE_CHILD_ANIMATION_MS = 240;
@@ -19067,46 +19395,81 @@ function unwrapToggleAnimationGroup(wrapper) {
 }
 
 function finishToggleAnimationGroup(wrapper, blockElements = [], unwrap = false) {
-  blockElements.forEach(clearToggleChildAnimation);
+  blockElements.filter((blockElement) => wrapper?.contains(blockElement)).forEach(clearToggleChildAnimation);
   if (unwrap) unwrapToggleAnimationGroup(wrapper);
+}
+
+function settleToggleAnimationGroups(editor, blockId = "") {
+  const selector = blockId
+    ? `.toggle-child-animation-group[data-toggle-animation-for="${cssEscape(blockId)}"]`
+    : ".toggle-child-animation-group";
+  const wrappers = [...(editor?.querySelectorAll(selector) || [])].reverse();
+  for (const wrapper of wrappers) {
+    wrapper.getAnimations?.().forEach((animation) => animation.cancel());
+    wrapper.querySelectorAll(".block[data-block-id]").forEach(clearToggleChildAnimation);
+    unwrapToggleAnimationGroup(wrapper);
+  }
 }
 
 function applyToggleChildAnimationGroup(toggleBlockElement, groupClassName, childClassName) {
   const blockElements = visibleToggleDescendantBlockElements(toggleBlockElement);
-  if (!blockElements.length) return null;
+  const animationTargets = toggleDescendantAnimationTargets(toggleBlockElement, blockElements);
+  if (!blockElements.length || !animationTargets.length) return null;
   const wrapper = document.createElement("div");
-  wrapper.className = `toggle-child-animation-group ${groupClassName}`;
-  const firstBlock = blockElements[0];
-  firstBlock.parentElement.insertBefore(wrapper, firstBlock);
+  wrapper.className = "toggle-child-animation-group";
+  wrapper.dataset.toggleAnimationFor = toggleBlockElement.dataset.blockId || "";
+  const firstTarget = animationTargets[0];
+  firstTarget.parentElement.insertBefore(wrapper, firstTarget);
+  for (const target of animationTargets) wrapper.append(target);
   for (const entry of blockElements) {
     clearToggleChildAnimation(entry);
     if (childClassName) entry.classList.add(childClassName);
-    wrapper.append(entry);
   }
-  const height = Math.max(1, Math.ceil(wrapper.getBoundingClientRect().height || 1));
+  const height = Math.max(1, Math.ceil(wrapper.scrollHeight || wrapper.getBoundingClientRect().height || 1));
   wrapper.style.setProperty("--toggle-group-height", `${height}px`);
-  const clear = () => finishToggleAnimationGroup(wrapper, blockElements, false);
-  wrapper.addEventListener("animationend", clear, { once: true });
-  window.setTimeout(clear, TOGGLE_CHILD_ANIMATION_MS + 240);
+  wrapper.getBoundingClientRect();
+  wrapper.classList.add(groupClassName);
+  const clear = (event) => {
+    if (event && event.target !== wrapper) return;
+    finishToggleAnimationGroup(wrapper, blockElements, false);
+  };
+  wrapper.addEventListener("animationend", clear);
+  window.setTimeout(() => clear(), TOGGLE_CHILD_ANIMATION_MS + 240);
   return { wrapper, blockElements, duration: toggleChildAnimationTotalMs(blockElements.length) };
 }
 
 function animateToggleDescendantCollapse(toggleBlockElement) {
   const animation = applyToggleChildAnimationGroup(toggleBlockElement, "is-toggle-group-collapsing", "is-toggle-child-collapsing");
+  if (animation?.wrapper) {
+    animation.wrapper.setAttribute("aria-hidden", "true");
+    animation.wrapper.setAttribute("inert", "");
+  }
   return animation?.duration || 0;
 }
 
 function animateToggleDescendantReveal(ownerType, ownerId, blockId) {
-  window.requestAnimationFrame(() => {
+  const animationKey = `${ownerType}:${ownerId}:${blockId}`;
+  const previousFrame = toggleBlockAnimationFrames.get(animationKey);
+  if (previousFrame) cancelAnimationFrame(previousFrame);
+  let frame = 0;
+  frame = window.requestAnimationFrame(() => {
+    if (toggleBlockAnimationFrames.get(animationKey) !== frame) return;
+    toggleBlockAnimationFrames.delete(animationKey);
+    const block = itemById(ownerType, ownerId)?.blocks?.find((entry) => entry.id === blockId);
+    if (!block || block.collapsed === true) return;
     const editor = document.querySelector(`.block-editor[data-owner-type="${cssEscape(ownerType)}"][data-owner-id="${cssEscape(ownerId)}"]`);
     const toggleBlockElement = editor?.querySelector(`.block[data-block-id="${cssEscape(blockId)}"]`);
-    const animation = applyToggleChildAnimationGroup(toggleBlockElement, "is-toggle-group-revealing", "");
+    const animation = applyToggleChildAnimationGroup(toggleBlockElement, "is-toggle-group-revealing", "is-toggle-child-revealing");
     if (animation?.wrapper) {
-      const finish = () => finishToggleAnimationGroup(animation.wrapper, animation.blockElements, true);
-      animation.wrapper.addEventListener("animationend", finish, { once: true });
-      window.setTimeout(finish, animation.duration + 300);
+      const finish = (event) => {
+        if (event && event.target !== animation.wrapper) return;
+        finishToggleAnimationGroup(animation.wrapper, animation.blockElements, true);
+      };
+      animation.wrapper.addEventListener("animationend", finish);
+      window.setTimeout(() => finish(), animation.duration + 300);
     }
   });
+  toggleBlockAnimationFrames.set(animationKey, frame);
 }
 
 function toggleBlockCollapsed(ownerType, ownerId, blockId, button) {
@@ -19117,10 +19480,24 @@ function toggleBlockCollapsed(ownerType, ownerId, blockId, button) {
   const focusRange = editableControlFocusRange(blockId);
   const focusTarget = focusRange ? { blockId, start: focusRange.start, end: focusRange.end } : { blockId, position: "end" };
   const blockElement = button?.closest(".block[data-block-id]");
+  const editor = blockElement?.closest(".block-editor");
+  const animationKey = `${ownerType}:${ownerId}:${blockId}`;
+  const pendingTimer = toggleBlockAnimationTimers.get(animationKey);
+  if (pendingTimer) {
+    window.clearTimeout(pendingTimer);
+    toggleBlockAnimationTimers.delete(animationKey);
+  }
+  const pendingFrame = toggleBlockAnimationFrames.get(animationKey);
+  if (pendingFrame) {
+    cancelAnimationFrame(pendingFrame);
+    toggleBlockAnimationFrames.delete(animationKey);
+  }
+  settleToggleAnimationGroups(editor, blockId);
   const history = beginEditorHistory(ownerType, ownerId, focusTarget);
   block.collapsed = !block.collapsed;
   const isCollapsed = block.collapsed === true;
-  const collapseAnimationMs = isCollapsed ? animateToggleDescendantCollapse(blockElement) : 0;
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+  const collapseAnimationMs = isCollapsed && !reduceMotion ? animateToggleDescendantCollapse(blockElement) : 0;
   if (blockElement) blockElement.dataset.toggleCollapsed = isCollapsed ? "true" : "false";
   button?.setAttribute("aria-expanded", block.collapsed ? "false" : "true");
   button?.setAttribute("aria-label", block.collapsed ? "토글 펼치기" : "토글 접기");
@@ -19129,10 +19506,15 @@ function toggleBlockCollapsed(ownerType, ownerId, blockId, button) {
   const renderAfterToggle = () => {
     renderEditorMutation(ownerType, ownerId);
     focusBlockContentAfterRender(blockId, focusRange ? { range: focusRange } : {});
-    if (!isCollapsed) animateToggleDescendantReveal(ownerType, ownerId, blockId);
+    if (!isCollapsed && !reduceMotion) animateToggleDescendantReveal(ownerType, ownerId, blockId);
   };
   if (collapseAnimationMs) {
-    window.setTimeout(renderAfterToggle, collapseAnimationMs);
+    const timer = window.setTimeout(() => {
+      if (toggleBlockAnimationTimers.get(animationKey) !== timer) return;
+      toggleBlockAnimationTimers.delete(animationKey);
+      renderAfterToggle();
+    }, collapseAnimationMs);
+    toggleBlockAnimationTimers.set(animationKey, timer);
   } else {
     renderAfterToggle();
   }
@@ -20381,7 +20763,11 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     : { blockId: newBlock.id, start: split.after ? 0 : (newBlock.text || "").length, end: split.after ? 0 : (newBlock.text || "").length });
   saveState();
   renderEditorMutation(ownerType, ownerId);
-  focusBlockContentAfterRender(focusBlock.id, { caret: split.after && !splitAtStart ? "start" : "end", transaction: true });
+  focusBlockContentAfterRender(focusBlock.id, {
+    caret: split.after && !splitAtStart ? "start" : "end",
+    transaction: true,
+    reserveLines: RESOURCE_CARET_ENTER_RESERVE_LINES,
+  });
 }
 
 function insertBlock(ownerType, ownerId, afterBlockId) {
@@ -21555,6 +21941,41 @@ function focusBlockContentAtRange(blockId, start, end = start) {
   return target;
 }
 
+function ensureResourceCaretVisible(blockContent, options = {}) {
+  const resourceDocument = blockContent?.closest?.(".resource-document");
+  const range = blockContent ? selectionRangeInside(blockContent) : null;
+  if (!resourceDocument || !range?.collapsed) return false;
+  const caretRect = caretRectFor(blockContent);
+  if (!caretRect || (!caretRect.width && !caretRect.height)) return false;
+  const documentRect = resourceDocument.getBoundingClientRect();
+  const style = getComputedStyle(blockContent);
+  const fontSize = Number.parseFloat(style.fontSize) || 16;
+  const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.55;
+  const reserveLines = Math.max(RESOURCE_CARET_RESERVE_LINES, Number(options.reserveLines) || 0);
+  const safeTop = documentRect.top + Math.max(18, lineHeight * 0.75);
+  const safeBottom = documentRect.bottom - Math.max(22, lineHeight * reserveLines);
+  let delta = 0;
+  if (caretRect.bottom > safeBottom) delta = caretRect.bottom - safeBottom;
+  else if (caretRect.top < safeTop) delta = caretRect.top - safeTop;
+  if (Math.abs(delta) < 0.5) return false;
+  const nextScrollTop = Math.max(0, Math.min(
+    resourceDocument.scrollHeight - resourceDocument.clientHeight,
+    resourceDocument.scrollTop + delta,
+  ));
+  if (Math.abs(nextScrollTop - resourceDocument.scrollTop) < 0.5) return false;
+  resourceDocument.scrollTop = nextScrollTop;
+  return true;
+}
+
+function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
+  if (!blockContent?.isConnected || !blockContent.closest(".resource-document")) return;
+  if (resourceCaretScrollFrame) cancelAnimationFrame(resourceCaretScrollFrame);
+  resourceCaretScrollFrame = requestAnimationFrame(() => {
+    resourceCaretScrollFrame = 0;
+    if (blockContent.isConnected) ensureResourceCaretVisible(blockContent, options);
+  });
+}
+
 function focusBlockContentAfterRender(blockId, options = {}) {
   const focusTarget = () => {
     if (options.range) return focusBlockContentAtRange(blockId, options.range.start, options.range.end ?? options.range.start);
@@ -21565,10 +21986,12 @@ function focusBlockContentAfterRender(blockId, options = {}) {
   };
   const focusIsSettled = (candidate) => Boolean(candidate && document.activeElement === candidate);
   const target = focusTarget();
+  if (target) scheduleEnsureResourceCaretVisible(target, options);
   let remainingChecks = options.transaction === true ? 4 : 1;
   const verifyFocus = () => {
-    const candidate = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
-    if (!focusIsSettled(candidate)) focusTarget();
+    let candidate = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
+    if (!focusIsSettled(candidate)) candidate = focusTarget();
+    if (candidate) scheduleEnsureResourceCaretVisible(candidate, options);
     remainingChecks -= 1;
     if (remainingChecks > 0) requestAnimationFrame(verifyFocus);
   };
@@ -21816,14 +22239,19 @@ function focusBlockAtPoint(target, direction, x) {
   activateBlockContent(target);
   if (!(target.textContent || "")) {
     placeCaretAtStart(target);
+    scheduleEnsureResourceCaretVisible(target);
     return;
   }
-  if (placeCaretNearPoint(target, direction, x)) return;
+  if (placeCaretNearPoint(target, direction, x)) {
+    scheduleEnsureResourceCaretVisible(target);
+    return;
+  }
   if (direction < 0) {
     placeCaretAtEnd(target);
   } else {
     placeCaretAtStart(target);
   }
+  scheduleEnsureResourceCaretVisible(target);
 }
 
 function placeCaretNearPoint(element, direction, x) {
