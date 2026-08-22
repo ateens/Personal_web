@@ -3386,7 +3386,12 @@ button:focus-visible {
 }
 
 .project-item:has(.finance-select.is-open),
-.project-item:has(.finance-select.is-open) .project-detail {
+.project-item:has(.finance-select.is-open) .project-detail,
+.habit-item:has(.finance-select.is-open),
+.habit-item:has(.finance-select.is-open) .habit-detail,
+.task-inline-item:has(.finance-select.is-open),
+.task-inline-item:has(.finance-select.is-open) .task-inline-detail,
+.entity-card:has(.finance-select.is-open) {
   z-index: 2;
   overflow: visible;
 }
@@ -6566,6 +6571,25 @@ body.is-resource-document-open {
   padding: 6px;
   background: rgba(15, 23, 42, 0.98);
   box-shadow: 0 18px 42px rgba(2, 6, 23, 0.42);
+}
+
+.code-language-picker.opens-up .code-language-menu {
+  top: auto;
+  bottom: calc(100% + 7px);
+}
+
+.code-language-menu:popover-open {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+}
+
+.code-language-menu::backdrop {
+  background: transparent;
+}
+
+.code-language-menu[hidden] {
+  display: none;
 }
 
 .code-language-option {
@@ -10978,6 +11002,20 @@ body.is-task-placement-open {
   bottom: calc(100% + 8px);
 }
 
+.finance-select-options:popover-open {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+}
+
+.finance-month-control .finance-select-options:popover-open {
+  margin-left: 0;
+}
+
+.finance-select-options::backdrop {
+  background: transparent;
+}
+
 .finance-select-options[hidden] {
   display: none;
 }
@@ -11334,6 +11372,13 @@ body.is-task-placement-open {
   font-size: 11px;
 }
 
+.finance-record-primary-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 12px;
+}
+
 .finance-record-actions button {
   flex: 0 0 auto;
   min-height: 34px;
@@ -11475,6 +11520,19 @@ body.is-task-placement-open {
   .finance-card-workspace[open] > .finance-card-workspace-body {
     animation: none;
   }
+
+  .finance-entry-form-card[open]:has(.finance-select.is-open)::details-content,
+  .finance-manage-details[open]:has(.finance-select.is-open)::details-content,
+  .finance-card-workspace[open]:has(.finance-select.is-open)::details-content {
+    overflow: visible;
+  }
+}
+
+.finance-entry-form-card:has(.finance-select.is-open),
+.finance-manage-details:has(.finance-select.is-open),
+.finance-stage-panel.panel:has(.finance-select.is-open) {
+  z-index: 60;
+  overflow: visible;
 }
 
 .finance-card-section {
@@ -12258,21 +12316,27 @@ body.is-task-placement-open {
 }
 
 .finance-record-edit {
-  margin: -2px 8px 14px;
+  display: none;
+  margin: 0;
   background-color: rgba(255, 255, 255, 0.1);
 }
 
-.finance-record-edit > summary {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-height: 44px;
-  padding: 7px 8px;
-  color: var(--muted);
+.finance-record-edit[open] {
+  display: block;
+  margin: -2px 8px 14px;
 }
 
-.finance-record-edit > summary::after {
+.finance-record-edit > summary {
   display: none;
+}
+
+.finance-record-actions .finance-record-edit-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  padding: 0 2px;
+  background-image: none;
 }
 
 .finance-edit-icon {
@@ -12288,13 +12352,25 @@ body.is-task-placement-open {
   transition: color 180ms var(--ease), background-color 180ms var(--ease), transform 260ms cubic-bezier(0.16, 0.92, 0.22, 1);
 }
 
-.finance-record-edit[open] > summary {
+.finance-record-edit-toggle[aria-expanded="true"] {
   color: var(--blue);
 }
 
-.finance-record-edit[open] .finance-edit-icon {
+.finance-record-edit-toggle[aria-expanded="true"] .finance-edit-icon {
   background-color: rgba(37, 99, 235, 0.1);
   transform: rotate(-12deg);
+}
+
+@media (max-width: 600px) {
+  .finance-manage-record-actions {
+    align-items: center;
+    flex-flow: row wrap;
+  }
+
+  .finance-manage-record-actions .finance-record-amount {
+    flex-basis: 100%;
+    text-align: right;
+  }
 }
 
 .finance-view-stats {

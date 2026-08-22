@@ -608,6 +608,8 @@ let projectCalendarResizeTimer = 0;
 let taskDoneRenderTimer = 0;
 let taskDoneRenderVersion = 0;
 let inlineToolbarPositionFrame = 0;
+let financeSelectPositionFrame = 0;
+let codeLanguagePositionFrame = 0;
 let preferredVerticalCaretX = null;
 let resourceCaretScrollFrame = 0;
 const toggleBlockAnimationTimers = new Map();
@@ -757,6 +759,8 @@ function init() {
   document.addEventListener("selectstart", handleCustomPointerDragSelectStart, true);
   document.addEventListener("wheel", cancelPendingPointerDrags, { passive: true, capture: true });
   document.addEventListener("scroll", cancelPendingPointerDrags, true);
+  document.addEventListener("scroll", scheduleFinanceSelectPositionSync, true);
+  document.addEventListener("scroll", scheduleCodeLanguagePositionSync, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleEditorMarqueePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleBlockPointerMove, true);
@@ -788,8 +792,14 @@ function init() {
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("resize", clampUrlPasteChoiceToViewport);
   window.addEventListener("resize", scheduleInlineToolbarPositionSync);
+  window.addEventListener("resize", scheduleFinanceSelectPositionSync);
+  window.addEventListener("resize", scheduleCodeLanguagePositionSync);
   window.visualViewport?.addEventListener("resize", scheduleInlineToolbarPositionSync);
+  window.visualViewport?.addEventListener("resize", scheduleFinanceSelectPositionSync);
+  window.visualViewport?.addEventListener("resize", scheduleCodeLanguagePositionSync);
   window.visualViewport?.addEventListener("scroll", scheduleInlineToolbarPositionSync);
+  window.visualViewport?.addEventListener("scroll", scheduleFinanceSelectPositionSync);
+  window.visualViewport?.addEventListener("scroll", scheduleCodeLanguagePositionSync);
   window.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   window.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
   window.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
@@ -2824,6 +2834,46 @@ function renderFinanceRecurringRuleForm(state, rule = null) {
   `;
 }
 
+function financeRecordEditTargetId(entityType, entityId) {
+  const safeType = String(entityType || "record").replace(/[^a-z0-9_-]/gi, "-");
+  const safeId = String(entityId || "item").replace(/[^a-z0-9_-]/gi, "-");
+  return `finance-edit-${safeType}-${safeId}`;
+}
+
+function renderFinanceRecordEditToggle(entityType, entityId, label) {
+  const targetId = financeRecordEditTargetId(entityType, entityId);
+  return `
+    <button
+      class="finance-record-edit-toggle"
+      type="button"
+      data-finance-edit-target="${esc(targetId)}"
+      aria-label="${esc(`${label} 수정`)}"
+      aria-controls="${esc(targetId)}"
+      aria-expanded="false"
+      title="수정"
+    ><span class="finance-edit-icon" aria-hidden="true">✎</span></button>
+  `;
+}
+
+function toggleFinanceRecordEdit(button) {
+  if (!(button instanceof HTMLElement)) return;
+  const targetId = button.dataset.financeEditTarget || "";
+  const details = document.getElementById(targetId);
+  if (!(details instanceof HTMLDetailsElement)) return;
+  const open = !details.open;
+  if (!open) {
+    const select = details.querySelector("[data-finance-select].is-open");
+    if (select) closeFinanceSelect(select);
+  }
+  details.open = open;
+  button.setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  requestAnimationFrame(() => {
+    details.querySelector(".finance-native-form input:not([type='hidden']):not([disabled]), .finance-native-form [data-finance-select-trigger], .finance-native-form button:not([disabled])")
+      ?.focus({ preventScroll: true });
+  });
+}
+
 function renderFinanceAccounts(state) {
   return `
     <section class="finance-section-heading">
@@ -2840,22 +2890,26 @@ function renderFinanceAccounts(state) {
           ${state.accounts.map((account) => {
             const references = financeAccountReferenceCount(state, account.id);
             const balance = financeModel.accountBalanceKrw(state, account, dateKey(new Date()));
+            const editTargetId = financeRecordEditTargetId("account", account.id);
             const lastCheck = [...state.balanceChecks]
               .filter((check) => check.accountId === account.id)
               .sort((left, right) => right.checkedOn.localeCompare(left.checkedOn))[0];
             return `
-              <article class="finance-record">
+              <article class="finance-record" data-finance-account-record="${esc(account.id)}">
                 <div>
                   <strong>${esc(account.name)}</strong>
                   <small>${esc(financeAccountTypeLabel(account.type))}${lastCheck ? ` · ${esc(lastCheck.checkedOn)} 잔액 확인` : ""}</small>
                 </div>
-                <div class="finance-record-actions">
+                <div class="finance-record-actions finance-manage-record-actions">
                   <span class="finance-record-amount">${esc(formatFinanceKrw(balance))}</span>
-                  <button type="button" data-finance-delete-account="${esc(account.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+                  <span class="finance-record-primary-actions">
+                    ${renderFinanceRecordEditToggle("account", account.id, account.name)}
+                    <button type="button" data-finance-delete-account="${esc(account.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+                  </span>
                 </div>
               </article>
-              <details class="finance-manage-details finance-record-edit" data-finance-edit-account="${esc(account.id)}">
-                <summary aria-label="${esc(account.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
+              <details id="${esc(editTargetId)}" class="finance-manage-details finance-record-edit" data-finance-edit-account="${esc(account.id)}">
+                <summary aria-label="${esc(account.name)} 수정">${esc(account.name)} 수정</summary>
                 ${renderFinanceAccountForm(state, account)}
               </details>
             `;
@@ -2899,18 +2953,22 @@ function renderFinancePaymentMethodManage(state, group) {
           const accountId = credit ? method.paymentAccountId : method.linkedAccountId;
           const account = state.accounts.find((item) => item.id === accountId);
           const references = financePaymentMethodReferenceCount(state, method.id);
+          const editTargetId = financeRecordEditTargetId("payment-method", method.id);
           return `
-            <article class="finance-record">
+            <article class="finance-record" data-finance-payment-method-record="${esc(method.id)}">
               <div>
                 <strong>${esc(method.name)}</strong>
                 <small>${esc(financePaymentMethodTypeLabel(method.type))}${credit ? ` · 매월 ${esc(method.dueDay || 1)}일 납부` : ""}${account ? ` · ${esc(account.name)}` : ""}</small>
               </div>
-              <div class="finance-record-actions">
-                <button type="button" data-finance-delete-payment-method="${esc(method.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+              <div class="finance-record-actions finance-manage-record-actions">
+                <span class="finance-record-primary-actions">
+                  ${renderFinanceRecordEditToggle("payment-method", method.id, method.name)}
+                  <button type="button" data-finance-delete-payment-method="${esc(method.id)}" ${references ? `disabled title="${references}개 기록에서 사용 중"` : ""}>삭제</button>
+                </span>
               </div>
             </article>
-            <details class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
-              <summary aria-label="${esc(method.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
+            <details id="${esc(editTargetId)}" class="finance-manage-details finance-record-edit" data-finance-edit-payment-method="${esc(method.id)}">
+              <summary aria-label="${esc(method.name)} 수정">${esc(method.name)} 수정</summary>
               ${renderFinancePaymentMethodForm(state, method, group)}
             </details>
           `;
@@ -2930,19 +2988,23 @@ function renderFinanceLoanManage(state) {
       </details>
       <div class="finance-record-list finance-manage-list">
         ${state.loans.map((loan) => {
+          const editTargetId = financeRecordEditTargetId("loan", loan.id);
           return `
             <article class="finance-record" data-finance-loan="${esc(loan.id)}">
               <div>
                 <strong>${esc(loan.name)}</strong>
                 <small>${esc(loan.openedOn)} 기준 남은 원금</small>
               </div>
-              <div class="finance-record-actions">
+              <div class="finance-record-actions finance-manage-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(financeModel.loanPrincipalKrw(state, loan, dateKey(new Date()))))}</span>
-                <button type="button" data-finance-delete-loan="${esc(loan.id)}">삭제</button>
+                <span class="finance-record-primary-actions">
+                  ${renderFinanceRecordEditToggle("loan", loan.id, loan.name)}
+                  <button type="button" data-finance-delete-loan="${esc(loan.id)}">삭제</button>
+                </span>
               </div>
             </article>
-            <details class="finance-manage-details finance-record-edit" data-finance-edit-loan="${esc(loan.id)}">
-              <summary aria-label="${esc(loan.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
+            <details id="${esc(editTargetId)}" class="finance-manage-details finance-record-edit" data-finance-edit-loan="${esc(loan.id)}">
+              <summary aria-label="${esc(loan.name)} 수정">${esc(loan.name)} 수정</summary>
               ${renderFinanceLoanForm(loan)}
             </details>
           `;
@@ -2968,23 +3030,27 @@ function renderFinanceRecurringManage(state) {
           const created = state.entries.some((entry) => entry.recurringRuleId === rule.id && entry.periodKey === financeWorkspace.month);
           const references = financeRecurringRuleReferenceCount(state, rule.id);
           const paused = rule.status === "paused";
+          const editTargetId = financeRecordEditTargetId("recurring-rule", rule.id);
           return `
             <article class="finance-record finance-recurring-record">
               <div>
                 <strong>${esc(rule.name)}</strong>
                 <span class="visually-hidden">${paused ? "일시정지 · " : ""}${rule.creationMode === "auto" ? "자동 생성" : "수동 생성"} · 매월 ${esc(rule.dueDay)}일${account ? ` · ${esc(account.name)}` : ""}${created ? " · 이 달 납부 생성됨" : ""}</span>
               </div>
-              <div class="finance-record-actions">
+              <div class="finance-record-actions finance-manage-record-actions">
                 <span class="finance-record-amount">${esc(formatFinanceKrw(rule.amountEstimateKrw))}</span>
                 ${rule.creationMode === "manual" && !created && !paused ? `<button type="button" data-finance-create-recurring-period="${esc(rule.id)}">납부 생성</button>` : ""}
                 <button type="button" data-finance-recurring-status="${paused ? "active" : "paused"}" data-finance-recurring-rule-id="${esc(rule.id)}">${paused ? "다시 시작" : "일시정지"}</button>
-                ${references
-                  ? `<button type="button" data-finance-recurring-status="archived" data-finance-recurring-rule-id="${esc(rule.id)}">보관</button>`
-                  : `<button type="button" data-finance-delete-recurring-rule="${esc(rule.id)}">삭제</button>`}
+                <span class="finance-record-primary-actions">
+                  ${renderFinanceRecordEditToggle("recurring-rule", rule.id, rule.name)}
+                  ${references
+                    ? `<button type="button" data-finance-recurring-status="archived" data-finance-recurring-rule-id="${esc(rule.id)}">보관</button>`
+                    : `<button type="button" data-finance-delete-recurring-rule="${esc(rule.id)}">삭제</button>`}
+                </span>
               </div>
             </article>
-            <details class="finance-manage-details finance-record-edit" data-finance-edit-recurring-rule="${esc(rule.id)}">
-              <summary aria-label="${esc(rule.name)} 수정" title="수정"><span class="finance-edit-icon" aria-hidden="true">✎</span></summary>
+            <details id="${esc(editTargetId)}" class="finance-manage-details finance-record-edit" data-finance-edit-recurring-rule="${esc(rule.id)}">
+              <summary aria-label="${esc(rule.name)} 수정">${esc(rule.name)} 수정</summary>
               ${renderFinanceRecurringRuleForm(state, rule)}
             </details>
           `;
@@ -3493,7 +3559,7 @@ function financeSelectInput(label, name, options, fieldOptions = {}) {
           <span data-finance-select-value>${esc(selectedOption?.[1] || "선택")}</span>
           <span aria-hidden="true">⌄</span>
         </button>
-        <div class="finance-select-options" role="listbox" aria-label="${esc(label)}" data-finance-select-options hidden>
+        <div class="finance-select-options" role="listbox" aria-label="${esc(label)}" data-finance-select-options popover="manual" hidden>
           ${options.map(([value, text]) => `
             <button
               class="finance-select-option"
@@ -4652,6 +4718,26 @@ function toggleFinanceSelect(control) {
   else openFinanceSelect(control);
 }
 
+function financeSelectPopoverIsOpen(list) {
+  if (!(list instanceof HTMLElement) || typeof list.matches !== "function") return false;
+  try {
+    return list.matches(":popover-open");
+  } catch {
+    return false;
+  }
+}
+
+function visualViewportBounds() {
+  const viewport = window.visualViewport;
+  const fallbackWidth = document.documentElement.clientWidth;
+  const fallbackHeight = document.documentElement.clientHeight;
+  const left = Number.isFinite(viewport?.offsetLeft) ? viewport.offsetLeft : 0;
+  const top = Number.isFinite(viewport?.offsetTop) ? viewport.offsetTop : 0;
+  const width = viewport?.width > 0 ? viewport.width : fallbackWidth;
+  const height = viewport?.height > 0 ? viewport.height : fallbackHeight;
+  return { left, top, width, height, right: left + width, bottom: top + height };
+}
+
 function openFinanceSelect(control, focusTarget = "") {
   if (!(control instanceof HTMLElement)) return;
   closeFinanceSelects(control);
@@ -4661,6 +4747,13 @@ function openFinanceSelect(control, focusTarget = "") {
   if (!trigger || !list || !options.length) return;
   list.hidden = false;
   control.classList.add("is-open");
+  if (typeof list.showPopover === "function" && !financeSelectPopoverIsOpen(list)) {
+    try {
+      list.showPopover();
+    } catch {
+      // Older web views keep the existing absolutely positioned fallback.
+    }
+  }
   placeFinanceSelectOptions(control, list);
   trigger.setAttribute("aria-expanded", "true");
   options.find((option) => option.getAttribute("aria-selected") === "true")?.scrollIntoView({ block: "nearest" });
@@ -4672,24 +4765,70 @@ function openFinanceSelect(control, focusTarget = "") {
 }
 
 function placeFinanceSelectOptions(control, list) {
+  if (!(control instanceof HTMLElement) || !(list instanceof HTMLElement)) return;
   const rect = control.getBoundingClientRect();
-  const viewportHeight = document.documentElement.clientHeight;
-  const above = Math.max(0, rect.top - 16);
-  const below = Math.max(0, viewportHeight - rect.bottom - 16);
-  const desired = Math.min(list.scrollHeight, 280, viewportHeight * 0.42);
+  const viewport = visualViewportBounds();
+  const edge = 12;
+  const gap = 8;
+  const above = Math.max(0, rect.top - gap - edge - viewport.top);
+  const below = Math.max(0, viewport.bottom - rect.bottom - gap - edge);
+  const desired = Math.min(list.scrollHeight + 2, 280, viewport.height * 0.42);
   const opensUp = below < desired && above > below;
+  const available = Math.max(0, opensUp ? above : below);
   control.classList.toggle("opens-up", opensUp);
-  control.style.setProperty("--finance-select-space", `${Math.floor(opensUp ? above : below)}px`);
+  control.style.setProperty("--finance-select-space", `${Math.floor(available)}px`);
+  if (!financeSelectPopoverIsOpen(list)) return;
+
+  const preferredWidth = control.closest(".finance-month-control") ? 176 : rect.width;
+  const width = Math.max(0, Math.min(preferredWidth, viewport.width - edge * 2));
+  const preferredLeft = control.closest(".finance-month-control")
+    ? rect.left + (rect.width - width) / 2
+    : rect.left;
+  const left = Math.max(viewport.left + edge, Math.min(preferredLeft, viewport.right - width - edge));
+  const height = Math.min(desired, available || desired);
+  const top = opensUp
+    ? Math.max(viewport.top + edge, rect.top - gap - height)
+    : Math.min(viewport.bottom - edge, rect.bottom + gap);
+  list.style.left = `${Math.round(left)}px`;
+  list.style.top = `${Math.round(top)}px`;
+  list.style.right = "auto";
+  list.style.bottom = "auto";
+  list.style.width = `${Math.round(width)}px`;
+}
+
+function scheduleFinanceSelectPositionSync(event = null) {
+  if (event?.target?.closest?.("[data-finance-select-options]")) return;
+  if (financeSelectPositionFrame) return;
+  financeSelectPositionFrame = window.requestAnimationFrame(() => {
+    financeSelectPositionFrame = 0;
+    const control = app.querySelector("[data-finance-select].is-open");
+    const list = control?.querySelector("[data-finance-select-options]");
+    if (control && list) placeFinanceSelectOptions(control, list);
+  });
 }
 
 function closeFinanceSelect(control, options = {}) {
   if (!(control instanceof HTMLElement)) return;
   const trigger = control.querySelector("[data-finance-select-trigger]");
   const list = control.querySelector("[data-finance-select-options]");
+  if (financeSelectPopoverIsOpen(list) && typeof list.hidePopover === "function") {
+    try {
+      list.hidePopover();
+    } catch {
+      // The DOM may have been replaced while the menu was closing.
+    }
+  }
   control.classList.remove("is-open", "opens-up");
   control.style.removeProperty("--finance-select-space");
   trigger?.setAttribute("aria-expanded", "false");
-  if (list) list.hidden = true;
+  if (list) {
+    list.style.removeProperty("left");
+    list.style.removeProperty("top");
+    list.style.removeProperty("right");
+    list.style.removeProperty("bottom");
+    list.style.removeProperty("width");
+    list.hidden = true;
+  }
   if (options.focus) trigger?.focus({ preventScroll: true });
 }
 
@@ -7631,8 +7770,8 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
           <span class="code-space-title">Code Space</span>
           <div class="code-space-actions">
             <details class="code-language-picker">
-              <summary class="code-language-trigger" role="button" aria-haspopup="menu" data-code-language-trigger="${esc(block.id)}" aria-label="코드 언어 선택, 현재 ${esc(codeLanguageLabel(language))}"><span>언어</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
-              <div class="code-language-menu" role="menu" aria-label="코드 언어">
+              <summary class="code-language-trigger" role="button" aria-haspopup="menu" aria-expanded="false" data-code-language-trigger="${esc(block.id)}" aria-label="코드 언어 선택, 현재 ${esc(codeLanguageLabel(language))}"><span>언어</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
+              <div class="code-language-menu" role="menu" aria-label="코드 언어" popover="manual" hidden>
                 ${renderCodeLanguageMenuOptions(language, ownerType, ownerId, block.id)}
               </div>
             </details>
@@ -9740,6 +9879,12 @@ function handleClick(event) {
     )?.focus());
     return;
   }
+  const financeEditToggle = event.target.closest("[data-finance-edit-target]");
+  if (financeEditToggle) {
+    event.preventDefault();
+    toggleFinanceRecordEdit(financeEditToggle);
+    return;
+  }
   const financeAccountDelete = event.target.closest("[data-finance-delete-account]");
   if (financeAccountDelete) {
     event.preventDefault();
@@ -9803,6 +9948,13 @@ function handleClick(event) {
   if (resourceBack) {
     event.preventDefault();
     closeResourceDocument();
+    return;
+  }
+  const codeLanguageTrigger = event.target.closest("[data-code-language-trigger]");
+  if (codeLanguageTrigger) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleCodeLanguagePicker(codeLanguageTrigger.closest(".code-language-picker"));
     return;
   }
   const codeLanguageOption = event.target.closest("[data-code-language-value]");
@@ -10874,6 +11026,111 @@ function trapResourceDocumentFocus(event) {
   return false;
 }
 
+function codeLanguagePopoverIsOpen(menu) {
+  if (!(menu instanceof HTMLElement) || typeof menu.matches !== "function") return false;
+  try {
+    return menu.matches(":popover-open");
+  } catch {
+    return false;
+  }
+}
+
+function placeCodeLanguageMenu(picker) {
+  if (!(picker instanceof HTMLElement)) return;
+  const trigger = picker.querySelector("[data-code-language-trigger]");
+  const menu = picker.querySelector(".code-language-menu");
+  if (!trigger || !menu) return;
+  const rect = trigger.getBoundingClientRect();
+  const viewport = visualViewportBounds();
+  const edge = 12;
+  const gap = 7;
+  const below = Math.max(0, viewport.bottom - rect.bottom - gap - edge);
+  const above = Math.max(0, rect.top - gap - edge - viewport.top);
+  const desired = Math.min(menu.scrollHeight + 2, 320, viewport.height - edge * 2);
+  const opensUp = below < desired && above > below;
+  const available = Math.max(0, opensUp ? above : below);
+  picker.classList.toggle("opens-up", opensUp);
+  if (!codeLanguagePopoverIsOpen(menu)) return;
+  const width = Math.max(0, Math.min(190, viewport.width - edge * 2));
+  const left = Math.max(viewport.left + edge, Math.min(rect.right - width, viewport.right - width - edge));
+  const height = Math.min(desired, available || desired);
+  const top = opensUp
+    ? Math.max(viewport.top + edge, rect.top - gap - height)
+    : Math.min(viewport.bottom - edge, rect.bottom + gap);
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.right = "auto";
+  menu.style.bottom = "auto";
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.maxHeight = `${Math.max(0, Math.floor(height))}px`;
+}
+
+function openCodeLanguagePicker(picker, options = {}) {
+  if (!(picker instanceof HTMLDetailsElement)) return;
+  document.querySelectorAll(".code-language-picker[open]").forEach((other) => {
+    if (other !== picker) closeCodeLanguagePicker(other);
+  });
+  const menu = picker.querySelector(".code-language-menu");
+  const trigger = picker.querySelector("[data-code-language-trigger]");
+  if (!menu || !trigger) return;
+  picker.open = true;
+  menu.hidden = false;
+  if (typeof menu.showPopover === "function" && !codeLanguagePopoverIsOpen(menu)) {
+    try {
+      menu.showPopover();
+    } catch {
+      // Older web views keep the existing absolutely positioned fallback.
+    }
+  }
+  trigger.setAttribute("aria-expanded", "true");
+  placeCodeLanguageMenu(picker);
+  if (options.focusFirst) {
+    requestAnimationFrame(() => picker.querySelector("[data-code-language-value]")?.focus({ preventScroll: true }));
+  }
+}
+
+function closeCodeLanguagePicker(picker, options = {}) {
+  if (!(picker instanceof HTMLDetailsElement)) return;
+  const menu = picker.querySelector(".code-language-menu");
+  const trigger = picker.querySelector("[data-code-language-trigger]");
+  if (codeLanguagePopoverIsOpen(menu) && typeof menu.hidePopover === "function") {
+    try {
+      menu.hidePopover();
+    } catch {
+      // The editor may have rerendered while the menu was closing.
+    }
+  }
+  picker.open = false;
+  picker.classList.remove("opens-up");
+  trigger?.setAttribute("aria-expanded", "false");
+  if (menu) {
+    menu.hidden = true;
+    menu.style.removeProperty("left");
+    menu.style.removeProperty("top");
+    menu.style.removeProperty("right");
+    menu.style.removeProperty("bottom");
+    menu.style.removeProperty("width");
+    menu.style.removeProperty("max-height");
+  }
+  if (options.focus) trigger?.focus({ preventScroll: true });
+}
+
+function toggleCodeLanguagePicker(picker) {
+  if (!(picker instanceof HTMLDetailsElement)) return;
+  if (picker.open) closeCodeLanguagePicker(picker);
+  else openCodeLanguagePicker(picker);
+}
+
+function scheduleCodeLanguagePositionSync(event = null) {
+  if (event?.target?.closest?.(".code-language-menu")) return;
+  if (codeLanguagePositionFrame) return;
+  codeLanguagePositionFrame = window.requestAnimationFrame(() => {
+    codeLanguagePositionFrame = 0;
+    const picker = document.querySelector(".code-language-picker[open]");
+    if (picker) placeCodeLanguageMenu(picker);
+  });
+}
+
 function handleCodeLanguagePickerKeydown(event) {
   if (!(event.target instanceof Element)) return false;
   const targetPicker = event.target.closest(".code-language-picker");
@@ -10885,15 +11142,13 @@ function handleCodeLanguagePickerKeydown(event) {
   if (event.key === "Escape" && openPicker) {
     event.preventDefault();
     event.stopPropagation();
-    openPicker.open = false;
-    openPicker.querySelector("[data-code-language-trigger]")?.focus({ preventScroll: true });
+    closeCodeLanguagePicker(openPicker, { focus: true });
     return true;
   }
   if (event.target === trigger && event.key === "ArrowDown") {
     event.preventDefault();
     event.stopPropagation();
-    picker.open = true;
-    requestAnimationFrame(() => picker.querySelector("[data-code-language-value]")?.focus({ preventScroll: true }));
+    openCodeLanguagePicker(picker, { focusFirst: true });
     return true;
   }
   const optionIndex = options.indexOf(event.target);
@@ -17133,7 +17388,7 @@ function inlineToolbarEqual(left, right) {
 function handleDocumentClick(event) {
   if (!event.target.closest?.("[data-finance-select]")) closeFinanceSelects();
   document.querySelectorAll(".code-language-picker[open]").forEach((picker) => {
-    if (!picker.contains(event.target)) picker.open = false;
+    if (!picker.contains(event.target)) closeCodeLanguagePicker(picker);
   });
   if (handleSelectedBlocksMenuOutsideClick(event)) return;
 
