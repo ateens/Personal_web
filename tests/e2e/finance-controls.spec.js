@@ -44,9 +44,12 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   const accountId = snapshot.financeState.accounts[0].id;
 
   const accountEdit = page.locator(`[data-finance-edit-account="${accountId}"]`);
+  const accountEditToggle = page.getByRole("button", { name: "생활비 통장 수정" });
   await expect(accountEdit.locator("summary")).toHaveAttribute("aria-label", "생활비 통장 수정");
-  await expect(accountEdit.locator(".finance-edit-icon")).toHaveText("✎");
-  await accountEdit.locator("summary").click();
+  await expect(accountEditToggle.locator(".finance-edit-icon")).toHaveText("✎");
+  await accountEditToggle.click();
+  await expect(accountEdit).toHaveAttribute("open", "");
+  await expect(accountEditToggle).toHaveAttribute("aria-expanded", "true");
   await accountEdit.locator('[name="name"]').fill("수정한 생활비 통장");
   await accountEdit.getByRole("button", { name: "계좌 수정 저장" }).click();
   await expect.poll(async () => (await fixtureSnapshot(request)).financeState.accounts[0].name).toBe("수정한 생활비 통장");
@@ -55,9 +58,11 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   snapshot = await fixtureSnapshot(request);
   const cardId = snapshot.financeState.paymentMethods[0].id;
   const cardEdit = page.locator(`[data-finance-edit-payment-method="${cardId}"]`);
+  const cardEditToggle = page.getByRole("button", { name: "생활 신용카드 수정" });
   await expect(cardEdit.locator("summary")).toHaveAttribute("aria-label", "생활 신용카드 수정");
-  await expect(cardEdit.locator(".finance-edit-icon")).toHaveText("✎");
-  await cardEdit.locator("summary").click();
+  await expect(cardEditToggle.locator(".finance-edit-icon")).toHaveText("✎");
+  await cardEditToggle.click();
+  await expect(cardEdit).toHaveAttribute("open", "");
   await cardEdit.locator('[name="name"]').fill("수정한 생활 신용카드");
   await cardEdit.locator('[name="dueDay"]').fill("17");
   await cardEdit.getByRole("button", { name: "결제수단 수정 저장" }).click();
@@ -81,7 +86,8 @@ test("management items edit, fixed costs generate once, and asset-only loans del
   expect(Object.hasOwn(loan, "paymentAccountId")).toBe(false);
 
   const loanEdit = page.locator(`[data-finance-edit-loan="${loan.id}"]`);
-  await loanEdit.locator("summary").click();
+  await page.getByRole("button", { name: "생활 대출 수정" }).click();
+  await expect(loanEdit).toHaveAttribute("open", "");
   await loanEdit.locator('[name="name"]').fill("수정한 생활 대출");
   await loanEdit.getByRole("button", { name: "대출 수정 저장" }).click();
   await expect.poll(async () => (await fixtureSnapshot(request)).financeState.loans[0].name).toBe("수정한 생활 대출");
@@ -112,7 +118,8 @@ test("management items edit, fixed costs generate once, and asset-only loans del
 
   const rule = (await fixtureSnapshot(request)).financeState.recurringRules[0];
   const ruleEdit = page.locator(`[data-finance-edit-recurring-rule="${rule.id}"]`);
-  await ruleEdit.locator("summary").click();
+  await page.getByRole("button", { name: "자동 월세 수정" }).click();
+  await expect(ruleEdit).toHaveAttribute("open", "");
   await ruleEdit.locator('[name="name"]').fill("수정한 자동 월세");
   await ruleEdit.getByRole("button", { name: "고정비 수정 저장" }).click();
   await page.reload();

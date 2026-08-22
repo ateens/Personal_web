@@ -369,7 +369,27 @@ test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공�
   const languageTrigger = codeSpace.locator("[data-code-language-trigger]");
   await languageTrigger.focus();
   await languageTrigger.press("ArrowDown");
-  await expect(codeSpace.locator(".code-language-menu")).toBeVisible();
+  const languageMenu = codeSpace.locator(".code-language-menu");
+  await expect(languageMenu).toBeVisible();
+  await expect(languageMenu).toHaveAttribute("popover", "manual");
+  await expect.poll(() => languageMenu.evaluate((menu) => menu.matches(":popover-open"))).toBe(true);
+  const menuGeometry = await languageMenu.evaluate((menu) => {
+    const rect = menu.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportRight = viewportLeft + (viewport?.width || document.documentElement.clientWidth);
+    const viewportBottom = viewportTop + (viewport?.height || document.documentElement.clientHeight);
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.bottom - 3);
+    return {
+      insideViewport: rect.left >= viewportLeft && rect.right <= viewportRight
+        && rect.top >= viewportTop && rect.bottom <= viewportBottom,
+      hitInside: Boolean(hit && menu.contains(hit)),
+      fixed: getComputedStyle(menu).position === "fixed",
+      cappedHeight: rect.height <= 320,
+    };
+  });
+  expect(menuGeometry).toEqual({ insideViewport: true, hitInside: true, fixed: true, cappedHeight: true });
   await expect(codeSpace.locator("[data-code-language-value]").first()).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(codeSpace.locator(".code-language-menu")).not.toBeVisible();
