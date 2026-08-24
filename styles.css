@@ -7110,6 +7110,10 @@ body.is-resource-document-open {
   pointer-events: none;
 }
 
+body:has(.editor-marquee) .resource-document .block {
+  transition: none;
+}
+
 
 .selected-block-menu,
 .mention-menu,

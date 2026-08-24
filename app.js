@@ -646,7 +646,6 @@ let ui = {
   recentBlockFocus: null,
   shiftKeyDown: false,
   composingBlockId: "",
-  compositionState: null,
   recentCompositionCommit: null,
   pendingEmptyContinuationExit: null,
   pendingMarkdownTextTarget: null,
@@ -10006,7 +10005,7 @@ function handleClick(event) {
 
   if (
     ui.suppressBlockClickUntil > Date.now()
-    && (event.target.closest(".block, .block-editor") || (ui.blockSelection.ids.length && event.target.closest(".resource-document")))
+    && event.target.closest(".block, .block-editor, .resource-document")
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -11742,13 +11741,8 @@ function handleCompositionStart(event) {
     },
     { forceNew: true },
   );
+  ui.recentCompositionCommit = null;
   ui.composingBlockId = blockContent.dataset.blockContent;
-  ui.compositionState = {
-    blockId: blockContent.dataset.blockContent,
-    start: Number.isInteger(offsets?.start) ? offsets.start : null,
-    end: Number.isInteger(offsets?.end) ? offsets.end : null,
-    text: blockContent.textContent || "",
-  };
 }
 
 function handleCompositionUpdate(event) {
@@ -11765,35 +11759,18 @@ function handleCompositionEnd(event) {
   const editor = blockContent.closest(".block-editor");
   if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const blockId = blockContent.dataset.blockContent;
-  const compositionState = ui.compositionState?.blockId === blockId ? ui.compositionState : null;
-  const currentText = blockContent.textContent || "";
-  const replacedLength = Number.isInteger(compositionState?.start) && Number.isInteger(compositionState?.end)
-    ? Math.max(0, compositionState.end - compositionState.start)
-    : 0;
-  const inferredCommittedLength = Number.isInteger(compositionState?.start) && typeof compositionState?.text === "string"
-    ? Math.max(0, currentText.length - (compositionState.text.length - replacedLength))
-    : null;
-  const eventCommittedLength = typeof event.data === "string" && event.data.length > 0 ? event.data.length : null;
-  const committedLength = Number.isInteger(eventCommittedLength) ? eventCommittedLength : inferredCommittedLength;
-  const caretOffset = Number.isInteger(compositionState?.start) && Number.isInteger(committedLength)
-    ? compositionState.start + committedLength
-    : null;
-  ui.recentCompositionCommit = {
+  const commit = {
     blockId,
     time: Date.now(),
     pending: true,
   };
+  ui.recentCompositionCommit = commit;
   ui.composingBlockId = "";
-  ui.compositionState = null;
   requestAnimationFrame(() => {
-    if (!blockContent.isConnected) return;
+    if (!blockContent.isConnected || ui.recentCompositionCommit !== commit || isComposingBlock(blockContent)) return;
     updateBlockText(blockContent);
-    if (ui.recentCompositionCommit?.blockId === blockId) {
-      ui.recentCompositionCommit.pending = false;
-      ui.recentCompositionCommit.time = Date.now();
-    }
-    if (!Number.isInteger(caretOffset) || !blockContent.isConnected || document.activeElement !== blockContent) return;
-    placeCaretAtTextOffset(blockContent, Math.min(caretOffset, (blockContent.textContent || "").length));
+    commit.pending = false;
+    commit.time = Date.now();
   });
 }
 
@@ -12884,7 +12861,7 @@ function handleEditorMarqueePointerMove(event) {
     const distance = Math.hypot(deltaX, deltaY);
     if (distance < EDITOR_MARQUEE_ACTIVATION_DISTANCE) return;
     if (pending.nativeTextSelection && Math.abs(deltaY) <= Math.abs(deltaX)) {
-      ui.pendingEditorMarquee = null;
+      if (ui.inlineSelectionPointer) ui.inlineSelectionPointer.dragged = true;
       return;
     }
     activatePendingEditorMarquee(pending, event);
@@ -12969,10 +12946,6 @@ function handleBlockSelectAll(blockContent, ownerType, ownerId) {
 function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId) {
   const blockId = blockContent?.dataset?.blockContent || "";
   if (!blockId) return;
-  if (ownerType === "resources") {
-    handleBlockSelectAll(blockContent, ownerType, ownerId);
-    return;
-  }
   const textLength = (blockContent.textContent || "").length;
   const offsets = selectionOffsetsInside(blockContent);
   const fullySelected =
@@ -16575,6 +16548,21 @@ function handleKeydown(event) {
     !event.metaKey &&
     !event.ctrlKey &&
     !event.altKey &&
+    ownerType === "resources" &&
+    event.key === "ArrowUp"
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId);
+    return;
+  }
+
+  if (
+    (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+    event.shiftKey &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
     extendCaretSelectionBetweenBlocks(blockContent, event.key)
   ) {
     event.preventDefault();
@@ -17312,7 +17300,7 @@ function refreshInlineToolbarFromSelection() {
 
 function beginInlineToolbarPointerSelection(event) {
   cancelInlineToolbarSelectionDelay();
-  ui.inlineSelectionPointer = { pointerId: eventPointerId(event) };
+  ui.inlineSelectionPointer = { pointerId: eventPointerId(event), dragged: false };
   if (!ui.inlineToolbar) return;
   ui.inlineToolbar = null;
   renderOverlays();
@@ -17322,6 +17310,9 @@ function finishInlineToolbarPointerSelection(event) {
   const pointer = ui.inlineSelectionPointer;
   if (!pointer || (event && !sameMouseLikePointer(pointer.pointerId, event))) return;
   ui.inlineSelectionPointer = null;
+  if (pointer.dragged && !window.getSelection()?.isCollapsed) {
+    ui.suppressBlockClickUntil = Math.max(ui.suppressBlockClickUntil, Date.now() + 260);
+  }
   window.clearTimeout(inlineToolbarSelectionTimer);
   inlineToolbarSelectionTimer = window.setTimeout(() => {
     inlineToolbarSelectionTimer = 0;
@@ -19441,6 +19432,7 @@ function editorOwnerMutationAllowed(ownerType, ownerId) {
 }
 
 function updateBlockText(blockContent, event = null) {
+  if (isComposingBlock(blockContent)) return;
   const editor = blockContent.closest(".block-editor");
   if (!editor || !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   const item = itemById(editor.dataset.ownerType, editor.dataset.ownerId);

@@ -93,6 +93,20 @@ async function activeCaret(page) {
   });
 }
 
+async function resourceSelectionState(page) {
+  return page.evaluate(() => {
+    const selection = window.getSelection();
+    const blockIdForNode = (node) => (node instanceof Element ? node : node?.parentElement)
+      ?.closest?.("[data-block-content]")?.dataset.blockContent || "";
+    return {
+      text: selection?.toString() || "",
+      anchorBlock: blockIdForNode(selection?.anchorNode),
+      focusBlock: blockIdForNode(selection?.focusNode),
+      selectedIds: [...document.querySelectorAll(".resource-document .block.is-selected")].map((block) => block.dataset.blockId),
+    };
+  });
+}
+
 async function pastePng(content) {
   await content.evaluate((element, bytes) => {
     element.focus();
@@ -133,6 +147,107 @@ test("제목과 본문, 자동 링크가 저장되고 새로고침 뒤에도 그
   await expect(page.locator(`[data-resource-title="${FIXTURE_IDS.bodySearchResource}"]`)).toHaveValue("저장되는 자료 제목");
   await expect(reloadedEditor.locator("[data-block-content]").first()).toHaveText("참고 링크 https://example.com/resource-path 확인 ");
   await expect(reloadedEditor.locator('a[data-inline-mark="link"]')).toHaveAttribute("href", "https://example.com/resource-path");
+});
+
+test("Resource 연속 한글 조합은 이전 commit RAF가 다음 받침 입력을 건드리지 않고 안녕을 저장한다", async ({ page, request }) => {
+  const blockId = "korean-composition";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [paragraph(blockId)]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const content = editor.locator(`[data-block-content="${blockId}"]`);
+  await setCaret(content, 0);
+
+  await content.evaluate((element) => {
+    const placeCaretAtEnd = () => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    };
+    const updateComposition = (prefix, data) => {
+      element.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data }));
+      element.dispatchEvent(new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        data,
+        inputType: "insertCompositionText",
+        isComposing: true,
+      }));
+      element.textContent = `${prefix}${data}`;
+      placeCaretAtEnd();
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data,
+        inputType: "insertCompositionText",
+        isComposing: true,
+      }));
+    };
+    const compose = (updates) => {
+      const prefix = element.textContent || "";
+      element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+      for (const data of updates) {
+        updateComposition(prefix, data);
+      }
+      const committed = updates.at(-1);
+      element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: committed }));
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data: committed,
+        inputType: "insertText",
+      }));
+    };
+
+    compose(["ㅇ", "아", "안"]);
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    updateComposition("안", "ㄴ");
+  });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+
+  await expect(content).toHaveText("안ㄴ");
+  expect(await activeCaret(page)).toMatchObject({ blockId, offset: 2 });
+
+  await content.evaluate((element) => {
+    const updateComposition = (data) => {
+      element.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data }));
+      element.dispatchEvent(new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        data,
+        inputType: "insertCompositionText",
+        isComposing: true,
+      }));
+      element.textContent = `안${data}`;
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data,
+        inputType: "insertCompositionText",
+        isComposing: true,
+      }));
+    };
+
+    updateComposition("녀");
+    updateComposition("녕");
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "녕" }));
+    element.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      data: "녕",
+      inputType: "insertText",
+    }));
+  });
+  await settleAnimationFrames(page);
+
+  await expect(content).toHaveText("안녕");
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
+    return { count: resource?.blocks.length, text: resource?.blocks[0]?.text };
+  }).toEqual({ count: 1, text: "안녕" });
 });
 
 test("Markdown 목록, 인용, 토글과 Tab 계층 이동이 같은 편집기에서 동작한다", async ({ page, request }) => {
@@ -637,32 +752,56 @@ test("Resource 왼쪽 여백을 세로로 드래그하면 지나간 줄 블록�
   await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(blockIds.length);
 });
 
-test("Resource Cmd+A는 현재 줄 다음 전체 내용을 선택하고 Shift 위아래로 범위를 늘린다", async ({ page, request }) => {
+test("Resource Cmd+A는 현재 줄 텍스트, 현재 블록, 전체 블록 순서로 선택한다", async ({ page, request }) => {
   const blockIds = ["keyboard-select-1", "keyboard-select-2", "keyboard-select-3", "keyboard-select-4"];
+  const blockTexts = blockIds.map((_, index) => `키보드 선택 줄 ${index + 1}`);
   await seedResourceBlocks(
     request,
     FIXTURE_IDS.bodySearchResource,
-    blockIds.map((id, index) => paragraph(id, `키보드 선택 줄 ${index + 1}`)),
+    blockIds.map((id, index) => paragraph(id, blockTexts[index])),
   );
   const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
-  const selectedIds = () => editor.locator(".block.is-selected").evaluateAll((blocks) => (
-    blocks.map((block) => block.dataset.blockId)
-  ));
   const second = editor.locator(`[data-block-content="${blockIds[1]}"]`);
 
-  await setCaret(second, 0);
+  await setCaret(second, 4);
   await page.keyboard.press("Meta+A");
-  await expect.poll(selectedIds).toEqual([blockIds[1]]);
+  await expect.poll(() => resourceSelectionState(page)).toEqual({
+    text: blockTexts[1],
+    anchorBlock: blockIds[1],
+    focusBlock: blockIds[1],
+    selectedIds: [],
+  });
   await page.keyboard.press("Meta+A");
-  await expect.poll(selectedIds).toEqual(blockIds);
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: [blockIds[1]] });
+  await page.keyboard.press("Meta+A");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds });
+});
 
-  await page.keyboard.press("Escape");
-  await setCaret(second, 0);
-  await page.keyboard.press("Meta+A");
-  await page.keyboard.press("Shift+ArrowDown");
-  await expect.poll(selectedIds).toEqual(blockIds.slice(1, 3));
+test("Resource Shift+ArrowUp은 현재 줄 텍스트, 현재 블록, 위 인접 블록 순서로 선택한다", async ({ page, request }) => {
+  const blockIds = ["keyboard-up-1", "keyboard-up-2", "keyboard-up-3", "keyboard-up-4"];
+  const blockTexts = blockIds.map((_, index) => `위쪽 선택 줄 ${index + 1}`);
+  await seedResourceBlocks(
+    request,
+    FIXTURE_IDS.bodySearchResource,
+    blockIds.map((id, index) => paragraph(id, blockTexts[index])),
+  );
+  await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const third = page.locator(`[data-block-content="${blockIds[2]}"]`);
+
+  await setCaret(third, blockTexts[2].length);
   await page.keyboard.press("Shift+ArrowUp");
-  await expect.poll(selectedIds).toEqual(blockIds.slice(0, 3));
+  await expect.poll(() => resourceSelectionState(page)).toEqual({
+    text: blockTexts[2],
+    anchorBlock: blockIds[2],
+    focusBlock: blockIds[2],
+    selectedIds: [],
+  });
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: [blockIds[2]] });
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds.slice(1, 3) });
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds.slice(0, 3) });
 });
 
 test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 한 줄 여유가 남는다", async ({ page, request }) => {
