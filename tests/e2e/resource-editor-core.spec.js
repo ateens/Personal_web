@@ -637,6 +637,34 @@ test("Resource 왼쪽 여백을 세로로 드래그하면 지나간 줄 블록�
   await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(blockIds.length);
 });
 
+test("Resource Cmd+A는 현재 줄 다음 전체 내용을 선택하고 Shift 위아래로 범위를 늘린다", async ({ page, request }) => {
+  const blockIds = ["keyboard-select-1", "keyboard-select-2", "keyboard-select-3", "keyboard-select-4"];
+  await seedResourceBlocks(
+    request,
+    FIXTURE_IDS.bodySearchResource,
+    blockIds.map((id, index) => paragraph(id, `키보드 선택 줄 ${index + 1}`)),
+  );
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const selectedIds = () => editor.locator(".block.is-selected").evaluateAll((blocks) => (
+    blocks.map((block) => block.dataset.blockId)
+  ));
+  const second = editor.locator(`[data-block-content="${blockIds[1]}"]`);
+
+  await setCaret(second, 0);
+  await page.keyboard.press("Meta+A");
+  await expect.poll(selectedIds).toEqual([blockIds[1]]);
+  await page.keyboard.press("Meta+A");
+  await expect.poll(selectedIds).toEqual(blockIds);
+
+  await page.keyboard.press("Escape");
+  await setCaret(second, 0);
+  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(selectedIds).toEqual(blockIds.slice(1, 3));
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(selectedIds).toEqual(blockIds.slice(0, 3));
+});
+
 test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 한 줄 여유가 남는다", async ({ page, request }) => {
   const blocks = Array.from({ length: 34 }, (_, index) => paragraph(`caret-scroll-${index + 1}`, `스크롤 확인 줄 ${index + 1}`));
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, blocks);

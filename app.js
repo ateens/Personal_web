@@ -332,7 +332,7 @@ const MARKDOWN_SHORTCUTS = [
   [/^>\s$/, "toggle", ""],
   [/^\|\s$/, "quote", ""],
   [/^!\s$/, "callout", ""],
-  [/^(?:---|\*\*\*|___)$/, "divider", ""],
+  [/^---$/, "divider", ""],
 ];
 const CONTINUED_BLOCK_TYPES = new Set(["bullet", "numbered", "todo"]);
 const MAX_BLOCK_INDENT = 6;
@@ -608,6 +608,7 @@ let projectCalendarResizeTimer = 0;
 let taskDoneRenderTimer = 0;
 let taskDoneRenderVersion = 0;
 let inlineToolbarPositionFrame = 0;
+let inlineToolbarSelectionTimer = 0;
 let financeSelectPositionFrame = 0;
 let codeLanguagePositionFrame = 0;
 let preferredVerticalCaretX = null;
@@ -630,6 +631,7 @@ let ui = {
   suppressNavClickUntil: 0,
   selectedBlockMenu: null,
   inlineToolbar: null,
+  inlineSelectionPointer: null,
   linkPopover: null,
   resourceCitationPopover: null,
   commentPopover: null,
@@ -1694,6 +1696,7 @@ function renderResourceDocument(resource) {
       role="dialog"
       aria-modal="true"
       aria-labelledby="resource-dialog-label-${esc(resource.id)}"
+      tabindex="-1"
     >
       <h2 class="visually-hidden" id="resource-dialog-label-${esc(resource.id)}">자료 편집</h2>
       <div class="visually-hidden" data-resource-announcements role="status" aria-live="polite" aria-atomic="true"></div>
@@ -7641,6 +7644,8 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
     : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
   const backgroundColorAttr = blockBackgroundColor ? ` data-block-background="${blockBackgroundColor}"` : "";
+  const toggleHeading = normalizeToggleHeading(block.toggleHeading);
+  const toggleHeadingAttr = block.type === "toggle" && toggleHeading ? ` data-toggle-heading="${toggleHeading}"` : "";
   const listSemanticAttr = meta.listItem ? ` role="listitem" aria-level="${indent + 1}"` : "";
   const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor);
   if (block.type === "divider") {
@@ -7673,7 +7678,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
   return `
-    <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
+    <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr}${toggleHeadingAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
       ${blockTools}
       ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}"></button>` : ""}
       ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}">▸</button>` : ""}
@@ -7753,12 +7758,11 @@ function urlPreviewParts(value = "") {
 
 function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", ownerId = "") {
   const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
-  if (block.type === "heading1") return `<h1 class="block-semantic-wrap">${editable}</h1>`;
-  if (block.type === "heading2") return `<h2 class="block-semantic-wrap">${editable}</h2>`;
-  if (block.type === "heading3") return `<h3 class="block-semantic-wrap">${editable}</h3>`;
-  if (block.type === "heading4") return `<h4 class="block-semantic-wrap">${editable}</h4>`;
-  if (block.type === "heading5") return `<h5 class="block-semantic-wrap">${editable}</h5>`;
-  if (block.type === "heading6") return `<h6 class="block-semantic-wrap">${editable}</h6>`;
+  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : normalizeToggleHeading(block.type);
+  if (heading) {
+    const level = heading.slice(-1);
+    return `<h${level} class="block-semantic-wrap">${editable}</h${level}>`;
+  }
   if (block.type === "quote") return `<blockquote class="block-semantic-wrap">${editable}</blockquote>`;
   if (block.type === "code") {
     const language = normalizeCodeLanguage(block.language);
@@ -7842,7 +7846,13 @@ function blockEditorAriaLabel(block) {
     quote: "인용 블록 편집",
     callout: "콜아웃 블록 편집",
   };
-  return labels[block.type] || "블록 편집";
+  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : "";
+  return heading ? `토글 제목 ${heading.slice(-1)} 블록 편집` : labels[block.type] || "블록 편집";
+}
+
+function normalizeToggleHeading(value = "") {
+  const heading = String(value || "");
+  return /^heading[1-6]$/.test(heading) ? heading : "";
 }
 
 function blockStyleForBlock(indent, color = "", backgroundColor = "") {
@@ -7976,6 +7986,16 @@ function normalizeEditableBlock(block) {
     delete block.listStart;
     changed = true;
   }
+  const toggleHeading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : "";
+  if (toggleHeading) {
+    if (block.toggleHeading !== toggleHeading) {
+      block.toggleHeading = toggleHeading;
+      changed = true;
+    }
+  } else if (Object.prototype.hasOwnProperty.call(block, "toggleHeading")) {
+    delete block.toggleHeading;
+    changed = true;
+  }
   const indent = normalizedBlockIndent(block.indent);
   if (block.indent !== indent) {
     block.indent = indent;
@@ -8055,7 +8075,7 @@ function renderInlineSegment(text, activeMarks) {
       if (!resourceId) continue;
       const targetState = resourceCitationTargetState(resourceId);
       const targetLabel = resourceCitationTargetLabel(resourceId, targetState);
-      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.resourceLink}" data-inline-mark="resourceLink" data-resource-citation="${esc(resourceId)}" data-resource-citation-state="${targetState}" href="${esc(resourceCitationHref(resourceId))}" tabindex="0"${targetState === "active" ? "" : ' aria-disabled="true"'} aria-label="${esc(targetLabel)}" title="${esc(targetLabel)}">${html}</a>`;
+      html = `<a class="inline-mark ${INLINE_MARK_CLASS_NAMES.resourceLink}" data-inline-mark="resourceLink" data-resource-citation="${esc(resourceId)}" data-resource-citation-state="${targetState}" href="${esc(resourceCitationHref(resourceId))}" tabindex="0" contenteditable="false"${targetState === "active" ? "" : ' aria-disabled="true"'} aria-label="${esc(targetLabel)}" title="${esc(targetLabel)}">${html}</a>`;
     } else if (type === "link") {
       const href = normalizeInlineHref(mark.href || "");
       if (!href) continue;
@@ -8453,12 +8473,8 @@ function openInlineLinkExternally(linkElement) {
 }
 
 function blockPlaceholder(block) {
-  if (block.type === "heading1") return "제목 1";
-  if (block.type === "heading2") return "제목 2";
-  if (block.type === "heading3") return "제목 3";
-  if (block.type === "heading4") return "제목 4";
-  if (block.type === "heading5") return "제목 5";
-  if (block.type === "heading6") return "제목 6";
+  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : normalizeToggleHeading(block.type);
+  if (heading) return `제목 ${heading.slice(-1)}`;
   if (block.type === "todo") return "할 일";
   if (block.type === "toggle") return "토글";
   if (block.type === "quote") return "인용";
@@ -9334,7 +9350,7 @@ function renderInlineFormatToolbar() {
   const resourceCitationControl = toolbar.ownerType === "resources" ? `
       <button class="inline-format-button ${toolbar.activeResourceCitation ? "is-active" : ""}" type="button" data-inline-resource-citation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="자료 인용" aria-pressed="${toolbar.activeResourceCitation ? "true" : "false"}" aria-haspopup="dialog" title="자료 인용"><span class="inline-format-symbol" aria-hidden="true">R</span><span class="inline-format-label">자료 인용</span></button>` : "";
   return `
-    <div class="inline-format-toolbar" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
+    <div class="inline-format-toolbar ${toolbar.animate ? "is-entering" : ""}" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       ${resourceCitationControl}
       <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" title="수식"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">수식</span></button>
@@ -9508,12 +9524,20 @@ function resourceCitationMenuEntries(query = "", sourceResourceId = "", existing
 function renderCommentPopover() {
   const popover = ui.commentPopover;
   if (!popover) return "";
+  const item = itemById(popover.ownerType, popover.ownerId);
+  const thread = popover.ownerType === "resources"
+    ? item?.commentThreads?.find((entry) => entry.id === popover.commentId && !entry.deletedAt)
+    : null;
+  const comments = thread
+    ? [thread, ...(thread.replies || []).filter((reply) => !reply.deletedAt)]
+    : [];
   return `
     <form class="inline-comment-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-comment-popover>
-      <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" placeholder="댓글 추가" aria-label="댓글">${esc(popover.body || "")}</textarea>
+      ${comments.length ? `<ol class="inline-comment-list" aria-label="댓글 ${comments.length}개">${comments.map((comment) => `<li>${esc(comment.body)}</li>`).join("")}</ol>` : ""}
+      <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" placeholder="${thread ? "답글 추가" : "댓글 추가"}" aria-label="${thread ? "답글" : "댓글"}">${esc(popover.body || "")}</textarea>
       <div class="inline-comment-actions">
-        <button class="inline-comment-action" type="submit">저장</button>
-        <button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>
+        <button class="inline-comment-action" type="submit">${thread ? "댓글 추가" : "저장"}</button>
+        ${thread || popover.ownerType !== "resources" ? '<button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>' : ""}
       </div>
     </form>
   `;
@@ -10983,7 +11007,22 @@ function openResourceDocument(resourceId) {
   ui.equationPopover = null;
   renderView({ soft: true });
   renderOverlays();
-  requestAnimationFrame(() => document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`)?.focus({ preventScroll: true }));
+  requestAnimationFrame(() => {
+    const title = document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`);
+    if (!String(resource.title || "").trim()) {
+      title?.focus({ preventScroll: true });
+      return;
+    }
+    const bodyIsEmpty = (resource.blocks || []).every((block) => (
+      block.type === "paragraph" && !String(block.text || "").trim()
+    ));
+    if (bodyIsEmpty) {
+      const firstBlockId = resource.blocks?.[0]?.id;
+      if (firstBlockId) focusBlockContentAfterRender(firstBlockId, { position: "start" });
+      return;
+    }
+    document.querySelector(`[data-resource-document="${cssEscape(resource.id)}"]`)?.focus({ preventScroll: true });
+  });
   return true;
 }
 
@@ -10998,6 +11037,7 @@ function closeResourceDocument() {
   ui.resourceCitationPopover = null;
   ui.commentPopover = null;
   ui.equationPopover = null;
+  cancelInlineToolbarSelectionDelay();
   renderView({ soft: true });
   renderOverlays();
   requestAnimationFrame(() => document.querySelector(`[data-resource-open="${cssEscape(resourceId)}"]`)?.focus({ preventScroll: true }));
@@ -12143,7 +12183,7 @@ function customPointerDragPendingOrActive() {
     ui.navPointerDrag ||
     ui.pendingBlockToolDrag ||
     ui.blockDrag ||
-    ui.pendingEditorMarquee ||
+    (ui.pendingEditorMarquee && !ui.pendingEditorMarquee.nativeTextSelection) ||
     ui.editorMarquee ||
     ui.pendingTodayTaskDrag ||
     ui.todayTaskDrag ||
@@ -12651,18 +12691,20 @@ function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
 
 function resourceEditorMarqueeTarget(event) {
   if (!(event?.target instanceof Element) || !canStartCustomPointerDrag(event)) return null;
-  if (event.target.closest("button, input, select, textarea, summary, a, [contenteditable='true'], .selected-block-menu, .inline-format-toolbar")) return null;
+  if (event.target.closest("button, input, select, textarea, summary, a, .selected-block-menu, .inline-format-toolbar")) return null;
   const documentPanel = event.target.closest(".resource-document");
   const editor = documentPanel?.querySelector('.block-editor[data-owner-type="resources"]');
   if (!documentPanel || !editor) return null;
   const panelRect = documentPanel.getBoundingClientRect();
   const editorRect = editor.getBoundingClientRect();
-  const gutterLeft = Math.max(panelRect.left + 4, editorRect.left - EDITOR_MARQUEE_GUTTER_WIDTH);
-  const gutterRight = editorRect.left + 10;
   const verticalBottom = Math.max(editorRect.bottom + 72, panelRect.bottom - 24);
-  if (event.clientX < gutterLeft || event.clientX > gutterRight) return null;
+  if (event.clientX < panelRect.left || event.clientX > panelRect.right) return null;
   if (event.clientY < editorRect.top - 8 || event.clientY > verticalBottom) return null;
-  return { documentPanel, editor };
+  return {
+    documentPanel,
+    editor,
+    nativeTextSelection: Boolean(event.target.closest("[data-block-content][contenteditable='true']")),
+  };
 }
 
 function beginPendingEditorMarquee(event) {
@@ -12679,12 +12721,17 @@ function beginPendingEditorMarquee(event) {
     startX: event.clientX,
     startY: event.clientY,
     captureTarget,
+    nativeTextSelection: target.nativeTextSelection,
   };
-  try {
-    if (event.pointerId !== undefined && captureTarget.setPointerCapture) captureTarget.setPointerCapture(event.pointerId);
-  } catch (_) {}
-  event.preventDefault();
-  event.stopPropagation();
+  if (target.nativeTextSelection) {
+    beginInlineToolbarPointerSelection(event);
+  } else {
+    try {
+      if (event.pointerId !== undefined && captureTarget.setPointerCapture) captureTarget.setPointerCapture(event.pointerId);
+    } catch (_) {}
+    event.preventDefault();
+    event.stopPropagation();
+  }
   return true;
 }
 
@@ -12817,6 +12864,10 @@ function activatePendingEditorMarquee(pending, event) {
   };
   ui.pendingEditorMarquee = null;
   ui.editorMarquee = drag;
+  cancelInlineToolbarSelectionDelay();
+  try {
+    if (event.pointerId !== undefined && pending.captureTarget.setPointerCapture) pending.captureTarget.setPointerCapture(event.pointerId);
+  } catch (_) {}
   clearBlockSelection();
   clearInlineEditingOverlaysForBlockSelection();
   window.getSelection()?.removeAllRanges();
@@ -12828,8 +12879,14 @@ function activatePendingEditorMarquee(pending, event) {
 function handleEditorMarqueePointerMove(event) {
   const pending = ui.pendingEditorMarquee;
   if (pending && sameMouseLikePointer(pending.pointerId, event)) {
-    const distance = Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY);
+    const deltaX = event.clientX - pending.startX;
+    const deltaY = event.clientY - pending.startY;
+    const distance = Math.hypot(deltaX, deltaY);
     if (distance < EDITOR_MARQUEE_ACTIVATION_DISTANCE) return;
+    if (pending.nativeTextSelection && Math.abs(deltaY) <= Math.abs(deltaX)) {
+      ui.pendingEditorMarquee = null;
+      return;
+    }
     activatePendingEditorMarquee(pending, event);
   }
   const drag = ui.editorMarquee;
@@ -12840,6 +12897,7 @@ function handleEditorMarqueePointerMove(event) {
 }
 
 function finishEditorMarqueeDrag(event) {
+  finishInlineToolbarPointerSelection(event);
   const pending = ui.pendingEditorMarquee;
   if (pending && (!event || sameMouseLikePointer(pending.pointerId, event))) {
     ui.pendingEditorMarquee = null;
@@ -12860,6 +12918,7 @@ function finishEditorMarqueeDrag(event) {
 function cancelEditorMarqueeDrag(event) {
   const carriesPointerIdentity = Boolean(event && (event.pointerId !== undefined || /^(?:mouse|pointer)/.test(event.type || "")));
   let cancelledAnyMarquee = false;
+  cancelInlineToolbarSelectionDelay();
   if (ui.pendingEditorMarquee && (!event || !carriesPointerIdentity || sameMouseLikePointer(ui.pendingEditorMarquee.pointerId, event))) {
     const pending = ui.pendingEditorMarquee;
     ui.pendingEditorMarquee = null;
@@ -12910,6 +12969,10 @@ function handleBlockSelectAll(blockContent, ownerType, ownerId) {
 function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId) {
   const blockId = blockContent?.dataset?.blockContent || "";
   if (!blockId) return;
+  if (ownerType === "resources") {
+    handleBlockSelectAll(blockContent, ownerType, ownerId);
+    return;
+  }
   const textLength = (blockContent.textContent || "").length;
   const offsets = selectionOffsetsInside(blockContent);
   const fullySelected =
@@ -13507,6 +13570,7 @@ function duplicateEditorBlock(block) {
   };
   if (safeUrl) duplicate.url = safeUrl;
   if (type === IMAGE_BLOCK_TYPE) duplicate.alt = imageAlt;
+  if (type === "toggle" && normalizeToggleHeading(clone.toggleHeading)) duplicate.toggleHeading = normalizeToggleHeading(clone.toggleHeading);
   if (type === "code" && typeof clone.language === "string") duplicate.language = clone.language.trim().split(/\s+/, 1)[0].slice(0, 64);
   return duplicate;
 }
@@ -14123,6 +14187,7 @@ function clipboardBlockFromBlock(block) {
   };
   if (safeUrl) clipboardBlock.url = safeUrl;
   if (type === IMAGE_BLOCK_TYPE) clipboardBlock.alt = imageAlt;
+  if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) clipboardBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
   if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
   if (type === "code" && typeof block.language === "string") clipboardBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
   return clipboardBlock;
@@ -14551,6 +14616,7 @@ function normalizeClipboardBlocks(blocks) {
     };
     if (safeUrl) normalizedBlock.url = safeUrl;
     if (type === IMAGE_BLOCK_TYPE) normalizedBlock.alt = imageAlt;
+    if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) normalizedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
     if (type === "code" && typeof block.language === "string") normalizedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     normalized.push(normalizedBlock);
@@ -14672,7 +14738,7 @@ function markdownBlockFromPlainText(text) {
   if (/^\|\s+/.test(text)) return { type: "quote", text: text.replace(/^\|\s+/, ""), checked: false, collapsed: false };
   if (/^!\s+/.test(text)) return { type: "callout", text: text.replace(/^!\s+/, ""), checked: false, collapsed: false };
   if (/^```\s*/.test(text)) return { type: "code", text: text.replace(/^```\s*/, ""), checked: false, collapsed: false };
-  if (/^(?:---|\*\*\*|___)$/.test(text)) return { type: "divider", text: "", checked: false, collapsed: false };
+  if (text === "---") return { type: "divider", text: "", checked: false, collapsed: false };
   return { type: "paragraph", text, checked: false, collapsed: false };
 }
 
@@ -14923,6 +14989,7 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       pastedBlock.url = normalizeResourceImageUrl(block.url);
       pastedBlock.alt = String(block.alt || block.text || "");
     }
+    if (block.type === "toggle" && normalizeToggleHeading(block.toggleHeading)) pastedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
     if (block.type === "code" && typeof block.language === "string") pastedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
     pasted.push(pastedBlock);
@@ -16878,7 +16945,13 @@ function handleDocumentKeydown(event) {
 
   if (handleSelectedBlocksTabKey(event)) return;
 
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "a" && !isEditableShortcutTarget(event.target)) {
+  if (
+    !ui.blockSelection.ids.length
+    && (event.metaKey || event.ctrlKey)
+    && !event.altKey
+    && event.key.toLowerCase() === "a"
+    && !isEditableShortcutTarget(event.target)
+  ) {
     const recent = recentBlockContentForSelectionShortcut();
     if (recent) {
       event.preventDefault();
@@ -17222,10 +17295,44 @@ function pendingMarkdownBlockType(pending) {
 
 function handleDocumentSelectionChange() {
   if (ui.blockDrag || ui.editorMarquee || ui.deleteDrag || ui.todayTaskDrag) return;
+  if (ui.inlineSelectionPointer) return;
+  window.clearTimeout(inlineToolbarSelectionTimer);
+  inlineToolbarSelectionTimer = 0;
+  refreshInlineToolbarFromSelection();
+}
+
+function refreshInlineToolbarFromSelection() {
   const nextToolbar = inlineToolbarFromSelection();
   if (inlineToolbarEqual(ui.inlineToolbar, nextToolbar)) return;
+  if (nextToolbar) nextToolbar.animate = !ui.inlineToolbar;
   ui.inlineToolbar = nextToolbar;
   renderOverlays();
+  if (ui.inlineToolbar) ui.inlineToolbar.animate = false;
+}
+
+function beginInlineToolbarPointerSelection(event) {
+  cancelInlineToolbarSelectionDelay();
+  ui.inlineSelectionPointer = { pointerId: eventPointerId(event) };
+  if (!ui.inlineToolbar) return;
+  ui.inlineToolbar = null;
+  renderOverlays();
+}
+
+function finishInlineToolbarPointerSelection(event) {
+  const pointer = ui.inlineSelectionPointer;
+  if (!pointer || (event && !sameMouseLikePointer(pointer.pointerId, event))) return;
+  ui.inlineSelectionPointer = null;
+  window.clearTimeout(inlineToolbarSelectionTimer);
+  inlineToolbarSelectionTimer = window.setTimeout(() => {
+    inlineToolbarSelectionTimer = 0;
+    refreshInlineToolbarFromSelection();
+  }, 500);
+}
+
+function cancelInlineToolbarSelectionDelay() {
+  window.clearTimeout(inlineToolbarSelectionTimer);
+  inlineToolbarSelectionTimer = 0;
+  ui.inlineSelectionPointer = null;
 }
 
 function inlineToolbarFromSelection() {
@@ -20778,16 +20885,9 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
     return true;
   }
 
-  if (!rawText) {
-    removeBlock(ownerType, ownerId, blockId);
-    return true;
-  }
-
   const previousIndex = previousVisibleBlockIndex(item.blocks, index);
-  if (previousIndex < 0) return false;
-  const previous = item.blocks[previousIndex];
-  if (!previous) return false;
-  if (previous.type === "divider") {
+  const previous = previousIndex >= 0 ? item.blocks[previousIndex] : null;
+  if (previous?.type === "divider") {
     item.blocks.splice(previousIndex, 1);
     commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
     saveState();
@@ -20795,6 +20895,14 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
     focusBlockContentAfterRender(block.id, { range: { start: 0, end: 0 } });
     return true;
   }
+
+  if (!rawText) {
+    removeBlock(ownerType, ownerId, blockId);
+    return true;
+  }
+
+  if (previousIndex < 0) return false;
+  if (!previous) return false;
 
   const previousText = previous.text || "";
   const caretOffset = previousText.length;
@@ -20975,9 +21083,11 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const originalType = current.type;
   const originalChecked = current.checked === true;
   const originalCollapsed = current.collapsed === true;
+  const originalToggleHeading = normalizeToggleHeading(current.toggleHeading);
   const splitAtStart = !split.before && Boolean(split.after);
   if (splitAtStart) {
     current.type = CONTINUED_BLOCK_TYPES.has(originalType) ? originalType : "paragraph";
+    if (current.type !== "toggle") delete current.toggleHeading;
     current.text = "";
     current.marks = [];
     current.checked = false;
@@ -21005,6 +21115,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     indent: nextIndent,
     collapsed: splitAtStart && originalType === "toggle" ? originalCollapsed : false,
   };
+  if (newBlock.type === "toggle" && originalToggleHeading) newBlock.toggleHeading = originalToggleHeading;
   item.blocks.splice(index + 1, 0, newBlock);
   const focusBlock = splitAtStart ? current : newBlock;
   schedulePendingEmptyContinuationExit(ownerType, ownerId, focusBlock);
@@ -21407,7 +21518,15 @@ function applyBlockColorAction(ownerType, ownerId, blockIds, action, options = {
 }
 
 function applyBlockType(block, type) {
+  const heading = normalizeToggleHeading(type);
+  if (block.type === "toggle" && heading) {
+    block.toggleHeading = heading;
+    return;
+  }
+  const previousHeading = normalizeToggleHeading(block.type);
   block.type = type;
+  if (type === "toggle" && previousHeading) block.toggleHeading = previousHeading;
+  else delete block.toggleHeading;
   if (type !== "numbered") delete block.listStart;
   if (type !== "code") delete block.language;
   if (type === "divider") {
@@ -21855,6 +21974,7 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
   if (!block || block.type === "code" || !block.text) return false;
   const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || range.collapsed || range.end <= range.start) return false;
+  if (ownerType === "resources") reconcileResourceCommentThreads(item);
   const marks = normalizeInlineMarks(block.text, block.marks);
   const existing = marks.find((mark) => mark.type === "comment" && mark.start <= range.start && mark.end >= range.end);
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
@@ -21869,7 +21989,7 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
     start: range.start,
     end: range.end,
     commentId: existing?.commentId || id(),
-    body: existing?.body || "",
+    body: ownerType === "resources" ? "" : existing?.body || "",
     x: Math.max(12, Math.min(rawX, window.innerWidth - 312)),
     y: Math.max(12, Math.min(rawY, window.innerHeight - 124)),
   };
@@ -21983,7 +22103,7 @@ function applyInlineComment(value) {
   if (!popover) return false;
   if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const body = String(value || "").trim();
-  if (!body) return removeInlineComment();
+  if (!body) return popover.ownerType === "resources" ? false : removeInlineComment();
   if (body.length > MAX_INLINE_COMMENT_BODY_LENGTH) {
     showToast(`댓글은 최대 ${MAX_INLINE_COMMENT_BODY_LENGTH}자입니다.`);
     return false;
@@ -21992,6 +22112,42 @@ function applyInlineComment(value) {
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
   const commentId = popover.commentId || id();
+  if (popover.ownerType === "resources") {
+    reconcileResourceCommentThreads(item);
+    const now = new Date().toISOString();
+    const thread = item.commentThreads.find((entry) => entry.id === commentId && !entry.deletedAt);
+    const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
+    if (thread) {
+      thread.replies.push({ id: id(), body, createdAt: now, updatedAt: now, deletedAt: "" });
+      thread.updatedAt = now;
+    } else {
+      item.commentThreads.push({
+        id: commentId,
+        scope: "inline",
+        anchor: { blockId: block.id, start: popover.start, end: popover.end },
+        body,
+        createdAt: now,
+        updatedAt: now,
+        resolvedAt: "",
+        deletedAt: "",
+        replies: [],
+      });
+      block.marks = normalizeInlineMarks(block.text, [
+        ...normalizeInlineMarks(block.text, block.marks),
+        { type: "comment", start: popover.start, end: popover.end, commentId, body },
+      ]);
+    }
+    markResourceChanged(item);
+    commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+    saveState();
+    renderEditorMutation(popover.ownerType, popover.ownerId);
+    const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
+    ui.commentPopover = null;
+    ui.inlineToolbar = null;
+    renderOverlays();
+    focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+    return true;
+  }
   const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end);
   marks.push({ type: "comment", start: popover.start, end: popover.end, commentId, body });
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
@@ -22049,10 +22205,23 @@ function removeInlineComment() {
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  if (popover.ownerType === "resources") {
+    const now = new Date().toISOString();
+    const thread = item.commentThreads?.find((entry) => entry.id === popover.commentId);
+    if (thread) {
+      thread.deletedAt = now;
+      thread.updatedAt = now;
+    }
+    block.marks = normalizeInlineMarks(block.text, block.marks).filter((mark) => (
+      mark.type !== "comment" || mark.commentId !== popover.commentId
+    ));
+    markResourceChanged(item);
+  } else {
   block.marks = normalizeInlineMarks(
     block.text,
     removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end),
   );
+  }
   commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
@@ -23995,6 +24164,61 @@ function normalizeResourceCommentThreads(value) {
   return threads;
 }
 
+function reconcileResourceCommentThreads(resource) {
+  if (!isPlainObject(resource)) return;
+  resource.commentThreads = normalizeResourceCommentThreads(resource.commentThreads);
+  const threadsById = new Map(resource.commentThreads.map((thread) => [thread.id, thread]));
+  const marksById = new Map();
+  for (const block of resource.blocks || []) {
+    const nextMarks = [];
+    for (const mark of normalizeInlineMarks(block.text || "", block.marks)) {
+      if (mark.type !== "comment") {
+        nextMarks.push(mark);
+        continue;
+      }
+      const thread = threadsById.get(mark.commentId);
+      if (marksById.has(mark.commentId) || thread?.deletedAt || thread?.scope === "page") continue;
+      marksById.set(mark.commentId, { block, mark });
+      nextMarks.push(mark);
+    }
+    block.marks = nextMarks;
+  }
+  const now = new Date().toISOString();
+  for (const [commentId, location] of marksById) {
+    if (threadsById.has(commentId)) continue;
+    const thread = {
+      id: commentId,
+      scope: "inline",
+      anchor: { blockId: location.block.id, start: location.mark.start, end: location.mark.end },
+      body: location.mark.body,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: "",
+      deletedAt: "",
+      replies: [],
+    };
+    resource.commentThreads.push(thread);
+    threadsById.set(commentId, thread);
+  }
+  for (const thread of resource.commentThreads) {
+    if (thread.deletedAt) continue;
+    const location = marksById.get(thread.id);
+    if (location) {
+      thread.scope = "inline";
+      thread.anchor = { blockId: location.block.id, start: location.mark.start, end: location.mark.end };
+      location.mark.body = thread.body;
+      delete thread.anchorLostAt;
+      delete thread.formerAnchor;
+      continue;
+    }
+    if (thread.scope !== "inline") continue;
+    thread.formerAnchor = normalizeFormerCommentAnchor(thread.anchor);
+    thread.anchorLostAt ||= now;
+    thread.scope = "page";
+    thread.anchor = null;
+  }
+}
+
 function normalizeFormerCommentAnchor(value) {
   if (!isPlainObject(value)) return null;
   const blockId = String(value.blockId || "").trim();
@@ -24950,6 +25174,7 @@ function isPlainObject(value) {
 }
 
 function saveState(options = {}) {
+  for (const resource of state.resources || []) reconcileResourceCommentThreads(resource);
   clearStateIndexes();
   state.version = APP_STATE_VERSION;
   state.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(state.updatedAt) + 1)).toISOString();

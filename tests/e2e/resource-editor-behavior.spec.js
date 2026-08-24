@@ -1,0 +1,200 @@
+import { expect, test } from "@playwright/test";
+import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
+
+const RESOURCE_ID = FIXTURE_IDS.bodySearchResource;
+
+function paragraph(id, text = "", indent = 0) {
+  return { id, type: "paragraph", text, marks: [], checked: false, indent, collapsed: false };
+}
+
+async function seedResource(request, blocks, commentThreads = []) {
+  const before = await fixtureSnapshot(request);
+  const draft = structuredClone(before.state);
+  const resource = draft.resources.find((entry) => entry.id === RESOURCE_ID);
+  resource.blocks = blocks;
+  resource.commentThreads = commentThreads;
+  const response = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${before.serverRevision}"` },
+    data: { state: draft, baseRevision: before.serverRevision },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function openResource(page) {
+  await page.goto("/");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await page.locator('[data-nav-key="resources"]').evaluate((button) => button.click());
+  await page.locator(`[data-resource-open="${RESOURCE_ID}"]`).click();
+  await expect(page.locator(`[data-resource-document="${RESOURCE_ID}"]`)).toBeVisible();
+  return page.locator(`.block-editor[data-owner-type="resources"][data-owner-id="${RESOURCE_ID}"]`);
+}
+
+async function persistedResource(request) {
+  const snapshot = await fixtureSnapshot(request);
+  return snapshot.state.resources.find((resource) => resource.id === RESOURCE_ID);
+}
+
+async function selectTextRange(content, start, end) {
+  await content.evaluate((element, offsets) => {
+    element.focus();
+    const textNode = element.firstChild;
+    const range = document.createRange();
+    range.setStart(textNode, offsets.start);
+    range.setEnd(textNode, offsets.end);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  }, { start, end });
+}
+
+test.beforeEach(async ({ request }) => {
+  await resetFixture(request);
+});
+
+test("---만 구분선을 만들고 바로 아래 Backspace는 문서를 닫지 않는다", async ({ page, request }) => {
+  await seedResource(request, [paragraph("markdown-shortcut", "")]);
+  const editor = await openResource(page);
+  let content = editor.locator('[data-block-content="markdown-shortcut"]');
+
+  await content.pressSequentially("***");
+  await expect(content).toHaveText("***");
+  await expect(editor.locator('.block[data-type="divider"]')).toHaveCount(0);
+
+  await content.press("End");
+  await content.press("Enter");
+  content = editor.locator("[data-block-content]:focus");
+  await content.pressSequentially("---");
+
+  const divider = editor.locator('.block[data-type="divider"]');
+  await expect(divider).toHaveCount(1);
+  const followingParagraphId = await editor.locator("[data-block-content]:focus").getAttribute("data-block-content");
+  expect(followingParagraphId).toBeTruthy();
+
+  await page.keyboard.press("Backspace");
+  await expect(divider).toHaveCount(0);
+  await expect(page.locator(`[data-resource-document="${RESOURCE_ID}"]`)).toBeVisible();
+  await expect(editor.locator(`[data-block-content="${followingParagraphId}"]`)).toBeFocused();
+  await expect.poll(async () => (await persistedResource(request)).blocks.map((block) => ({ type: block.type, text: block.text }))).toEqual([
+    { type: "paragraph", text: "***" },
+    { type: "paragraph", text: "" },
+  ]);
+});
+
+test("토글과 제목은 적용 순서와 무관하게 함께 저장되고 접힌 상태로 복원된다", async ({ page, request }) => {
+  const toggleFirstId = "toggle-then-heading";
+  const toggleFirstChildId = "toggle-then-heading-child";
+  const headingFirstId = "heading-then-toggle";
+  const headingFirstChildId = "heading-then-toggle-child";
+  await seedResource(request, [
+    paragraph(toggleFirstId, "토글 다음 제목"),
+    paragraph(toggleFirstChildId, "첫 번째 자식", 1),
+    { ...paragraph(headingFirstId, "제목 다음 토글"), type: "heading1" },
+    paragraph(headingFirstChildId, "두 번째 자식", 1),
+  ]);
+  let editor = await openResource(page);
+  const toggleFirstContent = editor.locator(`[data-block-content="${toggleFirstId}"]`);
+  const headingFirstContent = editor.locator(`[data-block-content="${headingFirstId}"]`);
+
+  await toggleFirstContent.press("Meta+Alt+7");
+  await toggleFirstContent.press("Meta+Alt+2");
+  await expect(editor.locator(`[data-block-id="${toggleFirstId}"]`)).toHaveAttribute("data-type", "toggle");
+  await expect(editor.locator(`[data-block-id="${toggleFirstId}"]`)).toHaveAttribute("data-toggle-heading", "heading2");
+  await expect(toggleFirstContent.locator("xpath=parent::h2")).toHaveCount(1);
+
+  await headingFirstContent.press("Meta+Alt+7");
+  await expect(editor.locator(`[data-block-id="${headingFirstId}"]`)).toHaveAttribute("data-type", "toggle");
+  await expect(editor.locator(`[data-block-id="${headingFirstId}"]`)).toHaveAttribute("data-toggle-heading", "heading1");
+  await expect(headingFirstContent.locator("xpath=parent::h1")).toHaveCount(1);
+
+  await editor.locator(`[data-block-toggle="${toggleFirstId}"]`).click();
+  await editor.locator(`[data-block-toggle="${headingFirstId}"]`).click();
+  await expect(editor.locator(`[data-block-id="${toggleFirstChildId}"]`)).toBeHidden();
+  await expect(editor.locator(`[data-block-id="${headingFirstChildId}"]`)).toBeHidden();
+
+  await expect.poll(async () => {
+    const resource = await persistedResource(request);
+    return [toggleFirstId, headingFirstId].map((id) => {
+      const block = resource.blocks.find((entry) => entry.id === id);
+      return { type: block.type, toggleHeading: block.toggleHeading, collapsed: block.collapsed };
+    });
+  }).toEqual([
+    { type: "toggle", toggleHeading: "heading2", collapsed: true },
+    { type: "toggle", toggleHeading: "heading1", collapsed: true },
+  ]);
+
+  editor = await openResource(page);
+  await expect(editor.locator(`[data-block-id="${toggleFirstId}"]`)).toHaveAttribute("data-toggle-heading", "heading2");
+  await expect(editor.locator(`[data-block-id="${headingFirstId}"]`)).toHaveAttribute("data-toggle-heading", "heading1");
+  await expect(editor.locator(`[data-block-id="${toggleFirstChildId}"]`)).toBeHidden();
+  await expect(editor.locator(`[data-block-id="${headingFirstChildId}"]`)).toBeHidden();
+});
+
+test("Resource 댓글은 흰색 스레드에서 답글을 누적하고 정확한 anchor로 복원된다", async ({ page, request }) => {
+  const blockId = "comment-target";
+  const text = "댓글 대상 텍스트";
+  const selectedText = "댓글 대상";
+  await seedResource(request, [paragraph(blockId, text)]);
+  let editor = await openResource(page);
+  let content = editor.locator(`[data-block-content="${blockId}"]`);
+
+  await selectTextRange(content, 0, selectedText.length);
+  await page.locator('[data-inline-mark-toggle="comment"]').click();
+  let popover = page.locator("[data-inline-comment-popover]");
+  await expect(popover).toBeVisible();
+  const colors = await popover.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  expect(colors.background).toContain("255, 255, 255");
+  expect(colors.color).toContain("55, 53, 47");
+
+  await popover.locator("[data-inline-comment-input]").fill("첫 댓글");
+  await popover.locator('button[type="submit"]').click();
+  const mark = content.locator('[data-inline-mark="comment"]');
+  await expect(mark).toHaveText(selectedText);
+
+  let commentId = "";
+  await expect.poll(async () => {
+    const resource = await persistedResource(request);
+    const storedMark = resource.blocks.find((block) => block.id === blockId)?.marks.find((entry) => entry.type === "comment");
+    const thread = resource.commentThreads.find((entry) => entry.id === storedMark?.commentId);
+    commentId = storedMark?.commentId || "";
+    return {
+      mark: storedMark && { start: storedMark.start, end: storedMark.end, body: storedMark.body },
+      thread: thread && { anchor: thread.anchor, body: thread.body, replies: thread.replies.length },
+    };
+  }).toEqual({
+    mark: { start: 0, end: selectedText.length, body: "첫 댓글" },
+    thread: { anchor: { blockId, start: 0, end: selectedText.length }, body: "첫 댓글", replies: 0 },
+  });
+  expect(commentId).toBeTruthy();
+
+  for (const reply of ["두 번째 댓글", "세 번째 댓글"]) {
+    await mark.click();
+    popover = page.locator("[data-inline-comment-popover]");
+    await popover.locator("[data-inline-comment-input]").fill(reply);
+    await popover.locator('button[type="submit"]').click();
+  }
+
+  await mark.click();
+  popover = page.locator("[data-inline-comment-popover]");
+  await expect(popover.locator(".inline-comment-list li")).toHaveText(["첫 댓글", "두 번째 댓글", "세 번째 댓글"]);
+  await expect.poll(async () => {
+    const resource = await persistedResource(request);
+    const thread = resource.commentThreads.find((entry) => entry.id === commentId);
+    return {
+      anchor: thread?.anchor,
+      replies: thread?.replies.map((reply) => reply.body),
+    };
+  }).toEqual({
+    anchor: { blockId, start: 0, end: selectedText.length },
+    replies: ["두 번째 댓글", "세 번째 댓글"],
+  });
+
+  await page.keyboard.press("Escape");
+  editor = await openResource(page);
+  content = editor.locator(`[data-block-content="${blockId}"]`);
+  await content.locator(`[data-inline-comment-id="${commentId}"]`).click();
+  await expect(page.locator(".inline-comment-list li")).toHaveText(["첫 댓글", "두 번째 댓글", "세 번째 댓글"]);
+});

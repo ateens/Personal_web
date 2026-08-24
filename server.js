@@ -1055,6 +1055,9 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
     if (block.listStart !== undefined && (block.type !== "numbered" || !Number.isInteger(block.listStart) || block.listStart < 1 || block.listStart > 999_999)) {
       addValidationIssue(issues, `${blockPath}.listStart`, "invalid_list_start", "Numbered list start must be an integer between 1 and 999999.");
     }
+    if (block.toggleHeading !== undefined && (block.type !== "toggle" || !/^heading[1-6]$/.test(block.toggleHeading))) {
+      addValidationIssue(issues, `${blockPath}.toggleHeading`, "invalid_toggle_heading", "Toggle heading must be heading1 through heading6.");
+    }
     const indent = block.indent === undefined ? 0 : block.indent;
     if (!Number.isInteger(indent) || indent < 0 || indent > MAX_BLOCK_INDENT) {
       addValidationIssue(issues, `${blockPath}.indent`, "invalid_indent", `Block indent must be between 0 and ${MAX_BLOCK_INDENT}.`);

@@ -28,7 +28,7 @@ test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를
   await expect(document).toHaveAttribute("role", "dialog");
   await expect(document).toHaveAttribute("aria-modal", "true");
   await expect(title).toHaveValue("E2E Notion Parity Resource");
-  await expect(title).toBeFocused();
+  await expect(document).toBeFocused();
   await expect(document.locator(":scope > .resource-document-title + .resource-document-divider + .resource-document-body")).toHaveCount(1);
   await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
   await expect(document.locator("[data-block-drag], [data-block-add]")).toHaveCount(0);
@@ -55,6 +55,49 @@ test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를
   await document.locator(".resource-document-close").click();
   await expect(document).toHaveCount(0);
   await expect(opener).toBeFocused();
+});
+
+test("기존 Resource는 비어 있는 첫 입력 위치에만 커서를 둔다", async ({ page, request }) => {
+  const before = await fixtureSnapshot(request);
+  const draft = structuredClone(before.state);
+  const blankTitle = draft.resources.find((resource) => resource.id === FIXTURE_IDS.bodySearchResource);
+  const emptyBody = draft.resources.find((resource) => resource.id === FIXTURE_IDS.titleSearchResource);
+  blankTitle.title = "";
+  emptyBody.blocks = [{
+    id: "fixture-focus-empty-body",
+    type: "paragraph",
+    text: "",
+    marks: [],
+    checked: false,
+    indent: 0,
+    collapsed: false,
+  }];
+  const response = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${before.serverRevision}"` },
+    data: { state: draft, baseRevision: before.serverRevision },
+  });
+  expect(response.ok()).toBeTruthy();
+
+  await page.reload();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await openResourceList(page);
+
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.bodySearchResource}"]`).click();
+  const blankTitleDocument = page.locator(`[data-resource-document="${FIXTURE_IDS.bodySearchResource}"]`);
+  await expect(blankTitleDocument.locator("[data-resource-title]")).toBeFocused();
+  await blankTitleDocument.locator(".resource-document-close").click();
+
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.titleSearchResource}"]`).click();
+  const emptyBodyContent = page.locator('[data-block-content="fixture-focus-empty-body"]');
+  await expect(emptyBodyContent).toBeFocused();
+  await expect.poll(() => emptyBodyContent.evaluate((element) => {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !selection.isCollapsed || !element.contains(selection.focusNode)) return null;
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(element);
+    beforeCaret.setEnd(selection.focusNode, selection.focusOffset);
+    return beforeCaret.toString().length;
+  })).toBe(0);
 });
 
 test("새 자료 버튼은 빈 문서를 만들고 제목에서 Enter를 누르면 본문으로 이동한다", async ({ page }) => {
