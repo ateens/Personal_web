@@ -730,7 +730,7 @@ function fixtureResourceLinkIssues(incomingState) {
           if (collection !== "resources") {
             addIssue(markPath, "resource_link_outside_resource", "Resource links may only appear inside Resource blocks.");
           }
-          if (["code", "divider", "bookmark", "embed", "image"].includes(block?.type)) {
+          if (["code", "divider", "bookmark", "embed", "image", "table"].includes(block?.type)) {
             addIssue(markPath, "resource_link_unsupported_block", "Resource links require an editable text block.");
           }
           if (collection === "resources" && Number.isInteger(mark.start) && Number.isInteger(mark.end) && mark.end > mark.start) {

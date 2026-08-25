@@ -89,6 +89,7 @@ const SUPPORTED_BLOCK_TYPES = new Set([
   "bookmark",
   "embed",
   "image",
+  "table",
 ]);
 const URL_PREVIEW_BLOCK_TYPES = new Set(["bookmark", "embed"]);
 const RESOURCE_IMAGE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -1070,6 +1071,9 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
     if (block.marks.length > MAX_MARKS_PER_BLOCK) {
       addValidationIssue(issues, `${blockPath}.marks`, "too_many_marks", `marks exceeds ${MAX_MARKS_PER_BLOCK} entries.`);
     }
+    if (block.type === "table" && block.marks.length) {
+      addValidationIssue(issues, `${blockPath}.marks`, "table_marks_unsupported", "Table blocks cannot store block-wide inline marks.");
+    }
     const textLength = typeof block.text === "string" ? block.text.length : 0;
     for (let markIndex = 0; markIndex < block.marks.length && issues.length < MAX_VALIDATION_ISSUES; markIndex += 1) {
       const mark = block.marks[markIndex];
@@ -1085,11 +1089,16 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
       if (mark.type === "link" && !isSafeStoredUrl(mark.href || mark.url || "")) {
         addValidationIssue(issues, `${markPath}.href`, "unsafe_url_protocol", "Link URL uses an unsupported or unsafe protocol.");
       }
+      if (mark.type === "equation") {
+        if (mark.displayMode !== undefined && typeof mark.displayMode !== "boolean") {
+          addValidationIssue(issues, `${markPath}.displayMode`, "invalid_equation_display_mode", "Equation displayMode must be a boolean.");
+        }
+      }
       if (mark.type === "resourceLink") {
         if (collectionKey !== "resources") {
           addValidationIssue(issues, markPath, "resource_link_outside_resource", "Resource links may only appear inside Resource blocks.");
         }
-        if (["code", "divider", "bookmark", "embed", "image"].includes(block.type)) {
+        if (["code", "divider", "bookmark", "embed", "image", "table"].includes(block.type)) {
           addValidationIssue(issues, markPath, "resource_link_unsupported_block", "Resource links require an editable text block.");
         }
         if (!validEntityId(mark.resourceId)) {

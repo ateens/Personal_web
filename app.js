@@ -134,7 +134,7 @@ const BLOCK_TYPES = {
   code: ["코드", "</>"],
 };
 const CODE_LANGUAGE_OPTIONS = Object.freeze([
-  ["", "일반 텍스트"],
+  ["", "Plain Text"],
   ["javascript", "JavaScript"],
   ["typescript", "TypeScript"],
   ["python", "Python"],
@@ -162,6 +162,7 @@ const URL_BLOCK_TYPES = Object.freeze({
   embed: ["임베드", "◇"],
 });
 const IMAGE_BLOCK_TYPE = "image";
+const TABLE_BLOCK_TYPE = "table";
 const RESOURCE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_RESOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_RESOURCE_TITLE_LENGTH = 20_000;
@@ -7675,6 +7676,15 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
       blockTools,
     });
   }
+  if (block.type === TABLE_BLOCK_TYPE) {
+    return renderMarkdownTableBlock(block, {
+      isSelected,
+      indent,
+      hiddenAttr,
+      blockStyle,
+      blockTools,
+    });
+  }
   const toggleCollapsed = block.type === "toggle" && block.collapsed === true && !meta.routeTemporarilyExpanded;
   return `
     <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr}${toggleHeadingAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
@@ -7692,7 +7702,7 @@ function isUrlPreviewBlockType(type = "") {
 }
 
 function isSupportedEditorBlockType(type = "") {
-  return Boolean(BLOCK_TYPES[type]) || isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE;
+  return Boolean(BLOCK_TYPES[type]) || isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE || type === TABLE_BLOCK_TYPE;
 }
 
 function renderResourceImageBlock(block, meta = {}) {
@@ -7707,6 +7717,34 @@ function renderResourceImageBlock(block, meta = {}) {
       </figure>
     </div>
   `;
+}
+
+function renderMarkdownTableBlock(block, meta = {}) {
+  const table = parseMarkdownTable(block.text);
+  const columnCount = table?.headers.length || 0;
+  const rowCount = table?.rows.length || 0;
+  return `
+    <div class="block resource-table-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="table" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
+      ${meta.blockTools || ""}
+      <div class="resource-table-scroll block-content" data-block-content="${esc(block.id)}" data-resource-table-select tabindex="0" role="group" aria-label="표, ${columnCount}열 ${rowCount}행">
+        ${table ? `
+          <table class="resource-markdown-table">
+            <thead><tr>${table.headers.map((cell, index) => `<th scope="col" class="${markdownTableAlignmentClass(table.align[index])}">${renderMarkdownTableCell(cell)}</th>`).join("")}</tr></thead>
+            <tbody>${table.rows.map((row) => `<tr>${table.headers.map((_, index) => `<td class="${markdownTableAlignmentClass(table.align[index])}">${renderMarkdownTableCell(row[index] || "")}</td>`).join("")}</tr>`).join("")}</tbody>
+          </table>
+        ` : `<span class="resource-table-error">표 형식을 읽을 수 없습니다.</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderMarkdownTableCell(value = "") {
+  const inline = parseMarkdownInlineText(value);
+  return renderInlineText({ text: inline.text, marks: inline.marks });
+}
+
+function markdownTableAlignmentClass(value = "") {
+  return value === "center" ? "is-align-center" : value === "right" ? "is-align-right" : "is-align-left";
 }
 
 function renderUrlPreviewBlock(block, meta = {}) {
@@ -7766,26 +7804,27 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
   if (block.type === "code") {
     const language = normalizeCodeLanguage(block.language);
     const lineCount = codeBlockLineCount(block.text);
+    const plainText = !language;
     return `
-      <section class="code-space" data-code-space data-code-block-id="${esc(block.id)}">
+      <section class="code-space ${plainText ? "is-plain-text" : "is-code"}" data-code-space data-code-block-id="${esc(block.id)}">
         <header class="code-space-header">
           <span class="code-space-window-controls" aria-hidden="true"><i></i><i></i><i></i></span>
           <span class="code-space-title">Code Space</span>
           <div class="code-space-actions">
             <details class="code-language-picker">
-              <summary class="code-language-trigger" role="button" aria-haspopup="menu" aria-expanded="false" data-code-language-trigger="${esc(block.id)}" aria-label="코드 언어 선택, 현재 ${esc(codeLanguageLabel(language))}"><span>언어</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
-              <div class="code-language-menu" role="menu" aria-label="코드 언어" popover="manual" hidden>
+              <summary class="code-language-trigger" role="button" aria-haspopup="menu" aria-expanded="false" data-code-language-trigger="${esc(block.id)}" aria-label="Code language, current ${esc(codeLanguageLabel(language))}"><span>Language</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
+              <div class="code-language-menu" role="menu" aria-label="Code language" popover="manual" hidden>
                 ${renderCodeLanguageMenuOptions(language, ownerType, ownerId, block.id)}
               </div>
             </details>
-            <button class="code-space-copy" type="button" data-code-copy="${esc(block.id)}" data-owner-type="${esc(ownerType)}" data-owner-id="${esc(ownerId)}" aria-label="코드 복사">복사</button>
+            <button class="code-space-copy" type="button" data-code-copy="${esc(block.id)}" data-owner-type="${esc(ownerType)}" data-owner-id="${esc(ownerId)}" aria-label="Copy code"><svg class="code-space-copy-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="9" height="9" rx="1.5"></rect><path d="M4.5 12H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v.5"></path></svg></button>
           </div>
         </header>
         <div class="code-space-body">
           <span class="code-space-lines" data-code-line-numbers aria-hidden="true">${renderCodeLineNumbers(block.text)}</span>
-          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${language} 코드 블록` : "코드 블록")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `${language} 코드 블록 편집` : "코드 블록 편집")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="코드를 입력하세요">${esc(block.text || "")}</code></pre>
+          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${codeLanguageLabel(language)} code block` : "Plain text block")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `Edit ${codeLanguageLabel(language)} code` : "Edit plain text")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="${plainText ? "Enter text" : "Enter code"}">${esc(block.text || "")}</code></pre>
         </div>
-        <footer class="code-space-footer"><span data-code-line-summary>${lineCount}줄</span><span>UTF-8</span></footer>
+        <footer class="code-space-footer"><span data-code-line-summary>${codeLineSummary(lineCount)}</span><span>UTF-8</span></footer>
       </section>
     `;
   }
@@ -7793,18 +7832,19 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
 }
 
 function normalizeCodeLanguage(value = "") {
-  return String(value || "").trim().split(/\s+/, 1)[0].slice(0, 64);
+  const language = String(value || "").trim().split(/\s+/, 1)[0].slice(0, 64).toLowerCase();
+  return ["text", "txt", "plaintext", "plain-text"].includes(language) ? "" : language;
 }
 
 function codeLanguageLabel(value = "") {
   const language = normalizeCodeLanguage(value);
-  return CODE_LANGUAGE_OPTIONS.find(([optionValue]) => optionValue === language)?.[1] || language || "일반 텍스트";
+  return CODE_LANGUAGE_OPTIONS.find(([optionValue]) => optionValue === language)?.[1] || language || "Plain Text";
 }
 
 function renderCodeLanguageMenuOptions(value = "", ownerType = "", ownerId = "", blockId = "") {
   const language = normalizeCodeLanguage(value);
   const options = language && !CODE_LANGUAGE_VALUES.has(language)
-    ? [[language, `${language} (사용자 지정)`], ...CODE_LANGUAGE_OPTIONS]
+    ? [[language, `${language} (Custom)`], ...CODE_LANGUAGE_OPTIONS]
     : CODE_LANGUAGE_OPTIONS;
   return options.map(([optionValue, label]) => `
     <button class="code-language-option ${optionValue === language ? "is-active" : ""}" type="button" role="menuitemradio" aria-checked="${optionValue === language ? "true" : "false"}" data-code-language-value="${esc(optionValue)}" data-code-language-block="${esc(blockId)}" data-owner-type="${esc(ownerType)}" data-owner-id="${esc(ownerId)}">${esc(label)}</button>
@@ -7813,6 +7853,10 @@ function renderCodeLanguageMenuOptions(value = "", ownerType = "", ownerId = "",
 
 function codeBlockLineCount(value = "") {
   return Math.max(1, String(value || "").split("\n").length);
+}
+
+function codeLineSummary(value) {
+  return `${value} ${value === 1 ? "line" : "lines"}`;
 }
 
 function renderCodeLineNumbers(value = "") {
@@ -7826,7 +7870,7 @@ function syncCodeSpaceMetrics(blockContent, value = "") {
   const lineNumbers = codeSpace.querySelector("[data-code-line-numbers]");
   const summary = codeSpace.querySelector("[data-code-line-summary]");
   if (lineNumbers) lineNumbers.innerHTML = renderCodeLineNumbers(value);
-  if (summary) summary.textContent = `${lineCount}줄`;
+  if (summary) summary.textContent = codeLineSummary(lineCount);
 }
 
 function blockEditorAriaLabel(block) {
@@ -7930,6 +7974,11 @@ function normalizeEditableBlock(block) {
         changed = true;
       }
     }
+  } else if (block.type === TABLE_BLOCK_TYPE) {
+    if (!parseMarkdownTable(block.text)) {
+      block.type = "paragraph";
+      changed = true;
+    }
   } else if (!BLOCK_TYPES[block.type]) {
     block.type = "paragraph";
     changed = true;
@@ -7938,7 +7987,7 @@ function normalizeEditableBlock(block) {
     block.text = block.text === undefined || block.text === null ? "" : String(block.text);
     changed = true;
   }
-  const marks = block.type === "code" ? [] : normalizeInlineMarks(block.text, block.marks);
+  const marks = ["code", TABLE_BLOCK_TYPE].includes(block.type) ? [] : normalizeInlineMarks(block.text, block.marks);
   if (!inlineMarksEqual(block.marks, marks)) {
     block.marks = marks;
     changed = true;
@@ -7960,7 +8009,7 @@ function normalizeEditableBlock(block) {
     changed = true;
   }
   if (block.type === "code") {
-    const language = typeof block.language === "string" ? block.language.trim().split(/\s+/, 1)[0].slice(0, 64) : "";
+    const language = normalizeCodeLanguage(block.language);
     if (block.language !== language) {
       if (language) block.language = language;
       else delete block.language;
@@ -8092,7 +8141,9 @@ function renderInlineSegment(text, activeMarks) {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.mention}" data-inline-mark="mention" data-mention-type="${esc(mark.mentionType || "")}" data-mention-label="${esc(mark.label || "")}" data-mention-date="${esc(mark.dateKey || "")}" data-mention-target-type="${esc(mark.targetType || "")}" data-mention-target-id="${esc(mark.targetId || "")}"${targetState ? ` data-mention-target-state="${targetState}"` : ""}${interactive ? ' role="link" tabindex="0" contenteditable="false"' : ""}${targetStateLabel ? ` aria-label="${esc(`${mark.label || text}, ${targetStateLabel}`)}" title="${esc(targetStateLabel)}"` : ""}>${html}</span>`;
     } else if (type === "equation") {
       const formula = mark.formula || text;
-      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-formula="${esc(formula)}" data-equation-display="${esc(renderEquationDisplay(formula))}" title="${esc(formula)}"><span class="inline-equation-source">${html}</span></span>`;
+      const mode = mark.displayMode === true ? "display" : "inline";
+      const display = renderEquationDisplay(formula);
+      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-mode="${mode}" data-equation-formula="${esc(formula)}" data-equation-display="${esc(display)}" role="math" aria-label="${esc(`수식: ${display}`)}" title="${esc(formula)}"><span class="inline-equation-source" aria-hidden="true">${html}</span></span>`;
     } else {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES[type] || ""}" data-inline-mark="${type}">${html}</span>`;
     }
@@ -8246,7 +8297,7 @@ function normalizeInlineMarks(text = "", marks = []) {
     } else if (mark.type === "equation") {
       const formula = normalizeEquationFormula(mark.formula || mark.equation || String(text).slice(start, end));
       if (!formula) continue;
-      normalized.push({ type: mark.type, start, end, formula });
+      normalized.push({ type: mark.type, start, end, formula, ...(mark.displayMode === true ? { displayMode: true } : {}) });
     } else if (mark.type === "textColor" || mark.type === "backgroundColor") {
       const color = normalizeBlockColorValue(mark.color || mark.value || "");
       if (!color) continue;
@@ -8289,7 +8340,9 @@ function mergeInlineMarks(marks) {
   const merged = [];
   for (const mark of marks) {
     const previous = [...merged].reverse().find((candidate) => (
-      candidate.type === mark.type && inlineMarkPayloadEqual(candidate, mark) && mark.start <= candidate.end
+      candidate.type === mark.type
+      && inlineMarkPayloadEqual(candidate, mark)
+      && (mark.type === "equation" ? mark.start < candidate.end : mark.start <= candidate.end)
     ));
     if (previous) {
       previous.end = Math.max(previous.end, mark.end);
@@ -8324,7 +8377,7 @@ function inlineMarkPayloadEqual(left, right) {
     );
   }
   if (left?.type === "equation" || right?.type === "equation") {
-    return (left?.formula || "") === (right?.formula || "");
+    return (left?.formula || "") === (right?.formula || "") && (left?.displayMode === true) === (right?.displayMode === true);
   }
   if (["textColor", "backgroundColor"].includes(left?.type) || ["textColor", "backgroundColor"].includes(right?.type)) {
     return normalizeBlockColorValue(left?.color) === normalizeBlockColorValue(right?.color);
@@ -9352,7 +9405,7 @@ function renderInlineFormatToolbar() {
     <div class="inline-format-toolbar ${toolbar.animate ? "is-entering" : ""}" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       ${resourceCitationControl}
-      <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" title="수식"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">수식</span></button>
+      <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" aria-keyshortcuts="Meta+Shift+D Control+Shift+D" title="수식"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">수식</span></button>
       ${colorControls}
     </div>
   `;
@@ -9546,8 +9599,8 @@ function renderEquationPopover() {
   const popover = ui.equationPopover;
   if (!popover) return "";
   return `
-    <form class="inline-equation-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-equation-popover>
-      <input class="inline-equation-input" data-inline-equation-input value="${esc(popover.formula || "")}" placeholder="E = mc^2" aria-label="TeX 수식">
+    <form class="inline-equation-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-equation-popover role="dialog" aria-label="수식 편집">
+      <input class="inline-equation-input" data-inline-equation-input value="${esc(popover.formula || "")}" placeholder="E = mc^2" aria-label="수식 입력">
       <button class="inline-equation-action" type="submit">적용</button>
       <button class="inline-equation-action secondary" type="button" data-inline-equation-remove>제거</button>
     </form>
@@ -10066,6 +10119,11 @@ function handleClick(event) {
   if (clickedInlineEquation && clickedEquationBlock) {
     event.preventDefault();
     event.stopPropagation();
+    if (clickedEquationBlock.matches("[data-resource-table-select]")) {
+      const editor = clickedEquationBlock.closest(".block-editor");
+      selectSingleBlock(editor?.dataset.ownerType, editor?.dataset.ownerId, clickedEquationBlock.dataset.blockContent);
+      return;
+    }
     activateBlockContent(clickedEquationBlock);
     const editor = clickedEquationBlock.closest(".block-editor");
     const range = textRangeForInlineElement(clickedEquationBlock, clickedInlineEquation);
@@ -10088,12 +10146,12 @@ function handleClick(event) {
     return;
   }
 
-  const clickedResourceImage = event.target.closest("[data-resource-image-select]");
-  if (clickedResourceImage) {
+  const clickedResourceMedia = event.target.closest("[data-resource-image-select], [data-resource-table-select]");
+  if (clickedResourceMedia) {
     event.preventDefault();
     event.stopPropagation();
-    const editor = clickedResourceImage.closest(".block-editor");
-    selectSingleBlock(editor?.dataset.ownerType, editor?.dataset.ownerId, clickedResourceImage.dataset.blockContent);
+    const editor = clickedResourceMedia.closest(".block-editor");
+    selectSingleBlock(editor?.dataset.ownerType, editor?.dataset.ownerId, clickedResourceMedia.dataset.blockContent);
     return;
   }
 
@@ -11259,10 +11317,10 @@ async function copyCodeBlock(control) {
   if (!block || block.type !== "code") return false;
   try {
     await writePlainTextToClipboard(block.text || "");
-    showToast("코드를 복사했습니다.");
+    showToast("Code copied.");
     return true;
   } catch (_) {
-    showToast("코드를 복사하지 못했습니다.");
+    showToast("Could not copy code.");
     return false;
   }
 }
@@ -13534,7 +13592,7 @@ function duplicateEditorBlock(block) {
     id: id(),
     type,
     text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || text,
-    marks: safeUrl ? [] : normalizeInlineMarks(text, clone.marks).filter((mark) => mark.type !== "comment"),
+    marks: safeUrl || type === TABLE_BLOCK_TYPE ? [] : normalizeInlineMarks(text, clone.marks).filter((mark) => mark.type !== "comment"),
     checked: type === "todo" && clone.checked === true,
     indent: normalizedBlockIndent(clone.indent),
     collapsed: type === "toggle" && clone.collapsed === true,
@@ -13544,7 +13602,7 @@ function duplicateEditorBlock(block) {
   if (safeUrl) duplicate.url = safeUrl;
   if (type === IMAGE_BLOCK_TYPE) duplicate.alt = imageAlt;
   if (type === "toggle" && normalizeToggleHeading(clone.toggleHeading)) duplicate.toggleHeading = normalizeToggleHeading(clone.toggleHeading);
-  if (type === "code" && typeof clone.language === "string") duplicate.language = clone.language.trim().split(/\s+/, 1)[0].slice(0, 64);
+  if (type === "code" && normalizeCodeLanguage(clone.language)) duplicate.language = normalizeCodeLanguage(clone.language);
   return duplicate;
 }
 
@@ -13642,7 +13700,12 @@ function handleDocumentPaste(event) {
   const rawHtml = customBlocks.length ? "" : String(event.clipboardData.getData("text/html") || "");
   const parsedHtmlBlocks = rawHtml && htmlClipboardHasSafePasteContent(rawHtml) ? readHtmlClipboardBlocks(event.clipboardData) : [];
   const htmlBlocks = clipboardBlocksHaveMeaningfulPasteContent(parsedHtmlBlocks) ? parsedHtmlBlocks : [];
-  const text = codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks) || event.clipboardData.getData("text/plain");
+  const plainText = event.clipboardData.getData("text/plain");
+  const parsedPlainBlocks = customBlocks.length ? [] : plainTextToClipboardBlocks(plainText);
+  const plainMarkdownBlocks = parsedPlainBlocks.some((block) => (
+    block.type === TABLE_BLOCK_TYPE || block.marks?.some((mark) => mark.type === "equation")
+  )) ? parsedPlainBlocks : [];
+  const text = codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks) || plainText;
   if (pasteTextIntoCodeBlock(event, text, { clearBlockSelectionBeforeCommit: shouldClearBlockSelection && pasteEventTargetBlockContent(event) && pasteEventTargetsCodeBlock(event, { actualTargetOnly: true }) })) {
     event.preventDefault();
     return;
@@ -13658,6 +13721,11 @@ function handleDocumentPaste(event) {
     pasteBlocksFromClipboard(event, customBlocks);
     return;
   }
+  if (plainMarkdownBlocks.length && target) {
+    event.preventDefault();
+    pasteBlocksFromClipboard(event, plainMarkdownBlocks);
+    return;
+  }
   if (htmlBlocks.length && target) {
     event.preventDefault();
     pasteBlocksFromClipboard(event, htmlBlocks);
@@ -13668,7 +13736,7 @@ function handleDocumentPaste(event) {
     if (shouldClearBlockSelection) clearBlockSelection();
     return;
   }
-  const plainBlocks = plainTextToClipboardBlocks(text);
+  const plainBlocks = parsedPlainBlocks.length ? parsedPlainBlocks : plainTextToClipboardBlocks(text);
   if (!plainBlocks.length) return;
   const shouldPlainNativeFallthrough = (shouldClearBlockSelection || !ui.blockSelection.ids.length) && !shouldPastePlainTextAsBlocks(event, text);
   if (shouldPlainNativeFallthrough) {
@@ -14118,7 +14186,7 @@ function shouldPastePlainTextAsBlocks(event, text) {
   if (/[\r\n]/.test(raw)) return true;
   const parsedBlock = markdownBlockFromPlainText(raw);
   if (parsedBlock.type !== "paragraph" || parsedBlock.text !== raw) return true;
-  if (parseMarkdownInlineText(raw).marks.length) return true;
+  if (parseMarkdownFormattedText(raw).marks.length) return true;
   return false;
 }
 
@@ -14151,7 +14219,7 @@ function clipboardBlockFromBlock(block) {
   const clipboardBlock = {
     type,
     text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || block.text || "",
-    marks: safeUrl ? [] : normalizeInlineMarks(block.text || "", block.marks).filter((mark) => mark.type !== "comment"),
+    marks: safeUrl || type === TABLE_BLOCK_TYPE ? [] : normalizeInlineMarks(block.text || "", block.marks).filter((mark) => mark.type !== "comment"),
     checked: block.checked === true,
     indent: blockIndent(block),
     collapsed: block.type === "toggle" && block.collapsed === true,
@@ -14162,7 +14230,7 @@ function clipboardBlockFromBlock(block) {
   if (type === IMAGE_BLOCK_TYPE) clipboardBlock.alt = imageAlt;
   if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) clipboardBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
   if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
-  if (type === "code" && typeof block.language === "string") clipboardBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
+  if (type === "code" && normalizeCodeLanguage(block.language)) clipboardBlock.language = normalizeCodeLanguage(block.language);
   return clipboardBlock;
 }
 
@@ -14190,7 +14258,7 @@ function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block)
   if (block.type === "code") {
     const longestRun = Math.max(0, ...[...rawText.matchAll(/`+/g)].map((match) => match[0].length));
     const fence = "`".repeat(Math.max(3, longestRun + 1));
-    const language = String(block.language || "").trim().split(/\s+/, 1)[0].slice(0, 64);
+    const language = normalizeCodeLanguage(block.language);
     return `${indent}${fence}${language}\n${rawLines.map((line) => `${indent}${line}`).join("\n")}\n${indent}${fence}`;
   }
   return rawLines.map((line, index) => `${indent}${index === 0 ? prefix : ""}${line}`).join("\n");
@@ -14467,7 +14535,10 @@ function htmlClipboardInlineMarksForElement(element, activeMarks) {
   if (tag === "u") marks.push({ type: "underline" });
   if (tag === "s" || tag === "del" || tag === "strike") marks.push({ type: "strike" });
   if (tag === "code") marks.push({ type: "code" });
-  if (tag === "a" && element.dataset.inlineMark === "resourceLink") {
+  if (element.dataset.inlineMark === "equation") {
+    const formula = normalizeEquationFormula(element.dataset.equationFormula || element.textContent || "");
+    if (formula) marks.push({ type: "equation", formula, ...(element.dataset.equationMode === "display" ? { displayMode: true } : {}) });
+  } else if (tag === "a" && element.dataset.inlineMark === "resourceLink") {
     const resourceId = String(element.dataset.resourceCitation || "").trim();
     if (resourceId) marks.push({ type: "resourceLink", resourceId });
   } else if (tag === "a") {
@@ -14580,7 +14651,7 @@ function normalizeClipboardBlocks(blocks) {
     const normalizedBlock = {
       type,
       text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || rawText,
-      marks: safeUrl ? [] : normalizeInlineMarks(rawText, block.marks).filter((mark) => mark.type !== "comment"),
+      marks: safeUrl || type === TABLE_BLOCK_TYPE ? [] : normalizeInlineMarks(rawText, block.marks).filter((mark) => mark.type !== "comment"),
       checked: block.checked === true,
       indent: normalizedBlockIndent(block.indent),
       collapsed: type === "toggle" && block.collapsed === true,
@@ -14591,10 +14662,86 @@ function normalizeClipboardBlocks(blocks) {
     if (type === IMAGE_BLOCK_TYPE) normalizedBlock.alt = imageAlt;
     if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) normalizedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
-    if (type === "code" && typeof block.language === "string") normalizedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
+    if (type === "code" && normalizeCodeLanguage(block.language)) normalizedBlock.language = normalizeCodeLanguage(block.language);
     normalized.push(normalizedBlock);
   }
   return normalized;
+}
+
+function markdownTableCells(line = "") {
+  const source = String(line).trim();
+  if (!source.includes("|")) return null;
+  const cells = [];
+  let cell = "";
+  let inCode = false;
+  let sawSeparator = false;
+  const start = source.startsWith("|") ? 1 : 0;
+  const end = source.endsWith("|") && !source.endsWith("\\|") ? source.length - 1 : source.length;
+  for (let index = start; index < end; index += 1) {
+    const character = source[index];
+    if (character === "\\" && source[index + 1] === "|") {
+      cell += "|";
+      index += 1;
+      continue;
+    }
+    if (character === "`") inCode = !inCode;
+    if (character === "|" && !inCode) {
+      cells.push(cell.trim());
+      cell = "";
+      sawSeparator = true;
+      continue;
+    }
+    cell += character;
+  }
+  cells.push(cell.trim());
+  return sawSeparator || (source.startsWith("|") && source.endsWith("|")) ? cells : null;
+}
+
+function markdownTableDelimiterAlignment(cell = "") {
+  const value = String(cell).replace(/\s+/g, "");
+  if (!/^:?-{2,}:?$/.test(value)) return null;
+  if (value.startsWith(":") && value.endsWith(":")) return "center";
+  if (value.endsWith(":")) return "right";
+  return "left";
+}
+
+function parseMarkdownTable(text = "") {
+  const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+  if (lines.length < 2) return null;
+  const headers = markdownTableCells(lines[0]);
+  const delimiters = markdownTableCells(lines[1]);
+  if (!headers || headers.length < 2 || !delimiters || delimiters.length !== headers.length) return null;
+  const align = delimiters.map(markdownTableDelimiterAlignment);
+  if (align.some((value) => !value)) return null;
+  const rows = [];
+  for (const line of lines.slice(2)) {
+    const cells = markdownTableCells(line);
+    if (!cells || cells.length !== headers.length) return null;
+    rows.push(cells);
+  }
+  return { headers, align, rows };
+}
+
+function markdownTableBlockAt(lines, startIndex) {
+  const header = clipboardPlainLineParts(lines[startIndex] || "");
+  const delimiter = clipboardPlainLineParts(lines[startIndex + 1] || "");
+  if (header.indent !== delimiter.indent) return null;
+  const headers = markdownTableCells(header.text);
+  const delimiters = markdownTableCells(delimiter.text);
+  if (!headers || !delimiters || headers.length < 2 || delimiters.length !== headers.length) return null;
+  if (delimiters.some((cell) => !markdownTableDelimiterAlignment(cell))) return null;
+  const tableLines = [header.text, delimiter.text];
+  let endIndex = startIndex + 1;
+  for (let index = startIndex + 2; index < lines.length; index += 1) {
+    const parts = clipboardPlainLineParts(lines[index]);
+    if (parts.indent !== header.indent || !parts.text.trim() || !markdownTableCells(parts.text)) break;
+    tableLines.push(parts.text);
+    endIndex = index;
+  }
+  const text = tableLines.join("\n");
+  return parseMarkdownTable(text)
+    ? { block: { type: TABLE_BLOCK_TYPE, text, marks: [], checked: false, indent: header.indent, collapsed: false }, endIndex }
+    : null;
 }
 
 function plainTextToClipboardBlocks(text) {
@@ -14621,6 +14768,35 @@ function plainTextToClipboardBlocks(text) {
       flushParagraph();
       continue;
     }
+    const table = markdownTableBlockAt(lines, index);
+    if (table) {
+      flushParagraph();
+      normalized.push(table.block);
+      index = table.endIndex;
+      continue;
+    }
+    const displayEquation = parseMarkdownDisplayEquation(parts.text);
+    if (displayEquation) {
+      flushParagraph();
+      normalized.push({ type: "paragraph", text: displayEquation.text, marks: displayEquation.marks, checked: false, indent: parts.indent, collapsed: false });
+      continue;
+    }
+    if (parts.text.trim() === "\\[") {
+      const displayLines = [parts.text];
+      let closingIndex = index + 1;
+      for (; closingIndex < lines.length; closingIndex += 1) {
+        const nextText = clipboardPlainLineParts(lines[closingIndex]).text;
+        displayLines.push(nextText);
+        if (nextText.trim() === "\\]") break;
+      }
+      const multilineEquation = closingIndex < lines.length ? parseMarkdownDisplayEquation(displayLines.join("\n")) : null;
+      if (multilineEquation) {
+        flushParagraph();
+        normalized.push({ type: "paragraph", text: multilineEquation.text, marks: multilineEquation.marks, checked: false, indent: parts.indent, collapsed: false });
+        index = closingIndex;
+        continue;
+      }
+    }
     const fence = markdownFenceOpen(parts.text);
     if (fence) {
       flushParagraph();
@@ -14634,7 +14810,7 @@ function plainTextToClipboardBlocks(text) {
         }
         codeLines.push(lines[index]);
       }
-      normalized.push({ type: "code", text: codeLines.join("\n"), language: fence.language, checked: false, indent: parts.indent, collapsed: false });
+      normalized.push({ type: "code", text: codeLines.join("\n"), language: normalizeCodeLanguage(fence.language), checked: false, indent: parts.indent, collapsed: false });
       if (!closed) break;
     } else {
       const setext = /^(=+|-+)\s*$/.exec(parts.text);
@@ -14761,14 +14937,50 @@ function markdownFenceClose(text = "", fence = null) {
 }
 
 function applyMarkdownInlineSyntax(block, references = null) {
-  if (!block || ["code", "divider"].includes(block.type)) {
+  if (!block || ["code", "divider", TABLE_BLOCK_TYPE].includes(block.type)) {
     if (block) block.marks = [];
     return block;
   }
-  const inline = parseMarkdownInlineText(block.text || "", references);
+  const inline = parseMarkdownFormattedText(block.text || "", references);
   block.text = inline.text;
   block.marks = inline.marks;
   return block;
+}
+
+function parseMarkdownFormattedText(text = "", references = null) {
+  return parseMarkdownDisplayEquation(text) || parseMarkdownInlineText(text, references);
+}
+
+function parseMarkdownDisplayEquation(text = "") {
+  const source = String(text || "");
+  const start = source.search(/\S/);
+  if (start < 0 || source.slice(start, start + 2) !== "\\[") return null;
+  const equation = markdownEquationAt(source, start, "[", "]");
+  if (!equation || source.slice(equation.end).trim()) return null;
+  const sourceToOutput = Array(source.length + 1).fill(0);
+  for (let index = equation.contentStart; index <= equation.contentEnd; index += 1) {
+    sourceToOutput[index] = Math.min(equation.formula.length, Math.max(0, index - equation.contentStart));
+  }
+  for (let index = equation.end; index <= source.length; index += 1) sourceToOutput[index] = equation.formula.length;
+  return {
+    text: equation.formula,
+    marks: [{ type: "equation", start: 0, end: equation.formula.length, formula: equation.formula, displayMode: true }],
+    sourceToOutput,
+  };
+}
+
+function markdownEquationAt(source, index, opening, closing) {
+  if (source.slice(index, index + 2) !== `\\${opening}`) return null;
+  for (let cursor = index + 2; cursor < source.length - 1; cursor += 1) {
+    if (source[cursor] !== "\\" || source[cursor + 1] !== closing) continue;
+    let slashCount = 1;
+    while (cursor - slashCount >= 0 && source[cursor - slashCount] === "\\") slashCount += 1;
+    if (slashCount % 2 === 0) continue;
+    const formula = normalizeEquationFormula(source.slice(index + 2, cursor));
+    if (!formula) return null;
+    return { formula, contentStart: index + 2, contentEnd: cursor, end: cursor + 2 };
+  }
+  return null;
 }
 
 function parseMarkdownInlineText(text = "", references = null) {
@@ -14795,6 +15007,20 @@ function parseMarkdownInlineText(text = "", references = null) {
     return { start, end: output.length };
   };
   for (let index = 0; index < source.length;) {
+    const equation = source.slice(index, index + 2) === "\\(" ? markdownEquationAt(source, index, "(", ")") : null;
+    if (equation) {
+      const start = output.length;
+      output += equation.formula;
+      marks.push({ type: "equation", start, end: output.length, formula: equation.formula });
+      markSourceRange(index, equation.end, start, output.length);
+      index = equation.end;
+      continue;
+    }
+    if (["\\(", "\\)", "\\[", "\\]"].includes(source.slice(index, index + 2))) {
+      appendPlainCharacter(index);
+      index += 1;
+      continue;
+    }
     if (source[index] === "\\" && index + 1 < source.length && /[\\`*{}\[\]()#+.!_>~-]/.test(source[index + 1])) {
       sourceToOutput[index] = output.length;
       output += source[index + 1];
@@ -14949,7 +15175,7 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       id: id(),
       type: block.type,
       text: block.text,
-      marks: normalizeInlineMarks(block.text, block.marks).filter((mark) => (
+      marks: block.type === TABLE_BLOCK_TYPE ? [] : normalizeInlineMarks(block.text, block.marks).filter((mark) => (
         mark.type !== "resourceLink"
         || (target.ownerType === "resources" && !["code", "divider", "bookmark", "embed", "image"].includes(block.type))
       )),
@@ -14964,7 +15190,7 @@ function prepareClipboardBlockPaste(item, target, blocks) {
     }
     if (block.type === "toggle" && normalizeToggleHeading(block.toggleHeading)) pastedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
-    if (block.type === "code" && typeof block.language === "string") pastedBlock.language = block.language.trim().split(/\s+/, 1)[0].slice(0, 64);
+    if (block.type === "code" && normalizeCodeLanguage(block.language)) pastedBlock.language = normalizeCodeLanguage(block.language);
     pasted.push(pastedBlock);
   }
   if (!pasted.length) return null;
@@ -16440,6 +16666,21 @@ function handleKeydown(event) {
     return;
   }
 
+  if (ownerType === "resources" && equationKeyboardShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const range = currentBlockSelectionRange(ownerType, ownerId, blockId);
+    openEquationPopover(
+      ownerType,
+      ownerId,
+      blockId,
+      range,
+      null,
+      range && !range.collapsed ? currentBlock?.text?.slice(range.start, range.end) || "" : "",
+    );
+    return;
+  }
+
   const inlineShortcut = inlineMarkKeyboardShortcut(event);
   if (inlineShortcut) {
     event.preventDefault();
@@ -16704,6 +16945,10 @@ function inlineMarkKeyboardShortcut(event) {
   if (event.shiftKey && key === "m") return "comment";
   if (event.shiftKey && key === "s") return "strike";
   return "";
+}
+
+function equationKeyboardShortcut(event) {
+  return (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "d";
 }
 
 function lastBlockColorKeyboardShortcut(event) {
@@ -19989,7 +20234,7 @@ function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, owner
   applyBlockType(block, "code");
   block.text = "";
   block.marks = [];
-  block.language = fence.language;
+  block.language = normalizeCodeLanguage(fence.language);
   ui.pendingMarkdownTextTarget = null;
   commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
   saveState();
@@ -20001,7 +20246,7 @@ function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, owner
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
-  const inline = parseMarkdownInlineText(rawText);
+  const inline = parseMarkdownFormattedText(rawText);
   const currentMarks = normalizeInlineMarks(rawText, inlineMarksForContentUpdate(block, blockContent, rawText));
   if (!inline.marks.length || (inline.text === rawText && inlineMarksEqual(inline.marks, currentMarks))) return false;
   const offsets = selectionOffsetsInside(blockContent) || { start: rawText.length, end: rawText.length };
@@ -20291,7 +20536,7 @@ function inlineMarkTypesForNode(node, root) {
       }
     } else if (current.dataset?.inlineMark === "equation") {
       const formula = normalizeEquationFormula(current.dataset.equationFormula || current.textContent || "");
-      if (formula) payloadMarks.push({ type: "equation", formula });
+      if (formula) payloadMarks.push({ type: "equation", formula, ...(current.dataset.equationMode === "display" ? { displayMode: true } : {}) });
     } else if (["textColor", "backgroundColor"].includes(current.dataset?.inlineMark)) {
       const color = normalizeBlockColorValue(current.dataset.inlineColor || "");
       if (color) payloadMarks.push({ type: current.dataset.inlineMark, color });
@@ -21208,21 +21453,6 @@ function changeBlockType(ownerType, ownerId, blockId, type) {
   return focusBlock;
 }
 
-function removeTextRangeFromBlock(block, range) {
-  if (!block || !range) return false;
-  const text = block.text || "";
-  const start = Math.max(0, Math.min(text.length, Number.parseInt(range.start, 10) || 0));
-  const end = Math.max(start, Math.min(text.length, Number.parseInt(range.end, 10) || 0));
-  if (end <= start) return false;
-  const splitMarks = splitInlineMarksAtSelection(block.marks || [], text, start, end);
-  block.text = `${text.slice(0, start)}${text.slice(end)}`;
-  block.marks = normalizeInlineMarks(block.text, [
-    ...splitMarks.before,
-    ...shiftInlineMarks(splitMarks.after, start),
-  ]);
-  return true;
-}
-
 function changeSelectedBlocksType(type) {
   if (!BLOCK_TYPES[type]) return false;
   const selection = ui.blockSelection;
@@ -22016,6 +22246,7 @@ function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anch
     start: range.start,
     end: range.end,
     formula: formulaValue || existing?.formula || "",
+    displayMode: options.displayMode === true || existing?.displayMode === true,
     preserveLeadingSpace: options.preserveLeadingSpace === true,
     x: Math.max(12, Math.min(rawX, window.innerWidth - 352)),
     y: Math.max(12, Math.min(rawY, window.innerHeight - 76)),
@@ -22175,7 +22406,7 @@ function applyInlineEquation(value) {
   block.text = `${text.slice(0, range.start)}${inserted}${text.slice(range.end)}`;
   block.marks = normalizeInlineMarks(block.text, [
     ...splitMarks.before,
-    { type: "equation", start: equationStart, end: equationEnd, formula },
+    { type: "equation", start: equationStart, end: equationEnd, formula, ...(popover.displayMode === true ? { displayMode: true } : {}) },
     ...shiftInlineMarks(splitMarks.after, range.start + inserted.length),
   ]);
   commitEditorHistory(history, { blockId: popover.blockId, start: equationEnd, end: equationEnd });

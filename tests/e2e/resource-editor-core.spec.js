@@ -462,6 +462,189 @@ test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여�
   ]);
 });
 
+test("중간 pipe table과 text fence를 native table 및 Plain Text Code Space로 보존한다", async ({ page, request }) => {
+  const { editor, resourceId } = await createEmptyResource(page);
+  const codeText = "plain <tag> & value\n두 번째 줄";
+  const tableText = [
+    "| 층 | dilation | 계산 | receptive field |",
+    "| -- | -------: | -----------: | --------------: |",
+    "| 시작 | - | 입력 하나 | 1 |",
+    String.raw`| 1층 | 1 | (1+2\times1) | 3 |`,
+    String.raw`| 2층 | 2 | (3+2\times2) | 7 |`,
+    String.raw`| 3층 | 4 | (7+2\times4) | 15 |`,
+  ].join("\n");
+  const markdown = [
+    "표 앞 일반 문단",
+    "",
+    ...tableText.split("\n"),
+    "",
+    "표 뒤 일반 문단",
+    "",
+    "```text",
+    ...codeText.split("\n"),
+    "```",
+  ].join("\n");
+  await editor.locator("[data-block-content]").first().evaluate((element, text) => {
+    element.focus();
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", text);
+    clipboardData.setData("text/html", text.split("\n").map((line) => `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`).join(""));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  }, markdown);
+
+  const table = editor.locator("table");
+  await expect(table).toHaveCount(1);
+  await expect(table.locator("thead th")).toHaveText(["층", "dilation", "계산", "receptive field"]);
+  await expect(table.locator("tbody tr")).toHaveCount(4);
+  await expect(table.locator("tbody tr").nth(0).locator("td")).toHaveText(["시작", "-", "입력 하나", "1"]);
+  await expect(table.locator("tbody tr").nth(1).locator("td")).toHaveText(["1층", "1", String.raw`(1+2\times1)`, "3"]);
+  await expect(table.locator("tbody tr").nth(2).locator("td")).toHaveText(["2층", "2", String.raw`(3+2\times2)`, "7"]);
+  await expect(table.locator("tbody tr").nth(3).locator("td")).toHaveText(["3층", "4", String.raw`(7+2\times4)`, "15"]);
+  await expect.poll(() => table.locator("thead th").last().evaluate((cell) => getComputedStyle(cell).textAlign)).toBe("right");
+  expect(await table.evaluate((element) => element.closest("[data-resource-table-select]").getBoundingClientRect().height - element.getBoundingClientRect().height)).toBeLessThanOrEqual(2);
+  await expect.poll(() => editor.evaluate((root) => {
+    const contents = [...root.querySelectorAll("[data-block-content]")];
+    const before = contents.find((element) => element.textContent === "표 앞 일반 문단");
+    const tableElement = root.querySelector("table");
+    const after = contents.find((element) => element.textContent === "표 뒤 일반 문단");
+    return Boolean(
+      before
+      && tableElement
+      && after
+      && (before.compareDocumentPosition(tableElement) & Node.DOCUMENT_POSITION_FOLLOWING)
+      && (tableElement.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING),
+    );
+  })).toBe(true);
+
+  const codeSpace = editor.locator("[data-code-space]");
+  await expect(codeSpace).toHaveCount(1);
+  await expect(codeSpace).toHaveClass(/is-plain-text/);
+  await expect(codeSpace.locator(".code-space-title")).not.toBeVisible();
+  await expect(codeSpace.locator("[data-code-line-numbers]")).toBeHidden();
+  await expect(codeSpace.locator(".code-space-footer")).toBeHidden();
+  await expect(codeSpace.locator(".code-space-window-controls")).toBeHidden();
+  await expect(codeSpace.locator("[data-code-language-trigger]")).toContainText("Plain Text");
+  await expect(codeSpace.locator("[data-code-language-trigger]")).toContainText("Language");
+  await expect(codeSpace.locator("[data-code-copy]")).toHaveAttribute("aria-label", "Copy code");
+  await expect(codeSpace.locator(".code-space-copy-icon")).toBeVisible();
+  const plainSurface = await codeSpace.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { background: styles.backgroundColor, radius: Number.parseFloat(styles.borderRadius) };
+  });
+  expect(plainSurface).toEqual({ background: "rgb(243, 244, 246)", radius: 12 });
+  await expect(codeSpace.locator("pre[data-code-language='plaintext'] code")).toHaveText(codeText);
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, resourceId);
+    return {
+      table: resource?.blocks?.find((block) => block.type === "table")?.text || "",
+      code: resource?.blocks?.find((block) => block.type === "code")?.text || "",
+    };
+  }).toEqual({ table: tableText, code: codeText });
+
+  const reloadedEditor = await openResource(page, resourceId);
+  await expect(reloadedEditor.locator("table thead th")).toHaveText(["층", "dilation", "계산", "receptive field"]);
+  const reloadedCodeSpace = reloadedEditor.locator("[data-code-space]");
+  await expect(reloadedCodeSpace.locator("[data-code-language-trigger]")).toContainText("Plain Text");
+  await expect(reloadedCodeSpace.locator("pre[data-code-language='plaintext'] code")).toHaveText(codeText);
+});
+
+test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도 inline과 전체 줄을 구분한다", async ({ page, request }) => {
+  const shortcutBlockId = "equation-shortcut";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [paragraph(shortcutBlockId, "E = mc^2")]);
+  const shortcutEditor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const shortcutContent = shortcutEditor.locator(`[data-block-content="${shortcutBlockId}"]`);
+  await shortcutContent.evaluate((element) => {
+    element.focus();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.keyboard.press("Meta+Shift+D");
+
+  const equationDialog = page.getByRole("dialog", { name: "수식 편집" });
+  const equationInput = equationDialog.getByRole("textbox", { name: "수식 입력" });
+  await expect(equationInput).toHaveValue("E = mc^2");
+  await equationInput.press("Enter");
+  await expect(shortcutEditor.locator('[data-inline-mark="equation"]')).toHaveAttribute("data-equation-mode", "inline");
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks[0]?.marks.find((mark) => mark.type === "equation")).toEqual({
+    type: "equation",
+    start: 0,
+    end: 8,
+    formula: "E = mc^2",
+  });
+
+  const liveBlockId = "equation-live";
+  await seedResourceBlocks(request, FIXTURE_IDS.titleSearchResource, [paragraph(liveBlockId)]);
+  const liveEditor = await openResource(page, FIXTURE_IDS.titleSearchResource);
+  await liveEditor.locator(`[data-block-content="${liveBlockId}"]`).pressSequentially(String.raw`실시간 \(z^2\)`, { delay: 10 });
+  await expect(liveEditor.locator('[data-inline-mark="equation"]')).toHaveAttribute("data-equation-formula", "z^2");
+
+  const { editor, resourceId } = await createEmptyResource(page);
+  const markdown = [
+    String.raw`앞 \(x\)\(x\) 중간`,
+    String.raw`\[ R=1+2\times1 \]`,
+    String.raw`뒤 \(y^2\)`,
+    String.raw`리터럴 \\(not math\\)`,
+  ].join("\n");
+  await editor.locator("[data-block-content]").first().evaluate((element, text) => {
+    element.focus();
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", text);
+    clipboardData.setData("text/html", text.split("\n").map((line) => `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`).join(""));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  }, markdown);
+
+  await expect(editor.locator("[data-block-content]")).toHaveCount(3);
+  await expect(editor.locator('[data-equation-mode="inline"]')).toHaveCount(3);
+  const displayEquation = editor.locator('[data-equation-mode="display"]');
+  await expect(displayEquation).toHaveCount(1);
+  await expect(displayEquation).toHaveAttribute("data-equation-formula", String.raw`R=1+2\times1`);
+  await expect(displayEquation).toHaveAttribute("role", "math");
+  await expect(editor.locator("[data-block-content]").last()).toHaveText(`뒤 y^2\n${String.raw`리터럴 \(not math\)`}`);
+  await expect(editor.locator("[data-block-content]").last().locator('[data-inline-mark="equation"]')).toHaveCount(1);
+  const displayGeometry = await displayEquation.evaluate((element) => {
+    const parent = element.closest("[data-block-content]");
+    return {
+      display: getComputedStyle(element).display,
+      width: element.getBoundingClientRect().width,
+      parentWidth: parent.getBoundingClientRect().width,
+    };
+  });
+  expect(displayGeometry.display).toBe("grid");
+  expect(displayGeometry.width).toBeGreaterThanOrEqual(displayGeometry.parentWidth - 2);
+
+  await expect.poll(async () => {
+    const shortcutResource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
+    const liveResource = await persistedResource(request, FIXTURE_IDS.titleSearchResource);
+    const syntaxResource = await persistedResource(request, resourceId);
+    return {
+      shortcut: shortcutResource?.blocks[0]?.marks.find((mark) => mark.type === "equation"),
+      live: liveResource?.blocks[0] ? {
+        text: liveResource.blocks[0].text,
+        equations: liveResource.blocks[0].marks.filter((mark) => mark.type === "equation"),
+      } : null,
+      syntax: syntaxResource?.blocks.map((block) => ({
+        text: block.text,
+        equations: block.marks.filter((mark) => mark.type === "equation"),
+      })),
+    };
+  }).toEqual({
+    shortcut: { type: "equation", start: 0, end: 8, formula: "E = mc^2" },
+    live: { text: "실시간 z^2", equations: [{ type: "equation", start: 4, end: 7, formula: "z^2" }] },
+    syntax: [
+      { text: "앞 xx 중간", equations: [{ type: "equation", start: 2, end: 3, formula: "x" }, { type: "equation", start: 3, end: 4, formula: "x" }] },
+      { text: String.raw`R=1+2\times1`, equations: [{ type: "equation", start: 0, end: 12, formula: String.raw`R=1+2\times1`, displayMode: true }] },
+      { text: `뒤 y^2\n${String.raw`리터럴 \(not math\)`}`, equations: [{ type: "equation", start: 2, end: 5, formula: "y^2" }] },
+    ],
+  });
+
+  const reloadedEditor = await openResource(page, resourceId);
+  await expect(reloadedEditor.locator('[data-equation-mode="inline"]')).toHaveCount(3);
+  await expect(reloadedEditor.locator('[data-equation-mode="display"]')).toHaveAttribute("data-equation-formula", String.raw`R=1+2\times1`);
+});
+
 test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공한다", async ({ page, request }) => {
   const { editor, resourceId } = await createEmptyResource(page);
   const content = editor.locator("[data-block-content]").first();
@@ -471,15 +654,21 @@ test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공�
   const codeSpace = editor.locator(".code-space");
   const code = codeSpace.locator("[data-block-content]");
   await expect(codeSpace).toBeVisible();
+  await expect(codeSpace).toHaveClass(/is-code/);
   await expect(codeSpace.locator(".code-space-title")).toHaveText("Code Space");
+  await expect(codeSpace.locator(".code-space-window-controls")).toBeVisible();
+  await expect(codeSpace.locator(".code-space-footer")).toBeVisible();
+  await expect(codeSpace.locator("[data-code-line-numbers]")).toBeVisible();
   await expect(codeSpace.locator("[data-code-language-trigger]")).toContainText("JavaScript");
-  await expect(codeSpace.locator("[data-code-copy]")).toHaveText("복사");
+  await expect(codeSpace.locator("[data-code-language-trigger]")).toContainText("Language");
+  await expect(codeSpace.locator("[data-code-copy]")).toHaveAttribute("aria-label", "Copy code");
+  await expect(codeSpace.locator(".code-space-copy-icon")).toBeVisible();
 
   await code.pressSequentially("const one = 1;");
   await code.press("Enter");
   await code.pressSequentially("const two = 2;");
   await expect(codeSpace.locator("[data-code-line-numbers] i")).toHaveCount(2);
-  await expect(codeSpace.locator("[data-code-line-summary]")).toHaveText("2줄");
+  await expect(codeSpace.locator("[data-code-line-summary]")).toHaveText("2 lines");
 
   const languageTrigger = codeSpace.locator("[data-code-language-trigger]");
   await languageTrigger.focus();
