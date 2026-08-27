@@ -3451,10 +3451,23 @@ button:focus-visible {
 
 .project-detail-overview p {
   max-width: 840px;
-  margin: 18px 0 0;
+  margin: 18px var(--hover-row-pad-x) 0;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.65;
+}
+
+.project-resource-panel {
+  grid-column: 1 / -1;
+}
+
+.project-resource-panel .resource-list {
+  margin-top: 8px;
+}
+
+.project-resource-panel .resource-list-item {
+  padding: 12px 0;
+  font-size: 13px;
 }
 
 .project-relation-strip {
@@ -5823,6 +5836,15 @@ button:focus-visible {
   background-color: rgba(255, 255, 255, 0.18);
 }
 
+.resource-list-filters,
+.resource-document .resource-relations {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  min-width: 0;
+  margin: 20px 0 0;
+  border: 0;
+  padding: 0;
+}
+
 .resource-document-root {
   position: fixed;
   inset: 0;
@@ -5980,6 +6002,7 @@ button:focus-visible {
 .resource-list-item {
   font-size: 16px;
   font-weight: 720;
+  overflow-wrap: anywhere;
 }
 
 .resource-list-item:focus-visible,

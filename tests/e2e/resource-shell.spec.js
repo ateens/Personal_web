@@ -14,6 +14,131 @@ async function openResourceList(page) {
   await expect(page.locator("[data-resource-view]")).toBeVisible();
 }
 
+async function chooseRelation(select, value) {
+  const control = select.locator("..");
+  await control.locator("[data-finance-select-trigger]").click();
+  await control.locator(`[data-finance-select-option="${value}"]`).click();
+}
+
+async function seedResourceRelations(page, request) {
+  const before = await fixtureSnapshot(request);
+  const state = structuredClone(before.state);
+  state.boxes.push({ ...structuredClone(state.boxes[0]), id: "fixture-second-box", name: "Second Box", blocks: [] });
+  state.projects.push({ ...structuredClone(state.projects[0]), id: "fixture-no-box-project", name: "No Box Project", boxId: "", blocks: [] });
+  Object.assign(state.resources.find((item) => item.id === FIXTURE_IDS.bodySearchResource), { boxId: "fixture-second-box", projectId: "" });
+  Object.assign(state.resources.find((item) => item.id === FIXTURE_IDS.titleSearchResource), { boxId: "", projectId: "" });
+  state.resources.find((item) => item.id === FIXTURE_IDS.archivedResource).locked = true;
+  const trashed = structuredClone(state.resources[0]);
+  state.resources.push({ ...trashed, id: "fixture-relations-trash", title: "Deleted Related Resource", blocks: [], commentThreads: [], trashedAt: new Date().toISOString() });
+  const response = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${before.serverRevision}"` },
+    data: { state, baseRevision: before.serverRevision },
+  });
+  expect(response.ok()).toBeTruthy();
+  await page.reload();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await openResourceList(page);
+}
+
+test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장 내용을 유지한다", async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  const window = await openSettledResource(page, FIXTURE_IDS.resource);
+  const relations = window.locator("[data-resource-relations]");
+  const box = relations.locator('[data-field="boxId"]');
+  const project = relations.locator('[data-field="projectId"]');
+  const before = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  await window.locator(".block-editor").evaluate((element) => { globalThis.__relationEditor = element; });
+  const saved = async (boxId, projectId) => {
+    await expect.poll(async () => {
+      const item = (await fixtureSnapshot(request)).state.resources.find((resource) => resource.id === FIXTURE_IDS.resource);
+      return [item.boxId, item.projectId];
+    }).toEqual([boxId, projectId]);
+    expect(await window.locator(".block-editor").evaluate((element) => element === globalThis.__relationEditor)).toBe(true);
+  };
+  await chooseRelation(project, "");
+  await saved(FIXTURE_IDS.box, "");
+  await chooseRelation(box, "fixture-second-box");
+  await saved("fixture-second-box", "");
+  await chooseRelation(project, FIXTURE_IDS.project);
+  await expect(box).toHaveValue(FIXTURE_IDS.box);
+  await saved(FIXTURE_IDS.box, FIXTURE_IDS.project);
+  await chooseRelation(box, "fixture-second-box");
+  await expect(project).toHaveValue("");
+  await saved("fixture-second-box", "");
+  await chooseRelation(project, "fixture-no-box-project");
+  await saved("", "fixture-no-box-project");
+  const after = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  expect(after.blocks).toEqual(before.blocks);
+  expect(after.commentThreads).toEqual(before.commentThreads);
+  expect(after.revision).toBeGreaterThan(before.revision);
+  await page.reload();
+  await openResourceList(page);
+  const reopened = await openSettledResource(page, FIXTURE_IDS.resource);
+  await expect(reopened.locator('[data-resource-relations] [data-field="boxId"]')).toHaveValue("");
+  await expect(reopened.locator('[data-resource-relations] [data-field="projectId"]')).toHaveValue("fixture-no-box-project");
+});
+
+test("Resource Box와 Project 필터는 저장 없이 교집합을 표시하고 Project에서 자료를 연다", async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  const before = await fixtureSnapshot(request);
+  const list = page.locator("[data-resource-view]");
+  const box = page.locator('[data-resource-filter="boxId"]');
+  const project = page.locator('[data-resource-filter="projectId"]');
+  const listed = () => list.locator("[data-resource-open]").evaluateAll((elements) => elements.map((element) => element.dataset.resourceOpen).sort());
+  await chooseRelation(box, "fixture-second-box");
+  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource]);
+  await chooseRelation(project, FIXTURE_IDS.project);
+  expect(await listed()).toEqual([]);
+  await chooseRelation(project, "__none__");
+  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource]);
+  await chooseRelation(box, "__none__");
+  expect(await listed()).toEqual([FIXTURE_IDS.titleSearchResource]);
+  await chooseRelation(box, "");
+  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource, FIXTURE_IDS.titleSearchResource].sort());
+  await chooseRelation(project, "");
+  expect(await listed()).toContain(FIXTURE_IDS.resource);
+  await page.waitForTimeout(650);
+  const filtered = await fixtureSnapshot(request);
+  expect(filtered.writes).toEqual(before.writes);
+  expect(filtered.state.resources).toEqual(before.state.resources);
+  await page.locator('[data-nav-key="projects"]').evaluate((button) => button.click());
+  const item = page.locator(`[data-project-item="${FIXTURE_IDS.project}"]`);
+  const panel = item.locator(`[data-project-resources="${FIXTURE_IDS.project}"]`);
+  expect(await panel.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(true);
+  await item.locator("[data-project-toggle]").click();
+  await expect(panel).toBeVisible();
+  expect(await panel.evaluate((element) => Boolean(element.closest("[inert]")))).toBe(false);
+  await expect(panel.locator('[data-resource-open="fixture-relations-trash"]')).toHaveCount(0);
+  await expect(panel.locator(`[data-resource-open="${FIXTURE_IDS.bodySearchResource}"]`)).toHaveCount(0);
+  await panel.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).click();
+  await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+});
+
+test("Resource 읽기 전용과 잠긴 자료의 연결 필드는 비활성화되고 강제 change도 저장하지 않는다", async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  const before = await fixtureSnapshot(request);
+  for (const id of [FIXTURE_IDS.readOnlyResource, FIXTURE_IDS.archivedResource]) {
+    const window = await openSettledResource(page, id);
+    const relations = window.locator("fieldset[data-resource-relations]");
+    await expect(relations).toHaveAttribute("disabled", "");
+    for (const trigger of await relations.locator("[data-finance-select-trigger]").all()) {
+      await expect(trigger).toBeDisabled();
+    }
+    for (const field of ["boxId", "projectId"]) {
+      const select = relations.locator(`[data-field="${field}"]`);
+      await expect(select).toBeDisabled();
+      await select.evaluate((element) => {
+        element.value = "";
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    }
+  }
+  await page.waitForTimeout(650);
+  const after = await fixtureSnapshot(request);
+  expect(after.state.resources).toEqual(before.state.resources);
+  expect(after.writes).toEqual(before.writes);
+});
+
 test.beforeEach(async ({ page, request }) => {
   await resetFixture(request);
   await page.goto("/");
@@ -109,7 +234,7 @@ test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를
   await expect(document).toHaveAttribute("aria-modal", "false");
   await expect(title).toHaveValue("E2E Notion Parity Resource");
   await expect(document).toBeFocused();
-  await expect(document.locator(":scope > .resource-document-title + .resource-document-divider + .resource-document-body")).toHaveCount(1);
+  await expect(document.locator(":scope > .resource-document-title + [data-resource-relations] + .resource-document-divider + .resource-document-body")).toHaveCount(1);
   await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
   await expect(document.locator("[data-block-drag], [data-block-add]")).toHaveCount(0);
 

@@ -689,6 +689,7 @@ let ui = {
   editingHabitId: "",
   habitDeleteConfirmId: "",
   activeResourceId: "",
+  resourceFilters: { boxId: "", projectId: "" },
   resourceWindows: [],
   resourceWindowOrder: 0,
   resourceWindowZ: 0,
@@ -1667,7 +1668,15 @@ function renderBoxes() {
 }
 
 function renderResources() {
-  const resources = state.resources.filter((resource) => !resource.trashedAt);
+  for (const field of ["boxId", "projectId"]) {
+    const value = ui.resourceFilters[field];
+    if (value && value !== "__none__" && !itemById(field === "boxId" ? "boxes" : "projects", value)) {
+      ui.resourceFilters[field] = "";
+    }
+  }
+  const resources = state.resources.filter((resource) => !resource.trashedAt
+    && Object.entries(ui.resourceFilters).every(([field, value]) => !value
+      || (value === "__none__" ? !resource[field] : resource[field] === value)));
   return `
     <section class="view" data-resource-view>
       ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
@@ -1679,23 +1688,37 @@ function renderResources() {
 }
 
 function renderResourceList(resources) {
-  if (!resources.length) {
-    return `<section class="panel resource-list-panel" aria-label="자료 목록">${empty("자료가 없습니다. 새 자료를 만들어보세요.")}</section>`;
-  }
   return `
     <section class="panel resource-list-panel" aria-labelledby="resource-list-title">
       <h2 class="panel-title" id="resource-list-title">자료 목록</h2>
-      <ul class="resource-list">
-        ${resources.map((resource) => `
-          <li>
-            <button class="resource-list-item" type="button" data-resource-open="${esc(resource.id)}">
-              ${esc(resource.title || "제목 없음")}
-            </button>
-          </li>
-        `).join("")}
-      </ul>
+      <div class="field-grid resource-list-filters" aria-label="자료 필터">
+        ${[["boxId", "Box", state.boxes], ["projectId", "Project", state.projects]].map(([field, label, items]) =>
+          financeSelectInput(`${label}별 보기`, field, [["", "전체"], ["__none__", "연결 없음"], ...items.map((item) => [item.id, item.name])], {
+            value: ui.resourceFilters[field],
+            attributes: `data-resource-filter="${field}"`,
+            allowEmpty: false,
+          })).join("")}
+      </div>
+      ${resources.length ? renderResourceLinks(resources) : empty("해당하는 자료가 없습니다.")}
     </section>
   `;
+}
+
+function renderResourceLinks(resources) {
+  return `<ul class="resource-list">
+    ${resources.map((resource) => `
+      <li><button class="resource-list-item" type="button" data-resource-open="${esc(resource.id)}">${esc(resource.title || "제목 없음")}</button></li>
+    `).join("")}
+  </ul>`;
+}
+
+function renderResourceRelations(resource) {
+  return `<fieldset class="field-grid resource-relations" data-resource-relations
+    data-inline-owner-type="resources" data-inline-owner-id="${esc(resource.id)}"
+    aria-label="자료 연결" ${resourceMutationAllowed(resource) ? "" : "disabled"}>
+    ${relationField("Box", "boxId", resource.boxId, state.boxes, "name")}
+    ${relationField("Project", "projectId", resource.projectId, state.projects, "name")}
+  </fieldset>`;
 }
 
 function renderResourceDocument(resource) {
@@ -1726,6 +1749,7 @@ function renderResourceDocument(resource) {
         placeholder="제목 없음"
         ${readOnly ? "readonly aria-readonly=\"true\"" : ""}
       >${esc(resource.title || "")}</textarea>
+      ${renderResourceRelations(resource)}
       <hr class="resource-document-divider">
       <section class="resource-document-body" aria-label="자료 내용">
         <div class="block-editor" data-owner-type="resources" data-owner-id="${esc(resource.id)}">
@@ -1758,12 +1782,18 @@ function syncResourceDocumentDialog() {
   els.detailRoot.hidden = !open;
   els.detailRoot.classList.toggle("resource-document-root", open);
   for (const record of ui.resourceWindows) {
+    const resource = itemById("resources", record.id);
     let element = resourceWindowElement(record.id);
     const isNew = !element;
     if (isNew) {
-      els.detailRoot.insertAdjacentHTML("beforeend", renderResourceDocument(itemById("resources", record.id)));
+      els.detailRoot.insertAdjacentHTML("beforeend", renderResourceDocument(resource));
       element = resourceWindowElement(record.id);
     }
+    const relationsMarkup = renderResourceRelations(resource);
+    if (!isNew && element.resourceRelationsMarkup !== relationsMarkup) {
+      element.querySelector("[data-resource-relations]").outerHTML = relationsMarkup;
+    }
+    element.resourceRelationsMarkup = relationsMarkup;
     element.dataset.active = String(record.id === ui.activeResourceId);
     syncResourceWindowGeometry(record);
     if (isNew && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -4871,6 +4901,7 @@ function closeFinanceSelects(except = null) {
 }
 
 function inlinePickerFieldSelector(input) {
+  if (input?.dataset.resourceFilter) return `[data-resource-filter="${cssEscape(input.dataset.resourceFilter)}"]`;
   const owner = input?.closest("[data-inline-owner-type][data-inline-owner-id]");
   const field = input?.dataset.field || "";
   if (!owner || !field) return "";
@@ -6145,7 +6176,7 @@ function renderProjectItem(project, statsByProjectId = null) {
         </div>
         <span class="project-chevron" aria-hidden="true"></span>
       </div>
-      <div class="project-detail-shell" aria-hidden="${expanded ? "false" : "true"}">
+      <div class="project-detail-shell" aria-hidden="${expanded ? "false" : "true"}" ${expanded ? "" : "inert"}>
         <div class="project-detail">
           ${renderProjectDetail(project, stats)}
         </div>
@@ -6157,6 +6188,7 @@ function renderProjectItem(project, statsByProjectId = null) {
 function renderProjectDetail(project, stats) {
   const boxName = project.boxId ? nameOf("boxes", project.boxId) : "";
   const { remainingTasks, doneTasks } = projectDetailTaskGroups(stats.tasks);
+  const resources = state.resources.filter((resource) => resource.projectId === project.id && !resource.trashedAt);
   return `
     ${ui.editingProjectId === project.id ? renderInlineEditPanel("projects", project, "프로젝트 수정") : ""}
     <div class="project-detail-overview">
@@ -6170,6 +6202,10 @@ function renderProjectDetail(project, stats) {
     <div class="project-task-detail-grid">
       ${renderProjectTaskGroup("남은 Task", remainingTasks, "remaining")}
       ${renderProjectTaskGroup("완료된 Task", doneTasks, "done")}
+      <div class="project-task-panel project-resource-panel" data-project-resources="${esc(project.id)}">
+        <div class="project-task-panel-head"><strong>자료</strong><span>${resources.length}</span></div>
+        ${resources.length ? renderResourceLinks(resources) : '<span class="project-muted">연결된 자료가 없습니다.</span>'}
+      </div>
     </div>
   `;
 }
@@ -11310,6 +11346,7 @@ function createResource(title = "새 자료") {
   }, createdAt);
   state.resources.push(resource);
   dirtyResourceIds.add(resource.id);
+  ui.resourceFilters = { boxId: "", projectId: "" };
   if (ui.view !== "resources") {
     ui.view = "resources";
     updateNav();
@@ -12250,6 +12287,13 @@ if (financeInstallmentEntry) {
     return;
   }
 
+  const resourceFilter = event.target.closest("[data-resource-filter]");
+  if (resourceFilter && ["boxId", "projectId"].includes(resourceFilter.dataset.resourceFilter)) {
+    ui.resourceFilters[resourceFilter.dataset.resourceFilter] = resourceFilter.value;
+    renderView({ soft: true });
+    return;
+  }
+
   const field = event.target.closest("[data-field]");
   if (!field) return;
   const inlineOwner = field.closest("[data-inline-owner-type][data-inline-owner-id]");
@@ -12266,12 +12310,25 @@ if (financeInstallmentEntry) {
     else field.value = String(item[field.dataset.field] ?? "");
     return;
   }
-  applyFieldValue(ownerType, item, field.dataset.field, value);
+  if (applyFieldValue(ownerType, item, field.dataset.field, value) === false) return;
   saveState();
   renderView({ soft: true });
 }
 
 function applyFieldValue(ownerType, item, fieldName, value) {
+  if (ownerType === "resources") {
+    if (!resourceMutationAllowed(item) || !["boxId", "projectId"].includes(fieldName)) return false;
+    const collection = fieldName === "boxId" ? "boxes" : "projects";
+    if (typeof value !== "string" || (value && !itemById(collection, value))) return false;
+    const previousBoxId = item.boxId;
+    const previousProjectId = item.projectId;
+    item[fieldName] = value;
+    if (fieldName === "projectId" && value) item.boxId = itemById("projects", value).boxId || "";
+    if (fieldName === "boxId" && item.projectId && (itemById("projects", item.projectId)?.boxId || "") !== value) item.projectId = "";
+    if (item.boxId === previousBoxId && item.projectId === previousProjectId) return false;
+    markResourceChanged(item);
+    return true;
+  }
   if (ownerType === "tasks") {
     applyTaskFieldValue(item, fieldName, value);
     return;
@@ -18804,6 +18861,7 @@ function toggleProjectDetail(projectId) {
       const detail = item.querySelector(".project-detail-shell");
       row?.setAttribute("aria-expanded", String(expanded));
       detail?.setAttribute("aria-hidden", String(!expanded));
+      detail?.toggleAttribute("inert", !expanded);
     });
     ui.expandedProjectId = nextExpandedId;
 ;
