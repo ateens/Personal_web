@@ -584,7 +584,7 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
   const { editor, resourceId } = await createEmptyResource(page);
   const markdown = [
     String.raw`앞 \(x\)\(x\) 중간`,
-    String.raw`\[ R=1+2\times1 \]`,
+    String.raw`\[ \sum_{i=1}^{n}\frac{x_i^2}{1+x_i} \]`,
     String.raw`뒤 \(y^2\)`,
     String.raw`리터럴 \\(not math\\)`,
   ].join("\n");
@@ -600,8 +600,33 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
   await expect(editor.locator('[data-equation-mode="inline"]')).toHaveCount(3);
   const displayEquation = editor.locator('[data-equation-mode="display"]');
   await expect(displayEquation).toHaveCount(1);
-  await expect(displayEquation).toHaveAttribute("data-equation-formula", String.raw`R=1+2\times1`);
+  await expect(displayEquation).toHaveAttribute("data-equation-formula", String.raw`\sum_{i=1}^{n}\frac{x_i^2}{1+x_i}`);
   await expect(displayEquation).toHaveAttribute("role", "math");
+  const fullEquation = displayEquation.locator("sygma-display-equation");
+  await expect(fullEquation).toHaveAttribute("data-equation-rendered", "true");
+  await expect(fullEquation.locator("munderover")).toHaveCount(1);
+  const fraction = fullEquation.locator("[data-equation-fraction]");
+  await expect(fraction).toHaveCount(1);
+  const fractionGeometry = await fraction.evaluate((element) => {
+    const numerator = element.querySelector("[data-equation-numerator]").getBoundingClientRect();
+    const denominator = element.querySelector("[data-equation-denominator]").getBoundingClientRect();
+    return {
+      stacked: numerator.bottom < denominator.top,
+      centered: Math.abs((numerator.left + numerator.right - denominator.left - denominator.right) / 2) < 2,
+    };
+  });
+  expect(fractionGeometry).toEqual({ stacked: true, centered: true });
+  await expect(editor.locator('[data-equation-mode="inline"] sygma-display-equation')).toHaveCount(0);
+  const parserGuards = await page.evaluate(() => ({
+    malformed: renderDisplayEquationMathML(String.raw`\frac{a}{`),
+    tooDeep: renderDisplayEquationMathML(`${"{".repeat(65)}x${"}".repeat(65)}`),
+    exclusiveMarks: normalizeInlineMarks("abc", [
+      { type: "equation", start: 0, end: 3, formula: "abc", displayMode: true },
+      { type: "bold", start: 0, end: 3 },
+      { type: "equation", start: 1, end: 3, formula: "bc" },
+    ]).map((mark) => mark.type),
+  }));
+  expect(parserGuards).toEqual({ malformed: "", tooDeep: "", exclusiveMarks: ["equation"] });
   await expect(editor.locator("[data-block-content]").last()).toHaveText(`뒤 y^2\n${String.raw`리터럴 \(not math\)`}`);
   await expect(editor.locator("[data-block-content]").last().locator('[data-inline-mark="equation"]')).toHaveCount(1);
   const displayGeometry = await displayEquation.evaluate((element) => {
@@ -635,14 +660,16 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
     live: { text: "실시간 z^2", equations: [{ type: "equation", start: 4, end: 7, formula: "z^2" }] },
     syntax: [
       { text: "앞 xx 중간", equations: [{ type: "equation", start: 2, end: 3, formula: "x" }, { type: "equation", start: 3, end: 4, formula: "x" }] },
-      { text: String.raw`R=1+2\times1`, equations: [{ type: "equation", start: 0, end: 12, formula: String.raw`R=1+2\times1`, displayMode: true }] },
+      { text: String.raw`\sum_{i=1}^{n}\frac{x_i^2}{1+x_i}`, equations: [{ type: "equation", start: 0, end: 33, formula: String.raw`\sum_{i=1}^{n}\frac{x_i^2}{1+x_i}`, displayMode: true }] },
       { text: `뒤 y^2\n${String.raw`리터럴 \(not math\)`}`, equations: [{ type: "equation", start: 2, end: 5, formula: "y^2" }] },
     ],
   });
 
   const reloadedEditor = await openResource(page, resourceId);
   await expect(reloadedEditor.locator('[data-equation-mode="inline"]')).toHaveCount(3);
-  await expect(reloadedEditor.locator('[data-equation-mode="display"]')).toHaveAttribute("data-equation-formula", String.raw`R=1+2\times1`);
+  const reloadedDisplayEquation = reloadedEditor.locator('[data-equation-mode="display"]');
+  await expect(reloadedDisplayEquation).toHaveAttribute("data-equation-formula", String.raw`\sum_{i=1}^{n}\frac{x_i^2}{1+x_i}`);
+  await expect(reloadedDisplayEquation.locator("[data-equation-fraction]")).toHaveCount(1);
 });
 
 test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공한다", async ({ page, request }) => {
@@ -1040,6 +1067,59 @@ test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 한
   });
   expect(geometry.scrollTop).toBeGreaterThan(beforeScrollTop);
   expect(geometry.bottomGap).toBeGreaterThanOrEqual(geometry.lineHeight - 2);
+});
+
+test("Resource 토글 기본 텍스트와 heading1~6은 화살표가 첫 줄 중앙에 맞는다", async ({ page, request }) => {
+  const variants = ["default", "heading1", "heading2", "heading3", "heading4", "heading5", "heading6"];
+  const blocks = variants.flatMap((variant, index) => {
+    const toggle = {
+      id: `toggle-alignment-${variant}`,
+      type: "toggle",
+      text: `${variant} 토글`,
+      marks: [],
+      checked: false,
+      indent: 0,
+      collapsed: index % 2 === 1,
+    };
+    if (variant !== "default") toggle.toggleHeading = variant;
+    return [
+      toggle,
+      { id: `toggle-alignment-child-${index}`, type: "paragraph", text: "토글 자식", marks: [], checked: false, indent: 1, collapsed: false },
+    ];
+  });
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, blocks);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await settleAnimationFrames(page);
+
+  const measurements = await editor.locator('[data-type="toggle"]').evaluateAll((elements) => elements.map((element) => {
+    const control = element.querySelector("[data-block-toggle]");
+    const content = element.querySelector("[data-block-content]");
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => node.textContent.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
+    });
+    const textNode = walker.nextNode();
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, Math.min(1, textNode.textContent.length));
+    const line = range.getClientRects()[0] || range.getBoundingClientRect();
+    const controlRect = control.getBoundingClientRect();
+    const controlCenter = controlRect.top + controlRect.height / 2;
+    const lineCenter = line.top + line.height / 2;
+    return {
+      variant: element.dataset.toggleHeading || "default",
+      controlCenter: Number(controlCenter.toFixed(3)),
+      lineCenter: Number(lineCenter.toFixed(3)),
+      delta: Number((controlCenter - lineCenter).toFixed(3)),
+      absoluteDelta: Number(Math.abs(controlCenter - lineCenter).toFixed(3)),
+    };
+  }));
+  expect(measurements.map(({ variant }) => variant)).toEqual(variants);
+  for (const measurement of measurements) {
+    expect.soft(
+      measurement.absoluteDelta,
+      `${measurement.variant}: toggle=${measurement.controlCenter}, first-line=${measurement.lineCenter}, delta=${measurement.delta}`,
+    ).toBeLessThanOrEqual(2);
+  }
 });
 
 test("Resource 토글은 첫 줄 중앙에 맞고 list 자식도 펼침과 접힘이 부드럽게 이어진다", async ({ page, request }) => {

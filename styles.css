@@ -5960,7 +5960,27 @@ body.is-resource-document-open {
   width: 27px;
   height: 27px;
   align-self: start;
-  margin-top: 0;
+  margin-top: 0.5px;
+}
+
+.resource-document .block[data-type="toggle"][data-toggle-heading="heading1"] > .block-toggle {
+  margin-top: 21px;
+}
+
+.resource-document .block[data-type="toggle"][data-toggle-heading="heading2"] > .block-toggle {
+  margin-top: 14px;
+}
+
+.resource-document .block[data-type="toggle"][data-toggle-heading="heading3"] > .block-toggle {
+  margin-top: 8px;
+}
+
+.resource-document .block[data-type="toggle"][data-toggle-heading="heading4"] > .block-toggle {
+  margin-top: 5px;
+}
+
+.resource-document .block[data-type="toggle"]:is([data-toggle-heading="heading5"], [data-toggle-heading="heading6"]) > .block-toggle {
+  margin-top: 2.5px;
 }
 
 .resource-document .block-content {
@@ -6289,6 +6309,20 @@ body.is-resource-document-open {
   text-align: center;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.inline-mark-equation[data-equation-mode="display"] > sygma-display-equation {
+  display: none;
+}
+
+.inline-mark-equation[data-equation-mode="display"].has-full-equation::before {
+  content: none;
+}
+
+.inline-mark-equation[data-equation-mode="display"].has-full-equation > sygma-display-equation {
+  display: block;
+  width: 100%;
+  min-width: 0;
 }
 
 .inline-equation-source {

@@ -8143,7 +8143,10 @@ function renderInlineSegment(text, activeMarks) {
       const formula = mark.formula || text;
       const mode = mark.displayMode === true ? "display" : "inline";
       const display = renderEquationDisplay(formula);
-      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-mode="${mode}" data-equation-formula="${esc(formula)}" data-equation-display="${esc(display)}" role="math" aria-label="${esc(`수식: ${display}`)}" title="${esc(formula)}"><span class="inline-equation-source" aria-hidden="true">${html}</span></span>`;
+      const fullDisplay = mode === "display"
+        ? `<sygma-display-equation data-formula="${esc(formula)}" contenteditable="false" aria-hidden="true"></sygma-display-equation>`
+        : "";
+      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-mode="${mode}" data-equation-formula="${esc(formula)}" data-equation-display="${esc(display)}" role="math" aria-label="${esc(`수식: ${display}`)}" title="${esc(formula)}"><span class="inline-equation-source" aria-hidden="true">${html}</span>${fullDisplay}</span>`;
     } else {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES[type] || ""}" data-inline-mark="${type}">${html}</span>`;
     }
@@ -8311,7 +8314,18 @@ function normalizeInlineMarks(text = "", marks = []) {
   const withoutConflictingLinks = resourceLinks.length
     ? withoutResourceLinks.filter((mark) => mark.type !== "link" || !resourceLinks.some((resourceLink) => resourceLink.start < mark.end && resourceLink.end > mark.start))
     : withoutResourceLinks;
-  const resolved = [...withoutConflictingLinks, ...resourceLinks];
+  const combined = [...withoutConflictingLinks, ...resourceLinks];
+  const equationMarks = combined
+    .filter((mark) => mark.type === "equation")
+    .sort((left, right) => left.start - right.start || right.end - left.end || Number(right.displayMode === true) - Number(left.displayMode === true));
+  const exclusiveEquations = [];
+  for (const mark of equationMarks) {
+    if (!exclusiveEquations.some((equation) => equation.start < mark.end && equation.end > mark.start)) exclusiveEquations.push(mark);
+  }
+  const resolved = [
+    ...combined.filter((mark) => mark.type !== "equation" && !exclusiveEquations.some((equation) => equation.start < mark.end && equation.end > mark.start)),
+    ...exclusiveEquations,
+  ];
   resolved.sort((a, b) => a.start - b.start || a.end - b.end || INLINE_MARK_TYPES.indexOf(a.type) - INLINE_MARK_TYPES.indexOf(b.type));
   return mergeInlineMarks(resolved);
 }
@@ -8410,6 +8424,233 @@ function renderEquationDisplay(value = "") {
   formula = formula.replace(/_([A-Za-z0-9+\-=()])/g, (_, body) => equationScriptText(body, "sub"));
   formula = formula.replace(/[{}]/g, "");
   return formula.replace(/\s+/g, " ").trim();
+}
+
+function renderDisplayEquationMathML(value = "") {
+  const cursor = { source: normalizeEquationFormula(value), index: 0, failed: false, depth: 0, nodes: 0 };
+  if (!cursor.source || cursor.source.length > 4_000) return "";
+  const body = equationMathRow(cursor);
+  equationMathSkipSpaces(cursor);
+  if (cursor.failed || cursor.index !== cursor.source.length || !body) return "";
+  return `<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mstyle displaystyle="true" scriptlevel="0">${body}</mstyle></math>`;
+}
+
+function equationMathRow(cursor, stop = "") {
+  if (cursor.depth >= 64) {
+    cursor.failed = true;
+    return "";
+  }
+  cursor.depth += 1;
+  try {
+    let html = "";
+    while (cursor.index < cursor.source.length) {
+      equationMathSkipSpaces(cursor);
+      const char = cursor.source[cursor.index];
+      if (!char) break;
+      if (stop && char === stop) {
+        cursor.index += 1;
+        return html;
+      }
+      if (char === "}" || char === "]" || char === "^" || char === "_") {
+        cursor.failed = true;
+        return "";
+      }
+      const atom = equationMathAtom(cursor);
+      if (!atom) {
+        cursor.failed = true;
+        return "";
+      }
+      let subscript = "";
+      let superscript = "";
+      while (!cursor.failed) {
+        equationMathSkipSpaces(cursor);
+        const script = cursor.source[cursor.index];
+        if (script !== "_" && script !== "^") break;
+        cursor.index += 1;
+        const argument = equationMathArgument(cursor);
+        if (argument === null || (script === "_" ? subscript : superscript)) {
+          cursor.failed = true;
+          return "";
+        }
+        if (script === "_") subscript = argument;
+        else superscript = argument;
+      }
+      html += equationMathScripts(atom, subscript, superscript);
+    }
+    if (stop) cursor.failed = true;
+    return html;
+  } finally {
+    cursor.depth -= 1;
+  }
+}
+
+function equationMathAtom(cursor) {
+  cursor.nodes += 1;
+  if (cursor.nodes > 2_000) {
+    cursor.failed = true;
+    return null;
+  }
+  const char = cursor.source[cursor.index];
+  if (!char) return null;
+  if (char === "{") {
+    cursor.index += 1;
+    return { html: `<mrow>${equationMathRow(cursor, "}")}</mrow>`, large: false };
+  }
+  if (char === "\\") return equationMathCommand(cursor);
+  if (/\d/.test(char) || (char === "." && /\d/.test(cursor.source[cursor.index + 1] || ""))) {
+    const start = cursor.index;
+    cursor.index += 1;
+    while (/[\d.,]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
+    return { html: `<mn>${esc(cursor.source.slice(start, cursor.index))}</mn>`, large: false };
+  }
+  cursor.index += 1;
+  if (/[A-Za-z]/.test(char)) return { html: `<mi>${esc(char)}</mi>`, large: false };
+  if (/[^\x00-\x7F]/u.test(char) && !/[×÷±∓≤≥≠≈∼∞∂∇∑∏∫→←↔]/u.test(char)) {
+    return { html: `<mtext>${esc(char)}</mtext>`, large: false };
+  }
+  if (/[()[\]|]/.test(char)) return { html: `<mo stretchy="true">${esc(char)}</mo>`, large: false };
+  return { html: `<mo>${esc(char)}</mo>`, large: ["∑", "∏", "∫"].includes(char) };
+}
+
+function equationMathCommand(cursor) {
+  cursor.index += 1;
+  const start = cursor.index;
+  while (/[A-Za-z]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
+  const command = cursor.source.slice(start, cursor.index);
+  if (!command) {
+    const literal = cursor.source[cursor.index] || "";
+    if (!literal) return null;
+    cursor.index += 1;
+    if (literal === " " || literal === "," || literal === ";") return { html: '<mspace width="0.28em"></mspace>', large: false };
+    return { html: `<mo>${esc(literal)}</mo>`, large: false };
+  }
+  if (["frac", "dfrac", "tfrac"].includes(command)) {
+    const numerator = equationMathArgument(cursor);
+    const denominator = equationMathArgument(cursor);
+    if (numerator === null || denominator === null) return null;
+    return {
+      html: `<mfrac data-equation-fraction="true"><mrow data-equation-numerator="true">${numerator}</mrow><mrow data-equation-denominator="true">${denominator}</mrow></mfrac>`,
+      large: false,
+    };
+  }
+  if (command === "sqrt") {
+    equationMathSkipSpaces(cursor);
+    let degree = "";
+    if (cursor.source[cursor.index] === "[") {
+      cursor.index += 1;
+      degree = equationMathRow(cursor, "]");
+    }
+    const body = equationMathArgument(cursor);
+    if (body === null) return null;
+    return { html: degree ? `<mroot><mrow>${body}</mrow><mrow>${degree}</mrow></mroot>` : `<msqrt><mrow>${body}</mrow></msqrt>`, large: false };
+  }
+  if (["text", "operatorname"].includes(command)) {
+    const text = equationMathRawArgument(cursor);
+    if (text === null) return null;
+    const tag = command === "text" ? "mtext" : "mi";
+    return { html: `<${tag} mathvariant="normal">${esc(text)}</${tag}>`, large: command === "operatorname" && text === "lim" };
+  }
+  if (["mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal"].includes(command)) {
+    const body = equationMathArgument(cursor);
+    if (body === null) return null;
+    const variants = { mathrm: "normal", mathbf: "bold", mathit: "italic", mathsf: "sans-serif", mathtt: "monospace", mathcal: "script" };
+    return { html: `<mstyle mathvariant="${variants[command]}">${body}</mstyle>`, large: false };
+  }
+  if (["left", "right"].includes(command)) {
+    equationMathSkipSpaces(cursor);
+    let delimiter = cursor.source[cursor.index] || "";
+    if (delimiter === "\\") {
+      cursor.index += 1;
+      const delimiterStart = cursor.index;
+      while (/[A-Za-z]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
+      delimiter = equationCommandSymbol(cursor.source.slice(delimiterStart, cursor.index));
+    } else {
+      cursor.index += 1;
+    }
+    if (!delimiter || delimiter === ".") return delimiter === "." ? { html: "", large: false } : null;
+    return { html: `<mo stretchy="true">${esc(delimiter)}</mo>`, large: false };
+  }
+  const spacing = { quad: "1em", qquad: "2em", enspace: "0.5em", thinspace: "0.17em" };
+  if (spacing[command]) return { html: `<mspace width="${spacing[command]}"></mspace>`, large: false };
+  const functions = new Set(["lim", "log", "ln", "sin", "cos", "tan", "min", "max"]);
+  if (functions.has(command)) return { html: `<mi mathvariant="normal">${command}</mi>`, large: command === "lim" };
+  const symbol = equationCommandSymbol(command);
+  if (symbol === command) return null;
+  const large = ["sum", "prod", "int"].includes(command);
+  const tag = /[A-Za-zα-ωΑ-Ω]/u.test(symbol) && !large ? "mi" : "mo";
+  return { html: `<${tag}${large ? ' largeop="true" movablelimits="true"' : ""}>${esc(symbol)}</${tag}>`, large };
+}
+
+function equationMathArgument(cursor) {
+  equationMathSkipSpaces(cursor);
+  if (cursor.source[cursor.index] === "{") {
+    cursor.index += 1;
+    const html = equationMathRow(cursor, "}");
+    return cursor.failed ? null : html;
+  }
+  const atom = equationMathAtom(cursor);
+  return atom?.html ?? null;
+}
+
+function equationMathRawArgument(cursor) {
+  equationMathSkipSpaces(cursor);
+  if (cursor.source[cursor.index] !== "{") return null;
+  cursor.index += 1;
+  let depth = 1;
+  let value = "";
+  while (cursor.index < cursor.source.length) {
+    const char = cursor.source[cursor.index];
+    cursor.index += 1;
+    if (char === "{") {
+      depth += 1;
+      value += char;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return value;
+    }
+    value += char;
+  }
+  cursor.failed = true;
+  return null;
+}
+
+function equationMathScripts(atom, subscript, superscript) {
+  if (!subscript && !superscript) return atom.html;
+  const sub = subscript ? `<mrow>${subscript}</mrow>` : "";
+  const sup = superscript ? `<mrow>${superscript}</mrow>` : "";
+  if (atom.large) {
+    if (sub && sup) return `<munderover>${atom.html}${sub}${sup}</munderover>`;
+    if (sub) return `<munder>${atom.html}${sub}</munder>`;
+    return `<mover>${atom.html}${sup}</mover>`;
+  }
+  if (sub && sup) return `<msubsup>${atom.html}${sub}${sup}</msubsup>`;
+  if (sub) return `<msub>${atom.html}${sub}</msub>`;
+  return `<msup>${atom.html}${sup}</msup>`;
+}
+
+function equationMathSkipSpaces(cursor) {
+  while (/\s/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
+}
+
+if (window.customElements && !window.customElements.get("sygma-display-equation")) {
+  window.customElements.define("sygma-display-equation", class extends HTMLElement {
+    connectedCallback() {
+      if (this.shadowRoot) return;
+      let mathML = "";
+      try {
+        mathML = renderDisplayEquationMathML(this.dataset.formula || "");
+      } catch (_) {
+        return;
+      }
+      if (!mathML) return;
+      const root = this.attachShadow({ mode: "open" });
+      root.innerHTML = `<style>:host{display:block;width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;color:inherit;font-size:1.18em;line-height:normal}math{width:max-content;min-width:min-content;max-width:none;margin:0 auto;padding:2px 0}</style>${mathML}`;
+      this.dataset.equationRendered = "true";
+      this.parentElement?.classList.add("has-full-equation");
+    }
+  });
 }
 
 function equationCommandSymbol(command = "") {
@@ -20246,6 +20487,7 @@ function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, owner
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
+  if (rawText.trimStart().startsWith("\\[") && !parseMarkdownDisplayEquation(rawText)) return false;
   const inline = parseMarkdownFormattedText(rawText);
   const currentMarks = normalizeInlineMarks(rawText, inlineMarksForContentUpdate(block, blockContent, rawText));
   if (!inline.marks.length || (inline.text === rawText && inlineMarksEqual(inline.marks, currentMarks))) return false;
