@@ -689,7 +689,7 @@ let ui = {
   editingHabitId: "",
   habitDeleteConfirmId: "",
   activeResourceId: "",
-  resourceFilters: { boxId: "", projectId: "" },
+  resourceGroupBy: "all",
   resourceWindows: [],
   resourceWindowOrder: 0,
   resourceWindowZ: 0,
@@ -1668,38 +1668,36 @@ function renderBoxes() {
 }
 
 function renderResources() {
-  for (const field of ["boxId", "projectId"]) {
-    const value = ui.resourceFilters[field];
-    if (value && value !== "__none__" && !itemById(field === "boxId" ? "boxes" : "projects", value)) {
-      ui.resourceFilters[field] = "";
+  const resources = state.resources.filter((resource) => !resource.trashedAt);
+  let lists = "";
+  if (ui.resourceGroupBy !== "all") {
+    const field = ui.resourceGroupBy === "boxes" ? "boxId" : "projectId";
+    const groups = new Map(state[ui.resourceGroupBy].map((item) => [item.id, { title: item.name, resources: [] }]));
+    const unclassified = [];
+    for (const resource of resources) {
+      (groups.get(resource[field])?.resources || unclassified).push(resource);
     }
-  }
-  const resources = state.resources.filter((resource) => !resource.trashedAt
-    && Object.entries(ui.resourceFilters).every(([field, value]) => !value
-      || (value === "__none__" ? !resource[field] : resource[field] === value)));
+    lists = [...groups].map(([groupId, group]) => renderResourceList(group.resources, group.title, groupId)).join("")
+      + renderResourceList(unclassified, "미분류", "");
+  } else lists = renderResourceList(resources);
   return `
     <section class="view" data-resource-view>
       ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      ${renderResourceList(resources)}
+      <div class="resource-view-toolbar">
+        ${renderViewModeButtons("resources", [["all", "전체"], ["boxes", "Box별 보기"], ["projects", "Project별 보기"]], ui.resourceGroupBy)}
+      </div>
+      <div class="resource-groups">${lists}</div>
     </section>
   `;
 }
 
-function renderResourceList(resources) {
+function renderResourceList(resources, title = "자료 목록", groupId = "all") {
   return `
-    <section class="panel resource-list-panel" aria-labelledby="resource-list-title">
-      <h2 class="panel-title" id="resource-list-title">자료 목록</h2>
-      <div class="field-grid resource-list-filters" aria-label="자료 필터">
-        ${[["boxId", "Box", state.boxes], ["projectId", "Project", state.projects]].map(([field, label, items]) =>
-          financeSelectInput(`${label}별 보기`, field, [["", "전체"], ["__none__", "연결 없음"], ...items.map((item) => [item.id, item.name])], {
-            value: ui.resourceFilters[field],
-            attributes: `data-resource-filter="${field}"`,
-            allowEmpty: false,
-          })).join("")}
-      </div>
-      ${resources.length ? renderResourceLinks(resources) : empty("해당하는 자료가 없습니다.")}
+    <section class="panel resource-list-panel" data-resource-group="${esc(groupId)}" aria-label="${esc(title)}">
+      <h2 class="panel-title">${esc(title)}</h2>
+      ${resources.length ? renderResourceLinks(resources) : empty("자료가 없습니다.")}
     </section>
   `;
 }
@@ -4841,7 +4839,8 @@ function placeFinanceSelectOptions(control, list) {
   control.style.setProperty("--finance-select-space", `${Math.floor(available)}px`);
   if (!financeSelectPopoverIsOpen(list)) return;
 
-  const preferredWidth = control.closest(".finance-month-control") ? 176 : rect.width;
+  const preferredWidth = control.closest(".finance-month-control") ? 176
+    : control.closest("[data-resource-relations]") ? Math.max(240, rect.width) : rect.width;
   const width = Math.max(0, Math.min(preferredWidth, viewport.width - edge * 2));
   const preferredLeft = control.closest(".finance-month-control")
     ? rect.left + (rect.width - width) / 2
@@ -4901,7 +4900,6 @@ function closeFinanceSelects(except = null) {
 }
 
 function inlinePickerFieldSelector(input) {
-  if (input?.dataset.resourceFilter) return `[data-resource-filter="${cssEscape(input.dataset.resourceFilter)}"]`;
   const owner = input?.closest("[data-inline-owner-type][data-inline-owner-id]");
   const field = input?.dataset.field || "";
   if (!owner || !field) return "";
@@ -10653,6 +10651,14 @@ function handleClick(event) {
   const viewMode = event.target.closest("[data-view-control-mode]");
   if (viewMode) {
     event.preventDefault();
+    if (viewMode.dataset.viewControlMode === "resources") {
+      const mode = viewMode.dataset.controlMode;
+      if (!["all", "boxes", "projects"].includes(mode) || mode === ui.resourceGroupBy) return;
+      ui.resourceGroupBy = mode;
+      renderView({ soft: true });
+      requestAnimationFrame(() => els.viewRoot.querySelector(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`)?.focus({ preventScroll: true }));
+      return;
+    }
     updateViewControl(viewMode.dataset.viewControlMode, "mode", viewMode.dataset.controlMode || "");
     return;
   }
@@ -11346,7 +11352,6 @@ function createResource(title = "새 자료") {
   }, createdAt);
   state.resources.push(resource);
   dirtyResourceIds.add(resource.id);
-  ui.resourceFilters = { boxId: "", projectId: "" };
   if (ui.view !== "resources") {
     ui.view = "resources";
     updateNav();
@@ -12284,13 +12289,6 @@ if (financeInstallmentEntry) {
   const googleCalendarToggle = event.target.closest("[data-google-calendar-toggle]");
   if (googleCalendarToggle) {
     setGoogleCalendarVisible(googleCalendarToggle.dataset.googleCalendarToggle, googleCalendarToggle.checked);
-    return;
-  }
-
-  const resourceFilter = event.target.closest("[data-resource-filter]");
-  if (resourceFilter && ["boxId", "projectId"].includes(resourceFilter.dataset.resourceFilter)) {
-    ui.resourceFilters[resourceFilter.dataset.resourceFilter] = resourceFilter.value;
-    renderView({ soft: true });
     return;
   }
 

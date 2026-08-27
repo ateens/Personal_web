@@ -24,6 +24,7 @@ async function seedResourceRelations(page, request) {
   const before = await fixtureSnapshot(request);
   const state = structuredClone(before.state);
   state.boxes.push({ ...structuredClone(state.boxes[0]), id: "fixture-second-box", name: "Second Box", blocks: [] });
+  state.boxes.push({ ...structuredClone(state.boxes[0]), id: "fixture-empty-box", name: "Empty Box", blocks: [] });
   state.projects.push({ ...structuredClone(state.projects[0]), id: "fixture-no-box-project", name: "No Box Project", boxId: "", blocks: [] });
   Object.assign(state.resources.find((item) => item.id === FIXTURE_IDS.bodySearchResource), { boxId: "fixture-second-box", projectId: "" });
   Object.assign(state.resources.find((item) => item.id === FIXTURE_IDS.titleSearchResource), { boxId: "", projectId: "" });
@@ -46,6 +47,16 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   const relations = window.locator("[data-resource-relations]");
   const box = relations.locator('[data-field="boxId"]');
   const project = relations.locator('[data-field="projectId"]');
+  const trigger = project.locator("..").locator("[data-finance-select-trigger]");
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await expect(relations.locator('[data-finance-select-options]:not([hidden])')).toBeVisible();
+  await page.keyboard.press("Escape");
+  const triggerStyle = await trigger.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { border: style.borderBottomWidth, shadow: style.boxShadow, decoration: style.textDecorationLine };
+  });
+  expect(triggerStyle).toEqual({ border: "0px", shadow: "none", decoration: "none" });
   const before = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
   await window.locator(".block-editor").evaluate((element) => { globalThis.__relationEditor = element; });
   const saved = async (boxId, projectId) => {
@@ -76,27 +87,37 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   const reopened = await openSettledResource(page, FIXTURE_IDS.resource);
   await expect(reopened.locator('[data-resource-relations] [data-field="boxId"]')).toHaveValue("");
   await expect(reopened.locator('[data-resource-relations] [data-field="projectId"]')).toHaveValue("fixture-no-box-project");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => reopened.locator("[data-resource-relations]").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
 });
 
-test("Resource Box와 Project 필터는 저장 없이 교집합을 표시하고 Project에서 자료를 연다", async ({ page, request }) => {
+test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시하고 열린 본문과 저장 상태를 유지한다", async ({ page, request }) => {
   await seedResourceRelations(page, request);
   const before = await fixtureSnapshot(request);
   const list = page.locator("[data-resource-view]");
-  const box = page.locator('[data-resource-filter="boxId"]');
-  const project = page.locator('[data-resource-filter="projectId"]');
   const listed = () => list.locator("[data-resource-open]").evaluateAll((elements) => elements.map((element) => element.dataset.resourceOpen).sort());
-  await chooseRelation(box, "fixture-second-box");
-  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource]);
-  await chooseRelation(project, FIXTURE_IDS.project);
-  expect(await listed()).toEqual([]);
-  await chooseRelation(project, "__none__");
-  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource]);
-  await chooseRelation(box, "__none__");
-  expect(await listed()).toEqual([FIXTURE_IDS.titleSearchResource]);
-  await chooseRelation(box, "");
-  expect(await listed()).toEqual([FIXTURE_IDS.bodySearchResource, FIXTURE_IDS.titleSearchResource].sort());
-  await chooseRelation(project, "");
-  expect(await listed()).toContain(FIXTURE_IDS.resource);
+  const allIds = await listed();
+  await expect(list.locator('[data-resource-group="all"]')).toHaveCount(1);
+  const floating = await openSettledResource(page, FIXTURE_IDS.resource);
+  await floating.locator(".block-editor").evaluate((element) => { globalThis.__groupEditor = element; });
+  for (const mode of ["boxes", "projects", "all"]) {
+    await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).evaluate((button) => button.click());
+    expect(await listed()).toEqual(allIds);
+    expect(new Set(await listed()).size).toBe(allIds.length);
+    expect(await floating.locator(".block-editor").evaluate((element) => element === globalThis.__groupEditor)).toBe(true);
+    if (mode === "boxes") {
+      await expect(list.locator('[data-resource-group="fixture-empty-box"] h2')).toHaveText("Empty Box");
+      await expect(list.locator('[data-resource-group="fixture-empty-box"] [data-resource-open]')).toHaveCount(0);
+      await expect(list.locator('[data-resource-group="fixture-second-box"] [data-resource-open]')).toHaveCount(1);
+      await expect(list.locator('[data-resource-group=""] [data-resource-open]')).toHaveAttribute("data-resource-open", FIXTURE_IDS.titleSearchResource);
+    }
+    if (mode === "projects") {
+      await expect(list.locator('[data-resource-group="fixture-no-box-project"] h2')).toHaveText("No Box Project");
+      await expect(list.locator('[data-resource-group="fixture-no-box-project"] [data-resource-open]')).toHaveCount(0);
+      await expect(list.locator('[data-resource-group=""] [data-resource-open]')).toHaveCount(2);
+    }
+  }
+  await floating.locator(".resource-document-close").click();
   await page.waitForTimeout(650);
   const filtered = await fixtureSnapshot(request);
   expect(filtered.writes).toEqual(before.writes);
@@ -167,13 +188,26 @@ test("Resource 도킹은 겹친 창의 최대 너비만 배경에서 빼고 resi
   await expect(a).toHaveAttribute("data-docked", "true");
   await expectLayout();
   expect((await layout.boundingBox()).width).toBeLessThan(originalWidth - 250);
+  const smallHandle = await a.locator('[data-resource-resize="w"]').boundingBox();
+  await page.mouse.move(smallHandle.x + smallHandle.width / 2, smallHandle.y + smallHandle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(page.viewportSize().width - 5, smallHandle.y + smallHandle.height / 2, { steps: 12 });
+  await page.mouse.up();
+  expect((await a.boundingBox()).width).toBe(300);
+  await expect.poll(() => a.locator("[data-resource-relations]").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
   const b = await openSettledResource(page, FIXTURE_IDS.bodySearchResource);
   const dock = await a.boundingBox();
   await drag(b, dock.x + dock.width / 2, 60);
   await expect(b).toHaveAttribute("data-docked", "true");
   await expectLayout();
   const handle = await b.locator('[data-resource-resize="w"]').boundingBox();
-  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  expect(handle.width).toBe(20);
+  expect(await b.locator('[data-resource-resize="w"]').evaluate((element) => ["::before", "::after"].every((pseudo) => {
+    const style = getComputedStyle(element, pseudo);
+    return style.content !== "none" && style.display !== "none" && Number(style.opacity) > 0;
+  }))).toBe(true);
+  // Start in the newly widened outer half, outside the former 10px hit target.
+  await page.mouse.move(handle.x + 2, handle.y + handle.height / 2);
   await page.mouse.down();
   await page.mouse.move(10, handle.y + handle.height / 2, { steps: 15 });
   await page.mouse.up();
@@ -220,7 +254,7 @@ test("Resource Cmd+W는 활성 창만 닫고 배경 포커스와 반복 입력�
 test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를 유지하며 열기만 해서는 저장하지 않는다", async ({ page, request }) => {
   await openResourceList(page);
   const before = await fixtureSnapshot(request);
-  const list = page.locator('[aria-labelledby="resource-list-title"]');
+  const list = page.locator('[data-resource-group="all"]');
   const opener = page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`);
 
   await opener.click();

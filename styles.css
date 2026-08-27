@@ -5836,13 +5836,85 @@ button:focus-visible {
   background-color: rgba(255, 255, 255, 0.18);
 }
 
-.resource-list-filters,
+.resource-view-toolbar {
+  display: flex;
+  margin: -28px 0 28px;
+}
+
+.resource-view-toolbar .view-mode-group {
+  flex-wrap: wrap;
+}
+
+.resource-view-toolbar .view-mode-button.is-active {
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  color: var(--blue);
+}
+
+.resource-groups {
+  display: grid;
+  gap: 28px;
+}
+
 .resource-document .resource-relations {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
   min-width: 0;
   margin: 20px 0 0;
   border: 0;
   padding: 0;
+}
+
+.resource-relations > .field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 8px;
+  min-width: 0;
+}
+
+.resource-relations > .field:last-child {
+  justify-content: flex-end;
+}
+
+.resource-relations .finance-select {
+  max-width: 100%;
+}
+
+.resource-document .resource-relations .finance-select .finance-select-trigger {
+  width: auto;
+  max-width: 100%;
+  min-height: 32px;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.resource-relations .finance-select-trigger > span:last-child {
+  display: none;
+}
+
+.resource-relations .finance-select-trigger:hover:not(:disabled) {
+  color: var(--blue);
+}
+
+.resource-relations .finance-select-trigger:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.resource-relations .finance-select-options {
+  left: 0;
+  right: auto;
+  width: min(240px, calc(100vw - 24px));
+}
+
+.resource-relations > .field:last-child .finance-select-options {
+  left: auto;
+  right: 0;
 }
 
 .resource-document-root {
@@ -5979,6 +6051,43 @@ button:focus-visible {
 .resource-window-resize[data-resource-resize="se"] { bottom: -5px; right: -5px; cursor: nwse-resize; }
 .resource-window-resize[data-resource-resize="sw"] { bottom: -5px; left: -5px; cursor: nesw-resize; }
 .resource-window-resize[data-resource-resize="nw"] { top: -5px; left: -5px; cursor: nwse-resize; }
+
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"] {
+  --resource-resize-line: rgba(15, 23, 42, 0.12);
+  --resource-resize-grip: rgba(15, 23, 42, 0.28);
+  left: -10px;
+  width: 20px;
+}
+
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"]::before,
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  transition: background-color 140ms var(--ease);
+}
+
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"]::before {
+  inset: 0 auto 0 10px;
+  width: 1px;
+  background: var(--resource-resize-line);
+}
+
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"]::after {
+  top: 50%;
+  left: 9px;
+  width: 3px;
+  height: 40px;
+  border-radius: 999px;
+  background: var(--resource-resize-grip);
+  transform: translateY(-50%);
+}
+
+.resource-window[data-docked="true"] > .resource-window-resize[data-resource-resize="w"]:hover,
+.resource-window[data-docked="true"].is-resizing > .resource-window-resize[data-resource-resize="w"] {
+  --resource-resize-line: rgba(15, 23, 42, 0.22);
+  --resource-resize-grip: rgba(15, 23, 42, 0.48);
+}
 
 .resource-list {
   display: grid;
