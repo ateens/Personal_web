@@ -7690,7 +7690,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
     <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="${block.type}" data-checked="${block.checked ? "true" : "false"}" data-indent="${indent}"${listSemanticAttr}${colorAttr}${backgroundColorAttr}${toggleHeadingAttr} data-toggle-collapsed="${toggleCollapsed ? "true" : "false"}" data-toggle-has-children="${meta.hasToggleChildren ? "true" : "false"}"${hiddenAttr}${blockStyle}>
       ${blockTools}
       ${block.type === "todo" ? `<button class="block-check ${block.checked ? "is-done" : ""}" type="button" data-block-check="${block.id}" aria-label="체크" aria-pressed="${block.checked ? "true" : "false"}"></button>` : ""}
-      ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}">▸</button>` : ""}
+      ${block.type === "toggle" ? `<button class="block-toggle" type="button" data-block-toggle="${block.id}" aria-label="${toggleCollapsed ? "토글 펼치기" : "토글 접기"}" aria-expanded="${toggleCollapsed ? "false" : "true"}"></button>` : ""}
       ${listMarker}
       ${renderEditableBlockContent(block, "", ownerType, ownerId)}
     </div>

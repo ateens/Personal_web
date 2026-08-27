@@ -7119,7 +7119,7 @@ body.is-resource-document-open {
   border-top: 5px solid transparent;
   border-bottom: 5px solid transparent;
   border-left: 7px solid currentColor;
-  transform: translateX(1px);
+  transform: rotate(0deg);
   transition: transform 180ms cubic-bezier(0.16, 0.92, 0.22, 1), opacity 140ms var(--ease);
 }
 
@@ -7135,7 +7135,7 @@ body.is-resource-document-open {
 }
 
 .block[data-type="toggle"][data-toggle-collapsed="false"] .block-toggle::before {
-  transform: translateY(1px) rotate(90deg);
+  transform: rotate(90deg);
 }
 
 .block[data-type="toggle"][data-toggle-has-children="false"] .block-toggle {
