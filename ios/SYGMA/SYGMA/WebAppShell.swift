@@ -106,6 +106,8 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     #elseif canImport(AppKit)
     private var popupWindows: [ObjectIdentifier: NSWindow] = [:]
     private var popupWebViews: [ObjectIdentifier: WKWebView] = [:]
+    private var resourceCloseKeyMonitor: Any?
+    private var resourceCloseInFlight = false
     #endif
 
     func makeMainWebView() -> WKWebView {
@@ -127,11 +129,20 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         configure(webView)
         observeAppActivation()
         configureWorkspaceBridge(for: webView)
+        #if canImport(AppKit) && !canImport(UIKit)
+        configureResourceCloseShortcut(for: webView)
+        #endif
         webView.load(URLRequest(url: SYGMAWebRuntime.homeURL))
         return webView
     }
 
     func tearDown(_ webView: WKWebView) {
+        #if canImport(AppKit) && !canImport(UIKit)
+        if let resourceCloseKeyMonitor {
+            NSEvent.removeMonitor(resourceCloseKeyMonitor)
+            self.resourceCloseKeyMonitor = nil
+        }
+        #endif
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -147,6 +158,49 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         }
         closeAllPopups()
     }
+
+    #if canImport(AppKit) && !canImport(UIKit)
+    private func configureResourceCloseShortcut(for webView: WKWebView) {
+        resourceCloseKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak webView] event in
+            guard let self, let webView,
+                  let window = webView.window,
+                  window === NSApp.keyWindow,
+                  event.window === window,
+                  SYGMAWebRuntime.isInternal(webView.url),
+                  event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+                  event.keyCode == 13 || event.charactersIgnoringModifiers?.lowercased() == "w" else { return event }
+            // Consume repeats as well: holding Cmd+W must never fall through to closing the app window.
+            guard !event.isARepeat, !self.resourceCloseInFlight else { return nil }
+            self.resourceCloseInFlight = true
+            Task { @MainActor [weak self, weak webView, weak window] in
+                guard let self else { return }
+                defer { self.resourceCloseInFlight = false }
+                guard self.resourceCloseKeyMonitor != nil,
+                      let webView, let window,
+                      window === NSApp.keyWindow,
+                      webView.window === window,
+                      SYGMAWebRuntime.isInternal(webView.url) else { return }
+                do {
+                    let handled = try await webView.callAsyncJavaScript(
+                        "return typeof window.closeActiveResourceWindowFromShortcut === 'function' ? await window.closeActiveResourceWindowFromShortcut() : false;",
+                        arguments: [:],
+                        in: nil,
+                        contentWorld: .page
+                    )
+                    guard self.resourceCloseKeyMonitor != nil,
+                          window === NSApp.keyWindow,
+                          webView.window === window,
+                          SYGMAWebRuntime.isInternal(webView.url) else { return }
+                    guard let handled = handled as? Bool else { NSSound.beep(); return }
+                    if !handled { window.performClose(nil) }
+                } catch {
+                    NSSound.beep()
+                }
+            }
+            return nil
+        }
+    }
+    #endif
 
     private func configureWorkspaceBridge(for webView: WKWebView) {
         SYGMAWorkspaceBridge.flushHandler = { [weak webView] in

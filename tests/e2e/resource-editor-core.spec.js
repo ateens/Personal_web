@@ -1069,7 +1069,7 @@ test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 한
   expect(geometry.bottomGap).toBeGreaterThanOrEqual(geometry.lineHeight - 2);
 });
 
-test("Resource 토글 기본 텍스트와 heading1~6은 화살표가 첫 줄 중앙에 맞는다", async ({ page, request }) => {
+test("Resource 토글은 화살표가 첫 줄 중앙에 맞고 제목과 본문의 왼쪽 여백이 같다", async ({ page, request }) => {
   const variants = ["default", "heading1", "heading2", "heading3", "heading4", "heading5", "heading6"];
   const blocks = variants.flatMap((variant, index) => {
     const toggle = {
@@ -1087,11 +1087,15 @@ test("Resource 토글 기본 텍스트와 heading1~6은 화살표가 첫 줄 중
       { id: `toggle-alignment-child-${index}`, type: "paragraph", text: "토글 자식", marks: [], checked: false, indent: 1, collapsed: false },
     ];
   });
+  blocks.splice(2, 0,
+    { ...paragraph("toggle-alignment-nested", "중첩 토글"), type: "toggle", toggleHeading: "heading2", indent: 1 },
+    { ...paragraph("toggle-alignment-nested-child", "중첩 본문"), indent: 2 },
+  );
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, blocks);
   const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
   await settleAnimationFrames(page);
 
-  const measurements = await editor.locator('[data-type="toggle"]').evaluateAll((elements) => elements.map((element) => {
+  const measurements = await editor.locator('[data-type="toggle"][data-indent="0"]').evaluateAll((elements) => elements.map((element) => {
     const control = element.querySelector("[data-block-toggle]");
     const content = element.querySelector("[data-block-content]");
     const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
@@ -1119,6 +1123,19 @@ test("Resource 토글 기본 텍스트와 heading1~6은 화살표가 첫 줄 중
       measurement.absoluteDelta,
       `${measurement.variant}: toggle=${measurement.controlCenter}, first-line=${measurement.lineCenter}, delta=${measurement.delta}`,
     ).toBeLessThanOrEqual(2);
+  }
+  for (const variant of variants.filter((_, index) => index % 2 === 1)) {
+    await editor.locator(`[data-block-toggle="toggle-alignment-${variant}"]`).click();
+  }
+  await expect(editor.locator(".toggle-child-animation-group")).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    const maxLeftDelta = await editor.locator('[data-type="toggle"]').evaluateAll((elements) => Math.max(...elements.map((element) => {
+      const title = element.querySelector("[data-block-content]").getBoundingClientRect();
+      const body = element.nextElementSibling.querySelector("[data-block-content]").getBoundingClientRect();
+      return Math.abs(body.left - title.left);
+    })));
+    expect(maxLeftDelta, `toggle body alignment at ${width}px`).toBeLessThanOrEqual(1);
   }
 });
 

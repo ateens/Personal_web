@@ -689,6 +689,12 @@ let ui = {
   editingHabitId: "",
   habitDeleteConfirmId: "",
   activeResourceId: "",
+  resourceWindows: [],
+  resourceWindowOrder: 0,
+  resourceWindowZ: 0,
+  resourceWindowDrag: null,
+  resourceWindowFocusVersion: 0,
+  resourceWindowFocused: false,
   habitDayCount: 0,
   draggedTaskId: "",
   pendingTodayTaskDrag: null,
@@ -752,6 +758,8 @@ function init() {
   app.addEventListener("drop", handleDrop);
 
   document.addEventListener("keydown", handleDocumentKeydown);
+  document.addEventListener("keydown", handleResourceWindowCloseShortcut, true);
+  window.closeActiveResourceWindowFromShortcut = closeActiveResourceWindowFromShortcut;
   document.addEventListener("keyup", handleDocumentKeyup);
   document.addEventListener("click", handleDocumentClick);
   document.addEventListener("copy", handleDocumentCopy);
@@ -763,6 +771,7 @@ function init() {
   document.addEventListener("scroll", cancelPendingPointerDrags, true);
   document.addEventListener("scroll", scheduleFinanceSelectPositionSync, true);
   document.addEventListener("scroll", scheduleCodeLanguagePositionSync, true);
+  document.addEventListener(pointerMoveEvent, handleResourceWindowPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleEditorMarqueePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleBlockPointerMove, true);
@@ -770,12 +779,15 @@ function init() {
   document.addEventListener(pointerMoveEvent, handleDeleteDragPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleSchedulePointerMove, true);
   document.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
+  document.addEventListener(pointerUpEvent, finishResourceWindowPointer, true);
   document.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
   document.addEventListener(pointerUpEvent, finishBlockDrag, true);
   document.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
   document.addEventListener(pointerUpEvent, finishDeleteDrag, true);
   document.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   if (pointerEventsSupported) {
+    document.addEventListener("pointercancel", cancelResourceWindowPointer, true);
+    document.addEventListener("lostpointercapture", cancelResourceWindowPointer, true);
     document.addEventListener("pointercancel", cancelNavPointerDrag, true);
     document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
     document.addEventListener("pointercancel", cancelBlockDrag, true);
@@ -796,6 +808,10 @@ function init() {
   window.addEventListener("resize", scheduleInlineToolbarPositionSync);
   window.addEventListener("resize", scheduleFinanceSelectPositionSync);
   window.addEventListener("resize", scheduleCodeLanguagePositionSync);
+  window.addEventListener("resize", reflowResourceWindows);
+  window.addEventListener("blur", cancelResourceWindowPointer);
+  window.visualViewport?.addEventListener("resize", reflowResourceWindows);
+  window.visualViewport?.addEventListener("scroll", reflowResourceWindows);
   window.visualViewport?.addEventListener("resize", scheduleInlineToolbarPositionSync);
   window.visualViewport?.addEventListener("resize", scheduleFinanceSelectPositionSync);
   window.visualViewport?.addEventListener("resize", scheduleCodeLanguagePositionSync);
@@ -943,11 +959,11 @@ function setWorkspaceAuthorityMode(mode = "ready") {
 
 function syncWorkspaceAuthorityGate() {
   const blocked = app.dataset.workspaceAuthority !== "ready" && ui.view !== "finance";
-  const resourceDocumentOpen = ui.view === "resources" && Boolean(ui.activeResourceId);
+  const modalOpen = Boolean(ui.taskPlacement || ui.todayBatch);
   app.classList.toggle("is-workspace-authority-blocked", blocked);
   const layout = app.querySelector(".layout");
   for (const element of [layout, els.fab, els.detailRoot, els.overlayRoot]) {
-    if (element) element.inert = blocked || (resourceDocumentOpen && (element === layout || element === els.fab));
+    if (element) element.inert = blocked || (modalOpen && element !== els.overlayRoot);
   }
   const gate = app.querySelector("[data-workspace-authority-gate]");
   if (!gate) return;
@@ -1041,7 +1057,6 @@ function setView(view, options = {}) {
     return;
   }
   if (view === "finance") financeWorkspace.status = "idle";
-  if (view !== "resources") ui.activeResourceId = "";
   ui.view = view;
   ui.selectedBlockMenu = null;
   ui.inlineToolbar = null;
@@ -1653,8 +1668,6 @@ function renderBoxes() {
 
 function renderResources() {
   const resources = state.resources.filter((resource) => !resource.trashedAt);
-  const activeResource = resources.find((resource) => resource.id === ui.activeResourceId) || null;
-  if (ui.activeResourceId && !activeResource) ui.activeResourceId = "";
   return `
     <section class="view" data-resource-view>
       ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
@@ -1689,18 +1702,20 @@ function renderResourceDocument(resource) {
   const blocksList = ensureEditableBlocks(resource, { save: false });
   const readOnly = !resourceMutationAllowed(resource);
   return `
-    <div class="resource-document-backdrop" data-resource-back aria-hidden="true"></div>
+    <div class="resource-window" data-resource-window="${esc(resource.id)}">
     <article
       class="panel resource-document"
       data-resource-document="${esc(resource.id)}"
       role="dialog"
-      aria-modal="true"
+      aria-modal="false"
       aria-labelledby="resource-dialog-label-${esc(resource.id)}"
       tabindex="-1"
     >
       <h2 class="visually-hidden" id="resource-dialog-label-${esc(resource.id)}">자료 편집</h2>
       <div class="visually-hidden" data-resource-announcements role="status" aria-live="polite" aria-atomic="true"></div>
-      <button class="resource-document-close" type="button" data-resource-back aria-label="자료 닫기">×</button>
+      <div class="resource-window-titlebar" data-resource-window-drag="${esc(resource.id)}" tabindex="0" aria-label="자료 창 이동, 방향키로 이동, Shift와 방향키로 크기 조절">
+        <button class="resource-document-close" type="button" data-resource-back="${esc(resource.id)}" aria-label="자료 닫기">×</button>
+      </div>
       <label class="visually-hidden" for="resource-title-${esc(resource.id)}">자료 제목</label>
       <textarea
         class="resource-document-title"
@@ -1718,33 +1733,47 @@ function renderResourceDocument(resource) {
         </div>
       </section>
     </article>
+    ${["n", "ne", "e", "se", "s", "sw", "w", "nw"].map((direction) => `<span class="resource-window-resize" data-resource-resize="${direction}" aria-hidden="true"></span>`).join("")}
+    </div>
   `;
 }
 
 function syncResourceDocumentDialog() {
-  const resource = ui.view === "resources" ? itemById("resources", ui.activeResourceId) : null;
-  const open = Boolean(resource && !resource.trashedAt);
-  if (open) {
-    if (els.detailRoot.dataset.resourceDialog !== resource.id) {
-      if (els.detailRoot.dataset.resourceDialog) {
-        cancelEditorMarqueeDrag();
-        clearBlockSelection();
-      }
-      els.detailRoot.innerHTML = renderResourceDocument(resource);
-      els.detailRoot.dataset.resourceDialog = resource.id;
-    }
-  } else {
-    if (ui.pendingEditorMarquee || ui.editorMarquee?.ownerType === "resources") cancelEditorMarqueeDrag();
-    if (ui.blockSelection.ownerType === "resources") clearBlockSelection();
-    els.detailRoot.innerHTML = "";
-    delete els.detailRoot.dataset.resourceDialog;
+  ui.resourceWindows = ui.resourceWindows.filter((record) => {
+    const resource = itemById("resources", record.id);
+    return resource && !resource.trashedAt;
+  });
+  if (!resourceWindowById(ui.activeResourceId)) {
+    ui.activeResourceId = ui.resourceWindows.reduce((latest, record) => !latest || record.z > latest.z ? record : latest, null)?.id || "";
+    ui.resourceWindowFocusVersion += 1;
   }
+  if (!ui.activeResourceId) ui.resourceWindowFocused = false;
+  for (const element of els.detailRoot.querySelectorAll("[data-resource-window]")) {
+    if (resourceWindowById(element.dataset.resourceWindow)) continue;
+    if (ui.resourceWindowDrag?.id === element.dataset.resourceWindow) cancelResourceWindowPointer();
+    element.resourceGeometryAnimation?.cancel();
+    element.remove();
+  }
+  const open = ui.resourceWindows.length > 0;
   els.detailRoot.hidden = !open;
   els.detailRoot.classList.toggle("resource-document-root", open);
-  app.querySelector(".layout")?.toggleAttribute("inert", open);
-  els.fab?.toggleAttribute("inert", open);
-  document.documentElement.classList.toggle("is-resource-document-open", open);
-  document.body.classList.toggle("is-resource-document-open", open);
+  for (const record of ui.resourceWindows) {
+    let element = resourceWindowElement(record.id);
+    const isNew = !element;
+    if (isNew) {
+      els.detailRoot.insertAdjacentHTML("beforeend", renderResourceDocument(itemById("resources", record.id)));
+      element = resourceWindowElement(record.id);
+    }
+    element.dataset.active = String(record.id === ui.activeResourceId);
+    syncResourceWindowGeometry(record);
+    if (isNew && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      element.animate([{ opacity: 0, transform: "translateY(8px) scale(0.985)" }, { opacity: 1, transform: "none" }], {
+        duration: 240, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+      });
+    }
+  }
+  syncResourceDockLayout();
+  syncWorkspaceAuthorityGate();
 }
 
 function renderHabits() {
@@ -7579,6 +7608,7 @@ function renderBlocks(blocksList, ownerType, ownerId) {
     const listMarker = numberedListMarkerForBlock(block, indent, numberedCounters);
     html += renderBlock(block, ownerType, ownerId, {
       hidden: stackHasCollapsedToggle(toggleStack),
+      toggleDepth: toggleStack.length,
       indent,
       listMarker,
       listItem: Boolean(listType),
@@ -7647,7 +7677,7 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   const toggleHeading = normalizeToggleHeading(block.toggleHeading);
   const toggleHeadingAttr = block.type === "toggle" && toggleHeading ? ` data-toggle-heading="${toggleHeading}"` : "";
   const listSemanticAttr = meta.listItem ? ` role="listitem" aria-level="${indent + 1}"` : "";
-  const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor);
+  const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor, ownerType === "resources" ? meta.toggleDepth : 0);
   if (block.type === "divider") {
     return `
       <div class="block ${isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${block.id}" data-type="divider" data-checked="false" data-indent="${indent}"${colorAttr}${backgroundColorAttr}${hiddenAttr}${blockStyle}>
@@ -7898,8 +7928,9 @@ function normalizeToggleHeading(value = "") {
   return /^heading[1-6]$/.test(heading) ? heading : "";
 }
 
-function blockStyleForBlock(indent, color = "", backgroundColor = "") {
+function blockStyleForBlock(indent, color = "", backgroundColor = "", toggleDepth = 0) {
   const style = [`--block-indent:${indent}`];
+  if (toggleDepth) style.push(`--block-toggle-depth:${toggleDepth}`);
   const textColor = color ? BLOCK_COLOR_OPTIONS[color]?.text || "" : "";
   const background = backgroundColor ? BLOCK_COLOR_OPTIONS[backgroundColor]?.background || "" : "";
   if (textColor) style.push(`--block-text-color:${textColor}`);
@@ -8961,6 +8992,7 @@ function hasPendingLocalWorkspaceWork() {
     databaseBackendStatus.conflict ||
     localStateChangedBeforeDatabaseReady ||
     ui.composingBlockId ||
+    ui.resourceWindowDrag ||
     ui.blockDrag ||
     ui.todayTaskDrag ||
     ui.deleteDrag ||
@@ -9066,7 +9098,6 @@ function updateTaskSchedulingMode() {
   const taskPlacementOpen = Boolean(ui.taskPlacement);
   const todayBatchOpen = Boolean(ui.todayBatch);
   const modalOpen = taskPlacementOpen || todayBatchOpen;
-  const resourceDocumentOpen = ui.view === "resources" && Boolean(ui.activeResourceId);
   const relationPlacementOpen = taskPlacementOpen && Number(ui.taskPlacement?.phaseIndex || 0) > 0;
   app.classList.toggle("is-task-scheduling", Boolean(ui.scheduler?.dragging && ui.view === "tasks"));
   app.classList.toggle("is-task-placement", taskPlacementOpen);
@@ -9075,8 +9106,7 @@ function updateTaskSchedulingMode() {
   els.overlayRoot?.classList.toggle("has-relation-placement", relationPlacementOpen || ui.todayBatch?.phase === "place");
   document.documentElement.classList.toggle("is-task-placement-open", modalOpen);
   document.body.classList.toggle("is-task-placement-open", modalOpen);
-  app.querySelector(".layout")?.toggleAttribute("inert", modalOpen || resourceDocumentOpen);
-  els.fab?.toggleAttribute("inert", modalOpen || resourceDocumentOpen);
+  syncWorkspaceAuthorityGate();
   app.classList.toggle("is-delete-dragging", Boolean(ui.deleteDrag));
   app.classList.toggle("is-block-dragging", Boolean(ui.blockDrag?.active));
 }
@@ -10264,7 +10294,7 @@ function handleClick(event) {
   const resourceBack = event.target.closest("[data-resource-back]");
   if (resourceBack) {
     event.preventDefault();
-    closeResourceDocument();
+    closeResourceDocument(resourceBack.dataset.resourceBack);
     return;
   }
   const codeLanguageTrigger = event.target.closest("[data-code-language-trigger]");
@@ -11257,6 +11287,10 @@ function createResourceFromAction() {
 }
 
 function createResource(title = "새 자료") {
+  if (ui.resourceWindows.length >= 3 && ui.resourceWindows.every((record) => record.docked)) {
+    showToast("고정된 창이 3개 열려 있습니다. 창 하나를 닫거나 왼쪽으로 꺼내주세요.");
+    return null;
+  }
   const createdAt = new Date().toISOString();
   const resource = normalizeResourceRecord({
     id: id(),
@@ -11276,38 +11310,47 @@ function createResource(title = "새 자료") {
   }, createdAt);
   state.resources.push(resource);
   dirtyResourceIds.add(resource.id);
-  ui.activeResourceId = resource.id;
   if (ui.view !== "resources") {
     ui.view = "resources";
     updateNav();
   }
   saveState();
   renderView({ soft: true });
-  renderOverlays();
-  requestAnimationFrame(() => document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`)?.focus());
+  openResourceDocument(resource.id, { focusTitle: true });
   showToast("새 자료를 만들었습니다.");
   return resource;
 }
 
-function openResourceDocument(resourceId) {
+function openResourceDocument(resourceId, options = {}) {
   const resource = itemById("resources", resourceId);
   if (!resource || resource.trashedAt) return false;
-  if (ui.activeResourceId && ui.activeResourceId !== resource.id) {
-    cancelEditorMarqueeDrag();
-    clearBlockSelection();
+  if (!resourceWindowById(resource.id)) {
+    let replaced = null;
+    if (ui.resourceWindows.length >= 3) {
+      replaced = ui.resourceWindows.filter((record) => !record.docked)
+        .reduce((latest, record) => !latest || record.opened > latest.opened ? record : latest, null);
+      if (!replaced) {
+        showToast("고정된 창이 3개 열려 있습니다. 창 하나를 닫거나 왼쪽으로 꺼내주세요.");
+        return false;
+      }
+      flushResourceWindowInputs(replaced.id);
+      ui.resourceWindows = ui.resourceWindows.filter((record) => record !== replaced);
+    }
+    const record = createResourceWindowState(resource.id);
+    if (replaced) {
+      record.rect = { ...replaced.rect };
+      record.floatingRect = { ...replaced.floatingRect };
+    }
+    ui.resourceWindows.push(record);
   }
-  ui.activeResourceId = resource.id;
-  ui.selectedBlockMenu = null;
-  ui.inlineToolbar = null;
-  ui.linkPopover = null;
-  ui.resourceCitationPopover = null;
-  ui.commentPopover = null;
-  ui.equationPopover = null;
-  renderView({ soft: true });
-  renderOverlays();
+  activateResourceWindow(resource.id);
+  syncResourceDocumentDialog();
+  const focusVersion = ui.resourceWindowFocusVersion;
   requestAnimationFrame(() => {
+    if (ui.activeResourceId !== resource.id || ui.resourceWindowFocusVersion !== focusVersion || !resourceWindowById(resource.id)) return;
+    if (resourceWindowElement(resource.id)?.contains(document.activeElement)) return;
     const title = document.querySelector(`[data-resource-title="${cssEscape(resource.id)}"]`);
-    if (!String(resource.title || "").trim()) {
+    if (options.focusTitle || !String(resource.title || "").trim()) {
       title?.focus({ preventScroll: true });
       return;
     }
@@ -11324,44 +11367,335 @@ function openResourceDocument(resourceId) {
   return true;
 }
 
-function closeResourceDocument() {
-  const resourceId = ui.activeResourceId;
+function clearResourceWindowEditingState() {
   cancelEditorMarqueeDrag();
   clearBlockSelection();
-  ui.activeResourceId = "";
   ui.selectedBlockMenu = null;
   ui.inlineToolbar = null;
   ui.linkPopover = null;
   ui.resourceCitationPopover = null;
   ui.commentPopover = null;
   ui.equationPopover = null;
+  ui.mention = null;
+  ui.pageCommand = null;
+  ui.emojiCommand = null;
+  ui.urlPasteChoice = null;
+  ui.recentBlockFocus = null;
   cancelInlineToolbarSelectionDelay();
-  renderView({ soft: true });
-  renderOverlays();
-  requestAnimationFrame(() => document.querySelector(`[data-resource-open="${cssEscape(resourceId)}"]`)?.focus({ preventScroll: true }));
 }
 
-function trapResourceDocumentFocus(event) {
-  const dialog = els.detailRoot?.querySelector("[data-resource-document]");
-  if (!dialog || event.key !== "Tab" || event.target.closest?.("[data-block-content][contenteditable='true']")) return false;
-  const selector = "a[href], button:not([disabled]), summary, textarea:not([disabled]), input:not([disabled]):not([type='file']), select:not([disabled]), [contenteditable='true'], [tabindex]:not([tabindex='-1'])";
-  const focusable = [dialog, els.overlayRoot]
-    .flatMap((scope) => [...scope.querySelectorAll(selector)])
-    .filter((element) => !element.hidden && element.getClientRects().length);
-  if (!focusable.length) return false;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (
-    !focusable.includes(document.activeElement)
-    || (!event.shiftKey && document.activeElement === last)
-    || (event.shiftKey && document.activeElement === first)
-  ) {
+function activateResourceWindow(resourceId) {
+  const record = resourceWindowById(resourceId);
+  if (!record) return false;
+  ui.resourceWindowFocused = true;
+  if (ui.activeResourceId !== resourceId) {
+    flushPendingEditorTextHistory();
+    clearResourceWindowEditingState();
+    ui.activeResourceId = resourceId;
+    ui.resourceWindowFocusVersion += 1;
+    record.z = ++ui.resourceWindowZ;
+    for (const entry of ui.resourceWindows) {
+      const element = resourceWindowElement(entry.id);
+      if (!element) continue;
+      element.dataset.active = String(entry.id === resourceId);
+      element.style.zIndex = String(entry.z);
+    }
+    renderOverlays();
+  }
+  return true;
+}
+
+function flushResourceWindowInputs(resourceId) {
+  const element = resourceWindowElement(resourceId);
+  if (!element) return;
+  const active = document.activeElement;
+  if (element.contains(active)) active.blur?.();
+  const composing = element.querySelector(`[data-block-content="${cssEscape(ui.composingBlockId || ui.recentCompositionCommit?.blockId || "")}"]`);
+  if (composing) {
+    if (isComposingBlock(composing)) ui.composingBlockId = "";
+    updateBlockText(composing);
+  }
+  const title = element.querySelector("[data-resource-title]");
+  if (title) updateResourceTitle(title);
+  if (ui.pendingEditorTextHistory?.ownerId === resourceId) flushPendingEditorTextHistory();
+}
+
+function closeResourceDocument(resourceId = ui.activeResourceId) {
+  if (!resourceWindowById(resourceId)) return;
+  const wasActive = ui.activeResourceId === resourceId;
+  if (ui.resourceWindowDrag?.id === resourceId) cancelResourceWindowPointer();
+  flushResourceWindowInputs(resourceId);
+  ui.resourceWindows = ui.resourceWindows.filter((record) => record.id !== resourceId);
+  if (wasActive) {
+    clearResourceWindowEditingState();
+    ui.activeResourceId = "";
+  }
+  renderView({ soft: true });
+  renderOverlays();
+  if (wasActive) {
+    const focusVersion = ui.resourceWindowFocusVersion;
+    requestAnimationFrame(() => {
+      if (focusVersion !== ui.resourceWindowFocusVersion) return;
+      const next = resourceWindowElement(ui.activeResourceId)?.querySelector("[data-resource-document]")
+        || document.querySelector(`[data-resource-open="${cssEscape(resourceId)}"]`);
+      next?.focus({ preventScroll: true });
+    });
+  }
+}
+
+function resourceWindowById(id) {
+  return ui.resourceWindows.find((record) => record.id === id) || null;
+}
+
+function closeActiveResourceWindowFromShortcut() {
+  if (!ui.resourceWindowFocused || !resourceWindowById(ui.activeResourceId)) return false;
+  if (app.dataset.workspaceAuthority !== "ready" || ui.taskPlacement || ui.todayBatch) return true;
+  closeResourceDocument(ui.activeResourceId);
+  return true;
+}
+
+function handleResourceWindowCloseShortcut(event) {
+  if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || (event.code !== "KeyW" && event.key.toLowerCase() !== "w")) return;
+  if (!event.repeat && !closeActiveResourceWindowFromShortcut()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function resourceDockWidth(width = 560) {
+  const viewportWidth = visualViewportBounds().width;
+  const navWidth = ui.navDocked ? parseFloat(getComputedStyle(app).getPropertyValue("--docked-nav-width")) || 0 : 0;
+  return Math.max(Math.min(300, viewportWidth), Math.min(width, viewportWidth >= 720 ? viewportWidth - navWidth - 320 : viewportWidth));
+}
+
+function syncResourceDockLayout() {
+  const width = visualViewportBounds().width >= 720
+    ? ui.resourceWindows.reduce((maximum, record) => record.docked || record.previewDock ? Math.max(maximum, record.rect.width) : maximum, 0)
+    : 0;
+  app.style.setProperty("--resource-dock-width", `${width}px`);
+  app.classList.toggle("has-docked-resource", width > 0);
+  app.classList.toggle("is-resource-window-resizing", Boolean(ui.resourceWindowDrag?.direction));
+}
+
+function handleResourceWindowKeydown(event) {
+  if (event.key === "Escape" && ui.resourceWindowDrag) {
     event.preventDefault();
     event.stopPropagation();
-    (event.shiftKey ? last : first).focus({ preventScroll: true });
+    cancelResourceWindowPointer();
     return true;
   }
-  return false;
+  if (!event.target.matches?.("[data-resource-window-drag]") || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return false;
+  const record = resourceWindowById(event.target.dataset.resourceWindowDrag);
+  if (!record) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (record.docked) {
+    record.rect = { ...record.floatingRect };
+    record.docked = false;
+  }
+  const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+  const step = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -16 : 16;
+  const key = event.shiftKey ? (horizontal ? "width" : "height") : (horizontal ? "x" : "y");
+  record.rect[key] += step;
+  record.floatingRect = { ...record.rect };
+  syncResourceWindowGeometry(record, { animate: true });
+  reflowResourceWindows();
+  return true;
+}
+
+function resourceWindowElement(id) {
+  return els.detailRoot?.querySelector(`[data-resource-window="${cssEscape(id)}"]`) || null;
+}
+
+function createResourceWindowState(id) {
+  const viewport = visualViewportBounds();
+  const edge = viewport.width <= 560 ? 10 : 20;
+  const width = Math.min(960, Math.max(1, viewport.width - edge * 2));
+  const height = Math.min(820, Math.max(1, viewport.height - edge * 2));
+  const cascade = (ui.resourceWindows.length % 3) * 24;
+  const rect = {
+    x: Math.min(viewport.right - width, viewport.left + (viewport.width - width) / 2 + cascade),
+    y: Math.min(viewport.bottom - height, viewport.top + (viewport.height - height) / 2 + cascade),
+    width,
+    height,
+  };
+  return { id, rect, floatingRect: { ...rect }, docked: false, previewDock: false, opened: ++ui.resourceWindowOrder, z: ++ui.resourceWindowZ };
+}
+
+function syncResourceWindowGeometry(record, { animate = false } = {}) {
+  const element = resourceWindowElement(record.id);
+  if (!element) return;
+  const before = element.getBoundingClientRect();
+  const target = { left: `${record.rect.x}px`, top: `${record.rect.y}px`, width: `${record.rect.width}px`, height: `${record.rect.height}px` };
+  Object.assign(element.style, target, { zIndex: String(record.z) });
+  element.dataset.docked = String(record.docked || record.previewDock);
+  element.classList.toggle("is-dock-preview", record.previewDock);
+  const previous = element.resourceGeometryAnimation;
+  if (animate && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    previous?.cancel();
+    const animation = element.animate([
+      { left: `${before.left}px`, top: `${before.top}px`, width: `${before.width}px`, height: `${before.height}px` },
+      target,
+    ], { duration: 340, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+    element.resourceGeometryAnimation = animation;
+    animation.onfinish = () => {
+      if (element.resourceGeometryAnimation === animation) element.resourceGeometryAnimation = null;
+    };
+  } else if (previous?.playState === "running") {
+    const frames = previous.effect.getKeyframes();
+    previous.effect.setKeyframes([frames[0], target]);
+  }
+  syncResourceDockLayout();
+}
+
+function beginResourceWindowPointer(event) {
+  if (!(event.target instanceof Element) || !canStartCustomPointerDrag(event)) return false;
+  const element = event.target.closest("[data-resource-window]");
+  if (!element) return false;
+  const record = resourceWindowById(element.dataset.resourceWindow);
+  if (!record) return false;
+  ui.resourceWindowFocusVersion += 1;
+  activateResourceWindow(record.id);
+  if (ui.resourceWindowDrag) return true;
+  const resize = event.target.closest("[data-resource-resize]");
+  const titlebar = event.target.closest("[data-resource-window-drag]");
+  if (!resize && (!titlebar || event.target.closest("button, input, textarea, select, a, [contenteditable='true']"))) return false;
+  const rect = { ...record.rect };
+  const floating = { ...(record.floatingRect || rect) };
+  const direction = resize?.dataset.resourceResize || "";
+  ui.resourceWindowDrag = {
+    id: record.id,
+    pointerId: eventPointerId(event),
+    captureTarget: element,
+    startX: event.clientX,
+    startY: event.clientY,
+    startRect: rect,
+    floating,
+    anchorX: Math.max(0, Math.min(1, (event.clientX - rect.x) / rect.width)),
+    anchorY: Math.max(0, Math.min(48, event.clientY - rect.y)),
+    direction,
+    original: { rect, floatingRect: floating, docked: record.docked, previewDock: record.previewDock, dockWidth: record.dockWidth },
+  };
+  element.classList.add(direction ? "is-resizing" : "is-dragging");
+  document.documentElement.style.setProperty("--resource-resize-cursor", direction ? `${direction}-resize` : "grabbing");
+  try { if (event.pointerId !== undefined) element.setPointerCapture(event.pointerId); } catch (_) {}
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function handleResourceWindowPointerMove(event) {
+  const drag = ui.resourceWindowDrag;
+  if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return false;
+  const record = resourceWindowById(drag.id);
+  if (!record) { cancelResourceWindowPointer(); return false; }
+  const viewport = visualViewportBounds();
+  const minWidth = Math.min(300, viewport.width);
+  const minHeight = Math.min(220, viewport.height);
+  const dx = event.clientX - drag.startX;
+  const dy = event.clientY - drag.startY;
+  if (!drag.moved && Math.hypot(dx, dy) < 3) return true;
+  drag.moved = true;
+  let animate = false;
+  if (drag.direction) {
+    if (drag.original.docked && !/[ns]/.test(drag.direction)) {
+      const width = resourceDockWidth(drag.startRect.width + (drag.direction.includes("w") ? -dx : dx));
+      record.rect = { x: viewport.right - width, y: viewport.top, width, height: viewport.height };
+      record.dockWidth = width;
+    } else {
+      const base = drag.original.docked ? { ...drag.floating, x: Math.min(drag.startRect.x, viewport.right - drag.floating.width), y: viewport.top } : drag.startRect;
+      let left = base.x;
+      let top = base.y;
+      let right = base.x + base.width;
+      let bottom = base.y + base.height;
+      if (drag.direction.includes("w")) left = Math.max(viewport.left, Math.min(right - minWidth, base.x + dx));
+      if (drag.direction.includes("e")) right = Math.min(viewport.right, Math.max(left + minWidth, base.x + base.width + dx));
+      if (drag.direction.includes("n")) top = Math.max(viewport.top, Math.min(bottom - minHeight, base.y + dy));
+      if (drag.direction.includes("s")) bottom = Math.min(viewport.bottom, Math.max(top + minHeight, base.y + base.height + dy));
+      animate = record.docked;
+      record.docked = false;
+      record.previewDock = false;
+      record.rect = { x: left, y: top, width: right - left, height: bottom - top };
+      record.floatingRect = { ...record.rect };
+    }
+  } else {
+    const dockLeft = ui.resourceWindows.reduce((left, other) => (
+      other !== record && other.docked ? Math.min(left, other.rect.x) : left
+    ), viewport.right - 64);
+    const dock = event.clientX >= dockLeft;
+    const width = Math.min(drag.floating.width, viewport.width);
+    const height = Math.min(drag.floating.height, viewport.height);
+    const floatingRect = {
+      x: Math.max(viewport.left, Math.min(viewport.right - width, event.clientX - width * drag.anchorX)),
+      y: Math.max(viewport.top, Math.min(viewport.bottom - height, event.clientY - drag.anchorY)),
+      width,
+      height,
+    };
+    animate = dock !== Boolean(record.docked || record.previewDock);
+    record.floatingRect = floatingRect;
+    record.docked = false;
+    record.previewDock = dock;
+    if (dock) {
+      const dockWidth = resourceDockWidth(record.dockWidth);
+      record.rect = { x: viewport.right - dockWidth, y: viewport.top, width: dockWidth, height: viewport.height };
+    } else record.rect = floatingRect;
+  }
+  syncResourceWindowGeometry(record, { animate });
+  event.preventDefault();
+  return true;
+}
+
+function finishResourceWindowPointer(event) {
+  const drag = ui.resourceWindowDrag;
+  if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return false;
+  handleResourceWindowPointerMove(event);
+  const record = resourceWindowById(drag.id);
+  if (record?.previewDock) {
+    record.docked = true;
+    record.previewDock = false;
+    record.dockWidth = record.rect.width;
+    syncResourceWindowGeometry(record);
+  }
+  ui.resourceWindowDrag = null;
+  drag.captureTarget.classList.remove("is-dragging", "is-resizing");
+  document.documentElement.style.removeProperty("--resource-resize-cursor");
+  syncResourceDockLayout();
+  try { if (drag.pointerId !== "mouse" && drag.captureTarget.hasPointerCapture(drag.pointerId)) drag.captureTarget.releasePointerCapture(drag.pointerId); } catch (_) {}
+  return true;
+}
+
+function cancelResourceWindowPointer(event = null) {
+  const drag = ui.resourceWindowDrag;
+  if (!drag || (event?.type !== "blur" && event && !sameMouseLikePointer(drag.pointerId, event))) return false;
+  ui.resourceWindowDrag = null;
+  const record = resourceWindowById(drag.id);
+  if (record) {
+    Object.assign(record, drag.original, { rect: { ...drag.original.rect }, floatingRect: { ...drag.original.floatingRect } });
+    syncResourceWindowGeometry(record, { animate: true });
+  }
+  drag.captureTarget.classList.remove("is-dragging", "is-resizing");
+  document.documentElement.style.removeProperty("--resource-resize-cursor");
+  syncResourceDockLayout();
+  try { if (drag.pointerId !== "mouse" && drag.captureTarget.hasPointerCapture(drag.pointerId)) drag.captureTarget.releasePointerCapture(drag.pointerId); } catch (_) {}
+  return true;
+}
+
+function reflowResourceWindows() {
+  cancelResourceWindowPointer();
+  const viewport = visualViewportBounds();
+  for (const record of ui.resourceWindows) {
+    for (const key of ["rect", "floatingRect"]) {
+      const rect = record[key];
+      rect.width = Math.min(viewport.width, Math.max(Math.min(300, viewport.width), rect.width));
+      rect.height = Math.min(viewport.height, Math.max(Math.min(220, viewport.height), rect.height));
+      rect.x = Math.max(viewport.left, Math.min(viewport.right - rect.width, rect.x));
+      rect.y = Math.max(viewport.top, Math.min(viewport.bottom - rect.height, rect.y));
+    }
+    if (record.docked) {
+      const width = resourceDockWidth(record.dockWidth);
+      record.rect = { x: viewport.right - width, y: viewport.top, width, height: viewport.height };
+    }
+    syncResourceWindowGeometry(record);
+  }
 }
 
 function codeLanguagePopoverIsOpen(menu) {
@@ -12136,6 +12470,12 @@ function shouldIgnoreDuplicateBlockParagraphInput(blockId) {
 }
 
 function handleFocusIn(event) {
+  const resourceWindow = event.target.closest("[data-resource-window]");
+  if (resourceWindow) activateResourceWindow(resourceWindow.dataset.resourceWindow);
+  else if (event.target.closest(".layout, .fab")) {
+    ui.resourceWindowFocused = false;
+    ui.resourceWindowFocusVersion += 1;
+  }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
   if (shouldPreserveBlockSelectionFocus(blockContent)) {
@@ -12455,6 +12795,7 @@ function canStartCustomPointerDrag(event) {
 
 function customPointerDragPendingOrActive() {
   return Boolean(
+    ui.resourceWindowDrag ||
     ui.pendingNavDrag ||
     ui.navPointerDrag ||
     ui.pendingBlockToolDrag ||
@@ -12935,7 +13276,7 @@ function blockSelectionAnnouncementKey(selection = {}) {
 }
 
 function announceAppStatus(message) {
-  const target = document.querySelector(".resource-document [data-resource-announcements]")
+  const target = resourceWindowElement(ui.activeResourceId)?.querySelector("[data-resource-announcements]")
     || els.appAnnouncements
     || document.querySelector("#appAnnouncements");
   if (!target) return;
@@ -15771,6 +16112,8 @@ function canBypassBlockClickSuppressionForDrag(event) {
 
 function handlePointerDown(event) {
   preferredVerticalCaretX = null;
+  if (event.target.closest(".layout, .fab")) ui.resourceWindowFocused = false;
+  if (beginResourceWindowPointer(event)) return;
   if (handleSelectedBlocksMenuOutsidePointerDown(event)) return;
 
   const todayBatchTask = event.target.closest("[data-today-batch-task]");
@@ -16738,12 +17081,12 @@ function trapTodayBatchFocus(event) {
 }
 
 function handleKeydown(event) {
+  if (handleResourceWindowKeydown(event)) return;
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && !event.isComposing) preferredVerticalCaretX = null;
   if (handleFinancePickerKeydown(event)) return;
   if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
   if (handleCodeLanguagePickerKeydown(event)) return;
-  if (trapResourceDocumentFocus(event)) return;
   if (handleUrlPasteChoiceKeydown(event)) return;
   if (handleInlineColorMenuKeydown(event)) return;
   if (handleSelectedBlockMenuKeydown(event)) return;
@@ -17236,6 +17579,7 @@ function toggleDockedNav() {
   ui.navShortcutHints = false;
   ui.navOpenedByShortcut = false;
   ui.navDocked = !ui.navDocked;
+  reflowResourceWindows();
   app.classList.remove("is-undocking-nav");
   if (ui.navDocked) {
     ui.navOpen = true;
@@ -17561,9 +17905,10 @@ function handleDocumentKeydown(event) {
       renderOverlays();
       return;
     }
-    if (ui.activeResourceId) {
+    const resourceWindow = event.target.closest?.("[data-resource-window]");
+    if (resourceWindow || (ui.activeResourceId && event.target.closest?.("#overlayRoot"))) {
       event.preventDefault();
-      closeResourceDocument();
+      closeResourceDocument(resourceWindow?.dataset.resourceWindow || ui.activeResourceId);
       return;
     }
   }
@@ -22841,7 +23186,8 @@ function ensureResourceCaretVisible(blockContent, options = {}) {
   const fontSize = Number.parseFloat(style.fontSize) || 16;
   const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.55;
   const reserveLines = Math.max(RESOURCE_CARET_RESERVE_LINES, Number(options.reserveLines) || 0);
-  const safeTop = documentRect.top + Math.max(18, lineHeight * 0.75);
+  const titlebarBottom = resourceDocument.querySelector("[data-resource-window-drag]")?.getBoundingClientRect().bottom || documentRect.top;
+  const safeTop = Math.max(documentRect.top, titlebarBottom) + Math.max(18, lineHeight * 0.75);
   const safeBottom = documentRect.bottom - Math.max(22, lineHeight * reserveLines);
   let delta = 0;
   if (caretRect.bottom > safeBottom) delta = caretRect.bottom - safeBottom;
@@ -22875,9 +23221,11 @@ function focusBlockContentAfterRender(blockId, options = {}) {
   };
   const focusIsSettled = (candidate) => Boolean(candidate && document.activeElement === candidate);
   const target = focusTarget();
+  const resourceFocusVersion = ui.resourceWindowFocusVersion;
   if (target) scheduleEnsureResourceCaretVisible(target, options);
   let remainingChecks = options.transaction === true ? 4 : 1;
   const verifyFocus = () => {
+    if (ui.resourceWindowFocusVersion !== resourceFocusVersion) return;
     let candidate = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
     if (!focusIsSettled(candidate)) candidate = focusTarget();
     if (candidate) scheduleEnsureResourceCaretVisible(candidate, options);

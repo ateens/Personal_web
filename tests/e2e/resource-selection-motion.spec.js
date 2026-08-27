@@ -29,6 +29,9 @@ async function openResource(page) {
   await page.locator('[data-nav-key="resources"]').evaluate((button) => button.click());
   await page.locator(`[data-resource-open="${RESOURCE_ID}"]`).click();
   await expect(page.locator(`[data-resource-document="${RESOURCE_ID}"]`)).toBeVisible();
+  await expect.poll(() => page.locator(`[data-resource-window="${RESOURCE_ID}"]`).evaluate((element) => (
+    element.getAnimations().every((animation) => animation.playState !== "running")
+  ))).toBe(true);
   return page.locator(`.block-editor[data-owner-type="resources"][data-owner-id="${RESOURCE_ID}"]`);
 }
 
