@@ -769,6 +769,54 @@ function fixtureResourceLinkIssues(incomingState) {
   return issues;
 }
 
+function fixtureStoredTableCells(block) {
+  if (block?.type !== "table" || typeof block.text !== "string") return null;
+  const lines = block.text.replace(/\r\n?/g, "\n").split("\n");
+  const split = (line, expected = 0, codePipes = false) => {
+    const source = line.trim().replace(/^\||(?<!\\)\|$/g, "");
+    const cells = [];
+    let cell = "";
+    let inCode = false;
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+      if (char === "\\" && source[index + 1] === "|") { cell += "|"; index += 1; }
+      else if (char === "|" && !inCode) { cells.push(cell.trim()); cell = ""; }
+      else { cell += char; if (codePipes && char === "`") inCode = !inCode; }
+    }
+    cells.push(cell.trim());
+    return expected && cells.length !== expected && !codePipes ? split(line, expected, true) : cells;
+  };
+  if (lines.length < 2 || !lines[1].includes("|")) return null;
+  const delimiter = split(lines[1]);
+  if (!delimiter.every((cell) => /^:?-{2,}:?$/.test(cell.replace(/\s+/g, "")))) return null;
+  const rows = [lines[0], ...lines.slice(2)].map((line) => split(line, delimiter.length));
+  return rows.every((row) => row.length === delimiter.length) ? rows : null;
+}
+
+function encodeMarkdownTableCellText(value = "") {
+  return String(value)
+    .replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char])
+    .replace(/[\\\`*_~\[\]]/g, "\\$&")
+    .replace(/^\s+|\s+$/g, (space) => Array.from(space, (char) => "&#" + char.codePointAt(0) + ";").join(""))
+    .replace(/\r/g, "&#13;")
+    .replace(/\n/g, "<br>");
+}
+
+function decodeMarkdownTableCellText(value = "") {
+  return String(value).replace(/<br\s*\/?>/gi, "\n").replace(/\\([\\\`*_~\[\]])/g, "$1")
+    .replace(/&(amp|lt|gt|#\d{1,7});/g, (entity, name) => {
+      if (name[0] !== "#") return { amp: "&", lt: "<", gt: ">" }[name];
+      const code = Number(name.slice(1));
+      const char = code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      return /\s/.test(char) ? char : entity;
+    });
+}
+
+function fixtureStoredTableCellText(block, row, column, cells = fixtureStoredTableCells(block)) {
+  const value = cells?.[row]?.[column];
+  return value === undefined ? undefined : decodeMarkdownTableCellText(value);
+}
+
 function fixtureBlockFormatIssues(incomingState) {
   const issues = [];
   const collections = ["boxes", "projects", "tasks", "resources", "habits", "journals"];
@@ -784,8 +832,59 @@ function fixtureBlockFormatIssues(incomingState) {
             issues.push({ path: `${path}.${field}`, code: "invalid_table_format", message: "Table format flags must be booleans on a table block." });
           }
         }
+        if (block.tableCellFormats !== undefined) {
+          const cells = fixtureStoredTableCells(block);
+          if (!cells || !block.tableCellFormats || typeof block.tableCellFormats !== "object" || Array.isArray(block.tableCellFormats)) {
+            issues.push({ path: `${path}.tableCellFormats`, code: "invalid_table_cell_formats", message: "Cell formats require a table and a coordinate map." });
+          } else {
+            for (const [key, format] of Object.entries(block.tableCellFormats)) {
+              const [row, column] = key.split(":").map(Number);
+              if (!/^(0|[1-9]\d*):(0|[1-9]\d*)$/.test(key) || cells[row]?.[column] === undefined) {
+                issues.push({ path: `${path}.tableCellFormats.${key}`, code: "invalid_table_cell_coordinate", message: "Cell formats must reference an existing table cell." });
+                continue;
+              }
+              if (!format || typeof format !== "object" || Array.isArray(format) || Object.entries(format).some(([field, value]) => {
+                if (["header", "bold"].includes(field)) return typeof value !== "boolean";
+                if (["color", "backgroundColor"].includes(field)) return value !== "" && !fixtureInlineColorKeys.has(value);
+                if (field === "align") return !["left", "center", "right"].includes(value);
+                return true;
+              })) issues.push({ path: `${path}.tableCellFormats.${key}`, code: "invalid_table_cell_format", message: "Cell formats require supported flags, colors and alignments." });
+            }
+          }
+        }
         if (block.columnWidths !== undefined && (block.type !== "table" || !Array.isArray(block.columnWidths) || block.columnWidths.length > 1000 || block.columnWidths.some((width) => !Number.isInteger(width) || width < 80 || width > 1200))) {
           issues.push({ path: `${path}.columnWidths`, code: "invalid_table_widths", message: "Table column widths must be integers from 80 to 1200 pixels." });
+        }
+        if (block.tableCellMarks !== undefined) {
+          const cells = fixtureStoredTableCells(block);
+          if (!cells || !block.tableCellMarks || typeof block.tableCellMarks !== "object" || Array.isArray(block.tableCellMarks)) {
+            issues.push({ path: `${path}.tableCellMarks`, code: "invalid_table_cell_marks", message: "Cell marks require a table and a coordinate map." });
+          } else {
+            let count = 0;
+            for (const [key, marks] of Object.entries(block.tableCellMarks)) {
+              const [row, column] = key.split(":").map(Number);
+              const text = fixtureStoredTableCellText(block, row, column, cells);
+              const markPath = `${path}.tableCellMarks.${key}`;
+              if (!/^(0|[1-9]\d*):(0|[1-9]\d*)$/.test(key) || text === undefined) {
+                issues.push({ path: markPath, code: "invalid_table_cell_coordinate", message: "Cell marks must reference an existing table cell." });
+                continue;
+              }
+              if (encodeMarkdownTableCellText(text) !== cells[row][column]) issues.push({ path: markPath, code: "invalid_table_cell_source", message: "Cells with inline marks must store escaped plain text." });
+              if (!Array.isArray(marks)) { issues.push({ path: markPath, code: "invalid_marks", message: "marks must be an array." }); continue; }
+              count += marks.length;
+              for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
+                const mark = marks[markIndex];
+                if (!mark || !["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "equation", "link", "resourceLink"].includes(mark.type)) {
+                  issues.push({ path: `${markPath}[${markIndex}]`, code: "unsupported_mark_type", message: "Unsupported inline mark type." });
+                  continue;
+                }
+                if (!Number.isInteger(mark.start) || !Number.isInteger(mark.end) || mark.start < 0 || mark.end <= mark.start || mark.end > text.length) issues.push({ path: `${markPath}[${markIndex}]`, code: "invalid_mark_range", message: "Mark range must be within cell text." });
+                if (["textColor", "backgroundColor"].includes(mark.type) && !fixtureInlineColorKeys.has(mark.color)) issues.push({ path: `${markPath}[${markIndex}].color`, code: "unsupported_inline_color", message: "Inline color must use a supported palette key." });
+                if (mark.type === "resourceLink") issues.push({ path: `${markPath}[${markIndex}]`, code: "resource_link_unsupported_block", message: "Resource links require an editable text block." });
+              }
+            }
+            if (count > 1000) issues.push({ path: `${path}.tableCellMarks`, code: "too_many_marks", message: "Cell marks exceed 1000 entries." });
+          }
         }
         const marks = Array.isArray(blocks[blockIndex]?.marks) ? blocks[blockIndex].marks : [];
         for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
@@ -846,7 +945,7 @@ function fixtureCommentAnchorIssues(incomingState) {
   const resources = Array.isArray(incomingState?.resources) ? incomingState.resources : [];
   for (let resourceIndex = 0; resourceIndex < resources.length; resourceIndex += 1) {
     const resource = resources[resourceIndex];
-    const blockTextLengths = new Map((Array.isArray(resource?.blocks) ? resource.blocks : []).map((block) => [block?.id, typeof block?.text === "string" ? block.text.length : 0]));
+    const blocksById = new Map((Array.isArray(resource?.blocks) ? resource.blocks : []).map((block) => [block?.id, block]));
     const threads = Array.isArray(resource?.commentThreads) ? resource.commentThreads : [];
     for (let threadIndex = 0; threadIndex < threads.length; threadIndex += 1) {
       const thread = threads[threadIndex];
@@ -859,9 +958,15 @@ function fixtureCommentAnchorIssues(incomingState) {
       }
       if (thread?.scope !== "inline") continue;
       const anchor = thread.anchor;
-      const textLength = blockTextLengths.get(anchor?.blockId);
-      if (!anchor || typeof anchor.blockId !== "string" || textLength === undefined) {
+      const block = blocksById.get(anchor?.blockId);
+      if (!anchor || typeof anchor.blockId !== "string" || !block) {
         issues.push({ path: `${path}.anchor.blockId`, code: "broken_comment_anchor", message: "Inline comment anchor must reference a block in the same Resource." });
+        continue;
+      }
+      const tableAnchor = anchor.tableRow !== undefined || anchor.tableColumn !== undefined;
+      const textLength = tableAnchor ? fixtureStoredTableCellText(block, anchor.tableRow, anchor.tableColumn)?.length : block.text?.length || 0;
+      if (tableAnchor ? block.type !== "table" || !Number.isInteger(anchor.tableRow) || !Number.isInteger(anchor.tableColumn) || textLength === undefined : block.type === "table") {
+        issues.push({ path: `${path}.anchor`, code: "invalid_comment_cell", message: "Table comment anchors require an existing row and column." });
         continue;
       }
       if (!Number.isInteger(anchor.start) || !Number.isInteger(anchor.end) || anchor.start < 0 || anchor.end <= anchor.start || anchor.end > textLength) {
@@ -893,47 +998,50 @@ function fixtureCommentReferenceIssues(incomingState) {
     const blocks = Array.isArray(resource?.blocks) ? resource.blocks : [];
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
       const block = blocks[blockIndex];
-      const marks = Array.isArray(block?.marks) ? block.marks : [];
-      for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
-        const mark = marks[markIndex];
-        if (!mark || typeof mark !== "object" || Array.isArray(mark) || mark.type !== "comment") continue;
-        const markPath = `${resourcePath}.blocks[${blockIndex}].marks[${markIndex}]`;
-        if (typeof mark.commentId !== "string" || !mark.commentId.trim() || mark.commentId.length > 256) {
-          issues.push({ path: `${markPath}.commentId`, code: "invalid_comment_id", message: "Comment mark ID must be a non-empty string of at most 256 characters." });
-          continue;
-        }
-        if (typeof mark.body !== "string" || !mark.body.trim()) {
-          issues.push({ path: `${markPath}.body`, code: "invalid_comment_body", message: "Comment body must be a non-empty string." });
-        }
-        const markLocations = markLocationsByCommentId.get(mark.commentId) || [];
-        markLocations.push({ block, mark, path: markPath });
-        markLocationsByCommentId.set(mark.commentId, markLocations);
+      const groups = [{ marks: block?.marks, path: `${resourcePath}.blocks[${blockIndex}].marks` }, ...Object.entries(block?.tableCellMarks && typeof block.tableCellMarks === "object" ? block.tableCellMarks : {}).map(([key, marks]) => ({ marks, path: `${resourcePath}.blocks[${blockIndex}].tableCellMarks.${key}`, tableRow: Number(key.split(":")[0]), tableColumn: Number(key.split(":")[1]) }))];
+      for (const group of groups) {
+        const marks = Array.isArray(group.marks) ? group.marks : [];
+        for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
+          const mark = marks[markIndex];
+          if (!mark || typeof mark !== "object" || Array.isArray(mark) || mark.type !== "comment") continue;
+          const markPath = `${group.path}[${markIndex}]`;
+          if (typeof mark.commentId !== "string" || !mark.commentId.trim() || mark.commentId.length > 256) {
+            issues.push({ path: `${markPath}.commentId`, code: "invalid_comment_id", message: "Comment mark ID must be a non-empty string of at most 256 characters." });
+            continue;
+          }
+          if (typeof mark.body !== "string" || !mark.body.trim()) {
+            issues.push({ path: `${markPath}.body`, code: "invalid_comment_body", message: "Comment body must be a non-empty string." });
+          }
+          const markLocations = markLocationsByCommentId.get(mark.commentId) || [];
+          markLocations.push({ block, mark, path: markPath, tableRow: group.tableRow, tableColumn: group.tableColumn });
+          markLocationsByCommentId.set(mark.commentId, markLocations);
 
-        const threadLocations = threadLocationsById.get(mark.commentId) || [];
-        if (!threadLocations.length) {
-          issues.push({ path: `${markPath}.commentId`, code: "orphan_comment_mark", message: "Comment mark must reference a comment thread in the same Resource." });
-          continue;
-        }
-        if (threadLocations.length !== 1) continue;
-        const { thread } = threadLocations[0];
-        if (thread.deletedAt) {
-          issues.push({ path: `${markPath}.commentId`, code: "deleted_comment_mark", message: "Deleted comment threads may not retain inline marks." });
-          continue;
-        }
-        if (thread.scope !== "inline") {
-          issues.push({ path: `${markPath}.commentId`, code: "non_inline_comment_mark", message: "Page comments, including comments with lost anchors, may not retain inline marks." });
-          continue;
-        }
-        if (block?.id !== thread.anchor?.blockId || mark.start !== thread.anchor?.start || mark.end !== thread.anchor?.end) {
-          issues.push({ path: markPath, code: "comment_anchor_mismatch", message: "Comment mark location must exactly match its inline thread anchor." });
-        }
-        if (
-          typeof mark.body === "string"
-          && mark.body.trim()
-          && typeof thread.body === "string"
-          && mark.body.trim() !== thread.body.trim()
-        ) {
-          issues.push({ path: `${markPath}.body`, code: "comment_body_mismatch", message: "Comment mark body must match its thread body after trimming." });
+          const threadLocations = threadLocationsById.get(mark.commentId) || [];
+          if (!threadLocations.length) {
+            issues.push({ path: `${markPath}.commentId`, code: "orphan_comment_mark", message: "Comment mark must reference a comment thread in the same Resource." });
+            continue;
+          }
+          if (threadLocations.length !== 1) continue;
+          const { thread } = threadLocations[0];
+          if (thread.deletedAt) {
+            issues.push({ path: `${markPath}.commentId`, code: "deleted_comment_mark", message: "Deleted comment threads may not retain inline marks." });
+            continue;
+          }
+          if (thread.scope !== "inline") {
+            issues.push({ path: `${markPath}.commentId`, code: "non_inline_comment_mark", message: "Page comments, including comments with lost anchors, may not retain inline marks." });
+            continue;
+          }
+          if (block?.id !== thread.anchor?.blockId || mark.start !== thread.anchor?.start || mark.end !== thread.anchor?.end || group.tableRow !== thread.anchor?.tableRow || group.tableColumn !== thread.anchor?.tableColumn) {
+            issues.push({ path: markPath, code: "comment_anchor_mismatch", message: "Comment mark location must exactly match its inline thread anchor." });
+          }
+          if (
+            typeof mark.body === "string"
+            && mark.body.trim()
+            && typeof thread.body === "string"
+            && mark.body.trim() !== thread.body.trim()
+          ) {
+            issues.push({ path: `${markPath}.body`, code: "comment_body_mismatch", message: "Comment mark body must match its thread body after trimming." });
+          }
         }
       }
     }
@@ -943,10 +1051,11 @@ function fixtureCommentReferenceIssues(incomingState) {
       const { thread, path: threadPath } = locations[0];
       if (thread.scope !== "inline" || thread.deletedAt) continue;
       const markLocations = markLocationsByCommentId.get(thread.id) || [];
-      const matchingLocations = markLocations.filter(({ block, mark }) => (
+      const matchingLocations = markLocations.filter(({ block, mark, tableRow, tableColumn }) => (
         block?.id === thread.anchor?.blockId
         && mark.start === thread.anchor?.start
         && mark.end === thread.anchor?.end
+        && tableRow === thread.anchor?.tableRow && tableColumn === thread.anchor?.tableColumn
       ));
       if (matchingLocations.length === 0) {
         issues.push({ path: `${threadPath}.anchor`, code: "missing_comment_mark", message: "Every live inline comment thread requires one matching comment mark." });

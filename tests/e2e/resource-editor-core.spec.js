@@ -1874,3 +1874,163 @@ test("긴 표의 높이는 본문 줄바꿈과 코멘트 사이드바 크기 변
   const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
   expect(resource.blocks[0].text).toBe(tableText);
 });
+
+test("행과 열 서식은 선택 범위에만 적용되고 저장과 행열 삭제 뒤에도 유지된다", async ({ page, request }) => {
+  test.setTimeout(45_000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    paragraph("table-scope-intro", "행과 열을 따로 선택합니다."),
+    { ...paragraph("table-scope", "| 이름 | 상태 | 메모 |\n| --- | --- | --- |\n| 첫 행 | 진행 | 유지 |\n| 둘째 행 | 예정 | 확인 |"), type: "table", columnWidths: [180, 180, 180], tableCellMarks: { "1:2": [{ type: "code", start: 0, end: 2 }] } },
+    paragraph("table-scope-paste"),
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const block = editor.locator('[data-block-id="table-scope"]');
+  const toolbar = block.locator(".resource-table-format");
+  const cell = (row, column) => block.locator(`[data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
+  const choose = async (field, value) => {
+    const picker = toolbar.locator("[data-finance-select]").filter({ has: page.locator(`[data-resource-table-format="${field}"]`) });
+    await picker.locator("[data-finance-select-trigger]").click();
+    await picker.locator(`[data-finance-select-option="${value}"]`).click();
+  };
+  await block.hover();
+  await block.getByRole("button", { name: "표 전체 선택", exact: true }).click();
+  await expect(block).toHaveClass(/is-selected/);
+  await toolbar.locator('[data-resource-table-format="tableHeader"]').click();
+  await expect(block.locator("th")).toHaveCount(0);
+  await expect(cell(0, 0).locator("..")).toHaveCSS("border-bottom-width", "1px");
+
+  await block.getByRole("button", { name: "2행 선택", exact: true }).click();
+  await expect(block.locator(".is-cell-selected")).toHaveCount(3);
+  await expect(toolbar).toHaveAttribute("aria-label", "행 서식");
+  await toolbar.locator('[data-resource-table-format="tableBold"]').click();
+  await choose("color", "red");
+  await choose("align", "center");
+  await toolbar.locator('[data-resource-table-format="tableHeader"]').click();
+  await expect(block.locator("tbody tr").first().locator("th")).toHaveCount(3);
+  await expect(cell(1, 0)).toHaveCSS("font-weight", "750");
+  await expect(cell(1, 0)).toHaveCSS("color", "rgb(212, 76, 71)");
+  await expect(cell(1, 0)).toHaveCSS("text-align", "center");
+  await expect(cell(2, 0)).toHaveCSS("font-weight", "400");
+  await expect(cell(2, 0)).toHaveCSS("text-align", "left");
+
+  await block.getByRole("button", { name: "2열 선택", exact: true }).click();
+  await expect(block.locator(".is-cell-selected")).toHaveCount(3);
+  await expect(toolbar).toHaveAttribute("aria-label", "열 서식");
+  await choose("backgroundColor", "blue");
+  await choose("align", "right");
+  await cell(2, 2).click();
+  for (const row of [0, 1, 2]) {
+    await expect(cell(row, 1).locator("..")).toHaveCSS("background-color", "rgb(231, 243, 248)");
+    await expect(cell(row, 1)).toHaveCSS("text-align", "right");
+  }
+  await expect(cell(2, 0).locator("..")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const stored = async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource)).blocks.find((entry) => entry.id === "table-scope");
+  await expect.poll(async () => (await stored()).tableCellFormats?.["1:0"]).toEqual({ bold: true, color: "red", align: "center", header: true });
+  await expect.poll(async () => (await stored()).tableCellFormats?.["2:1"]).toEqual({ backgroundColor: "blue", align: "right" });
+  await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(cell(1, 0)).toHaveCSS("color", "rgb(212, 76, 71)");
+  await expect(cell(1, 1)).toHaveCSS("text-align", "right");
+
+  await block.getByRole("button", { name: "1행 선택", exact: true }).click();
+  await toolbar.getByRole("button", { name: "행 삭제", exact: true }).click();
+  await expect(block.locator("tr")).toHaveCount(2);
+  await expect(cell(0, 0)).toHaveText("첫 행");
+  await expect(cell(0, 0)).toHaveCSS("color", "rgb(212, 76, 71)");
+  await block.getByRole("button", { name: "1열 선택", exact: true }).click();
+  await toolbar.getByRole("button", { name: "열 삭제", exact: true }).click();
+  await expect(cell(0, 0)).toHaveText("진행");
+  await expect(cell(0, 0)).toHaveCSS("text-align", "right");
+  await expect.poll(async () => (await stored()).tableCellFormats?.["0:0"]).toEqual({ bold: true, color: "red", align: "right", header: true, backgroundColor: "blue" });
+  await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(block.locator("tr")).toHaveCount(2);
+  await expect(cell(0, 0)).toHaveCSS("color", "rgb(212, 76, 71)");
+  await expect(cell(0, 1).locator('[data-inline-mark="code"]')).toHaveText("유지");
+  await block.getByRole("button", { name: "표 전체 선택", exact: true }).click();
+  const copied = await block.evaluate((element) => {
+    const data = new DataTransfer();
+    element.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data }));
+    return { text: data.getData("text/plain"), html: data.getData("text/html") };
+  });
+  expect(copied.html).toContain("data-block-table=");
+  await page.keyboard.press("Meta+d");
+  await expect(editor.locator("table")).toHaveCount(2);
+  await editor.locator('[data-block-content="table-scope-paste"]').evaluate((element, copied) => {
+    element.focus();
+    const data = new DataTransfer();
+    data.setData("text/plain", copied.text);
+    data.setData("text/html", copied.html);
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  }, copied);
+  await expect(editor.locator("table")).toHaveCount(3);
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource)).blocks.filter((entry) => entry.type === "table").length).toBe(3);
+  const copies = (await persistedResource(request, FIXTURE_IDS.bodySearchResource)).blocks.filter((entry) => entry.type === "table");
+  for (const copy of copies.slice(1)) {
+    for (const field of ["text", "columnWidths", "tableHeader", "tableCellMarks", "tableCellFormats"]) expect(copy[field]).toEqual(copies[0][field]);
+  }
+  await expect(editor.locator('table [data-inline-mark="code"]')).toHaveText(["유지", "유지", "유지"]);
+  const before = await fixtureSnapshot(request);
+  const draft = structuredClone(before.state);
+  const invalid = draft.resources.find((entry) => entry.id === FIXTURE_IDS.bodySearchResource).blocks.find((entry) => entry.id === "table-scope");
+  invalid.tableCellFormats["99:0"] = { bold: true };
+  const response = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${before.serverRevision}"` },
+    data: { state: draft, baseRevision: before.serverRevision },
+  });
+  expect(response.status()).toBe(422);
+  expect((await fixtureSnapshot(request)).serverRevision).toBe(before.serverRevision);
+  expect(errors).toEqual([]);
+});
+
+test("표 머리글을 꺼도 경계선이 남고 서식 메뉴는 여유 있게 중앙 정렬된다", async ({ page, request }, testInfo) => {
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    paragraph("table-layout-intro", "표 서식과 경계선"),
+    { ...paragraph("table-layout", "| 제목 | 상태 |\n| --- | --- |\n| 첫 행 | 확인 |\n| 둘째 행 | 유지 |"), type: "table" },
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const block = editor.locator('[data-block-id="table-layout"]');
+  const cell = block.locator("[data-resource-table-cell]").first();
+  await cell.click();
+  await cell.press("Escape");
+  await cell.press("Escape");
+  const toolbar = block.locator(".resource-table-format");
+  await toolbar.locator('[data-resource-table-format="tableHeader"]').click();
+  await expect(block.locator("th")).toHaveCount(0);
+  for (const row of await block.locator("tr").all()) {
+    const isLast = await row.evaluate((element) => element === element.closest("table").rows[element.closest("table").rows.length - 1]);
+    await expect(row.locator("td").first()).toHaveCSS("border-bottom-width", isLast ? "0px" : "1px");
+  }
+  expect(await toolbar.evaluate((element) => parseFloat(getComputedStyle(element).paddingLeft))).toBeGreaterThanOrEqual(10);
+  for (const field of ["color", "backgroundColor", "align"]) {
+    const picker = toolbar.locator("[data-finance-select]").filter({ has: page.locator(`[data-resource-table-format="${field}"]`) });
+    const trigger = picker.locator("[data-finance-select-trigger]");
+    const geometry = () => trigger.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const value = element.querySelector("[data-finance-select-value]").getBoundingClientRect();
+      const arrow = element.lastElementChild.getBoundingClientRect();
+      return { valueX: (value.left + value.right - box.left - box.right) / 2, valueY: (value.top + value.bottom - box.top - box.bottom) / 2, arrowY: (arrow.top + arrow.bottom - box.top - box.bottom) / 2 };
+    });
+    const closed = await geometry();
+    await trigger.click();
+    const list = picker.locator("[data-finance-select-options]");
+    await expect(list).toBeVisible();
+    await list.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {}))));
+    const opened = await geometry();
+    for (const value of [...Object.values(closed), ...Object.values(opened)]) expect(Math.abs(value)).toBeLessThanOrEqual(1);
+    expect((await list.boundingBox()).width).toBeGreaterThanOrEqual(120);
+    for (const option of await list.locator("[data-finance-select-option]").all()) {
+      const layout = await option.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const value = element.querySelector("span").getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(element.querySelector("span"));
+        return { lines: range.getClientRects().length, dx: (value.left + value.right - box.left - box.right) / 2, dy: (value.top + value.bottom - box.top - box.bottom) / 2 };
+      });
+      expect(layout.lines).toBe(1);
+      expect(Math.abs(layout.dx)).toBeLessThanOrEqual(1);
+      expect(Math.abs(layout.dy)).toBeLessThanOrEqual(1);
+    }
+    if (field === "backgroundColor") await page.screenshot({ path: testInfo.outputPath("table-format-menu.png") });
+    await trigger.click();
+  }
+});

@@ -11,10 +11,13 @@ const files = {
 };
 
 const checks = [
-  ["browser storage never persists finance or workspace state", () => (
-    !files.app.includes("localStorage.setItem")
-    && !files.app.includes("sessionStorage.")
-  )],
+  ["browser storage never persists finance or workspace state", () => {
+    const deviceSizeWrite = "localStorage.setItem(RESOURCE_WINDOW_SIZE_KEY, JSON.stringify({ width: saved.width, height: saved.height, dockWidth: saved.dockWidth }))";
+    return files.app.includes('const RESOURCE_WINDOW_SIZE_KEY = "sygma-resource-window-size-v1";')
+      && files.app.split(deviceSizeWrite).length === 2
+      && !files.app.replace(deviceSizeWrite, "").includes("localStorage.setItem")
+      && !files.app.includes("sessionStorage.");
+  }],
   ["storage refuses to run without PostgreSQL", () => {
     try {
       createStorage({ databaseUrl: "" });

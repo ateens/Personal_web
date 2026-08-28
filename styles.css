@@ -6911,12 +6911,12 @@ button:focus-visible {
   display: none;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 10px;
   width: max-content;
   max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 6px;
+  padding: 10px;
   background: #fff;
   color: #37352f;
   box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12);
@@ -6925,12 +6925,40 @@ button:focus-visible {
 .resource-table-block.is-selected .resource-table-format { display: flex; }
 .resource-table-block.has-cell-selection .resource-table-cell-actions { display: flex; }
 .resource-table-cell-actions { bottom: auto; }
-.resource-table-format .field { display: flex; align-items: center; gap: 4px; }
-.resource-table-format .field > span { font-size: 11px; }
+.resource-table-format .field { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.resource-table-format .field > span { font-size: 12px; text-align: center; white-space: nowrap; }
 .resource-table-format button,
-.resource-table-cell-actions button { min-height: 28px; padding: 3px 7px; border-radius: 4px; background: #f6f7f9; color: inherit; font-size: 12px; }
+.resource-table-cell-actions button { min-height: 36px; padding: 7px 10px; border-radius: 6px; background: #f6f7f9; color: inherit; font-size: 12px; line-height: 20px; text-align: center; white-space: nowrap; }
 .resource-table-cell-actions button:hover:not(:disabled) { background: #e8edf3; }
-.resource-table-format .finance-picker-trigger { width: auto; min-width: 66px; min-height: 28px; padding: 3px 7px; border: 0; box-shadow: none; }
+.resource-table-format .finance-picker-trigger { position: relative; display: flex; justify-content: center; width: 94px; padding-inline: 24px; border: 0; box-shadow: none; }
+.resource-table-format .finance-picker-trigger:focus-visible,
+.resource-table-format .finance-select.is-open .finance-select-trigger { outline: 1px solid rgba(37, 99, 235, 0.35); outline-offset: 0; box-shadow: none; }
+.resource-table-format .finance-select-trigger > span:last-child,
+.resource-table-format .finance-select.is-open .finance-select-trigger > span:last-child {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  font-size: 0;
+  transform: translateY(-50%);
+  transition: color 160ms var(--ease);
+}
+.resource-table-format .finance-select-trigger > span:last-child::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1.5px) rotate(45deg);
+}
+.resource-table-format .finance-select-options { min-width: 120px; padding: 8px; }
+.resource-table-format .finance-select-option { position: relative; justify-content: center; padding: 8px 24px; background: transparent; }
+.resource-table-format .finance-select-option[aria-selected="true"] { color: var(--blue); background: color-mix(in srgb, var(--blue) 7%, transparent); }
+.resource-table-format .finance-select-option[aria-selected="true"]::after { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); }
+.resource-table-format .finance-select-option:is(:hover, :focus-visible) { background: var(--hover-surface); transform: none; }
 .resource-table-format button[aria-pressed="true"] { background: #e5f1fc; color: #1769aa; }
 
 .resource-table-column-resize {
@@ -7023,6 +7051,41 @@ button:focus-visible {
   cursor: default;
 }
 
+.resource-table-scope {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: #f2f3f5;
+  color: #737780;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  box-shadow: none;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.resource-table-row-handles { position: absolute; inset: 0; pointer-events: none; }
+.resource-table-scope.is-row { left: -22px; width: 18px; height: 22px; font-size: 18px; pointer-events: auto; }
+.resource-table-scope.is-column { top: 0; left: 50%; width: 28px; height: 11px; font-size: 18px; transform: translateX(-50%); }
+.resource-table-scope.is-column > span { width: 2px; height: 2px; border-radius: 50%; background: currentColor; box-shadow: -5px 0 0 currentColor, 5px 0 0 currentColor; }
+.resource-table-scope.is-all { top: -23px; left: -23px; width: 20px; height: 20px; font-size: 16px; }
+.resource-table-shell:is(:hover, :focus-within) .resource-table-scope,
+.resource-table-scope:focus-visible,
+.resource-table-scope[aria-pressed="true"] { opacity: 1; }
+.resource-table-scope:is(:hover, :focus-visible, [aria-pressed="true"]) { background: #e5f1fc; color: #1769aa; }
+.resource-table-scope:focus-visible { outline: 2px solid #2383e2; outline-offset: 1px; }
+.resource-table-block.has-table-range-selection .resource-table-format { display: flex; }
+.resource-table-block.has-table-range-selection > .resource-table-shell > .resource-table-cell-actions { display: none; }
+.resource-table-block.has-table-range-selection :is(th, td).has-cell-selection { background: rgba(35, 131, 226, 0.12); box-shadow: inset 0 0 0 1px #2383e2; }
+
 .resource-table-edge {
   position: absolute;
   z-index: 1;
@@ -7105,7 +7168,7 @@ button:focus-visible {
   font-weight: 750;
 }
 
-.resource-markdown-table tr:last-child td {
+.resource-markdown-table tbody tr:last-child td {
   border-bottom: 0;
 }
 

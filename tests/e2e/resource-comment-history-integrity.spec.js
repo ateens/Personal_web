@@ -112,6 +112,33 @@ test("full and incremental writes reject orphaned, missing, duplicate, or mismat
   }
 });
 
+test("table cell marks and comments reject invalid coordinates, ranges and cross-cell anchors", async ({ request }) => {
+  const before = await fixtureSnapshot(request);
+  const resource = structuredClone(before.state.resources.find((entry) => entry.id === FIXTURE_IDS.resource));
+  const { block, mark, markIndex } = fixtureInlineMarkLocation(resource);
+  const text = block.text;
+  block.marks.splice(markIndex, 1);
+  resource.blocks.push({ id: "inline-comment-table", type: "table", text: `| Heading | Other |\n| --- | --- |\n| ${text} | ${text} |`, marks: [], checked: false, indent: 0, collapsed: false, tableCellMarks: { "1:0": [mark] } });
+  fixtureInlineThread(resource).anchor = { ...fixtureInlineThread(resource).anchor, blockId: "inline-comment-table", tableRow: 1, tableColumn: 0 };
+  const response = await request.put(`/api/resources/${encodeURIComponent(resource.id)}`, {
+    headers: { "If-Match": `"state-${before.serverRevision}"` }, data: { resource, baseRevision: before.serverRevision },
+  });
+  expect(response.ok()).toBeTruthy();
+  const table = (entry) => entry.blocks.find((candidate) => candidate.id === "inline-comment-table");
+  const cases = [
+    ["invalid_table_cell_coordinate", (entry) => { table(entry).tableCellMarks["99:0"] = []; }],
+    ["invalid_table_cell_coordinate", (entry) => { table(entry).tableCellMarks["01:0"] = []; }],
+    ["invalid_marks", (entry) => { table(entry).tableCellMarks["0:0"] = {}; }],
+    ["invalid_mark_range", (entry) => { table(entry).tableCellMarks["1:0"][0].end = text.length + 1; }],
+    ["invalid_comment_cell", (entry) => { delete fixtureInlineThread(entry).anchor.tableColumn; }],
+    ["comment_anchor_mismatch", (entry) => { fixtureInlineThread(entry).anchor.tableColumn = 1; }],
+    ["orphan_comment_mark", (entry) => { table(entry).tableCellMarks["1:0"][0].commentId = "missing-cell-comment"; }],
+  ];
+  for (const mode of ["full", "incremental"]) {
+    for (const [code, mutate] of cases) await expectCommentReferenceWriteRejected(request, mode, mutate, code);
+  }
+});
+
 test("trim-equivalent bodies, deleted threads without marks, and lost page threads without marks remain valid", async ({ request }) => {
   let before = await fixtureSnapshot(request);
   let resource = structuredClone(before.state.resources.find((entry) => entry.id === FIXTURE_IDS.resource));

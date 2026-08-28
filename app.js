@@ -1,4 +1,5 @@
 const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
+const RESOURCE_WINDOW_SIZE_KEY = "sygma-resource-window-size-v1";
 const APP_STATE_VERSION = 4;
 const VIEW_HISTORY_STATE_KEY = "sygmaView";
 const TASK_DONE_REORDER_GRACE_MS = 520;
@@ -722,6 +723,7 @@ let ui = {
   resourceWindowZ: 0,
   resourceWindowDrag: null,
   markdownTableDrag: null,
+  markdownTableSelection: null,
   resourceWindowFocusVersion: 0,
   resourceWindowFocused: false,
   habitDayCount: 0,
@@ -820,6 +822,10 @@ function init() {
   document.addEventListener("scroll", cancelPendingPointerDrags, true);
   document.addEventListener("scroll", scheduleFinanceSelectPositionSync, true);
   document.addEventListener("scroll", scheduleCodeLanguagePositionSync, true);
+  document.addEventListener("scroll", (event) => {
+    const block = event.target.closest?.(".resource-table-block, .resource-document");
+    if (block) positionMarkdownTableHandles(block);
+  }, true);
   document.addEventListener(pointerMoveEvent, handleResourceWindowPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleResourceListPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
@@ -1825,10 +1831,10 @@ function renderResourceComments(resource, record) {
   const editable = resourceMutationAllowed(resource);
   const blockOrder = new Map(resource.blocks.map((block, index) => [block.id, index]));
   const threads = (resource.commentThreads || []).filter((thread) => !thread.deletedAt);
-  if (draft && !threads.some((thread) => thread.id === draft.commentId)) threads.push({ id: draft.commentId, anchor: draft.blockId ? { blockId: draft.blockId, start: draft.start } : null, replies: [] });
+  if (draft && !threads.some((thread) => thread.id === draft.commentId)) threads.push({ id: draft.commentId, anchor: draft.blockId ? { blockId: draft.blockId, start: draft.start, ...tableCellRange(draft) } : null, replies: [] });
   threads.sort((left, right) => {
     const order = (thread) => blockOrder.get(thread.anchor?.blockId) ?? resource.blocks.length;
-    return order(left) - order(right) || (left.anchor?.start || 0) - (right.anchor?.start || 0);
+    return order(left) - order(right) || (left.anchor?.tableRow || 0) - (right.anchor?.tableRow || 0) || (left.anchor?.tableColumn || 0) - (right.anchor?.tableColumn || 0) || (left.anchor?.start || 0) - (right.anchor?.start || 0);
   });
   const form = () => `<form class="resource-comment-form" data-resource-comment-form="${esc(resource.id)}" data-inline-comment-popover>
     <textarea data-resource-comment-input data-inline-comment-input rows="3" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" aria-label="코멘트 내용" placeholder="코멘트 입력">${esc(draft?.body || "")}</textarea>
@@ -1889,8 +1895,9 @@ function positionResourceComments(resourceId) {
   const top = list.getBoundingClientRect().top;
   let bottom = 0;
   list.querySelectorAll("[data-comment-thread]").forEach((card) => {
-    const thread = threads.get(card.dataset.commentThread);
+    const thread = threads.get(card.dataset.commentThread) || (record.commentDraft?.commentId === card.dataset.commentThread ? { anchor: record.commentDraft } : null);
     const anchor = element.querySelector(`[data-inline-comment-id="${cssEscape(thread?.id || "")}"]`)
+      || (thread?.anchor?.tableRow !== undefined ? element.querySelector(`[data-block-id="${cssEscape(thread.anchor.blockId)}"] [data-table-row="${thread.anchor.tableRow}"][data-table-column="${thread.anchor.tableColumn}"]`) : null)
       || element.querySelector(`[data-block-id="${cssEscape(card.dataset.commentAnchor)}"]`);
     const rect = anchor?.getClientRects()[0];
     const desired = rect?.height ? rect.top - top : bottom;
@@ -1973,7 +1980,7 @@ function saveResourceComment(form) {
   const body = String(form.querySelector("[data-resource-comment-input]")?.value || "").trim();
   if (!draft || !body || body.length > MAX_INLINE_COMMENT_BODY_LENGTH || !resourceMutationAllowed(resource) || app.dataset.workspaceAuthority !== "ready") return false;
   reconcileResourceCommentThreads(resource);
-  const history = beginEditorHistory("resources", resourceId, { blockId: draft.blockId, start: draft.start, end: draft.end });
+  const history = beginEditorHistory("resources", resourceId, { blockId: draft.blockId, start: draft.start, end: draft.end, ...tableCellRange(draft) });
   const now = new Date().toISOString();
   const thread = resource.commentThreads.find((entry) => entry.id === draft.commentId && !entry.deletedAt);
   if (draft.editId) {
@@ -1987,19 +1994,20 @@ function saveResourceComment(form) {
     thread.updatedAt = now;
   } else {
     const block = resource.blocks.find((entry) => entry.id === draft.blockId);
-    if (draft.blockId && (!block || draft.end > block.text.length || draft.end <= draft.start || (draft.quote !== undefined && block.text.slice(draft.start, draft.end) !== draft.quote))) {
+    const content = inlineContentForRange(block, draft);
+    if (draft.blockId && (!content || draft.end > content.text.length || draft.end <= draft.start || (draft.quote !== undefined && content.text.slice(draft.start, draft.end) !== draft.quote))) {
       showToast("선택한 문장이 변경됐습니다. 코멘트 내용을 복사한 뒤 문장을 다시 선택해 주세요.");
       return false;
     }
-    const anchor = block ? { blockId: block.id, start: draft.start, end: draft.end } : null;
+    const anchor = block ? { blockId: block.id, start: draft.start, end: draft.end, ...tableCellRange(draft) } : null;
     resource.commentThreads.push({ id: draft.commentId, scope: anchor ? "inline" : "page", anchor, body, createdAt: now, updatedAt: now, resolvedAt: "", deletedAt: "", replies: [] });
-    if (block) block.marks = normalizeInlineMarks(block.text, [...(block.marks || []), { type: "comment", start: draft.start, end: draft.end, commentId: draft.commentId, body }]);
+    if (content) setInlineContentForRange(block, draft, { text: content.text, marks: normalizeInlineMarks(content.text, [...(content.marks || []), { type: "comment", start: draft.start, end: draft.end, commentId: draft.commentId, body }]) });
   }
   record.activeCommentId = draft.commentId;
   record.commentDraft = null;
   reconcileResourceCommentThreads(resource);
   markResourceChanged(resource);
-  commitEditorHistory(history, { blockId: draft.blockId, start: draft.start, end: draft.end });
+  commitEditorHistory(history, { blockId: draft.blockId, start: draft.start, end: draft.end, ...tableCellRange(draft) });
   saveState();
   renderEditorMutation("resources", resourceId);
   syncResourceComments(resourceId, true);
@@ -2033,9 +2041,13 @@ function syncResourceDocumentDialog() {
     if (isNew) {
       els.detailRoot.insertAdjacentHTML("beforeend", renderResourceDocument(resource));
       element = resourceWindowElement(record.id);
-      element.resourceCommentsObserver = new ResizeObserver(() => positionResourceComments(record.id));
+      element.resourceCommentsObserver = new ResizeObserver(() => {
+        positionResourceComments(record.id);
+        positionMarkdownTableHandles(element);
+      });
       element.resourceCommentsObserver.observe(element.querySelector(".block-editor"));
       element.resourceCommentsObserver.observe(element.querySelector("[data-resource-comments]"));
+      element.resourceCommentsObserver.observe(element.querySelector("[data-resource-document]"));
     }
     const relationsMarkup = renderResourceRelations(resource);
     if (!isNew && element.resourceRelationsMarkup !== relationsMarkup) {
@@ -2053,6 +2065,7 @@ function syncResourceDocumentDialog() {
   }
   syncResourceDockLayout();
   syncWorkspaceAuthorityGate();
+  positionMarkdownTableHandles();
 }
 
 function renderHabits() {
@@ -5091,9 +5104,10 @@ function placeFinanceSelectOptions(control, list) {
   if (!financeSelectPopoverIsOpen(list)) return;
 
   const preferredWidth = control.closest(".finance-month-control") ? 176
-    : control.closest("[data-resource-relations]") ? Math.max(240, rect.width) : rect.width;
+    : control.closest("[data-resource-relations]") ? Math.max(240, rect.width)
+      : control.closest(".resource-table-format") ? Math.max(120, rect.width) : rect.width;
   const width = Math.max(0, Math.min(preferredWidth, viewport.width - edge * 2));
-  const preferredLeft = control.closest(".finance-month-control")
+  const preferredLeft = control.closest(".finance-month-control, .resource-table-format")
     ? rect.left + (rect.width - width) / 2
     : rect.left;
   const left = Math.max(viewport.left + edge, Math.min(preferredLeft, viewport.right - width - edge));
@@ -8049,6 +8063,7 @@ function renderMarkdownTableBlock(block, meta = {}) {
     <div class="block resource-table-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="table" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
       ${meta.blockTools || ""}
       <div class="resource-table-shell">
+        ${table && editable ? `<button type="button" class="resource-table-scope is-all" data-resource-table-scope="all" aria-label="표 전체 선택" title="표 전체 선택"><span aria-hidden="true">▦</span></button><div class="resource-table-row-handles">${renderMarkdownTableRowHandles(rowCount)}</div>` : ""}
         ${table && editable ? renderMarkdownTableToolbar(block, table) : ""}
         ${table && editable ? `<div class="resource-table-cell-actions" role="toolbar" aria-label="선택한 셀">
           <button type="button" data-resource-table-delete="row">행 삭제</button>
@@ -8058,8 +8073,8 @@ function renderMarkdownTableBlock(block, meta = {}) {
           ${table ? `
             <table class="resource-markdown-table" data-table-bold="${block.tableBold === true}" style="${widths ? `width:${widths.reduce((sum, width) => sum + width, 0)}px;min-width:0;` : `min-width:${Math.max(480, columnCount * 160)}px;`}${color ? `--table-text:${color.text};` : ""}${background ? `--table-background:${background.background};` : ""}">
               ${widths ? `<colgroup>${widths.map((width) => `<col style="width:${width}px">`).join("")}</colgroup>` : ""}
-              <thead><tr>${renderMarkdownTableRow(table.headers, 0, table.align, editable, block.tableHeader !== false)}</tr></thead>
-              <tbody>${table.rows.map((row, index) => `<tr>${renderMarkdownTableRow(row, index + 1, table.align, editable)}</tr>`).join("")}</tbody>
+              <thead><tr>${renderMarkdownTableRow(table.headers, 0, table.align, editable, block)}</tr></thead>
+              <tbody>${table.rows.map((row, index) => `<tr>${renderMarkdownTableRow(row, index + 1, table.align, editable, block)}</tr>`).join("")}</tbody>
             </table>
           ` : `<span class="resource-table-error">표 형식을 읽을 수 없습니다.</span>`}
         </div>
@@ -8072,10 +8087,15 @@ function renderMarkdownTableBlock(block, meta = {}) {
   `;
 }
 
-function renderMarkdownTableRow(cells, row, align, editable, header = true) {
+function renderMarkdownTableRowHandles(count) {
+  return Array.from({ length: count }, (_, row) => `<button type="button" class="resource-table-scope is-row" data-resource-table-scope="row" data-table-row="${row}" aria-label="${row + 1}행 선택" title="${row + 1}행 선택"><span aria-hidden="true">⋮</span></button>`).join("");
+}
+
+function renderMarkdownTableRow(cells, row, align, editable, block) {
   return cells.map((value, column) => {
-    const tag = row === 0 && header ? "th" : "td";
-    return `<${tag}${tag === "th" ? ' scope="col"' : ""} class="${markdownTableAlignmentClass(align[column])}"><span class="resource-table-cell" contenteditable="${editable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${row + 1}행 ${column + 1}열" data-resource-table-cell data-table-row="${row}" data-table-column="${column}">${renderMarkdownTableCell(value)}</span>${row === 0 && editable ? `<span class="resource-table-column-resize" data-resource-table-width="${column}" role="separator" tabindex="0" aria-label="${column + 1}열 너비" aria-orientation="vertical" aria-valuemin="80" aria-valuemax="1200" aria-valuenow="160"></span>` : ""}</${tag}>`;
+    const format = markdownTableCellFormat(block, row, column, align[column]);
+    const tag = format.header ? "th" : "td";
+    return `<${tag}${tag === "th" ? ` scope="${row === 0 ? "col" : "row"}"` : ""} class="${markdownTableAlignmentClass(format.align)}" style="${markdownTableCellStyle(format)}"><span class="resource-table-cell" contenteditable="${editable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${row + 1}행 ${column + 1}열" data-resource-table-cell data-table-row="${row}" data-table-column="${column}">${renderMarkdownTableCell(value, markdownTableCellMarks(block, row, column))}</span>${row === 0 && editable ? `<button type="button" class="resource-table-scope is-column" data-resource-table-scope="column" data-table-column="${column}" aria-label="${column + 1}열 선택" title="${column + 1}열 선택"><span aria-hidden="true"></span></button><span class="resource-table-column-resize" data-resource-table-width="${column}" role="separator" tabindex="0" aria-label="${column + 1}열 너비" aria-orientation="vertical" aria-valuemin="80" aria-valuemax="1200" aria-valuenow="160"></span>` : ""}</${tag}>`;
   }).join("");
 }
 
@@ -8085,14 +8105,63 @@ function markdownTableColumnWidths(block, count) {
     : null;
 }
 
+function normalizeMarkdownTableCellFormats(block) {
+  const table = parseMarkdownTable(block.text);
+  const formats = {};
+  if (!table || !isPlainObject(block.tableCellFormats)) return formats;
+  for (const [key, value] of Object.entries(block.tableCellFormats)) {
+    const [row, column] = key.split(":").map(Number);
+    if (!/^(0|[1-9]\d*):(0|[1-9]\d*)$/.test(key) || row > table.rows.length || column >= table.headers.length || !isPlainObject(value)) continue;
+    const format = {};
+    for (const field of ["header", "bold"]) if (typeof value[field] === "boolean") format[field] = value[field];
+    for (const field of ["color", "backgroundColor"]) {
+      if (value[field] === "" || BLOCK_COLOR_KEYS.includes(value[field])) format[field] = value[field];
+    }
+    if (["left", "center", "right"].includes(value.align)) format.align = value.align;
+    if (Object.keys(format).length) formats[key] = format;
+  }
+  return formats;
+}
+
+function markdownTableCellFormat(block, row, column, alignment) {
+  const format = block.tableCellFormats?.[`${row}:${column}`] || {};
+  const header = typeof format.header === "boolean" ? format.header : row === 0 && block.tableHeader !== false;
+  return {
+    header,
+    bold: typeof format.bold === "boolean" ? format.bold : block.tableBold === true || header,
+    color: normalizeBlockColorValue(format.color ?? block.color),
+    backgroundColor: normalizeBlockColorValue(format.backgroundColor ?? block.backgroundColor),
+    align: format.align || alignment || "left",
+  };
+}
+
+function markdownTableCellStyle(format) {
+  const color = BLOCK_COLOR_OPTIONS[format.color]?.text || (format.header ? "#344054" : "var(--ink)");
+  const background = BLOCK_COLOR_OPTIONS[format.backgroundColor]?.background || (format.header ? "#f6f7f9" : "transparent");
+  return `--table-text:${color};--table-background:${background};font-weight:${format.bold ? 750 : 400};text-align:${format.align};`;
+}
+
+function markdownTableSelectedCoordinates(table, selection) {
+  return [table.headers, ...table.rows].flatMap((cells, row) => cells.flatMap((_, column) => {
+    const selected = !selection || (selection.mode === "row" ? row === selection.row
+      : selection.mode === "column" ? column === selection.column : row === selection.row && column === selection.column);
+    return selected ? [{ row, column }] : [];
+  }));
+}
+
 function renderMarkdownTableToolbar(block, table) {
+  const selection = ui.markdownTableSelection?.blockId === block.id ? ui.markdownTableSelection : null;
+  const formats = selection ? markdownTableSelectedCoordinates(table, selection).map(({ row, column }) => markdownTableCellFormat(block, row, column, table.align[column])) : [];
+  const value = (field) => formats.length ? formats.every((format) => format[field] === formats[0][field]) ? formats[0][field] : "" : block[field] || "";
   const picker = (label, field, options, value) => financeSelectInput(label, `table-${block.id}-${field}`, options, { value, allowEmpty: false, attributes: `data-resource-table-format="${field}"` });
-  const colors = (field) => picker(field === "color" ? "글자" : "배경", field, [["", "기본"], ...Object.entries(BLOCK_COLOR_OPTIONS).map(([key, option]) => [key, option.label])], block[field] || "");
-  return `<div class="resource-table-format" role="toolbar" aria-label="표 서식">
-    <button type="button" data-resource-table-format="tableHeader" aria-pressed="${block.tableHeader !== false}">머리글</button>
-    <button type="button" data-resource-table-format="tableBold" aria-label="표 굵게" aria-pressed="${block.tableBold === true}"><strong>B</strong></button>
+  const colors = (field) => picker(field === "color" ? "글자" : "배경", field, [["", "기본"], ...Object.entries(BLOCK_COLOR_OPTIONS).map(([key, option]) => [key, option.label])], value(field));
+  const dimension = ["row", "column"].includes(selection?.mode) ? selection.mode : "";
+  return `<div class="resource-table-format" role="toolbar" aria-label="${dimension === "row" ? "행" : dimension === "column" ? "열" : "표"} 서식">
+    <button type="button" data-resource-table-format="tableHeader" aria-pressed="${formats.length ? formats.every((format) => format.header) : block.tableHeader !== false}">머리글</button>
+    <button type="button" data-resource-table-format="tableBold" aria-label="표 굵게" aria-pressed="${formats.length ? formats.every((format) => format.bold) : block.tableBold === true}"><strong>B</strong></button>
     ${colors("color")}${colors("backgroundColor")}
-    ${picker("정렬", "align", [["left", "왼쪽"], ["center", "가운데"], ["right", "오른쪽"]], table.align.every((alignment) => alignment === table.align[0]) ? table.align[0] : "")}
+    ${picker("정렬", "align", [["left", "왼쪽"], ["center", "가운데"], ["right", "오른쪽"]], formats.length ? value("align") : table.align.every((alignment) => alignment === table.align[0]) ? table.align[0] : "")}
+    ${dimension ? `<button type="button" data-resource-table-delete="${dimension}" ${dimension === "row" ? table.rows.length === 0 ? "disabled" : "" : table.headers.length === 1 ? "disabled" : ""}>${dimension === "row" ? "행" : "열"} 삭제</button>` : ""}
   </div>`;
 }
 
@@ -8102,9 +8171,20 @@ function applyMarkdownTableFormat(control) {
   const { block, table, ownerType, ownerId } = context;
   const field = control.dataset.resourceTableFormat;
   if (!["tableHeader", "tableBold", "color", "backgroundColor", "align"].includes(field)) return;
+  if (field === "align" && !["left", "center", "right"].includes(control.value)) return;
+  const selection = ui.markdownTableSelection?.blockId === block.id ? { ...ui.markdownTableSelection } : null;
+  const cellField = field === "tableHeader" ? "header" : field === "tableBold" ? "bold" : field;
   const history = beginEditorHistory(ownerType, ownerId, { blockId: block.id });
-  if (field === "align") {
-    if (!["left", "center", "right"].includes(control.value)) return;
+  if (selection) {
+    const cells = markdownTableSelectedCoordinates(table, selection);
+    const value = ["header", "bold"].includes(cellField)
+      ? !cells.every(({ row, column }) => markdownTableCellFormat(block, row, column, table.align[column])[cellField])
+      : cellField === "align" ? control.value : normalizeBlockColorValue(control.value);
+    block.tableCellFormats ||= {};
+    for (const { row, column } of cells) {
+      block.tableCellFormats[`${row}:${column}`] = { ...block.tableCellFormats[`${row}:${column}`], [cellField]: value };
+    }
+  } else if (field === "align") {
     table.align.fill(control.value);
     block.text = serializeMarkdownTable(table);
   } else if (field === "tableHeader") block.tableHeader = block.tableHeader === false;
@@ -8114,19 +8194,113 @@ function applyMarkdownTableFormat(control) {
     if (color) block[field] = color;
     else delete block[field];
   }
+  if (!selection && block.tableCellFormats) {
+    for (const format of Object.values(block.tableCellFormats)) delete format[cellField];
+    block.tableCellFormats = normalizeMarkdownTableCellFormats(block);
+    if (!Object.keys(block.tableCellFormats).length) delete block.tableCellFormats;
+  }
   commitEditorHistory(history, { blockId: block.id });
   saveState();
   renderEditorMutation(ownerType, ownerId);
-  restoreBlockSelection(ownerType, ownerId, [block.id]);
+  if (selection) selectMarkdownTableScope(block.id, selection.mode, selection.row, selection.column);
+  else restoreBlockSelection(ownerType, ownerId, [block.id]);
   const replacement = document.querySelector(`[data-block-id="${cssEscape(block.id)}"] [data-resource-table-format="${field}"]`);
   (replacement?.closest("[data-finance-select]")?.querySelector("[data-finance-select-trigger]") || replacement)?.focus({ preventScroll: true });
 }
 
-function renderMarkdownTableCell(value = "") {
-  return String(value).split(/<br\s*\/?>/i).map((line) => {
-    const inline = parseMarkdownInlineText(line, null, true);
-    return renderInlineText({ text: inline.text, marks: inline.marks });
-  }).join("<br>");
+function encodeMarkdownTableCellText(value = "") {
+  return String(value)
+    .replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char])
+    .replace(/[\\\`*_~\[\]]/g, "\\$&")
+    .replace(/^\s+|\s+$/g, (space) => Array.from(space, (char) => "&#" + char.codePointAt(0) + ";").join(""))
+    .replace(/\r/g, "&#13;")
+    .replace(/\n/g, "<br>");
+}
+
+function decodeMarkdownTableCellText(value = "") {
+  return String(value).replace(/<br\s*\/?>/gi, "\n").replace(/\\([\\\`*_~\[\]])/g, "$1")
+    .replace(/&(amp|lt|gt|#\d{1,7});/g, (entity, name) => {
+      if (name[0] !== "#") return { amp: "&", lt: "<", gt: ">" }[name];
+      const code = Number(name.slice(1));
+      const char = code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      return /\s/.test(char) ? char : entity;
+    });
+}
+
+function markdownTableCellInline(value = "", marks) {
+  if (marks === undefined) return parseMarkdownInlineText(String(value).replace(/<br\s*\/?>/gi, "\n"), null, true);
+  const text = decodeMarkdownTableCellText(value);
+  return { text, marks: normalizeInlineMarks(text, marks) };
+}
+
+function renderMarkdownTableCell(value = "", marks) {
+  return renderInlineText(markdownTableCellInline(value, marks));
+}
+
+function markdownTableCellMarks(block, row, column) {
+  return block.tableCellMarks?.[`${row}:${column}`];
+}
+
+function normalizeMarkdownTableCellMarks(block, stripComments = false) {
+  const table = parseMarkdownTable(block.text);
+  const marks = {};
+  for (const [key, value] of Object.entries(isPlainObject(block.tableCellMarks) ? block.tableCellMarks : {})) {
+    const [row, column] = key.split(":").map(Number);
+    const source = (row === 0 ? table?.headers : table?.rows[row - 1])?.[column];
+    if (!/^(0|[1-9]\d*):(0|[1-9]\d*)$/.test(key) || source === undefined || !Array.isArray(value)) continue;
+    marks[key] = normalizeInlineMarks(decodeMarkdownTableCellText(source), value).filter((mark) => mark.type !== "resourceLink" && (!stripComments || mark.type !== "comment"));
+  }
+  return marks;
+}
+
+function tableCellRange(range) {
+  return Number.isInteger(range?.tableRow) && range.tableRow >= 0 && Number.isInteger(range?.tableColumn) && range.tableColumn >= 0
+    ? { tableRow: range.tableRow, tableColumn: range.tableColumn }
+    : {};
+}
+
+function inlineContentForRange(block, range) {
+  if (block?.type !== TABLE_BLOCK_TYPE) return block;
+  const { tableRow: row, tableColumn: column } = tableCellRange(range);
+  const table = parseMarkdownTable(block.text);
+  const value = (row === 0 ? table?.headers : table?.rows[row - 1])?.[column];
+  return value === undefined ? null : markdownTableCellInline(value, markdownTableCellMarks(block, row, column));
+}
+
+function setInlineContentForRange(block, range, content) {
+  if (block.type !== TABLE_BLOCK_TYPE) { Object.assign(block, content); return; }
+  const { tableRow: row, tableColumn: column } = tableCellRange(range);
+  const table = parseMarkdownTable(block.text);
+  const cells = row === 0 ? table?.headers : table?.rows[row - 1];
+  if (cells?.[column] === undefined) return;
+  cells[column] = encodeMarkdownTableCellText(content.text || "");
+  block.text = serializeMarkdownTable(table);
+  block.tableCellMarks ||= {};
+  block.tableCellMarks[`${row}:${column}`] = normalizeInlineMarks(content.text, content.marks);
+  const cell = document.activeElement;
+  if (cell?.matches?.(`[data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`) && cell.closest(".block")?.dataset.blockId === block.id) {
+    const html = renderInlineText(content);
+    if (cell.innerHTML !== html) {
+      const offsets = selectionOffsetsInside(cell);
+      cell.innerHTML = html;
+      if (offsets) setSelectionOffsets(cell, offsets.start, offsets.end);
+    }
+  }
+}
+
+function focusInlineContentRange(blockId, range) {
+  if (tableCellRange(range).tableRow === undefined) {
+    focusBlockContentAfterRender(blockId, { range });
+    return;
+  }
+  const focus = () => {
+    const cell = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-resource-table-cell][data-table-row="${range.tableRow}"][data-table-column="${range.tableColumn}"]`);
+    if (!cell) return;
+    cell.focus({ preventScroll: true });
+    setSelectionOffsets(cell, range.start, range.end);
+  };
+  focus();
+  requestAnimationFrame(focus);
 }
 
 function markdownTableAlignmentClass(value = "") {
@@ -8166,6 +8340,8 @@ function focusMarkdownTableCell(blockId, row = 0, column = 0, offset = null) {
 }
 
 function clearMarkdownTableCellSelection() {
+  const selection = ui.markdownTableSelection;
+  ui.markdownTableSelection = null;
   document.querySelectorAll("[data-resource-table-cell].is-cell-selected").forEach((cell) => {
     cell.classList.remove("is-cell-selected");
     cell.parentElement.classList.remove("has-cell-selection");
@@ -8174,25 +8350,51 @@ function clearMarkdownTableCellSelection() {
     cell.removeAttribute("tabindex");
     cell.removeAttribute("aria-readonly");
   });
+  document.querySelectorAll(".resource-table-block.has-table-range-selection").forEach((block) => block.classList.remove("has-table-range-selection"));
+  document.querySelectorAll('[data-resource-table-scope][aria-pressed="true"]').forEach((button) => button.setAttribute("aria-pressed", "false"));
+  if (selection) {
+    const context = markdownTableCellContext(document.querySelector(`[data-block-id="${cssEscape(selection.blockId)}"]`));
+    const toolbar = context?.blockElement.querySelector(".resource-table-format");
+    if (toolbar) toolbar.outerHTML = renderMarkdownTableToolbar(context.block, context.table);
+  }
 }
 
 function selectMarkdownTableCell(blockId, row, column) {
+  return selectMarkdownTableScope(blockId, "cell", row, column);
+}
+
+function selectMarkdownTableScope(blockId, mode, row = 0, column = 0) {
+  if (!["cell", "row", "column"].includes(mode)) return false;
   const cell = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
   const context = markdownTableCellContext(cell);
   if (!context || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return false;
+  if (context.ownerType === "resources") activateResourceWindow(context.ownerId);
   document.activeElement?.blur?.();
   clearMarkdownTableCellSelection();
   clearBlockSelection();
   clearInlineEditingOverlaysForBlockSelection();
-  cell.contentEditable = "false";
+  ui.markdownTableSelection = { blockId, ownerType: context.ownerType, ownerId: context.ownerId, mode, row, column };
+  context.blockElement.querySelectorAll("[data-resource-table-cell]").forEach((entry) => {
+    const sameRow = Number(entry.dataset.tableRow) === row;
+    const sameColumn = Number(entry.dataset.tableColumn) === column;
+    if (!(mode === "row" ? sameRow : mode === "column" ? sameColumn : sameRow && sameColumn)) return;
+    entry.contentEditable = "false";
+    entry.setAttribute("aria-readonly", "true");
+    entry.classList.add("is-cell-selected");
+    entry.parentElement.classList.add("has-cell-selection");
+  });
   cell.tabIndex = 0;
-  cell.setAttribute("aria-readonly", "true");
-  cell.classList.add("is-cell-selected");
-  cell.parentElement.classList.add("has-cell-selection");
   context.blockElement.classList.add("has-cell-selection");
+  context.blockElement.classList.toggle("has-table-range-selection", mode !== "cell");
+  const toolbar = context.blockElement.querySelector(".resource-table-format");
+  if (toolbar) toolbar.outerHTML = renderMarkdownTableToolbar(context.block, context.table);
+  context.blockElement.querySelector(`[data-resource-table-scope="${mode}"][data-table-${mode}="${mode === "row" ? row : column}"]`)?.setAttribute("aria-pressed", "true");
   window.getSelection()?.removeAllRanges();
   cell.focus({ preventScroll: true });
-  cell.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const scroller = context.blockElement.querySelector(".resource-table-scroll");
+  const scrollLeft = scroller.scrollLeft;
+  (mode === "row" ? cell.closest("tr") : cell).scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (mode === "row") scroller.scrollLeft = scrollLeft;
   const actions = context.blockElement.querySelector(".resource-table-cell-actions");
   actions.querySelector('[data-resource-table-delete="row"]').disabled = context.table.rows.length === 0;
   actions.querySelector('[data-resource-table-delete="column"]').disabled = context.table.headers.length === 1;
@@ -8200,6 +8402,7 @@ function selectMarkdownTableCell(blockId, row, column) {
   const bounds = cell.getBoundingClientRect();
   actions.style.top = `${bounds.top - shell.top - actions.offsetHeight - 6}px`;
   actions.style.left = `${Math.max(0, Math.min(bounds.left - shell.left, shell.width - actions.offsetWidth))}px`;
+  positionMarkdownTableHandles(context.blockElement);
   return true;
 }
 
@@ -8227,6 +8430,21 @@ function deleteMarkdownTableDimension(control) {
     }
   }
   block.text = serializeMarkdownTable(table);
+  for (const field of ["tableCellFormats", "tableCellMarks"]) {
+    if (!block[field]) continue;
+    const entries = [];
+    for (const [key, value] of Object.entries(block[field])) {
+      const coordinate = key.split(":").map(Number);
+      const axis = removeRow ? 0 : 1;
+      const removed = removeRow ? row : column;
+      if (coordinate[axis] === removed) continue;
+      if (coordinate[axis] > removed) coordinate[axis] -= 1;
+      entries.push([coordinate.join(":"), value]);
+    }
+    if (entries.length) block[field] = Object.fromEntries(entries);
+    else delete block[field];
+  }
+  if (ownerType === "resources") reconcileResourceCommentThreads(itemById(ownerType, ownerId));
   const nextRow = Math.min(row, table.rows.length);
   const nextColumn = Math.min(column, table.headers.length - 1);
   commitEditorHistory(history, { blockId: block.id, tableRow: nextRow, tableColumn: nextColumn, start: 0 });
@@ -8235,30 +8453,29 @@ function deleteMarkdownTableDimension(control) {
   selectMarkdownTableCell(block.id, nextRow, nextColumn);
 }
 
-function markdownTableCellSource(element) {
-  const read = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) return normalizeEditorPlainText(node.textContent || "").replace(/[\\`*_~\[\]]/g, "\\$&");
-    if (!(node instanceof Element)) return "";
-    if (node.tagName === "BR") return "\n";
-    const value = [...node.childNodes].map(read).join("");
-    const mark = node.dataset.inlineMark;
-    if (mark === "equation") return `\\(${node.dataset.equationFormula || value}\\)`;
-    if (mark === "code" || node.tagName === "CODE") {
-      const raw = normalizeEditorPlainText(node.textContent || "");
-      const fence = "`".repeat(Math.max(1, ...[...raw.matchAll(/`+/g)].map((match) => match[0].length + 1)));
-      const padding = raw.startsWith("`") || raw.endsWith("`") || (/^ .* $/.test(raw) && /\S/.test(raw)) ? " " : "";
-      return `${fence}${padding}${raw}${padding}${fence}`;
-    }
-    if (mark === "bold" || ["B", "STRONG"].includes(node.tagName)) return `**${value}**`;
-    if (mark === "italic" || ["I", "EM"].includes(node.tagName)) return `*${value}*`;
-    if (mark === "strike" || ["S", "DEL", "STRIKE"].includes(node.tagName)) return `~~${value}~~`;
-    if (node.tagName === "A") {
-      const href = normalizeInlineHref(node.getAttribute("href") || "");
-      if (href) return `[${value}](${href})`;
-    }
-    return node !== element && ["DIV", "P"].includes(node.tagName) ? `\n${value}` : value;
-  };
-  return read(element).replace(/\n$/, "").replace(/\n/g, "<br>");
+function markdownTableCellContent(element) {
+  const clone = element.cloneNode(true);
+  const trailingBreak = clone.lastChild?.nodeName === "BR";
+  clone.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+  clone.querySelectorAll("div, p").forEach((node) => node.replaceWith("\n", ...node.childNodes));
+  const text = normalizeEditorPlainText(clone.textContent || "").replace(trailingBreak ? /\n$/ : /$^/, "");
+  return { text, marks: inlineMarksFromContent(clone, text) };
+}
+
+function applyMarkdownTableInlineShortcut(cell, event) {
+  if (event.inputType !== "insertText" || event.data?.length !== 1 || !/[`*_~]/.test(event.data)) return;
+  const range = selectionOffsetsInside(cell);
+  if (!range?.collapsed) return;
+  const content = markdownTableCellContent(cell);
+  const match = content.text.slice(0, range.start).match(/(?:(?<!`)(`+)[^`\n]+\1|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|(?<!\*)\*[^*\n]+\*|(?<!_)_[^_\n]+_)$/);
+  if (!match || content.marks.some((mark) => mark.type === "code" && mark.start <= match.index && mark.end >= range.end)) return;
+  const inline = parseMarkdownInlineText(match[0], null, true);
+  if (!inline.marks.length) return;
+  const split = splitInlineMarksAtSelection(content.marks, content.text, match.index, range.end);
+  const text = content.text.slice(0, match.index) + inline.text + content.text.slice(range.end);
+  const marks = normalizeInlineMarks(text, [...split.before, ...shiftInlineMarks(inline.marks, match.index), ...shiftInlineMarks(split.after, match.index + inline.text.length)]);
+  cell.innerHTML = renderInlineText({ text, marks });
+  setSelectionOffsets(cell, match.index + inline.text.length, match.index + inline.text.length);
 }
 
 function updateMarkdownTableCell(cell) {
@@ -8268,25 +8485,47 @@ function updateMarkdownTableCell(cell) {
   const column = Number(cell.dataset.tableColumn);
   const cells = row === 0 ? context.table.headers : context.table.rows[row - 1];
   if (!cells || !Number.isInteger(column) || column < 0 || column >= cells.length) return false;
+  const previous = inlineContentForRange(context.block, { tableRow: row, tableColumn: column });
   const rendered = document.createElement("span");
-  rendered.innerHTML = renderMarkdownTableCell(cells[column]);
+  rendered.innerHTML = renderInlineText(previous);
   if (cell.innerHTML === rendered.innerHTML) return false;
-  const value = markdownTableCellSource(cell);
-  if (cells[column] === value) return false;
+  const content = markdownTableCellContent(cell);
+  content.marks = inlineMarksForContentUpdate(previous, cell, content.text);
+  if (previous.text === content.text && inlineMarksEqual(previous.marks, content.marks)) return false;
   beginEditorTextHistory(context.ownerType, context.ownerId, context.block.id, markdownTableCellFocus(cell));
-  cells[column] = value;
-  context.block.text = serializeMarkdownTable(context.table);
+  setInlineContentForRange(context.block, { tableRow: row, tableColumn: column }, content);
   if (context.ownerType === "resources") markResourceChanged(context.ownerId);
   saveState();
   return true;
 }
 
 function handleMarkdownTableCellEvent(event) {
+  const scope = event.target.closest?.("[data-resource-table-scope]");
+  if (scope) {
+    event.stopPropagation();
+    if (["pointerdown", "mousedown"].includes(event.type)) event.preventDefault();
+    if (event.type === "click") {
+      event.preventDefault();
+      const context = markdownTableCellContext(scope);
+      if (!context || app.dataset.workspaceAuthority !== "ready" || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return;
+      if (scope.dataset.resourceTableScope === "all") {
+        clearMarkdownTableCellSelection();
+        selectSingleBlock(context.ownerType, context.ownerId, context.block.id);
+      } else selectMarkdownTableScope(context.block.id, scope.dataset.resourceTableScope, Number(scope.dataset.tableRow || 0), Number(scope.dataset.tableColumn || 0));
+    }
+    return;
+  }
+  if (ui.markdownTableSelection && ["pointerdown", "mousedown", "focusin"].includes(event.type)) {
+    const selectedBlock = document.querySelector(`[data-block-id="${cssEscape(ui.markdownTableSelection.blockId)}"]`);
+    const inControls = selectedBlock?.contains(event.target) && event.target.closest?.(".resource-table-format, .resource-table-cell-actions");
+    const selectedCell = event.type === "focusin" && event.target.matches?.("[data-resource-table-cell].is-cell-selected");
+    if (inControls && event.type !== "focusin") event.preventDefault();
+    if (!inControls && !selectedCell) clearMarkdownTableCellSelection();
+  }
   const remove = event.target.closest?.("[data-resource-table-delete]");
   if (remove) {
     event.stopPropagation();
     if (["pointerdown", "mousedown"].includes(event.type)) event.preventDefault();
-    if (event.type === "focusout" && !event.relatedTarget?.closest?.(".resource-table-cell-actions")) clearMarkdownTableCellSelection();
     if (event.type === "click") {
       event.preventDefault();
       deleteMarkdownTableDimension(remove);
@@ -8350,6 +8589,7 @@ function handleMarkdownTableCellEvent(event) {
   if (!cell) return;
   const context = markdownTableCellContext(cell);
   if (!context) return;
+  if (event.type === "click" && event.target.closest("[data-inline-mark='comment'], a[data-inline-mark], [data-inline-mark='equation']")) return;
   event.stopPropagation();
   const { ownerType, ownerId, block, blockElement } = context;
   const allowed = app.dataset.workspaceAuthority === "ready" && editorOwnerMutationAllowed(ownerType, ownerId);
@@ -8364,6 +8604,7 @@ function handleMarkdownTableCellEvent(event) {
     clearInlineEditingOverlaysForBlockSelection();
     return;
   }
+  if (event.type === "pointerdown" && event.button === 0 && !cell.classList.contains("is-cell-selected")) beginInlineToolbarPointerSelection(event);
   if (event.type === "compositionstart") {
     beginEditorTextHistory(ownerType, ownerId, block.id, markdownTableCellFocus(cell), { forceNew: true });
     ui.composingBlockId = block.id;
@@ -8375,17 +8616,14 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (event.type === "focusout") {
-    if (cell.classList.contains("is-cell-selected")) {
-      if (!event.relatedTarget?.closest?.(".resource-table-cell-actions")) clearMarkdownTableCellSelection();
-      return;
-    }
+    if (cell.classList.contains("is-cell-selected")) return;
     if (ui.composingBlockId === block.id) ui.composingBlockId = "";
     updateMarkdownTableCell(cell);
     flushPendingEditorTextHistory(markdownTableCellFocus(cell));
     const next = markdownTableCellContext(cell);
     const row = Number(cell.dataset.tableRow);
     const value = (row === 0 ? next?.table.headers : next?.table.rows[row - 1])?.[Number(cell.dataset.tableColumn)];
-    if (value !== undefined) cell.innerHTML = renderMarkdownTableCell(value);
+    if (value !== undefined) cell.innerHTML = renderMarkdownTableCell(value, markdownTableCellMarks(block, row, Number(cell.dataset.tableColumn)));
     return;
   }
   if (event.isComposing || event.keyCode === 229 || ui.composingBlockId === block.id) return;
@@ -8401,6 +8639,7 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (event.type === "input") {
+    applyMarkdownTableInlineShortcut(cell, event);
     updateMarkdownTableCell(cell);
     return;
   }
@@ -8424,7 +8663,7 @@ function handleMarkdownTableCellEvent(event) {
       event.preventDefault();
       const row = Math.max(0, Math.min(context.table.rows.length, Number(cell.dataset.tableRow) + (event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0)));
       const column = Math.max(0, Math.min(context.table.headers.length - 1, Number(cell.dataset.tableColumn) + (event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0)));
-      selectMarkdownTableCell(block.id, row, column);
+      selectMarkdownTableScope(block.id, ui.markdownTableSelection?.mode || "cell", row, column);
     } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       focusMarkdownTableCell(block.id, Number(cell.dataset.tableRow), Number(cell.dataset.tableColumn));
@@ -8433,6 +8672,24 @@ function handleMarkdownTableCellEvent(event) {
       clearMarkdownTableCellSelection();
       selectSingleBlock(ownerType, ownerId, block.id);
     }
+    return;
+  }
+  const inlineShortcut = inlineMarkKeyboardShortcut(event);
+  if (inlineShortcut) {
+    event.preventDefault();
+    const range = { ...selectionOffsetsInside(cell), ...tableCellRange(markdownTableCellFocus(cell)) };
+    const command = { bold: "bold", italic: "italic", underline: "underline", strike: "strikeThrough" }[inlineShortcut];
+    if (range.collapsed && command) {
+      document.execCommand(command);
+      if (document.queryCommandState(command)) cell.dataset.inlineTypingMark = inlineShortcut;
+      else delete cell.dataset.inlineTypingMark;
+    } else toggleInlineMark(ownerType, ownerId, block.id, inlineShortcut, range);
+    return;
+  }
+  if (equationKeyboardShortcut(event)) {
+    event.preventDefault();
+    const range = { ...selectionOffsetsInside(cell), ...tableCellRange(markdownTableCellFocus(cell)) };
+    openEquationPopover(ownerType, ownerId, block.id, range, null, inlineContentForRange(block, range)?.text.slice(range.start, range.end) || "");
     return;
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
@@ -8489,13 +8746,13 @@ function syncMarkdownTableSize(blockElement, table, widths = undefined) {
   rows.forEach((values, index) => {
     let row = tableElement.rows[index];
     if (!row) {
-      tableElement.tBodies[0].insertAdjacentHTML("beforeend", `<tr>${renderMarkdownTableRow(values, index, table.align, true)}</tr>`);
+      tableElement.tBodies[0].insertAdjacentHTML("beforeend", `<tr>${renderMarkdownTableRow(values, index, table.align, true, block)}</tr>`);
       return;
     }
     while (row.cells.length > values.length) row.deleteCell(-1);
     if (row.cells.length < values.length) {
       const first = row.cells.length;
-      const added = renderMarkdownTableRow(values, index, table.align, true, block?.tableHeader !== false);
+      const added = renderMarkdownTableRow(values, index, table.align, true, block);
       const scratch = document.createElement("tr");
       scratch.innerHTML = added;
       for (const cell of [...scratch.cells].slice(first)) row.appendChild(cell);
@@ -8507,6 +8764,41 @@ function syncMarkdownTableSize(blockElement, table, widths = undefined) {
   tableElement.style.minWidth = widths ? "0" : `${Math.max(480, table.headers.length * 160)}px`;
   blockElement.querySelectorAll("[data-resource-table-width]").forEach((handle, column) => handle.setAttribute("aria-valuenow", String(widths?.[column] || Math.round(tableElement.rows[0].cells[column].getBoundingClientRect().width))));
   blockElement.querySelector("[data-resource-table-select]").setAttribute("aria-label", `표, ${table.headers.length}열 ${rows.length}행`);
+  positionMarkdownTableHandles(blockElement);
+}
+
+function positionMarkdownTableHandles(root = document) {
+  const blocks = root.matches?.(".resource-table-block") ? [root] : root.querySelectorAll(".resource-table-block");
+  for (const block of blocks) {
+    const rail = block.querySelector(".resource-table-row-handles");
+    const table = block.querySelector("table");
+    if (!rail || !table) continue;
+    if (rail.childElementCount !== table.rows.length) rail.innerHTML = renderMarkdownTableRowHandles(table.rows.length);
+    const shell = block.querySelector(".resource-table-shell");
+    const bounds = shell.getBoundingClientRect();
+    const scale = bounds.width / shell.offsetWidth || 1;
+    [...rail.children].forEach((button, row) => {
+      const rowBounds = table.rows[row].getBoundingClientRect();
+      button.style.top = `${(rowBounds.top - bounds.top + rowBounds.height / 2) / scale - button.offsetHeight / 2}px`;
+    });
+    const selection = ui.markdownTableSelection;
+    const toolbar = block.querySelector(".resource-table-format");
+    if (selection?.blockId !== block.dataset.blockId || selection.mode !== "row" || !toolbar) continue;
+    const rowBounds = table.rows[selection.row]?.getBoundingClientRect();
+    if (!rowBounds) continue;
+    const viewport = visualViewportBounds();
+    const document = block.closest(".resource-document");
+    const visible = document?.getBoundingClientRect() || viewport;
+    const titlebar = document?.querySelector("[data-resource-window-drag]")?.getBoundingClientRect();
+    const top = Math.max(viewport.top, titlebar?.bottom || visible.top) + 6;
+    const bottom = Math.min(viewport.bottom, visible.bottom) - 8;
+    const height = toolbar.offsetHeight * scale;
+    const aboveTable = bounds.top - height - 6;
+    const preferred = aboveTable >= top ? aboveTable : rowBounds.top - height - 6;
+    const y = Math.max(top, Math.min(preferred < top ? rowBounds.bottom + 6 : preferred, bottom - height));
+    toolbar.style.top = `${(y - bounds.top) / scale}px`;
+    toolbar.style.bottom = "auto";
+  }
 }
 
 function beginMarkdownTableEdgeDrag(event) {
@@ -8843,12 +9135,20 @@ function normalizeEditableBlock(block) {
   }
   if (block.type === TABLE_BLOCK_TYPE) {
     const widths = markdownTableColumnWidths(block, parseMarkdownTable(block.text)?.headers.length || 0);
+    if (block.tableCellFormats !== undefined) {
+      const formats = normalizeMarkdownTableCellFormats(block);
+      if (JSON.stringify(block.tableCellFormats) !== JSON.stringify(formats)) { block.tableCellFormats = formats; changed = true; }
+    }
+    if (block.tableCellMarks !== undefined) {
+      const marks = normalizeMarkdownTableCellMarks(block);
+      if (JSON.stringify(block.tableCellMarks) !== JSON.stringify(marks)) { block.tableCellMarks = marks; changed = true; }
+    }
     if (widths && JSON.stringify(widths) !== JSON.stringify(block.columnWidths)) { block.columnWidths = widths; changed = true; }
     for (const field of ["tableHeader", "tableBold"]) {
       if (block[field] !== undefined && typeof block[field] !== "boolean") { delete block[field]; changed = true; }
     }
   } else {
-    for (const field of ["columnWidths", "tableHeader", "tableBold"]) {
+    for (const field of ["columnWidths", "tableHeader", "tableBold", "tableCellMarks", "tableCellFormats"]) {
       if (block[field] !== undefined) { delete block[field]; changed = true; }
     }
   }
@@ -10445,10 +10745,10 @@ function renderInlineFormatToolbar() {
     toolbar.activeTextColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeTextColor]?.label || toolbar.activeTextColor} 글자` : "",
     toolbar.activeBackgroundColor ? `${BLOCK_COLOR_OPTIONS[toolbar.activeBackgroundColor]?.label || toolbar.activeBackgroundColor} 배경` : "",
   ].filter(Boolean).join(", ");
-  const colorControls = toolbar.ownerType === "resources" ? "" : `
+  const colorControls = toolbar.ownerType === "resources" && toolbar.tableRow === undefined ? "" : `
       <button class="inline-format-button ${colorSummary ? "is-active" : ""}" id="${esc(`${colorMenuId}-trigger`)}" type="button" data-inline-color-menu-toggle aria-label="${esc(colorSummary ? `색상, ${colorSummary}` : "색상")}" aria-haspopup="menu" aria-expanded="${toolbar.colorMenuOpen ? "true" : "false"}" ${toolbar.colorMenuOpen ? `aria-controls="${esc(colorMenuId)}"` : ""} title="색상"><span class="inline-format-symbol" aria-hidden="true">A</span><span class="inline-format-label">색상</span></button>
       ${toolbar.colorMenuOpen ? renderInlineColorMenu(toolbar, colorMenuId) : ""}`;
-  const resourceCitationControl = toolbar.ownerType === "resources" ? `
+  const resourceCitationControl = toolbar.ownerType === "resources" && toolbar.tableRow === undefined ? `
       <button class="inline-format-button ${toolbar.activeResourceCitation ? "is-active" : ""}" type="button" data-inline-resource-citation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="자료 인용" aria-pressed="${toolbar.activeResourceCitation ? "true" : "false"}" aria-haspopup="dialog" title="자료 인용"><span class="inline-format-symbol" aria-hidden="true">R</span><span class="inline-format-label">자료 인용</span></button>` : "";
   return `
     <div class="inline-format-toolbar ${toolbar.animate ? "is-entering" : ""}" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
@@ -11076,7 +11376,8 @@ function handleClick(event) {
     event.stopPropagation();
     activateBlockContent(clickedCommentBlock);
     const editor = clickedCommentBlock.closest(".block-editor");
-    const range = textRangeForInlineElement(clickedCommentBlock, clickedInlineComment);
+    const cell = clickedInlineComment.closest("[data-resource-table-cell]");
+    const range = { ...textRangeForInlineElement(cell || clickedCommentBlock, clickedInlineComment), ...(cell ? { tableRow: Number(cell.dataset.tableRow), tableColumn: Number(cell.dataset.tableColumn) } : {}) };
     openCommentPopover(
       editor.dataset.ownerType,
       editor.dataset.ownerId,
@@ -11092,14 +11393,10 @@ function handleClick(event) {
   if (clickedInlineEquation && clickedEquationBlock) {
     event.preventDefault();
     event.stopPropagation();
-    if (clickedEquationBlock.matches("[data-resource-table-select]")) {
-      const editor = clickedEquationBlock.closest(".block-editor");
-      selectSingleBlock(editor?.dataset.ownerType, editor?.dataset.ownerId, clickedEquationBlock.dataset.blockContent);
-      return;
-    }
     activateBlockContent(clickedEquationBlock);
     const editor = clickedEquationBlock.closest(".block-editor");
-    const range = textRangeForInlineElement(clickedEquationBlock, clickedInlineEquation);
+    const cell = clickedInlineEquation.closest("[data-resource-table-cell]");
+    const range = { ...textRangeForInlineElement(cell || clickedEquationBlock, clickedInlineEquation), ...(cell ? { tableRow: Number(cell.dataset.tableRow), tableColumn: Number(cell.dataset.tableColumn) } : {}) };
     openEquationPopover(
       editor.dataset.ownerType,
       editor.dataset.ownerId,
@@ -11202,7 +11499,7 @@ function handleClick(event) {
       inlineEquationButton.dataset.blockId,
       range,
       inlineEquationButton.getBoundingClientRect(),
-      block?.text?.slice(range.start, range.end) || "",
+      inlineContentForRange(block, range)?.text?.slice(range.start, range.end) || "",
     );
     return;
   }
@@ -12087,6 +12384,7 @@ function openResourceDocument(resourceId, options = {}) {
 }
 
 function clearResourceWindowEditingState() {
+  clearMarkdownTableCellSelection();
   closeResourceSlashMenu();
   cancelEditorMarqueeDrag();
   clearBlockSelection();
@@ -12514,6 +12812,7 @@ function handleResourceWindowKeydown(event) {
   record.floatingRect = { ...record.rect };
   syncResourceWindowGeometry(record, { animate: true });
   reflowResourceWindows();
+  if (event.shiftKey) rememberResourceWindowSize(record);
   return true;
 }
 
@@ -12521,11 +12820,30 @@ function resourceWindowElement(id) {
   return els.detailRoot?.querySelector(`[data-resource-window="${cssEscape(id)}"]`) || null;
 }
 
+function resourceWindowSizePreference() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RESOURCE_WINDOW_SIZE_KEY) || "{}");
+    return Object.fromEntries(["width", "height", "dockWidth"]
+      .filter((key) => Number.isFinite(saved?.[key]) && saved[key] > 0)
+      .map((key) => [key, saved[key]]));
+  } catch (_) {
+    return {};
+  }
+}
+
+function rememberResourceWindowSize(record) {
+  const saved = resourceWindowSizePreference();
+  if (record.docked) saved.dockWidth = record.rect.width;
+  else Object.assign(saved, { width: record.rect.width, height: record.rect.height });
+  try { localStorage.setItem(RESOURCE_WINDOW_SIZE_KEY, JSON.stringify({ width: saved.width, height: saved.height, dockWidth: saved.dockWidth })); } catch (_) {}
+}
+
 function createResourceWindowState(id) {
   const viewport = visualViewportBounds();
   const edge = viewport.width <= 560 ? 10 : 20;
-  const width = Math.min(960, Math.max(1, viewport.width - edge * 2));
-  const height = Math.min(820, Math.max(1, viewport.height - edge * 2));
+  const saved = resourceWindowSizePreference();
+  const width = saved.width ? Math.min(viewport.width, Math.max(300, saved.width)) : Math.min(960, Math.max(1, viewport.width - edge * 2));
+  const height = saved.height ? Math.min(viewport.height, Math.max(220, saved.height)) : Math.min(820, Math.max(1, viewport.height - edge * 2));
   const cascade = (ui.resourceWindows.length % 3) * 24;
   const rect = {
     x: Math.min(viewport.right - width, viewport.left + (viewport.width - width) / 2 + cascade),
@@ -12533,7 +12851,7 @@ function createResourceWindowState(id) {
     width,
     height,
   };
-  return { id, rect, floatingRect: { ...rect }, docked: false, previewDock: false, opened: ++ui.resourceWindowOrder, z: ++ui.resourceWindowZ };
+  return { id, rect, floatingRect: { ...rect }, dockWidth: saved.dockWidth, docked: false, previewDock: false, opened: ++ui.resourceWindowOrder, z: ++ui.resourceWindowZ };
 }
 
 function syncResourceWindowGeometry(record, { animate = false } = {}) {
@@ -12670,6 +12988,7 @@ function finishResourceWindowPointer(event) {
     record.dockWidth = record.rect.width;
     syncResourceWindowGeometry(record);
   }
+  if (record && drag.direction && drag.moved) rememberResourceWindowSize(record);
   ui.resourceWindowDrag = null;
   drag.captureTarget.classList.remove("is-dragging", "is-resizing");
   document.documentElement.style.removeProperty("--resource-resize-cursor");
@@ -14206,7 +14525,10 @@ function refreshBlockEditorsAfterMutation(ownerType, ownerId) {
   const editors = [...document.querySelectorAll(selector)];
   if (!editors.length) return false;
   const blocksHtml = renderBlocks(item.blocks, ownerType, ownerId);
-  for (const editor of editors) patchBlockEditorStructure(editor, blocksHtml);
+  for (const editor of editors) {
+    patchBlockEditorStructure(editor, blocksHtml);
+    positionMarkdownTableHandles(editor);
+  }
   if (ownerType === "resources") syncResourceComments(ownerId);
   return true;
 }
@@ -15213,6 +15535,7 @@ function duplicateSelectedBlocks() {
 
 function duplicateEditorBlock(block) {
   const clone = cloneEditorBlocks([block])[0] || {};
+  if (clone.type === TABLE_BLOCK_TYPE) return { id: id(), ...clipboardBlockFromBlock(clone) };
   let type = isSupportedEditorBlockType(clone.type) ? clone.type : "paragraph";
   const text = typeof clone.text === "string" ? clone.text : "";
   const safeUrl = type === IMAGE_BLOCK_TYPE
@@ -15351,6 +15674,11 @@ function handleDocumentPaste(event) {
   if (customBlocks.length && target) {
     event.preventDefault();
     pasteBlocksFromClipboard(event, customBlocks);
+    return;
+  }
+  if (htmlBlocks.some((block) => block.type === TABLE_BLOCK_TYPE) && rawHtml.includes("data-block-table=") && target) {
+    event.preventDefault();
+    pasteBlocksFromClipboard(event, htmlBlocks);
     return;
   }
   if (plainMarkdownBlocks.length && target) {
@@ -15865,6 +16193,8 @@ function clipboardBlockFromBlock(block) {
   if (type === TABLE_BLOCK_TYPE) {
     const widths = markdownTableColumnWidths(block, parseMarkdownTable(block.text)?.headers.length || 0);
     if (widths) clipboardBlock.columnWidths = widths;
+    if (block.tableCellFormats) clipboardBlock.tableCellFormats = normalizeMarkdownTableCellFormats(block);
+    if (block.tableCellMarks) clipboardBlock.tableCellMarks = normalizeMarkdownTableCellMarks(block, true);
     for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") clipboardBlock[field] = block[field];
   }
   return clipboardBlock;
@@ -15942,7 +16272,9 @@ function clipboardBlocksHtml(blocks) {
     const urlAttr = (isUrlPreviewBlockType(block.type) || block.type === IMAGE_BLOCK_TYPE) && normalizeResourceImageUrl(block.url || block.text || "")
       ? ` data-block-url="${esc(normalizeResourceImageUrl(block.url || block.text || ""))}"`
       : "";
-    if (block.type === "code") {
+    if (block.type === TABLE_BLOCK_TYPE) {
+      html += `<div data-block-type="table" data-block-table="${esc(JSON.stringify(clipboardBlockFromBlock(block)))}">${renderInlineTextForClipboard(block)}</div>`;
+    } else if (block.type === "code") {
       html += `<pre data-block-type="${blockType}" data-block-indent="${blockIndent}"${colorAttr}${backgroundColorAttr}><code>${esc(block.text || "")}</code></pre>`;
     } else if (block.type === IMAGE_BLOCK_TYPE) {
       html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
@@ -16002,6 +16334,12 @@ function clipboardBlockFromHtmlElement(element) {
   const rawType = element.matches("pre") ? "code" : element.dataset.blockType;
   let type = isSupportedEditorBlockType(rawType) ? rawType : "";
   if (!type) return null;
+  if (type === TABLE_BLOCK_TYPE && element.dataset.blockTable) {
+    try {
+      const [table] = normalizeClipboardBlocks([JSON.parse(element.dataset.blockTable)]);
+      if (table?.type === TABLE_BLOCK_TYPE && parseMarkdownTable(table.text)) return table;
+    } catch (_) {}
+  }
   const checked = element.dataset.blockChecked === "true";
   const inline = htmlClipboardInlineData(element);
   const text = normalizeHtmlClipboardText(element.innerText || element.textContent || "");
@@ -16321,6 +16659,8 @@ function normalizeClipboardBlocks(blocks) {
     if (type === TABLE_BLOCK_TYPE) {
       const widths = markdownTableColumnWidths(block, parseMarkdownTable(rawText)?.headers.length || 0);
       if (widths) normalizedBlock.columnWidths = widths;
+      if (block.tableCellFormats) normalizedBlock.tableCellFormats = normalizeMarkdownTableCellFormats(block);
+      if (block.tableCellMarks) normalizedBlock.tableCellMarks = normalizeMarkdownTableCellMarks(block, true);
       for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") normalizedBlock[field] = block[field];
     }
     normalized.push(normalizedBlock);
@@ -16867,6 +17207,8 @@ function prepareClipboardBlockPaste(item, target, blocks) {
     for (const field of ["color", "backgroundColor"]) if (block[field]) pastedBlock[field] = block[field];
     if (block.type === TABLE_BLOCK_TYPE) {
       if (block.columnWidths) pastedBlock.columnWidths = block.columnWidths.slice();
+      if (block.tableCellFormats) pastedBlock.tableCellFormats = normalizeMarkdownTableCellFormats(block);
+      if (block.tableCellMarks) pastedBlock.tableCellMarks = normalizeMarkdownTableCellMarks(block, true);
       for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") pastedBlock[field] = block[field];
     }
     pasted.push(pastedBlock);
@@ -19239,8 +19581,8 @@ function inlineToolbarFromSelection() {
   const range = selection.getRangeAt(0);
   const startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
   const endElement = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
-  const blockContent = startElement?.closest("[data-block-content]");
-  if (!blockContent || blockContent !== endElement?.closest("[data-block-content]")) return null;
+  const blockContent = startElement?.closest("[data-resource-table-cell], [data-block-content]");
+  if (!blockContent || blockContent !== endElement?.closest("[data-resource-table-cell], [data-block-content]")) return null;
   const editor = blockContent.closest(".block-editor");
   if (!editor) return null;
   if (!editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return null;
@@ -19248,9 +19590,13 @@ function inlineToolbarFromSelection() {
   if (!offsets || offsets.collapsed || offsets.end <= offsets.start) return null;
   const rect = range.getBoundingClientRect();
   const fallbackRect = blockContent.getBoundingClientRect();
-  const block = itemById(editor.dataset.ownerType, editor.dataset.ownerId)?.blocks?.find((entry) => entry.id === blockContent.dataset.blockContent);
-  if (!block || block.type === "code" || block.type === TABLE_BLOCK_TYPE) return null;
-  const marks = normalizeInlineMarks(block?.text || blockContent.textContent || "", block?.marks || inlineMarksFromContent(blockContent));
+  const blockId = blockContent.closest(".block")?.dataset.blockId;
+  const cellRange = blockContent.matches("[data-resource-table-cell]") ? { tableRow: Number(blockContent.dataset.tableRow), tableColumn: Number(blockContent.dataset.tableColumn) } : {};
+  const block = itemById(editor.dataset.ownerType, editor.dataset.ownerId)?.blocks?.find((entry) => entry.id === blockId);
+  if (!block || block.type === "code") return null;
+  const content = inlineContentForRange(block, cellRange);
+  if (!content) return null;
+  const marks = normalizeInlineMarks(content.text, content.marks);
   const existingToolbarElement = els.overlayRoot?.querySelector("[data-inline-toolbar]");
   const existingToolbarRect = existingToolbarElement?.getBoundingClientRect();
   const position = inlineToolbarPositionForRect(
@@ -19260,13 +19606,15 @@ function inlineToolbarFromSelection() {
   );
   const sameSelection = ui.inlineToolbar?.ownerType === editor.dataset.ownerType &&
     ui.inlineToolbar?.ownerId === editor.dataset.ownerId &&
-    ui.inlineToolbar?.blockId === blockContent.dataset.blockContent &&
+    ui.inlineToolbar?.blockId === blockId &&
+    ui.inlineToolbar?.tableRow === cellRange.tableRow && ui.inlineToolbar?.tableColumn === cellRange.tableColumn &&
     ui.inlineToolbar?.start === offsets.start &&
     ui.inlineToolbar?.end === offsets.end;
   return {
     ownerType: editor.dataset.ownerType,
     ownerId: editor.dataset.ownerId,
-    blockId: blockContent.dataset.blockContent,
+    blockId,
+    ...cellRange,
     start: offsets.start,
     end: offsets.end,
     ...position,
@@ -19320,7 +19668,7 @@ function inlineToolbarPositionForRect(anchorRect, width = INLINE_TOOLBAR_ESTIMAT
 function inlineToolbarAnchorRect(toolbar = ui.inlineToolbar) {
   if (!toolbar) return null;
   const editor = document.querySelector(`.block-editor[data-owner-type="${cssEscape(toolbar.ownerType)}"][data-owner-id="${cssEscape(toolbar.ownerId)}"]`);
-  const blockContent = editor?.querySelector(`[data-block-content="${cssEscape(toolbar.blockId)}"]`);
+  const blockContent = editor?.querySelector(`[data-block-content="${cssEscape(toolbar.blockId)}"]${toolbar.tableRow === undefined ? "" : ` [data-resource-table-cell][data-table-row="${toolbar.tableRow}"][data-table-column="${toolbar.tableColumn}"]`}`);
   if (!blockContent) return null;
   const textLength = (blockContent.textContent || "").length;
   const start = Math.max(0, Math.min(textLength, toolbar.start));
@@ -19377,6 +19725,7 @@ function inlineToolbarEqual(left, right) {
     left.ownerType === right.ownerType &&
     left.ownerId === right.ownerId &&
     left.blockId === right.blockId &&
+    left.tableRow === right.tableRow && left.tableColumn === right.tableColumn &&
     left.start === right.start &&
     left.end === right.end &&
     Math.round(left.x) === Math.round(right.x) &&
@@ -23349,7 +23698,7 @@ function applyBlockType(block, type) {
 function inlineToolbarRangeFromControl(control) {
   const start = Number.parseInt(control?.dataset?.selectionStart, 10) || 0;
   const end = Math.max(start, Number.parseInt(control?.dataset?.selectionEnd, 10) || 0);
-  return { start, end, collapsed: end <= start };
+  return { start, end, collapsed: end <= start, ...tableCellRange(ui.inlineToolbar?.blockId === control?.dataset?.blockId ? ui.inlineToolbar : null) };
 }
 
 function toggleInlineColorMenu(forceOpen = null, options = {}) {
@@ -23414,7 +23763,7 @@ function applyInlineColorChoice(choice = "") {
     toolbar.blockId,
     mode,
     color,
-    { start: toolbar.start, end: toolbar.end, collapsed: toolbar.end <= toolbar.start },
+    { start: toolbar.start, end: toolbar.end, collapsed: toolbar.end <= toolbar.start, ...tableCellRange(toolbar) },
   );
 }
 
@@ -23429,16 +23778,18 @@ function applyInlineColor(ownerType, ownerId, blockId, mode, color = "", rangeIn
   if (!block || !block.text || block.type === "code" || block.type === "divider") return false;
   const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || range.collapsed || range.end <= range.start) return false;
-  const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), markType, range.start, range.end);
+  const content = inlineContentForRange(block, range);
+  if (!content) return false;
+  const marks = removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), markType, range.start, range.end);
   if (normalizedColor) marks.push({ type: markType, start: range.start, end: range.end, color: normalizedColor });
-  const history = beginEditorHistory(ownerType, ownerId, { blockId, start: range.start, end: range.end });
-  block.marks = normalizeInlineMarks(block.text, marks);
-  commitEditorHistory(history, { blockId, start: range.start, end: range.end });
+  const history = beginEditorHistory(ownerType, ownerId, { blockId, ...range });
+  setInlineContentForRange(block, range, { text: content.text, marks: normalizeInlineMarks(content.text, marks) });
+  commitEditorHistory(history, { blockId, ...range });
   saveState();
   renderEditorMutation(ownerType, ownerId);
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(blockId, { range: { start: range.start, end: range.end } });
+  focusInlineContentRange(blockId, range);
   return true;
 }
 
@@ -23464,7 +23815,7 @@ function toggleSelectedBlocksInlineMark(markType) {
   const targetBlocks = [];
   for (const block of item.blocks) {
     if (!selectedIds.has(block.id)) continue;
-    if (!block.text || block.type === "code" || block.type === "divider") continue;
+    if (!block.text || block.type === "code" || block.type === "divider" || block.type === TABLE_BLOCK_TYPE) continue;
     targetBlocks.push(block);
   }
   if (!targetBlocks.length) {
@@ -23507,18 +23858,20 @@ function toggleInlineMark(ownerType, ownerId, blockId, markType, rangeInfo = nul
   if (!block.text) return false;
   const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || range.collapsed || range.end <= range.start) return false;
-  const marks = normalizeInlineMarks(block.text, block.marks);
+  const content = inlineContentForRange(block, range);
+  if (!content) return false;
+  const marks = normalizeInlineMarks(content.text, content.marks);
   const nextMarks = inlineRangeFullyMarked(marks, markType, range.start, range.end)
     ? removeInlineMarkRange(marks, markType, range.start, range.end)
-    : normalizeInlineMarks(block.text, [...marks, { type: markType, start: range.start, end: range.end }]);
-  const history = beginEditorHistory(ownerType, ownerId, { blockId, start: range.start, end: range.end });
-  block.marks = nextMarks;
-  commitEditorHistory(history, { blockId, start: range.start, end: range.end });
+    : normalizeInlineMarks(content.text, [...marks, { type: markType, start: range.start, end: range.end }]);
+  const history = beginEditorHistory(ownerType, ownerId, { blockId, ...range });
+  setInlineContentForRange(block, range, { text: content.text, marks: nextMarks });
+  commitEditorHistory(history, { blockId, ...range });
   saveState();
   renderEditorMutation(ownerType, ownerId);
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(blockId, { range: { start: range.start, end: range.end } });
+  focusInlineContentRange(blockId, range);
   return true;
 }
 
@@ -23529,7 +23882,9 @@ function openLinkPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRe
   if (!block || block.type === "code" || (!block.text && !options.previewType)) return false;
   const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || (!options.previewType && (range.collapsed || range.end <= range.start))) return false;
-  const marks = normalizeInlineMarks(block.text, block.marks);
+  const content = inlineContentForRange(block, range);
+  if (!content) return false;
+  const marks = normalizeInlineMarks(content.text, content.marks);
   const existing = marks.find((mark) => mark.type === "link" && mark.start <= range.start && mark.end >= range.end);
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
   const fallbackX = window.innerWidth / 2 - 130;
@@ -23542,6 +23897,7 @@ function openLinkPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRe
     blockId,
     start: range.start,
     end: range.end,
+    ...tableCellRange(range),
     href: existing?.href || "",
     previewType: isUrlPreviewBlockType(options.previewType) ? options.previewType : "",
     x: Math.max(12, Math.min(rawX, window.innerWidth - 272)),
@@ -23784,14 +24140,16 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
   const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || range.collapsed || range.end <= range.start) return false;
   if (ownerType === "resources") reconcileResourceCommentThreads(item);
-  const marks = normalizeInlineMarks(block.text, block.marks);
+  const content = inlineContentForRange(block, range);
+  if (!content) return false;
+  const marks = normalizeInlineMarks(content.text, content.marks);
   const existing = marks.find((mark) => mark.type === "comment" && mark.start <= range.start && mark.end >= range.end);
   if (ownerType === "resources") {
     if (!existing && !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
     const commentId = existing?.commentId || id();
     return openResourceCommentSidebar(ownerId, {
       commentId,
-      ...(!existing ? { draft: { commentId, blockId, start: range.start, end: range.end, quote: block.text.slice(range.start, range.end), body: "" } } : {}),
+      ...(!existing ? { draft: { commentId, blockId, start: range.start, end: range.end, ...tableCellRange(range), quote: content.text.slice(range.start, range.end), body: "" } } : {}),
     });
   }
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
@@ -23805,6 +24163,7 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
     blockId,
     start: range.start,
     end: range.end,
+    ...tableCellRange(range),
     commentId: existing?.commentId || id(),
     body: existing?.body || "",
     x: Math.max(12, Math.min(rawX, window.innerWidth - 312)),
@@ -23825,9 +24184,12 @@ function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anch
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || block.type === "divider") return false;
-  const text = block.text || "";
-  const range = normalizeTextRange(rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId) || { start: text.length, end: text.length }, text.length);
-  const marks = normalizeInlineMarks(text, block.marks);
+  const selectedRange = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
+  const content = inlineContentForRange(block, selectedRange);
+  if (!content) return false;
+  const text = content.text || "";
+  const range = { ...normalizeTextRange(selectedRange || { start: text.length, end: text.length }, text.length), ...tableCellRange(selectedRange) };
+  const marks = normalizeInlineMarks(text, content.marks);
   const existing = marks.find((mark) => mark.type === "equation" && mark.start <= range.start && mark.end >= range.end);
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
   const fallbackX = window.innerWidth / 2 - 170;
@@ -23840,6 +24202,7 @@ function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anch
     blockId,
     start: range.start,
     end: range.end,
+    ...tableCellRange(range),
     formula: formulaValue || existing?.formula || "",
     displayMode: options.displayMode === true || existing?.displayMode === true,
     preserveLeadingSpace: options.preserveLeadingSpace === true,
@@ -23914,19 +24277,21 @@ function applyInlineLink(value) {
     return true;
   }
   if (!block || !block.text) return false;
-  let marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "resourceLink", popover.start, popover.end);
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
+  let marks = removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), "resourceLink", popover.start, popover.end);
   marks = removeInlineMarkRange(marks, "link", popover.start, popover.end);
   marks.push({ type: "link", start: popover.start, end: popover.end, href });
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  block.marks = normalizeInlineMarks(block.text, marks);
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) });
+  setInlineContentForRange(block, popover, { text: content.text, marks: normalizeInlineMarks(content.text, marks) });
+  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
+  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) };
   ui.linkPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -23943,19 +24308,21 @@ function applyInlineComment(value) {
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
   const commentId = popover.commentId || id();
-  const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end);
+  const marks = removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), "comment", popover.start, popover.end);
   marks.push({ type: "comment", start: popover.start, end: popover.end, commentId, body });
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  block.marks = normalizeInlineMarks(block.text, marks);
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) });
+  setInlineContentForRange(block, popover, { text: content.text, marks: normalizeInlineMarks(content.text, marks) });
+  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
+  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) };
   ui.commentPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -23968,28 +24335,30 @@ function applyInlineEquation(value) {
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block) return false;
-  const text = typeof block.text === "string" ? block.text : "";
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
+  const text = content.text || "";
   const range = normalizeTextRange({ start: popover.start, end: popover.end }, text.length);
   const insertPrefix = popover.preserveLeadingSpace && range.start > 0 ? " " : "";
   const inserted = `${insertPrefix}${formula}`;
   const equationStart = range.start + insertPrefix.length;
   const equationEnd = equationStart + formula.length;
-  const splitMarks = splitInlineMarksAtSelection(block.marks, text, range.start, range.end);
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: range.start, end: range.end });
-  block.text = `${text.slice(0, range.start)}${inserted}${text.slice(range.end)}`;
-  block.marks = normalizeInlineMarks(block.text, [
+  const splitMarks = splitInlineMarksAtSelection(content.marks, text, range.start, range.end);
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: range.start, end: range.end, ...tableCellRange(popover) });
+  const nextText = `${text.slice(0, range.start)}${inserted}${text.slice(range.end)}`;
+  setInlineContentForRange(block, popover, { text: nextText, marks: normalizeInlineMarks(nextText, [
     ...splitMarks.before,
     { type: "equation", start: equationStart, end: equationEnd, formula, ...(popover.displayMode === true ? { displayMode: true } : {}) },
     ...shiftInlineMarks(splitMarks.after, range.start + inserted.length),
-  ]);
-  commitEditorHistory(history, { blockId: popover.blockId, start: equationEnd, end: equationEnd });
+  ]) });
+  commitEditorHistory(history, { blockId: popover.blockId, start: equationEnd, end: equationEnd, ...tableCellRange(popover) });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: equationEnd, end: equationEnd };
+  const selection = { blockId: popover.blockId, start: equationEnd, end: equationEnd, ...tableCellRange(popover) };
   ui.equationPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -24000,19 +24369,18 @@ function removeInlineComment() {
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  block.marks = normalizeInlineMarks(
-    block.text,
-    removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end),
-  );
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
+  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) };
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, selection);
+  setInlineContentForRange(block, popover, { text: content.text, marks: normalizeInlineMarks(content.text, removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), "comment", popover.start, popover.end)) });
+  commitEditorHistory(history, selection);
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
   ui.commentPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -24023,19 +24391,18 @@ function removeInlineEquation() {
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  block.marks = normalizeInlineMarks(
-    block.text,
-    removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "equation", popover.start, popover.end),
-  );
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
+  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) };
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, selection);
+  setInlineContentForRange(block, popover, { text: content.text, marks: normalizeInlineMarks(content.text, removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), "equation", popover.start, popover.end)) });
+  commitEditorHistory(history, selection);
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
   ui.equationPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -24046,19 +24413,18 @@ function removeInlineLink() {
   const item = itemById(popover.ownerType, popover.ownerId);
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
-  const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  block.marks = normalizeInlineMarks(
-    block.text,
-    removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "link", popover.start, popover.end),
-  );
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  const content = inlineContentForRange(block, popover);
+  if (!content) return false;
+  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end, ...tableCellRange(popover) };
+  const history = beginEditorHistory(popover.ownerType, popover.ownerId, selection);
+  setInlineContentForRange(block, popover, { text: content.text, marks: normalizeInlineMarks(content.text, removeInlineMarkRange(normalizeInlineMarks(content.text, content.marks), "link", popover.start, popover.end)) });
+  commitEditorHistory(history, selection);
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
   ui.linkPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
-  focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
+  focusInlineContentRange(selection.blockId, selection);
   return true;
 }
 
@@ -24114,6 +24480,11 @@ function shiftInlineMarks(marks = [], offset = 0) {
 function currentBlockSelectionRange(ownerType, ownerId, blockId) {
   const editor = document.querySelector(`.block-editor[data-owner-type="${ownerType}"][data-owner-id="${ownerId}"]`);
   const blockContent = editor?.querySelector(`[data-block-content="${blockId}"]`);
+  const cell = document.activeElement?.closest?.("[data-resource-table-cell]");
+  if (cell && blockContent?.contains(cell)) {
+    const offsets = selectionOffsetsInside(cell);
+    return offsets ? { ...offsets, tableRow: Number(cell.dataset.tableRow), tableColumn: Number(cell.dataset.tableColumn) } : null;
+  }
   return blockContent ? selectionOffsetsInside(blockContent) : null;
 }
 
@@ -26140,6 +26511,7 @@ function normalizeResourceCommentThreads(value) {
           blockId: String(anchorSource.blockId || ""),
           start: Math.max(0, Number.parseInt(anchorSource.start, 10) || 0),
           end: Math.max(0, Number.parseInt(anchorSource.end, 10) || 0),
+          ...tableCellRange(anchorSource),
         }
       : null;
     let formerAnchor = normalizeFormerCommentAnchor(entry.formerAnchor);
@@ -26194,18 +26566,27 @@ function reconcileResourceCommentThreads(resource) {
   const threadsById = new Map(resource.commentThreads.map((thread) => [thread.id, thread]));
   const marksById = new Map();
   for (const block of resource.blocks || []) {
-    const nextMarks = [];
-    for (const mark of normalizeInlineMarks(block.text || "", block.marks)) {
-      if (mark.type !== "comment") {
+    const groups = block.type === TABLE_BLOCK_TYPE
+      ? Object.entries(normalizeMarkdownTableCellMarks(block)).map(([key, marks]) => ({ key, marks, range: { tableRow: Number(key.split(":")[0]), tableColumn: Number(key.split(":")[1]) } }))
+      : [{ marks: normalizeInlineMarks(block.text || "", block.marks), range: {} }];
+    for (const group of groups) {
+      const nextMarks = [];
+      for (const mark of group.marks) {
+        if (mark.type !== "comment") {
+          nextMarks.push(mark);
+          continue;
+        }
+        const thread = threadsById.get(mark.commentId);
+        const formerAnchor = thread?.anchorLostAt ? thread.formerAnchor : null;
+        const restoredAnchor = formerAnchor?.blockId === block.id && formerAnchor.start === mark.start && formerAnchor.end === mark.end
+          && formerAnchor.tableRow === group.range.tableRow && formerAnchor.tableColumn === group.range.tableColumn;
+        if (marksById.has(mark.commentId) || thread?.deletedAt || (thread?.scope === "page" && !restoredAnchor)) continue;
+        marksById.set(mark.commentId, { block, mark, ...group.range });
         nextMarks.push(mark);
-        continue;
       }
-      const thread = threadsById.get(mark.commentId);
-      if (marksById.has(mark.commentId) || thread?.deletedAt || thread?.scope === "page") continue;
-      marksById.set(mark.commentId, { block, mark });
-      nextMarks.push(mark);
+      if (group.key) block.tableCellMarks[group.key] = nextMarks;
+      else block.marks = nextMarks;
     }
-    block.marks = nextMarks;
   }
   const now = new Date().toISOString();
   for (const [commentId, location] of marksById) {
@@ -26213,7 +26594,7 @@ function reconcileResourceCommentThreads(resource) {
     const thread = {
       id: commentId,
       scope: "inline",
-      anchor: { blockId: location.block.id, start: location.mark.start, end: location.mark.end },
+      anchor: { blockId: location.block.id, start: location.mark.start, end: location.mark.end, ...tableCellRange(location) },
       body: location.mark.body,
       createdAt: now,
       updatedAt: now,
@@ -26229,7 +26610,7 @@ function reconcileResourceCommentThreads(resource) {
     const location = marksById.get(thread.id);
     if (location) {
       thread.scope = "inline";
-      thread.anchor = { blockId: location.block.id, start: location.mark.start, end: location.mark.end };
+      thread.anchor = { blockId: location.block.id, start: location.mark.start, end: location.mark.end, ...tableCellRange(location) };
       location.mark.body = thread.body;
       delete thread.anchorLostAt;
       delete thread.formerAnchor;
@@ -26249,7 +26630,7 @@ function normalizeFormerCommentAnchor(value) {
   const start = Math.max(0, Number.parseInt(value.start, 10) || 0);
   const end = Math.max(0, Number.parseInt(value.end, 10) || 0);
   if (!blockId || end <= start) return null;
-  return { blockId, start, end };
+  return { blockId, start, end, ...tableCellRange(value) };
 }
 
 function resourceNeedsMigration(resource) {

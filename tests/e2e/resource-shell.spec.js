@@ -325,6 +325,177 @@ test("Resource 도킹은 겹친 창의 최대 너비만 배경에서 빼고 resi
   await expect.poll(async () => Math.abs((await layout.boundingBox()).width - originalWidth)).toBeLessThanOrEqual(1);
 });
 
+test("Resource 창 크기는 다시 열기와 새로고침 후에도 기억하고 도킹과 화면 축소가 덮어쓰지 않는다", async ({ page, request }) => {
+  await openResourceList(page);
+  const before = await fixtureSnapshot(request);
+  let window = await openSettledResource(page, FIXTURE_IDS.resource);
+  const size = async () => {
+    const { width, height } = await window.boundingBox();
+    return { width, height };
+  };
+  const settled = () => expect.poll(() => window.evaluate((element) => element.getAnimations().every((animation) => animation.playState !== "running"))).toBe(true);
+  const close = () => window.locator(".resource-document-close").click();
+  const resize = async (direction, dx, dy, cancel = false) => {
+    const handle = await window.locator(`[data-resource-resize="${direction}"]`).boundingBox();
+    const x = handle.x + handle.width / 2;
+    const y = handle.y + handle.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx, y + dy, { steps: 8 });
+    if (cancel) await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await settled();
+  };
+  const drag = async (x, y) => {
+    const bar = await window.locator("[data-resource-window-drag]").boundingBox();
+    await page.mouse.move(bar.x + 100, bar.y + bar.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, y, { steps: 10 });
+    await page.mouse.up();
+    await settled();
+  };
+  const original = await size();
+  await resize("se", -180, -120);
+  const resized = await size();
+  expect(resized).toEqual({ width: original.width - 180, height: original.height - 120 });
+  await close();
+  window = await openSettledResource(page, FIXTURE_IDS.bodySearchResource);
+  expect(await size()).toEqual(resized);
+  await window.locator("[data-resource-window-drag]").focus();
+  await page.keyboard.press("Shift+ArrowLeft");
+  await page.keyboard.press("Shift+ArrowDown");
+  await settled();
+  const floating = await size();
+  expect(floating).toEqual({ width: resized.width - 16, height: resized.height + 16 });
+  await resize("se", -80, -60, true);
+  expect(await size()).toEqual(floating);
+  await drag(page.viewportSize().width - 10, 60);
+  await expect(window).toHaveAttribute("data-docked", "true");
+  await resize("w", 84, 0);
+  const dockWidth = (await size()).width;
+  expect(dockWidth).toBe(476);
+  await close();
+  await page.reload();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await openResourceList(page);
+  window = await openSettledResource(page, FIXTURE_IDS.resource);
+  expect(await size()).toEqual(floating);
+  await drag(page.viewportSize().width - 10, 60);
+  await expect(window).toHaveAttribute("data-docked", "true");
+  expect((await size()).width).toBe(dockWidth);
+  await drag(200, 100);
+  await expect(window).toHaveAttribute("data-docked", "false");
+  expect(await size()).toEqual(floating);
+  await close();
+  await page.setViewportSize({ width: 390, height: 520 });
+  window = await openSettledResource(page, FIXTURE_IDS.resource);
+  expect(await size()).toEqual({ width: 390, height: 520 });
+  await close();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  window = await openSettledResource(page, FIXTURE_IDS.resource);
+  expect(await size()).toEqual(floating);
+  const after = await fixtureSnapshot(request);
+  expect(after.state).toEqual(before.state);
+  expect(after.writes).toEqual(before.writes);
+});
+
+test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후에도 정렬과 셀 이동을 유지한다", async ({ page, request }, testInfo) => {
+  const before = await fixtureSnapshot(request);
+  const state = structuredClone(before.state);
+  const resource = state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  resource.blocks = [
+    { id: "table-selection-handles", type: "table", text: ["| A | B | C |", "| --- | --- | --- |", ...Array.from({ length: 8 }, (_, row) => `| ${row === 2 ? "높이가 다른 긴 내용 ".repeat(16) : `row ${row}`} | value ${row} | end ${row} |`)].join("\n"), columnWidths: [330, 330, 330], marks: [], indent: 0 },
+    { id: "after-table-handles", type: "paragraph", text: "다음 문장", marks: [], indent: 0 },
+  ].map((block) => ({ ...block, checked: false, collapsed: false }));
+  resource.commentThreads = [];
+  const response = await request.put("/api/state", { headers: { "If-Match": `"state-${before.serverRevision}"` }, data: { state, baseRevision: before.serverRevision } });
+  expect(response.ok(), await response.text()).toBeTruthy();
+  await page.reload();
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await openResourceList(page);
+  const window = await openSettledResource(page, FIXTURE_IDS.resource);
+  const block = window.locator('[data-block-id="table-selection-handles"]');
+  const rowHandle = (row) => block.locator(`[data-resource-table-scope="row"][data-table-row="${row}"]`);
+  const selected = block.locator("[data-resource-table-cell].is-cell-selected");
+  const aligned = () => expect.poll(() => block.evaluate((element) => [...element.querySelectorAll('[data-resource-table-scope="row"]')].every((button, row) => {
+    const handle = button.getBoundingClientRect();
+    const bounds = element.querySelector("table").rows[row].getBoundingClientRect();
+    return Math.abs(handle.y + handle.height / 2 - bounds.y - bounds.height / 2) < 1;
+  }))).toBe(true);
+  await expect(block.locator("table tr")).toHaveCount(9);
+  await expect(block.locator("table :is(td, th)")).toHaveCount(27);
+  await expect(block.locator('[data-resource-table-scope="row"]')).toHaveCount(9);
+  await expect(block.locator('[data-resource-table-scope="column"]')).toHaveCount(3);
+  await aligned();
+  await rowHandle(2).click();
+  await expect(selected).toHaveCount(3);
+  expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableRow === "2"))).toBe(true);
+  await expect(block.locator(".resource-table-format")).toBeVisible();
+  await block.locator('[data-resource-table-format="tableBold"]').click();
+  await expect(block.locator(".resource-table-format")).toBeVisible();
+  await block.locator(".resource-table-scroll").evaluate((element) => { element.scrollLeft = 390; });
+  const scrolledLeft = await block.locator(".resource-table-scroll").evaluate((element) => element.scrollLeft);
+  expect(scrolledLeft).toBeGreaterThan(0);
+  await aligned();
+  await block.locator('[data-resource-table-scope="column"][data-table-column="1"]').click();
+  expect(await block.locator(".resource-table-scroll").evaluate((element) => element.scrollLeft)).toBe(scrolledLeft);
+  await expect(selected).toHaveCount(9);
+  expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableColumn === "1"))).toBe(true);
+  await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveCount(1);
+  await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveAttribute("data-resource-table-scope", "column");
+  await page.screenshot({ path: testInfo.outputPath("table-selection-handles.png") });
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(selected).toHaveCount(0);
+  const cell = block.locator('[data-resource-table-cell][data-table-row="1"][data-table-column="1"]');
+  await expect(cell).toBeFocused();
+  expect(await cell.evaluate((element) => {
+    const selection = getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.setEnd(selection.focusNode, selection.focusOffset);
+    return range.toString().length === element.textContent.length && selection.isCollapsed;
+  })).toBe(true);
+  await cell.press("Escape");
+  await expect(selected).toHaveCount(1);
+  await cell.press("ArrowRight");
+  await expect(selected).toHaveAttribute("data-table-column", "2");
+  await block.locator('[data-resource-table-scope="all"]').click();
+  await expect(block).toHaveClass(/is-selected/);
+  await expect(selected).toHaveCount(0);
+  const all = await block.locator('[data-resource-table-scope="all"]').boundingBox();
+  const scroll = await block.locator(".resource-table-scroll").boundingBox();
+  expect(all.x + all.width).toBeLessThan(scroll.x);
+  await block.locator(".resource-table-scroll").evaluate((element) => { element.scrollLeft = 0; });
+  const width = block.locator('[data-resource-table-width="0"]');
+  await width.focus();
+  await page.keyboard.press("ArrowLeft");
+  await aligned();
+  await block.locator('[data-resource-table-edge="rows"]').click();
+  await expect(block.locator('[data-resource-table-scope="row"]')).toHaveCount(10);
+  await aligned();
+  for (let row = 0; row < 12; row += 1) await block.locator('[data-resource-table-edge="rows"]').click();
+  await block.locator('[data-resource-table-scope="row"]').last().click();
+  const document = window.locator("[data-resource-document]");
+  const visibleToolbar = () => expect.poll(async () => {
+    const bounds = await document.boundingBox();
+    const titlebar = await window.locator("[data-resource-window-drag]").boundingBox();
+    const toolbar = await block.locator(".resource-table-format").boundingBox();
+    return toolbar.y >= titlebar.y + titlebar.height && toolbar.y + toolbar.height <= bounds.y + bounds.height;
+  }).toBe(true);
+  expect((await block.locator("table").boundingBox()).y).toBeLessThan((await document.boundingBox()).y);
+  await visibleToolbar();
+  await rowHandle(14).click();
+  await document.evaluate((element) => {
+    const row = element.querySelector('[data-resource-table-cell][data-table-row="14"]');
+    const titlebar = element.querySelector("[data-resource-window-drag]");
+    element.scrollTop += row.getBoundingClientRect().top - titlebar.getBoundingClientRect().bottom - 4;
+  });
+  await visibleToolbar();
+  await block.locator('[data-resource-table-format="tableBold"]').click();
+  await visibleToolbar();
+});
+
 test("Resource Cmd+W는 활성 창만 닫고 배경 포커스와 반복 입력을 구분한다", async ({ page }) => {
   await openResourceList(page);
   const a = await openSettledResource(page, FIXTURE_IDS.resource);

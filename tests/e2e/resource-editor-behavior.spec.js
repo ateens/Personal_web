@@ -37,10 +37,17 @@ async function persistedResource(request) {
 async function selectTextRange(content, start, end) {
   await content.evaluate((element, offsets) => {
     element.focus();
-    const textNode = element.firstChild;
+    const point = (offset) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node && offset > node.textContent.length) { offset -= node.textContent.length; node = walker.nextNode(); }
+      return node ? { node, offset } : { node: element, offset: element.childNodes.length };
+    };
+    const start = point(offsets.start);
+    const end = point(offsets.end);
     const range = document.createRange();
-    range.setStart(textNode, offsets.start);
-    range.setEnd(textNode, offsets.end);
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
@@ -50,6 +57,92 @@ async function selectTextRange(content, start, end) {
 
 test.beforeEach(async ({ request }) => {
   await resetFixture(request);
+});
+
+test("표 셀의 인라인 단축키와 마크다운, 코멘트는 선택 범위와 저장 위치를 보존한다", async ({ page, request }) => {
+  await seedResource(request, [
+    { ...paragraph("inline-table", "| 제목 | 값 |\n| --- | --- |\n| 기존 **강조** | |\n| 마지막 줄 | 보존 |\n| | |"), type: "table" },
+    paragraph("table-following-text", "표 아래 본문"),
+  ]);
+  let editor = await openResource(page);
+  const cell = (row, column) => editor.locator(`[data-block-id="inline-table"] [data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
+  const saved = async () => (await persistedResource(request)).blocks.find((block) => block.id === "inline-table");
+  await selectTextRange(cell(1, 0), 3, 5);
+  await page.keyboard.press("Meta+b");
+  await expect(cell(1, 0).locator('[data-inline-mark="bold"]')).toHaveCount(0);
+  for (const [shortcut, type] of [["Meta+b", "bold"], ["Meta+i", "italic"], ["Meta+u", "underline"], ["Meta+e", "code"], ["Meta+Shift+s", "strike"]]) {
+    await selectTextRange(cell(1, 0), 3, 5);
+    await page.keyboard.press(shortcut);
+    await expect(cell(1, 0).locator(`[data-inline-mark="${type}"]`)).toHaveText("강조");
+  }
+  await expect.poll(async () => (await saved()).tableCellMarks?.["1:0"]?.map((mark) => mark.type).sort()).toEqual(["bold", "code", "italic", "strike", "underline"]);
+  await cell(1, 1).click();
+  await page.keyboard.type("**bold** `code` ~~strike~~");
+  await expect(cell(1, 1)).toHaveText("bold code strike");
+  await expect(cell(1, 1).locator('[data-inline-mark="bold"]')).toHaveText("bold");
+  await expect(cell(1, 1).locator('[data-inline-mark="code"]')).toHaveText("code");
+  await expect(cell(1, 1).locator('[data-inline-mark="strike"]')).toHaveText("strike");
+  await cell(1, 1).press("Tab");
+  await selectTextRange(cell(2, 1), 2, 2);
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type(" BOLD");
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type(" plain");
+  await expect(cell(2, 1).locator('[data-inline-mark="bold"]')).toHaveText(" BOLD");
+  await expect(cell(2, 1)).toHaveText("보존 BOLD plain");
+  const literal = " \t<https://example.com> x<br>y &lt; &#32; | \\ **literal** \t ";
+  const multiline = " first\nsecond \t";
+  await cell(3, 0).fill(literal);
+  await selectTextRange(cell(3, 0), 0, literal.length);
+  await page.keyboard.press("Meta+b");
+  await expect.poll(() => cell(3, 0).textContent()).toBe(literal);
+  await expect.poll(async () => (await saved()).tableCellMarks?.["3:0"]).toEqual([{ type: "bold", start: 0, end: literal.length }]);
+  await cell(3, 1).fill(multiline);
+  await selectTextRange(cell(3, 1), 1, multiline.length);
+  await page.keyboard.press("Meta+i");
+  await expect.poll(() => cell(3, 1).textContent()).toBe(multiline);
+  await selectTextRange(cell(2, 0), 0, 3);
+  await expect(page.locator('[data-inline-toolbar]')).toBeVisible();
+  await page.locator('[data-inline-toolbar] [data-inline-mark-toggle="comment"]').click();
+  await page.locator('[data-resource-comment-input]').fill("셀 코멘트");
+  await page.locator('[data-resource-comment-input]').press("Meta+Enter");
+  await expect(cell(2, 0).locator('[data-inline-mark="comment"]')).toHaveText("마지막");
+  await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.anchor).toEqual({ blockId: "inline-table", start: 0, end: 3, tableRow: 2, tableColumn: 0 });
+  await page.locator('[data-resource-comments-toggle]').click();
+  await cell(2, 0).locator('[data-inline-mark="comment"]').click();
+  await expect(page.locator('[data-resource-comments-toggle]')).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('.resource-comment-body')).toHaveText("셀 코멘트");
+  await page.locator('[data-resource-comment-action="reply"]').click();
+  await page.locator('[data-resource-comment-input]').fill("셀 답글");
+  await page.locator('[data-resource-comment-input]').press("Meta+Enter");
+  await expect(page.locator('.resource-comment-body')).toHaveText(["셀 코멘트", "셀 답글"]);
+  await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.replies?.length).toBe(1);
+  editor = await openResource(page);
+  await expect(cell(1, 0).locator('[data-inline-mark="underline"]')).toHaveText("강조");
+  await expect(cell(1, 1)).toHaveText("bold code strike");
+  await expect.poll(() => cell(3, 0).textContent()).toBe(literal);
+  await expect.poll(() => cell(3, 0).locator('[data-inline-mark="bold"]').textContent()).toBe(literal);
+  await expect.poll(() => cell(3, 1).textContent()).toBe(multiline);
+  await expect.poll(() => cell(3, 1).locator('[data-inline-mark="italic"]').textContent()).toBe(multiline.slice(1));
+  await expect(cell(2, 0).locator('[data-inline-mark="comment"]')).toHaveText("마지막");
+  await cell(1, 0).click();
+  await cell(1, 0).press("Escape");
+  await editor.locator('[data-resource-table-delete="row"]').click();
+  await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.anchor?.tableRow).toBe(1);
+  await expect(cell(1, 0).locator('[data-inline-mark="comment"]')).toHaveText("마지막");
+  await page.keyboard.press("Meta+z");
+  await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.anchor?.tableRow).toBe(2);
+  for (const axis of ["row", "column"]) {
+    await cell(2, 0).click();
+    await cell(2, 0).press("Escape");
+    await editor.locator(`[data-resource-table-delete="${axis}"]`).click();
+    await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.scope).toBe("page");
+    await page.keyboard.press("Meta+z");
+    await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.anchor).toEqual({ blockId: "inline-table", start: 0, end: 3, tableRow: 2, tableColumn: 0 });
+    await expect(cell(2, 0).locator('[data-inline-mark="comment"]')).toHaveText("마지막");
+    await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.replies?.length).toBe(1);
+  }
+  await expect(editor.locator('[data-block-content="table-following-text"]')).toHaveText("표 아래 본문");
 });
 
 test("멘션 제거 후 기존 글자와 @ 입력을 보존하고 페이지 링크와 이모지는 계속 동작한다", async ({ page, request }) => {
