@@ -24,6 +24,7 @@ const LEGACY_TASK_SOMEDAY_STATUS = "someday";
 const LEGACY_CAPTURE_FIELDS = ["status", "convertedTo", "convertedId", "processedAt"];
 const RETIRED_CAPTURE_STATUSES = new Set(["processed", "archived"]);
 const PROJECT_STATUSES = new Set(["planned", "active", "completed", "paused"]);
+export const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "equation", "link", "resourceLink"]);
 const DEFAULT_NAV_ORDER = ["today", "tasks", "projects", "boxes", "resources", "habits", "journal", "calendar", "database"];
 const NAV_KEY_SET = new Set(DEFAULT_NAV_ORDER);
 const DEFAULT_CALENDAR_SOURCES = {
@@ -1969,7 +1970,7 @@ function storageError(status, code, message, details = undefined) {
   return Object.assign(new Error(message), { status, code, expose: true, details });
 }
 
-function normalizeAppStateForStorage(state) {
+export function normalizeAppStateForStorage(state) {
   const validRoot = isPlainObject(state);
   const nextState = validRoot ? state : {};
   let changed = !validRoot;
@@ -2101,6 +2102,16 @@ function normalizeAppStateForStorage(state) {
       }
       if (key === "projects") cleanItem = normalizeProjectForStorage(cleanItem);
       if (key === "tasks") cleanItem = normalizeTaskForStorage(cleanItem);
+      if (Array.isArray(cleanItem.blocks)) {
+        const blocks = cleanItem.blocks.map((block) => {
+          if (!Array.isArray(block?.marks)) return block;
+          const marks = block.marks.filter((mark) => SUPPORTED_MARK_TYPES.has(mark?.type));
+          return marks.length === block.marks.length ? block : { ...block, marks };
+        });
+        if (blocks.some((block, blockIndex) => block !== cleanItem.blocks[blockIndex])) {
+          cleanItem = { ...cleanItem, blocks };
+        }
+      }
       if (cleanItem !== item) {
         if (!normalizedItems) normalizedItems = items.slice(0, index);
         normalizedItems.push(cleanItem);

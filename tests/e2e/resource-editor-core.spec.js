@@ -548,6 +548,121 @@ test("중간 pipe table과 text fence를 native table 및 Plain Text Code Space�
   await expect(reloadedCodeSpace.locator("pre[data-code-language='plaintext'] code")).toHaveText(codeText);
 });
 
+test("표 셀 편집과 두 가장자리 확장이 저장되고 드래그 단위 실행 취소 및 IME를 보존한다", async ({ page, request }) => {
+  const resourceId = FIXTURE_IDS.bodySearchResource;
+  const literal = "*literal* [square] `tick` \\path";
+  const tableText = [
+    "| 제목 | 값 | 비고 |", "| --- | ---: | --- |", "| **기존 강조** | 10 | 원본 |",
+    String.raw`| \*literal\* \[square\] \`tick\` \\path | 20 | 유지 |`,
+  ].join("\n");
+  await seedResourceBlocks(request, resourceId, [
+    { ...paragraph("editable-table", tableText), type: "table" },
+    paragraph("after-editable-table", "표 아래 본문"),
+  ]);
+  const editor = await openResource(page, resourceId);
+  const block = editor.locator('[data-block-id="editable-table"]');
+  const table = block.locator("table");
+  const cell = (row, column) => block.locator(`[data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
+  const savedTable = async () => (await persistedResource(request, resourceId)).blocks.find((entry) => entry.id === "editable-table").text;
+  await expect(cell(2, 0)).toHaveText(literal);
+  await cell(2, 0).click();
+  await cell(2, 1).click();
+  await expect(cell(2, 0)).toHaveText(literal);
+  await expect(cell(2, 0).locator("[data-inline-mark]")).toHaveCount(0);
+  expect(await savedTable()).toBe(tableText);
+  const addedLiteral = " 추가 *[새]`코드`*";
+  await setCaret(cell(2, 0), literal.length);
+  await page.keyboard.insertText(addedLiteral);
+  await cell(2, 0).press("Tab");
+  await expect(cell(2, 0)).toHaveText(literal + addedLiteral);
+  await expect(cell(2, 0).locator("[data-inline-mark]")).toHaveCount(0);
+  await expect.poll(savedTable).toContain("\\*literal\\* \\[square\\] \\`tick\\` \\\\path");
+  await cell(1, 2).fill("직접 편집 | 테스트");
+  await cell(1, 2).press("Tab");
+  await expect(cell(2, 0)).toBeFocused();
+  await expect.poll(savedTable).toContain("직접 편집 \\| 테스트");
+  await expect(block.locator('[data-inline-mark="bold"]')).toHaveText("기존 강조");
+
+  const dragEdge = async (axis, count, release = true) => {
+    await block.hover();
+    const edge = block.locator(`[data-resource-table-edge="${axis}"]`);
+    const bounds = await edge.boundingBox();
+    const step = await table.locator("tr").first().evaluate((row, vertical) => vertical ? row.getBoundingClientRect().height : row.cells[0].getBoundingClientRect().width, axis === "rows");
+    const x = bounds.x + bounds.width / 2;
+    const y = bounds.y + bounds.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + (axis === "columns" ? step * count : 0), y + (axis === "rows" ? step * count : 0), { steps: 8 });
+    if (release) await page.mouse.up();
+  };
+  await table.evaluate((element) => { window.__tableBeforeDrag = element; });
+  const beforeGrowth = await savedTable();
+  await dragEdge("rows", 2, false);
+  await expect(table.locator("tr")).toHaveCount(5);
+  expect(await savedTable()).toBe(beforeGrowth);
+  expect(await table.evaluate((element) => element === window.__tableBeforeDrag)).toBe(true);
+  await page.mouse.up();
+  await expect.poll(async () => (await savedTable()).split("\n").length).toBe(6);
+  await page.keyboard.press("Meta+z");
+  await expect(table.locator("tr")).toHaveCount(3);
+  await expect(cell(1, 2)).toHaveText("직접 편집 | 테스트");
+  await page.keyboard.press("Meta+Shift+z");
+  await expect(table.locator("tr")).toHaveCount(5);
+
+  await dragEdge("columns", 1);
+  await expect(table.locator("thead th")).toHaveCount(4);
+  await expect(table.locator("tbody tr").first().locator("td")).toHaveCount(4);
+  await page.keyboard.press("Meta+z");
+  await expect(table.locator("thead th")).toHaveCount(3);
+  await expect(table.locator("tr")).toHaveCount(5);
+  await page.keyboard.press("Meta+Shift+z");
+  await expect(table.locator("thead th")).toHaveCount(4);
+
+  await dragEdge("rows", 2, false);
+  await expect(table.locator("tr")).toHaveCount(7);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(table.locator("tr")).toHaveCount(5);
+  await expect(block.locator(".resource-table-edge.is-dragging")).toHaveCount(0);
+
+  await cell(2, 2).focus();
+  await cell(2, 2).evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    element.textContent = "한글 받";
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", data: "한글 받", isComposing: true }));
+  });
+  expect(await savedTable()).toContain("유지");
+  await cell(2, 2).evaluate((element) => {
+    element.textContent = "한글 받침";
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "한글 받침" }));
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "한글 받침", isComposing: false }));
+  });
+  await expect(cell(2, 2)).toBeFocused();
+  await expect.poll(savedTable).toContain("한글 받침");
+  await cell(2, 2).press("Meta+z");
+  await expect(cell(2, 2)).toHaveText("유지");
+  await expect(cell(2, 2)).toBeFocused();
+  await cell(2, 2).press("Meta+Shift+z");
+  await expect(cell(2, 2)).toHaveText("한글 받침");
+  await expect(editor.locator('[data-block-content="after-editable-table"]')).toHaveText("표 아래 본문");
+  await expect.poll(async () => (await savedTable()).includes("한글 받침")).toBe(true);
+  const reloaded = await openResource(page, resourceId);
+  await expect(reloaded.locator("table tr")).toHaveCount(5);
+  await expect(reloaded.locator("table thead th")).toHaveCount(4);
+  await expect(reloaded.locator('[data-table-row="2"][data-table-column="2"]')).toHaveText("한글 받침");
+  await expect(reloaded.locator('[data-table-row="2"][data-table-column="0"]')).toHaveText(literal + addedLiteral);
+  await expect(reloaded.locator('[data-table-row="2"][data-table-column="0"] [data-inline-mark]')).toHaveCount(0);
+  await seedResourceBlocks(request, FIXTURE_IDS.readOnlyResource, [{ ...paragraph("readonly-table", tableText), type: "table" }]);
+  const readonlyEditor = await openResource(page, FIXTURE_IDS.readOnlyResource);
+  await expect(readonlyEditor.locator("[data-resource-table-edge]")).toHaveCount(0);
+  await expect(readonlyEditor.locator("[data-resource-table-cell]").first()).toHaveAttribute("contenteditable", "false");
+  await readonlyEditor.locator("[data-resource-table-cell]").first().evaluate((element) => {
+    element.textContent = "허용하지 않는 수정";
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "허용하지 않는 수정" }));
+  });
+  expect((await persistedResource(request, FIXTURE_IDS.readOnlyResource)).blocks[0].text).toBe(tableText);
+});
+
 test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도 inline과 전체 줄을 구분한다", async ({ page, request }) => {
   const shortcutBlockId = "equation-shortcut";
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [paragraph(shortcutBlockId, "E = mc^2")]);
@@ -742,21 +857,123 @@ test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공�
   await expect(reloadedEditor.locator("[data-code-language-trigger]")).toContainText("TypeScript");
 });
 
-test("슬래시 입력은 메뉴를 열지 않고 일반 텍스트로 저장된다", async ({ page, request }) => {
+test("슬래시 메뉴는 고정된 DOM에서 검색하고 서식과 표를 생성한다", async ({ page, request }) => {
   const { editor, resourceId } = await createEmptyResource(page);
   const content = editor.locator("[data-block-content]").first();
-  await content.type("/image");
-
-  await expect(page.locator(".selected-block-menu")).toHaveCount(0);
-  await expect(content).toHaveText("/image");
+  await content.type("/");
+  const menu = page.locator(".resource-slash-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator("[data-resource-slash-id]")).toHaveCount(54);
+  await menu.evaluate((element) => { window.slashMenuIdentity = element; window.slashOptionsIdentity = [...element.querySelectorAll("[role=option]")]; });
+  const bounds = await menu.boundingBox();
+  for (const character of "heading2") {
+    await page.keyboard.type(character);
+    expect(await menu.evaluate((element) => element === window.slashMenuIdentity && [...element.querySelectorAll("[role=option]")].every((option, index) => option === window.slashOptionsIdentity[index]))).toBe(true);
+    expect((await menu.boundingBox()).height).toBe(bounds.height);
+    expect(await menu.evaluate((element) => element.getAnimations({ subtree: true }).length)).toBe(0);
+    await expect(content).toBeFocused();
+  }
+  await menu.locator('[data-resource-slash-id="heading2"]').click();
+  await expect(menu).toHaveCount(0);
+  await expect(editor.locator('.block[data-type="heading2"]')).toBeVisible();
+  await page.keyboard.type("Heading");
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);
-    return resource?.blocks[0]?.text;
-  }).toBe("/image");
+    return { text: resource?.blocks[0]?.text, type: resource?.blocks[0]?.type };
+  }).toEqual({ text: "Heading", type: "heading2" });
 
-  await content.press("Enter");
-  await expect(editor.locator("[data-block-content]").first()).toHaveText("/image");
-  await expect(editor.locator("[data-block-content]:focus")).toHaveText("");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/table");
+  await page.keyboard.press("Enter");
+  await expect(editor.locator('.block[data-type="table"] table')).toBeVisible();
+  await expect(editor.locator('.block[data-type="table"] tr')).toHaveCount(3);
+  await expect.poll(async () => (await persistedResource(request, resourceId))?.blocks.some((block) => block.type === "table")).toBe(true);
+});
+
+test("슬래시 수식은 블록과 인라인을 구분하고 닫기와 코드 안의 슬래시는 본문을 보존한다", async ({ page, request }) => {
+  const { editor, resourceId } = await createEmptyResource(page);
+  const content = editor.locator("[data-block-content]").first();
+  await content.type("before /inline equation");
+  await page.keyboard.press("Enter");
+  await page.locator("[data-inline-equation-input]").fill("\\frac{a}{b}");
+  await page.locator("[data-inline-equation-input]").press("Enter");
+  await expect(editor.locator('[data-equation-mode="inline"]')).toBeVisible();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/block equation");
+  await page.keyboard.press("Enter");
+  await page.locator("[data-inline-equation-input]").fill("\\frac{a}{b}");
+  await page.locator("[data-inline-equation-input]").press("Enter");
+  await expect(editor.locator('[data-equation-mode="display"] math')).toBeVisible();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/does-not-exist");
+  await expect(page.locator(".resource-slash-empty")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".resource-slash-menu")).toHaveCount(0);
+  await page.keyboard.type(" literal");
+  await expect(page.locator(".resource-slash-menu")).toHaveCount(0);
+  await expect(editor.locator('[data-block-content]:focus')).toHaveText("/does-not-exist literal");
+  await expect.poll(async () => (await persistedResource(request, resourceId))?.blocks.some((block) => block.text === "/does-not-exist literal")).toBe(true);
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/code");
+  await page.locator('[data-resource-slash-id="code"]').click();
+  await page.keyboard.type("/not-a-command");
+  await expect(page.locator(".resource-slash-menu")).toHaveCount(0);
+  await expect(editor.locator('.block[data-type="code"] [data-block-content]')).toHaveText("/not-a-command");
+});
+
+test("슬래시 변환은 토글 자식과 인라인 서식, 조합 종료 직후의 한글을 보존한다", async ({ page, request }) => {
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    paragraph("slash-inline"),
+    { ...paragraph("slash-toggle", "Parent"), type: "toggle" },
+    { ...paragraph("slash-child", "Child"), indent: 1 },
+    paragraph("slash-ime"),
+    paragraph("slash-text-color"),
+    paragraph("slash-background-color"),
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await editor.locator('[data-block-content="slash-inline"]').type("/inline code");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("const");
+  await expect(editor.locator('[data-block-content="slash-inline"] [data-inline-mark="code"]')).toHaveText("const");
+  await expect(editor.locator('[data-block-content="slash-inline"] [data-inline-mark="code"]')).toHaveCSS("color", "rgb(235, 87, 87)");
+  await expect(editor.locator('[data-block-content="slash-inline"] [data-inline-mark="code"]')).toHaveCSS("background-color", "rgba(135, 131, 120, 0.15)");
+  for (const [blockId, optionId, markType, property, expected] of [
+    ["slash-text-color", "text-red", "textColor", "color", "rgb(212, 76, 71)"],
+    ["slash-background-color", "background-red", "backgroundColor", "background-color", "rgb(253, 235, 236)"],
+  ]) {
+    await editor.locator(`[data-block-content="${blockId}"]`).type("/");
+    await page.locator(`[data-resource-slash-id="${optionId}"]`).click();
+    await expect(editor.locator(`[data-block-content="${blockId}"] [data-inline-mark="${markType}"]`)).toHaveCSS(property, expected);
+  }
+  const parent = editor.locator('[data-block-content="slash-toggle"]');
+  await setCaret(parent, "Parent".length);
+  await parent.type(" /table");
+  await page.keyboard.press("Enter");
+  await expect(editor.locator('.block[data-type="table"]')).toHaveCount(1);
+  expect(await editor.locator('.block').evaluateAll((blocks) => blocks.map((block) => block.dataset.blockId).slice(0, 3))).toEqual(["slash-inline", "slash-toggle", "slash-child"]);
+  await editor.locator('[data-block-toggle="slash-toggle"]').click();
+  await expect(editor.locator('[data-block-id="slash-child"]')).toBeHidden();
+
+  const composing = editor.locator('[data-block-content="slash-ime"]');
+  await composing.type("/");
+  await composing.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    element.textContent = "/표";
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "표" }));
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+  });
+  await expect(editor.locator('.block[data-type="table"]')).toHaveCount(2);
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
+    return { tables: resource.blocks.filter((block) => block.type === "table").length, child: resource.blocks.find((block) => block.id === "slash-child")?.text };
+  }).toEqual({ tables: 2, child: "Child" });
 });
 
 test("붙여넣은 PNG 이미지는 클릭 선택 후 Backspace로 DOM과 저장 상태에서 제거된다", async ({ page, request }) => {

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { createStorage } from "../server/storage.js";
+import { createStorage, normalizeAppStateForStorage } from "../server/storage.js";
 
 const files = {
   app: read("app.js"),
@@ -22,6 +22,25 @@ const checks = [
     } catch (error) {
       return String(error?.message || "").includes("DATABASE_URL is required");
     }
+  }],
+  ["retired inline annotations preserve text, comments, and Resource links", () => {
+    const text = "Legacy label and retained formatting";
+    const marks = [
+      { type: "bold", start: 0, end: 12 },
+      { type: "comment", start: 0, end: 12, commentId: "thread", body: "Keep this comment" },
+      { type: "resourceLink", start: 13, end: 16, resourceId: "target" },
+      { type: "equation", start: 17, end: 25, formula: "x+y", displayMode: true },
+    ];
+    const block = { id: "block", type: "paragraph", text, marks: [...marks, { type: "mention", start: 0, end: 12, targetId: "legacy" }, { type: "unknown", start: 0, end: 12 }] };
+    const resource = { id: "resource", blocks: [block], commentThreads: [{ id: "thread", body: "Keep this comment" }] };
+    const { state } = normalizeAppStateForStorage({ resources: [resource], boxes: [{ id: "box", blocks: [block] }] });
+    return state.resources[0].blocks[0].text === text
+      && state.boxes[0].blocks[0].text === text
+      && JSON.stringify(state.resources[0].blocks[0].marks) === JSON.stringify(marks)
+      && JSON.stringify(state.boxes[0].blocks[0].marks) === JSON.stringify(marks)
+      && state.resources[0].commentThreads === resource.commentThreads
+      && block.marks.length === marks.length + 2
+      && normalizeAppStateForStorage(state).changed === false;
   }],
   ["Google OAuth state is claimed and consumed once", () => (
     files.storage.includes("CREATE TABLE IF NOT EXISTS app_oauth_transactions")

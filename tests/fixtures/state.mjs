@@ -14,7 +14,7 @@ export const FIXTURE_IDS = Object.freeze({
   inlineThread: "fixture-thread-inline",
 });
 
-const INLINE_MARK_TEXT = "Bold Italic Underline Strike Code Link Comment Mention Equation";
+const INLINE_MARK_TEXT = "Bold Italic Underline Strike Code Link Comment Equation";
 
 const viewControls = () => ({
   today: control("date", "overview"),
@@ -61,12 +61,6 @@ function inlineFixtureBlock() {
       mark("Comment", "comment", {
         commentId: FIXTURE_IDS.inlineThread,
         body: "Existing inline thread",
-      }),
-      mark("Mention", "mention", {
-        mentionType: "page",
-        label: "Body Search Fixture",
-        targetType: "resources",
-        targetId: FIXTURE_IDS.bodySearchResource,
       }),
       mark("Equation", "equation", { formula: "E=mc^2" }),
     ],

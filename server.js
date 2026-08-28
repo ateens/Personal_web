@@ -17,7 +17,7 @@ import {
   verifyFinanceSession,
 } from "./server/finance.js";
 import { mutationOriginAllowed } from "./server/request-security.js";
-import { createStorage } from "./server/storage.js";
+import { createStorage, SUPPORTED_MARK_TYPES } from "./server/storage.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const sourceStaticRoot = resolve(root);
@@ -93,7 +93,6 @@ const SUPPORTED_BLOCK_TYPES = new Set([
 ]);
 const URL_PREVIEW_BLOCK_TYPES = new Set(["bookmark", "embed"]);
 const RESOURCE_IMAGE_CONTENT_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const SUPPORTED_MARK_TYPES = new Set(["bold", "italic", "underline", "strike", "code", "textColor", "backgroundColor", "comment", "mention", "equation", "link", "resourceLink"]);
 const SUPPORTED_INLINE_COLOR_KEYS = new Set(["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
 const SUPPORTED_RESOURCE_FONTS = new Set(["default", "serif", "mono"]);
 const SUPPORTED_COMMENT_SCOPES = new Set(["page", "inline"]);

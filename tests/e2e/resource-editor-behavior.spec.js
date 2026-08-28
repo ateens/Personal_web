@@ -52,6 +52,80 @@ test.beforeEach(async ({ request }) => {
   await resetFixture(request);
 });
 
+test("멘션 제거 후 기존 글자와 @ 입력을 보존하고 페이지 링크와 이모지는 계속 동작한다", async ({ page, request }) => {
+  const legacyText = "기존 연결 이름";
+  await seedResource(request, [
+    { ...paragraph("retired-annotation", legacyText), marks: [{ type: "mention", start: 0, end: legacyText.length, mentionType: "page", targetType: "projects", targetId: FIXTURE_IDS.project, label: legacyText }] },
+    paragraph("plain-at-input"),
+    paragraph("page-command-link"),
+    paragraph("emoji-command"),
+  ]);
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  let editor = await openResource(page);
+  await expect(editor.locator('[data-block-content="retired-annotation"]')).toHaveText(legacyText);
+  await expect(editor.locator('[data-inline-mark="mention"]')).toHaveCount(0);
+
+  const plain = editor.locator('[data-block-content="plain-at-input"]');
+  await plain.pressSequentially("@tomorrow");
+  await expect(plain).toHaveText("@tomorrow");
+  await expect(page.locator(".editor-command-menu, .mention-menu")).toHaveCount(0);
+
+  let command = editor.locator('[data-block-content="page-command-link"]');
+  await command.pressSequentially("[[Fixture Project");
+  await expect(page.locator(".page-command-menu")).toBeVisible();
+  await command.press("Enter");
+  let link = command.locator('a[data-inline-mark="link"]');
+  await expect(link).toHaveText("Fixture Project");
+  await expect(link).toHaveAttribute("href", `#page/projects/${FIXTURE_IDS.project}`);
+  await expect.poll(async () => (await persistedResource(request)).blocks.find((block) => block.id === "page-command-link")?.marks).toEqual([
+    { type: "link", start: 0, end: "Fixture Project".length, href: `#page/projects/${FIXTURE_IDS.project}` },
+  ]);
+  await link.click();
+  await expect(page.locator('[data-nav-key="projects"]')).toHaveAttribute("aria-current", "page");
+  expect(page.context().pages()).toHaveLength(1);
+
+  editor = await openResource(page);
+  command = editor.locator('[data-block-content="page-command-link"]');
+  link = command.locator('a[data-inline-mark="link"]');
+  await link.focus();
+  await expect(link).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator('[data-nav-key="projects"]')).toHaveAttribute("aria-current", "page");
+  expect(page.context().pages()).toHaveLength(1);
+
+  editor = await openResource(page);
+  command = editor.locator('[data-block-content="page-command-link"]');
+  await command.fill("");
+  await command.pressSequentially("+Fixture Box");
+  await expect(page.locator(".page-command-menu")).toBeVisible();
+  await command.press("Enter");
+  link = command.locator('a[data-inline-mark="link"]');
+  await expect(link).toHaveAttribute("href", `#page/boxes/${FIXTURE_IDS.box}`);
+  await expect.poll(async () => (await persistedResource(request)).blocks.find((block) => block.id === "page-command-link")?.marks[0]?.href).toBe(`#page/boxes/${FIXTURE_IDS.box}`);
+  await link.focus();
+  await expect(link).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.locator('[data-nav-key="boxes"]')).toHaveAttribute("aria-current", "page");
+  expect(page.context().pages()).toHaveLength(1);
+
+  editor = await openResource(page);
+  const emoji = editor.locator('[data-block-content="emoji-command"]');
+  await emoji.pressSequentially(":rocket");
+  await expect(page.locator(".emoji-menu")).toBeVisible();
+  await emoji.press("Enter");
+  await expect(emoji).toHaveText("🚀");
+  await expect.poll(async () => {
+    const blocks = (await persistedResource(request)).blocks;
+    return {
+      legacy: blocks.find((block) => block.id === "retired-annotation"),
+      plain: blocks.find((block) => block.id === "plain-at-input")?.text,
+      emoji: blocks.find((block) => block.id === "emoji-command")?.text,
+    };
+  }).toMatchObject({ legacy: { text: legacyText, marks: [] }, plain: "@tomorrow", emoji: "🚀" });
+  expect(pageErrors).toEqual([]);
+});
+
 test("---만 구분선을 만들고 바로 아래 Backspace는 문서를 닫지 않는다", async ({ page, request }) => {
   await seedResource(request, [paragraph("markdown-shortcut", "")]);
   const editor = await openResource(page);

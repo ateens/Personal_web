@@ -173,7 +173,7 @@ test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리�
   const rows = groups.locator("[data-resource-open]");
   const first = await rows.first().boundingBox();
   const last = await rows.last().boundingBox();
-  await page.mouse.move(first.x + 10, first.y + 4);
+  await page.mouse.move(first.x - 12, first.y + 4);
   await page.mouse.down();
   await page.mouse.move(last.x + last.width - 10, last.y + last.height - 4, { steps: 15 });
   await page.mouse.up();
@@ -212,6 +212,29 @@ test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리�
   await page.keyboard.press("Delete");
   await page.waitForTimeout(650);
   expect((await fixtureSnapshot(request)).state.resources.filter((item) => writableIds.includes(item.id) && item.trashedAt)).toHaveLength(0);
+  await opened.locator(".resource-document-close").click();
+  const beforeMove = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  for (const [mode, field, targetId, expected] of [
+    ["boxes", "boxId", "fixture-second-box", ["fixture-second-box", ""]],
+    ["projects", "projectId", FIXTURE_IDS.project, [FIXTURE_IDS.box, FIXTURE_IDS.project]],
+  ]) {
+    await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).click();
+    const source = await groups.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).boundingBox();
+    const target = await groups.locator(`[data-resource-drop-field="${field}"][data-resource-drop-id="${targetId}"]`).boundingBox();
+    await page.mouse.move(source.x + 20, source.y + source.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(target.x + target.width / 2, target.y + 24, { steps: 16 });
+    await expect(page.locator(".resource-move-ghost")).toHaveCount(1);
+    await page.mouse.up();
+    await expect.poll(async () => {
+      const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+      return [resource.boxId, resource.projectId];
+    }).toEqual(expected);
+    await expect(page.locator(".resource-move-ghost, .resource-move-stage")).toHaveCount(0);
+    await expect(page.locator("[data-resource-window]")).toHaveCount(0);
+  }
+  const afterMove = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  for (const field of ["blocks", "commentThreads", "parentId", "childOrder"]) expect(afterMove[field]).toEqual(beforeMove[field]);
 });
 
 test("Resource 읽기 전용과 잠긴 자료의 연결 필드는 비활성화되고 강제 change도 저장하지 않는다", async ({ page, request }) => {
