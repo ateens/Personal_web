@@ -807,6 +807,7 @@ function init() {
   window.visualViewport?.addEventListener("scroll", positionResourceSlashMenu);
   window.addEventListener("blur", () => closeResourceSlashMenu(true));
   document.addEventListener("keydown", handleResourceWindowCloseShortcut, true);
+  document.addEventListener("keydown", handleResourceCommentsShortcut, true);
   window.closeActiveResourceWindowFromShortcut = closeActiveResourceWindowFromShortcut;
   document.addEventListener("keyup", handleDocumentKeyup);
   document.addEventListener("click", handleDocumentClick);
@@ -1841,7 +1842,19 @@ function renderResourceComments(resource, record) {
       ${draft?.commentId === thread.id ? form() : editable ? `<button class="resource-comment-add" type="button" data-resource-comment-action="reply">코멘트 추가</button>` : ""}
     </section>`;
   }).join("")}
-  <div class="resource-comments-tail">${!threads.length && !draft ? '<p class="resource-comments-empty">코멘트가 없습니다.</p>' : ""}${editable && !draft ? '<button class="resource-comment-add" type="button" data-resource-comment-action="new">코멘트 추가</button>' : ""}</div></div>`;
+  <div class="resource-comments-tail">${!threads.length && !draft ? '<p class="resource-comments-empty">코멘트가 없습니다.</p>' : ""}</div></div>`;
+}
+
+function toggleResourceComments(resourceId) {
+  const record = resourceWindowById(resourceId);
+  if (!record) return false;
+  record.commentsOpen = !record.commentsOpen;
+  const element = resourceWindowElement(resourceId);
+  if (!record.commentsOpen && element?.querySelector("[data-resource-comments]").contains(document.activeElement)) {
+    element.querySelector("[data-resource-comments-toggle]").focus({ preventScroll: true });
+  }
+  syncResourceComments(resourceId);
+  return true;
 }
 
 function syncResourceComments(resourceId, force = false) {
@@ -1919,9 +1932,9 @@ function handleResourceCommentAction(control) {
   const action = control.dataset.resourceCommentAction;
   const thread = resource.commentThreads?.find((entry) => entry.id === control.closest("[data-comment-thread]")?.dataset.commentThread && !entry.deletedAt);
   if (action === "cancel") { record.commentDraft = null; syncResourceComments(resourceId, true); return; }
-  if (action === "new" || action === "reply") {
-    const commentId = thread?.id || id();
-    openResourceCommentSidebar(resourceId, { commentId, draft: { commentId, body: "", ...(thread?.anchor || {}) } });
+  if (action === "reply" && thread) {
+    const commentId = thread.id;
+    openResourceCommentSidebar(resourceId, { commentId, draft: { commentId, body: "", ...(thread.anchor || {}) } });
     return;
   }
   const comment = thread && [thread, ...thread.replies].find((entry) => entry.id === control.dataset.commentId && !entry.deletedAt);
@@ -8037,6 +8050,10 @@ function renderMarkdownTableBlock(block, meta = {}) {
       ${meta.blockTools || ""}
       <div class="resource-table-shell">
         ${table && editable ? renderMarkdownTableToolbar(block, table) : ""}
+        ${table && editable ? `<div class="resource-table-cell-actions" role="toolbar" aria-label="선택한 셀">
+          <button type="button" data-resource-table-delete="row">행 삭제</button>
+          <button type="button" data-resource-table-delete="column">열 삭제</button>
+        </div>` : ""}
         <div class="resource-table-scroll block-content" data-block-content="${esc(block.id)}" data-resource-table-select tabindex="0" role="group" aria-label="표, ${columnCount}열 ${rowCount}행">
           ${table ? `
             <table class="resource-markdown-table" data-table-bold="${block.tableBold === true}" style="${widths ? `width:${widths.reduce((sum, width) => sum + width, 0)}px;min-width:0;` : `min-width:${Math.max(480, columnCount * 160)}px;`}${color ? `--table-text:${color.text};` : ""}${background ? `--table-background:${background.background};` : ""}">
@@ -8047,8 +8064,8 @@ function renderMarkdownTableBlock(block, meta = {}) {
           ` : `<span class="resource-table-error">표 형식을 읽을 수 없습니다.</span>`}
         </div>
         ${table && editable ? `
-          <button type="button" class="resource-table-edge is-rows" data-resource-table-edge="rows" aria-label="드래그하여 표 행 추가" title="아래로 드래그하여 행 추가"><span aria-hidden="true">+</span></button>
-          <button type="button" class="resource-table-edge is-columns" data-resource-table-edge="columns" aria-label="드래그하여 표 열 추가" title="오른쪽으로 드래그하여 열 추가"><span aria-hidden="true">+</span></button>
+          <button type="button" class="resource-table-edge is-rows" data-resource-table-edge="rows" aria-label="표 행 추가" title="클릭하여 행 추가 · 드래그하여 여러 행 추가"><span aria-hidden="true">+</span></button>
+          <button type="button" class="resource-table-edge is-columns" data-resource-table-edge="columns" aria-label="표 열 추가" title="클릭하여 열 추가 · 드래그하여 여러 열 추가"><span aria-hidden="true">+</span></button>
         ` : ""}
       </div>
     </div>
@@ -8140,11 +8157,82 @@ function markdownTableCellFocus(cell) {
 
 function focusMarkdownTableCell(blockId, row = 0, column = 0, offset = null) {
   const cell = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
-  if (!cell || cell.contentEditable !== "true") return false;
+  if (!cell || (cell.contentEditable !== "true" && !cell.classList.contains("is-cell-selected"))) return false;
+  clearMarkdownTableCellSelection();
   if (Number.isInteger(offset)) placeCaretAtTextOffset(cell, offset);
   else placeCaretAtEnd(cell);
   cell.scrollIntoView({ block: "nearest", inline: "nearest" });
   return true;
+}
+
+function clearMarkdownTableCellSelection() {
+  document.querySelectorAll("[data-resource-table-cell].is-cell-selected").forEach((cell) => {
+    cell.classList.remove("is-cell-selected");
+    cell.parentElement.classList.remove("has-cell-selection");
+    cell.closest(".resource-table-block")?.classList.remove("has-cell-selection");
+    cell.contentEditable = "true";
+    cell.removeAttribute("tabindex");
+    cell.removeAttribute("aria-readonly");
+  });
+}
+
+function selectMarkdownTableCell(blockId, row, column) {
+  const cell = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
+  const context = markdownTableCellContext(cell);
+  if (!context || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return false;
+  document.activeElement?.blur?.();
+  clearMarkdownTableCellSelection();
+  clearBlockSelection();
+  clearInlineEditingOverlaysForBlockSelection();
+  cell.contentEditable = "false";
+  cell.tabIndex = 0;
+  cell.setAttribute("aria-readonly", "true");
+  cell.classList.add("is-cell-selected");
+  cell.parentElement.classList.add("has-cell-selection");
+  context.blockElement.classList.add("has-cell-selection");
+  window.getSelection()?.removeAllRanges();
+  cell.focus({ preventScroll: true });
+  cell.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const actions = context.blockElement.querySelector(".resource-table-cell-actions");
+  actions.querySelector('[data-resource-table-delete="row"]').disabled = context.table.rows.length === 0;
+  actions.querySelector('[data-resource-table-delete="column"]').disabled = context.table.headers.length === 1;
+  const shell = context.blockElement.querySelector(".resource-table-shell").getBoundingClientRect();
+  const bounds = cell.getBoundingClientRect();
+  actions.style.top = `${bounds.top - shell.top - actions.offsetHeight - 6}px`;
+  actions.style.left = `${Math.max(0, Math.min(bounds.left - shell.left, shell.width - actions.offsetWidth))}px`;
+  return true;
+}
+
+function deleteMarkdownTableDimension(control) {
+  const context = markdownTableCellContext(control);
+  const cell = context?.blockElement.querySelector("[data-resource-table-cell].is-cell-selected");
+  if (!cell || app.dataset.workspaceAuthority !== "ready" || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return;
+  const { block, table, ownerType, ownerId } = context;
+  const row = Number(cell.dataset.tableRow);
+  const column = Number(cell.dataset.tableColumn);
+  const removeRow = control.dataset.resourceTableDelete === "row";
+  if (removeRow ? table.rows.length === 0 : table.headers.length === 1) return;
+  const history = beginEditorHistory(ownerType, ownerId, markdownTableCellFocus(cell));
+  if (removeRow) {
+    if (row === 0) table.headers = table.rows.shift();
+    else table.rows.splice(row - 1, 1);
+  } else {
+    const widths = markdownTableColumnWidths(block, table.headers.length);
+    table.headers.splice(column, 1);
+    table.align.splice(column, 1);
+    table.rows.forEach((values) => values.splice(column, 1));
+    if (widths) {
+      widths.splice(column, 1);
+      block.columnWidths = widths;
+    }
+  }
+  block.text = serializeMarkdownTable(table);
+  const nextRow = Math.min(row, table.rows.length);
+  const nextColumn = Math.min(column, table.headers.length - 1);
+  commitEditorHistory(history, { blockId: block.id, tableRow: nextRow, tableColumn: nextColumn, start: 0 });
+  saveState();
+  renderEditorMutation(ownerType, ownerId);
+  selectMarkdownTableCell(block.id, nextRow, nextColumn);
 }
 
 function markdownTableCellSource(element) {
@@ -8194,6 +8282,17 @@ function updateMarkdownTableCell(cell) {
 }
 
 function handleMarkdownTableCellEvent(event) {
+  const remove = event.target.closest?.("[data-resource-table-delete]");
+  if (remove) {
+    event.stopPropagation();
+    if (["pointerdown", "mousedown"].includes(event.type)) event.preventDefault();
+    if (event.type === "focusout" && !event.relatedTarget?.closest?.(".resource-table-cell-actions")) clearMarkdownTableCellSelection();
+    if (event.type === "click") {
+      event.preventDefault();
+      deleteMarkdownTableDimension(remove);
+    }
+    return;
+  }
   const format = event.target.closest?.("[data-resource-table-format]");
   if (format) {
     event.stopPropagation();
@@ -8226,7 +8325,9 @@ function handleMarkdownTableCellEvent(event) {
   if (edge && event.type === "click") {
     event.preventDefault();
     event.stopPropagation();
-    if (event.detail !== 0) return;
+    const skipClick = edge.dataset.tableSkipClick === "true";
+    delete edge.dataset.tableSkipClick;
+    if (event.detail !== 0 && skipClick) return;
     const context = markdownTableCellContext(edge);
     if (!context || !editorOwnerMutationAllowed(context.ownerType, context.ownerId) || app.dataset.workspaceAuthority !== "ready") return;
     const { table, block, ownerType, ownerId, blockElement } = context;
@@ -8256,6 +8357,7 @@ function handleMarkdownTableCellEvent(event) {
     if (["beforeinput", "paste"].includes(event.type)) event.preventDefault();
     return;
   }
+  if (["pointerdown", "mousedown"].includes(event.type) && cell.classList.contains("is-cell-selected")) clearMarkdownTableCellSelection();
   if (event.type === "focusin") {
     if (ownerType === "resources") activateResourceWindow(ownerId);
     activateBlockContent(blockElement.querySelector("[data-resource-table-select]"));
@@ -8273,6 +8375,10 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (event.type === "focusout") {
+    if (cell.classList.contains("is-cell-selected")) {
+      if (!event.relatedTarget?.closest?.(".resource-table-cell-actions")) clearMarkdownTableCellSelection();
+      return;
+    }
     if (ui.composingBlockId === block.id) ui.composingBlockId = "";
     updateMarkdownTableCell(cell);
     flushPendingEditorTextHistory(markdownTableCellFocus(cell));
@@ -8313,6 +8419,22 @@ function handleMarkdownTableCellEvent(event) {
     else undoEditorHistory();
     return;
   }
+  if (cell.classList.contains("is-cell-selected")) {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      const row = Math.max(0, Math.min(context.table.rows.length, Number(cell.dataset.tableRow) + (event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0)));
+      const column = Math.max(0, Math.min(context.table.headers.length - 1, Number(cell.dataset.tableColumn) + (event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0)));
+      selectMarkdownTableCell(block.id, row, column);
+    } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      focusMarkdownTableCell(block.id, Number(cell.dataset.tableRow), Number(cell.dataset.tableColumn));
+    } else if (event.key === "Escape" || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a")) {
+      event.preventDefault();
+      clearMarkdownTableCellSelection();
+      selectSingleBlock(ownerType, ownerId, block.id);
+    }
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
     event.preventDefault();
     const offsets = selectionOffsetsInside(cell);
@@ -8329,8 +8451,7 @@ function handleMarkdownTableCellEvent(event) {
   }
   if (event.key === "Escape") {
     event.preventDefault();
-    cell.blur();
-    selectSingleBlock(ownerType, ownerId, block.id);
+    selectMarkdownTableCell(block.id, Number(cell.dataset.tableRow), Number(cell.dataset.tableColumn));
     return;
   }
   if ((event.key !== "Tab" && event.key !== "Enter") || event.metaKey || event.ctrlKey || event.altKey || (event.key === "Enter" && event.shiftKey)) return;
@@ -8403,6 +8524,7 @@ function beginMarkdownTableEdgeDrag(event) {
   window.getSelection()?.removeAllRanges();
   const tableElement = latest.blockElement.querySelector("table");
   const axis = handle.hasAttribute("data-resource-table-width") ? "width" : handle.dataset.resourceTableEdge;
+  delete handle.dataset.tableSkipClick;
   ui.markdownTableDrag = {
     ...latest,
     originalText: latest.block.text,
@@ -8416,6 +8538,7 @@ function beginMarkdownTableEdgeDrag(event) {
     start: axis === "rows" ? event.clientY : event.clientX,
     step: axis === "rows" ? Math.max(32, tableElement.rows[0].getBoundingClientRect().height) : Math.max(80, tableElement.rows[0].cells[0].getBoundingClientRect().width),
     extra: 0,
+    moved: false,
   };
   handle.classList.add("is-dragging");
   handle.focus({ preventScroll: true });
@@ -8427,6 +8550,7 @@ function moveMarkdownTableEdgeDrag(event) {
   if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return;
   if (event.buttons === 0) return finishMarkdownTableEdgeDrag(event, true);
   event.preventDefault();
+  drag.moved ||= Math.abs((drag.axis === "rows" ? event.clientY : event.clientX) - drag.start) > 4;
   if (drag.axis === "width") {
     drag.previewWidths = drag.widths.slice();
     drag.previewWidths[drag.column] = Math.max(80, Math.min(1200, Math.round(drag.widths[drag.column] + event.clientX - drag.start)));
@@ -8458,6 +8582,7 @@ function finishMarkdownTableEdgeDrag(event, cancelled = false) {
   if (!drag || (event?.pointerId !== undefined && !sameMouseLikePointer(drag.pointerId, event))) return;
   ui.markdownTableDrag = null;
   drag.handle.classList.remove("is-dragging");
+  drag.handle.dataset.tableSkipClick = String(cancelled || drag.moved);
   try { if (typeof drag.pointerId === "number" && drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); } catch (_) {}
   const current = itemById(drag.ownerType, drag.ownerId)?.blocks?.find((block) => block.id === drag.block.id);
   if (!current || current.text !== drag.originalText || !editorOwnerMutationAllowed(drag.ownerType, drag.ownerId)) {
@@ -10716,8 +10841,7 @@ function handleClick(event) {
   const commentsToggle = event.target.closest("[data-resource-comments-toggle]");
   if (commentsToggle) {
     event.preventDefault();
-    const record = resourceWindowById(commentsToggle.dataset.resourceCommentsToggle);
-    if (record) { record.commentsOpen = !record.commentsOpen; syncResourceComments(record.id); }
+    toggleResourceComments(commentsToggle.dataset.resourceCommentsToggle);
     return;
   }
   const commentAction = event.target.closest("[data-resource-comment-action]");
@@ -11926,6 +12050,18 @@ function openResourceDocument(resourceId, options = {}) {
     }
     ui.resourceWindows.push(record);
   }
+  if (app.dataset.workspaceAuthority === "ready" && resourceMutationAllowed(resource)) {
+    let recoveredTable = false;
+    for (const block of resource.blocks || []) {
+      if (block.type !== "paragraph" || block.marks?.length || !parseMarkdownTable(block.text)) continue;
+      block.type = TABLE_BLOCK_TYPE;
+      recoveredTable = true;
+    }
+    if (recoveredTable) {
+      markResourceChanged(resource);
+      saveState();
+    }
+  }
   activateResourceWindow(resource.id);
   syncResourceDocumentDialog();
   const focusVersion = ui.resourceWindowFocusVersion;
@@ -12328,6 +12464,14 @@ function closeActiveResourceWindowFromShortcut() {
 function handleResourceWindowCloseShortcut(event) {
   if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || (event.code !== "KeyW" && event.key.toLowerCase() !== "w")) return;
   if (!event.repeat && !closeActiveResourceWindowFromShortcut()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function handleResourceCommentsShortcut(event) {
+  if (!window.__sygmaNativeMutationBridge || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || (event.code !== "KeyS" && event.key.toLowerCase() !== "s")) return;
+  if (!ui.resourceWindowFocused || !resourceWindowById(ui.activeResourceId) || ui.taskPlacement || ui.todayBatch) return;
+  if (!event.repeat) toggleResourceComments(ui.activeResourceId);
   event.preventDefault();
   event.stopImmediatePropagation();
 }
@@ -15193,7 +15337,7 @@ function handleDocumentPaste(event) {
   const plainMarkdownBlocks = parsedPlainBlocks.some((block) => (
     block.type === TABLE_BLOCK_TYPE || block.marks?.some((mark) => mark.type === "equation")
   )) ? parsedPlainBlocks : [];
-  const text = codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks) || plainText;
+  const text = plainText || codeBlockPasteTextFromBlocks(event, customBlocks.length ? customBlocks : htmlBlocks);
   if (pasteTextIntoCodeBlock(event, text, { clearBlockSelectionBeforeCommit: shouldClearBlockSelection && pasteEventTargetBlockContent(event) && pasteEventTargetsCodeBlock(event, { actualTargetOnly: true }) })) {
     event.preventDefault();
     return;
@@ -15844,7 +15988,13 @@ function readHtmlClipboardBlocks(clipboardData) {
   const html = clipboardData.getData("text/html");
   if (!html || typeof DOMParser !== "function") return [];
   const doc = new DOMParser().parseFromString(html, "text/html");
-  return normalizeClipboardBlocks(htmlClipboardStructuredBlocks(doc.body));
+  const blocks = normalizeClipboardBlocks(htmlClipboardStructuredBlocks(doc.body));
+  const text = clipboardData.getData("text/plain");
+  if (blocks.length === 1 && BLOCK_TYPES[blocks[0].type] && blocks[0].type !== "code" && !/[\r\n]/.test(text) && blocks[0].text === text.trim()) {
+    blocks[0].marks = shiftInlineMarks(blocks[0].marks, text.length - text.trimStart().length);
+    blocks[0].text = text;
+  }
+  return blocks;
 }
 
 function clipboardBlockFromHtmlElement(element) {
@@ -15884,11 +16034,21 @@ function htmlClipboardStructuredBlocks(root) {
 
 function appendHtmlClipboardChildren(blocks, element, indent) {
   if (!(element instanceof Element)) return;
-  for (const child of element.children) appendHtmlClipboardElement(blocks, child, indent);
-  if (!blocks.length) {
-    const inline = htmlClipboardInlineData(element);
+  const inlineRoot = element.cloneNode(false);
+  const flushInline = () => {
+    const inline = htmlClipboardInlineData(inlineRoot);
     if (inline.text) blocks.push({ type: "paragraph", text: inline.text, marks: inline.marks, checked: false, indent, collapsed: false });
+    inlineRoot.replaceChildren();
+  };
+  for (const child of element.childNodes) {
+    if (child instanceof Element && (htmlClipboardElementIsStructured(child) || htmlClipboardElementHasStructuredChildren(child))) {
+      flushInline();
+      appendHtmlClipboardElement(blocks, child, indent);
+    } else {
+      inlineRoot.append(child.cloneNode(true));
+    }
   }
+  flushInline();
 }
 
 function appendHtmlClipboardElement(blocks, element, indent) {
@@ -15934,9 +16094,7 @@ function appendHtmlClipboardElement(blocks, element, indent) {
     return;
   }
   if (htmlClipboardElementHasStructuredChildren(element)) {
-    const inline = htmlClipboardInlineData(element, { removeSelectors: "h1,h2,h3,h4,h5,h6,p,div,section,article,main,blockquote,pre,ul,ol,li,script,style,template" });
-    if (inline.text) blocks.push({ type: "paragraph", text: inline.text, marks: inline.marks, checked: false, indent, collapsed: false });
-    for (const child of element.children) appendHtmlClipboardElement(blocks, child, indent);
+    appendHtmlClipboardChildren(blocks, element, indent);
     return;
   }
   const inline = htmlClipboardInlineData(element);
@@ -15971,12 +16129,12 @@ function htmlClipboardHeadingType(tag) {
 }
 
 function htmlClipboardElementHasStructuredChildren(element) {
-  return [...element.children].some((child) => htmlClipboardElementIsStructured(child));
+  return [...element.children].some((child) => htmlClipboardElementIsStructured(child) || htmlClipboardElementHasStructuredChildren(child));
 }
 
 function htmlClipboardElementIsStructured(element) {
   const tag = element.tagName.toLowerCase();
-  return ["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "main", "blockquote", "pre", "ul", "ol", "li", "img"].includes(tag);
+  return isSupportedEditorBlockType(element.dataset.blockType) || ["h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "main", "blockquote", "pre", "ul", "ol", "li", "img"].includes(tag);
 }
 
 function htmlClipboardInlineData(element, options = {}) {
@@ -15985,13 +16143,15 @@ function htmlClipboardInlineData(element, options = {}) {
   clone.querySelectorAll(removeSelectors).forEach((child) => child.remove());
   clone.querySelectorAll("input[type='checkbox']").forEach((input) => input.remove());
   const data = { text: "", marks: [] };
-  appendHtmlClipboardInlineNode(data, clone, []);
+  let whiteSpace = "";
+  for (let ancestor = element; ancestor && !whiteSpace; ancestor = ancestor.parentElement) whiteSpace = ancestor.style.whiteSpace;
+  appendHtmlClipboardInlineNode(data, clone, [], whiteSpace || "normal");
   return trimHtmlClipboardInlineData(data);
 }
 
-function appendHtmlClipboardInlineNode(data, node, activeMarks) {
+function appendHtmlClipboardInlineNode(data, node, activeMarks, whiteSpace = "normal") {
   if (node.nodeType === Node.TEXT_NODE) {
-    appendHtmlClipboardInlineText(data, node.textContent || "", activeMarks);
+    appendHtmlClipboardInlineText(data, node.textContent || "", activeMarks, whiteSpace);
     return;
   }
   if (!(node instanceof Element)) return;
@@ -16001,11 +16161,14 @@ function appendHtmlClipboardInlineNode(data, node, activeMarks) {
     appendHtmlClipboardInlineBreak(data);
     return;
   }
-  for (const child of node.childNodes) appendHtmlClipboardInlineNode(data, child, nextMarks);
+  for (const child of node.childNodes) appendHtmlClipboardInlineNode(data, child, nextMarks, node.style.whiteSpace || whiteSpace);
 }
 
-function appendHtmlClipboardInlineText(data, text, activeMarks) {
-  const nextText = String(text || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ");
+function appendHtmlClipboardInlineText(data, text, activeMarks, whiteSpace = "normal") {
+  const raw = String(text || "").replace(/\u00a0/g, " ");
+  const preserve = /^(pre|pre-wrap|break-spaces)$/.test(whiteSpace);
+  let nextText = preserve ? raw : raw.replace(whiteSpace === "pre-line" ? /[^\S\r\n]+/g : /\s+/g, " ");
+  if (!preserve && /[ \n]$/.test(data.text)) nextText = nextText.replace(/^ /, "");
   if (!nextText) return;
   const start = data.text.length;
   data.text += nextText;
@@ -16165,7 +16328,7 @@ function normalizeClipboardBlocks(blocks) {
   return normalized;
 }
 
-function markdownTableCells(line = "") {
+function markdownTableCells(line = "", expectedColumns = 0, codePipes = false) {
   const source = String(line).trim();
   if (!source.includes("|")) return null;
   const cells = [];
@@ -16181,7 +16344,7 @@ function markdownTableCells(line = "") {
       index += 1;
       continue;
     }
-    if (character === "`") inCode = !inCode;
+    if (codePipes && character === "`") inCode = !inCode;
     if (character === "|" && !inCode) {
       cells.push(cell.trim());
       cell = "";
@@ -16191,6 +16354,8 @@ function markdownTableCells(line = "") {
     cell += character;
   }
   cells.push(cell.trim());
+  // Old pasted code spans may contain unescaped pipes; typed backticks must not hide column boundaries.
+  if (expectedColumns && cells.length !== expectedColumns && !codePipes) return markdownTableCells(line, expectedColumns, true);
   return sawSeparator || (source.startsWith("|") && source.endsWith("|")) ? cells : null;
 }
 
@@ -16205,14 +16370,14 @@ function markdownTableDelimiterAlignment(cell = "") {
 function parseMarkdownTable(text = "") {
   const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
   if (lines.length < 2) return null;
-  const headers = markdownTableCells(lines[0]);
   const delimiters = markdownTableCells(lines[1]);
-  if (!headers || headers.length < 2 || !delimiters || delimiters.length !== headers.length) return null;
+  const headers = markdownTableCells(lines[0], delimiters?.length);
+  if (!headers || !headers.length || !delimiters || delimiters.length !== headers.length) return null;
   const align = delimiters.map(markdownTableDelimiterAlignment);
   if (align.some((value) => !value)) return null;
   const rows = [];
   for (const line of lines.slice(2)) {
-    const cells = markdownTableCells(line);
+    const cells = markdownTableCells(line, headers.length);
     if (!cells || cells.length !== headers.length) return null;
     rows.push(cells);
   }
@@ -16232,9 +16397,9 @@ function markdownTableBlockAt(lines, startIndex) {
   const header = clipboardPlainLineParts(lines[startIndex] || "");
   const delimiter = clipboardPlainLineParts(lines[startIndex + 1] || "");
   if (header.indent !== delimiter.indent) return null;
-  const headers = markdownTableCells(header.text);
   const delimiters = markdownTableCells(delimiter.text);
-  if (!headers || !delimiters || headers.length < 2 || delimiters.length !== headers.length) return null;
+  const headers = markdownTableCells(header.text, delimiters?.length);
+  if (!headers || !delimiters || !headers.length || delimiters.length !== headers.length) return null;
   if (delimiters.some((cell) => !markdownTableDelimiterAlignment(cell))) return null;
   const tableLines = [header.text, delimiter.text];
   let endIndex = startIndex + 1;
@@ -16642,7 +16807,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
 }
 
 function pasteBlocksFromClipboard(event, blocks, options = {}) {
-  const target = clipboardPasteTarget(event, options);
+  const target = clipboardPasteTarget(event, { mergeIntoTarget: true, ...options });
   if (!target) return false;
   if (!editorOwnerMutationAllowed(target.ownerType, target.ownerId)) return false;
   const item = itemById(target.ownerType, target.ownerId);
@@ -16654,7 +16819,9 @@ function pasteBlocksFromClipboard(event, blocks, options = {}) {
   const history = beginEditorHistory(
     target.ownerType,
     target.ownerId,
-    { blockId: target.replaceSelection ? target.selection?.ids?.[0] : target.blockId, position: "end" },
+    target.selectionOffsets
+      ? { blockId: target.blockId, start: target.selectionOffsets.start, end: target.selectionOffsets.end }
+      : { blockId: target.replaceSelection ? target.selection?.ids?.[0] : target.blockId, position: "end" },
   );
   item.blocks = prepared.item.blocks;
   ensureEditableBlocks(item);
@@ -16697,6 +16864,11 @@ function prepareClipboardBlockPaste(item, target, blocks) {
     if (block.type === "toggle" && normalizeToggleHeading(block.toggleHeading)) pastedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
     if (block.type === "code" && normalizeCodeLanguage(block.language)) pastedBlock.language = normalizeCodeLanguage(block.language);
+    for (const field of ["color", "backgroundColor"]) if (block[field]) pastedBlock[field] = block[field];
+    if (block.type === TABLE_BLOCK_TYPE) {
+      if (block.columnWidths) pastedBlock.columnWidths = block.columnWidths.slice();
+      for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") pastedBlock[field] = block[field];
+    }
     pasted.push(pastedBlock);
   }
   if (!pasted.length) return null;
@@ -16807,7 +16979,7 @@ function insertPastedBlocksAtTarget(item, pasted, target) {
     item.blocks.splice(index, 1, ...pasted);
     return { blockId: pasted[pasted.length - 1].id };
   }
-  if (target?.mergeIntoTarget && target.textSplit && current.type !== "divider") {
+  if (target?.mergeIntoTarget && target.textSplit && [current, pasted[0], pasted[pasted.length - 1]].every((block) => BLOCK_TYPES[block?.type] && block.type !== "divider")) {
     return mergePastedBlocksIntoTarget(item, pasted, index, target.textSplit, target.selectionOffsets);
   }
   item.blocks.splice(blockSubtreeEndIndex(item.blocks, index) + 1, 0, ...pasted);
@@ -18014,6 +18186,13 @@ function trapTodayBatchFocus(event) {
 function handleKeydown(event) {
   if (handleResourceListKeydown(event)) return;
   if (handleResourceWindowKeydown(event)) return;
+  const commentForm = event.target.closest("[data-resource-comment-form]");
+  if (commentForm && event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) commentForm.requestSubmit();
+    return;
+  }
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && !event.isComposing) preferredVerticalCaretX = null;
   if (handleFinancePickerKeydown(event)) return;
   if (handleTodayBatchKeydown(event)) return;
@@ -18812,7 +18991,7 @@ function editorHistoryShortcutContext(event) {
   if (editable) {
     return Boolean(editable.matches("[data-block-content], [data-field]"));
   }
-  if (target?.closest("[data-block-content]")) return true;
+  if (target?.closest("[data-block-content], .resource-table-block")) return true;
   if (ui.blockSelection.ids.length) return true;
   const recent = ui.recentBlockFocus;
   return Boolean(recent?.ownerType && recent?.ownerId && recent?.blockId && Date.now() <= recent.expiresAt);

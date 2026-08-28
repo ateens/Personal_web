@@ -223,8 +223,12 @@ test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제
   expect(colors.background).toContain("255, 255, 255");
   expect(colors.color).toContain("55, 53, 47");
 
-  await popover.locator("[data-inline-comment-input]").fill("첫 댓글");
-  await popover.locator('button[type="submit"]').click();
+  const commentInput = popover.locator("[data-inline-comment-input]");
+  await commentInput.fill("첫 댓글");
+  await expect(commentInput).toHaveCSS("border-top-width", "1px");
+  await expect(commentInput).toHaveCSS("outline-width", "0px");
+  await expect(commentInput).toHaveCSS("box-shadow", "none");
+  await commentInput.press("Meta+Enter");
   const mark = content.locator('[data-inline-mark="comment"]');
   await expect(mark).toHaveText(selectedText);
 
@@ -246,7 +250,11 @@ test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제
 
   for (const reply of ["두 번째 댓글", "세 번째 댓글"]) {
     await mark.click();
-    await page.locator(`[data-comment-thread="${commentId}"] [data-resource-comment-action="reply"]`).click();
+    const addComment = page.locator(`[data-comment-thread="${commentId}"] [data-resource-comment-action="reply"]`);
+    await expect(page.locator('.resource-comments-tail [data-resource-comment-action]')).toHaveCount(0);
+    await addComment.hover();
+    await expect(addComment).toHaveCSS("background-color", "rgb(241, 243, 245)");
+    await addComment.click();
     popover = page.locator("[data-inline-comment-popover]");
     await popover.locator("[data-inline-comment-input]").fill(reply);
     await popover.locator('button[type="submit"]').click();
@@ -284,9 +292,34 @@ test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제
   await expect(page.locator(".inline-comment-popover")).toHaveCount(0);
   const card = sidebar.locator(`[data-comment-thread="${commentId}"]`);
   await expect.poll(async () => Math.abs((await card.boundingBox()).y - (await mark.boundingBox()).y)).toBeLessThan(2);
+  const commentsShortcut = (options = {}) => page.evaluate((overrides) => {
+    const event = new KeyboardEvent("keydown", { key: "s", code: "KeyS", metaKey: true, bubbles: true, cancelable: true, ...overrides });
+    document.activeElement.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, options);
+  await content.focus();
+  expect(await commentsShortcut()).toBe(false);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "false");
+  await page.evaluate(() => { window.__sygmaNativeMutationBridge = true; });
+  await page.locator(".resource-document").focus();
+  expect(await commentsShortcut({ shiftKey: true })).toBe(false);
+  expect(await commentsShortcut({ key: "ㄴ" })).toBe(true);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+  expect(await commentsShortcut({ repeat: true })).toBe(true);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+  expect(await commentsShortcut()).toBe(true);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "false");
+  await page.locator('[data-capture-zone] input[name="title"]').focus();
+  expect(await commentsShortcut()).toBe(false);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "false");
   await card.locator('[data-resource-comment-action="edit"]').first().click();
   await page.locator("[data-resource-comment-input]").fill("수정한 첫 댓글");
-  await page.locator("[data-resource-comment-form] button[type=submit]").click();
+  expect(await commentsShortcut()).toBe(true);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+  expect(await commentsShortcut()).toBe(true);
+  await expect(sidebar).toHaveAttribute("aria-hidden", "false");
+  await expect(page.locator("[data-resource-comment-input]")).toHaveValue("수정한 첫 댓글");
+  await page.locator("[data-resource-comment-input]").press("Meta+Enter");
   await expect(card.locator(".resource-comment-body").first()).toHaveText("수정한 첫 댓글");
   await card.locator('[data-resource-comment-action="delete"]').nth(1).click();
   await expect(card.locator(".resource-comment-body")).toHaveText(["수정한 첫 댓글", "세 번째 댓글"]);

@@ -417,6 +417,82 @@ test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 �
   await expect(markers()).toHaveText(["1.", "2.", "3.", "4."]);
 });
 
+test("서식이 있는 복사 내용도 모든 텍스트 서식의 커서 위치에 줄바꿈 없이 붙고 저장된다", async ({ page, request }) => {
+  const resourceId = FIXTURE_IDS.bodySearchResource;
+  const types = ["paragraph", "heading1", "heading2", "heading3", "heading4", "heading5", "heading6", "bullet", "numbered", "todo", "toggle", "quote", "callout", "code"];
+  await seedResourceBlocks(request, resourceId, types.map((type, index) => ({
+    ...paragraph(`paste-caret-${index}`, "앞뒤"), type,
+    marks: type === "code" ? [] : [{ type: "italic", start: 1, end: 2 }],
+  })));
+  let editor = await openResource(page, resourceId);
+  for (const [index, type] of types.entries()) {
+    const content = editor.locator(`[data-block-content="paste-caret-${index}"]`);
+    await setCaret(content, 1);
+    await content.evaluate((element) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", " 복사 ");
+      clipboardData.setData("text/html", " <span>복</span><strong>사</strong> ");
+      element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+    });
+    await expect(content).toHaveText("앞 복사 뒤");
+    await expect(editor.locator(`[data-block-id="paste-caret-${index}"]`)).toHaveAttribute("data-type", type);
+    await expect.poll(async () => (await activeCaret(page))?.offset).toBe(5);
+    if (type !== "code") {
+      await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("사");
+      await expect(content.locator('[data-inline-mark="italic"]')).toHaveText("뒤");
+    }
+    if (index === 0) {
+      await content.press("Meta+z");
+      await expect(content).toHaveText("앞뒤");
+      await expect.poll(async () => (await activeCaret(page))?.offset).toBe(1);
+      await content.press("Meta+Shift+z");
+      await expect(content).toHaveText("앞 복사 뒤");
+    }
+    await content.evaluate((element) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", "추가");
+      clipboardData.setData("application/x-sygma-blocks", JSON.stringify({ version: 1, blocks: [{ type: "paragraph", text: "추가", marks: [], indent: 0 }] }));
+      element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+    });
+    await expect(content).toHaveText("앞 복사 추가뒤");
+    await expect.poll(async () => (await activeCaret(page))?.offset).toBe(7);
+  }
+  await expect(editor.locator(".block")).toHaveCount(types.length);
+  await expect.poll(async () => (await persistedResource(request, resourceId)).blocks.map((block) => ({ type: block.type, text: block.text }))).toEqual(types.map((type) => ({ type, text: "앞 복사 추가뒤" })));
+  editor = await openResource(page, resourceId);
+  await expect(editor.locator(".block")).toHaveCount(types.length);
+  await expect(editor.locator("[data-block-content]")).toHaveText(types.map(() => "앞 복사 추가뒤"));
+  const first = editor.locator('[data-block-content="paste-caret-0"]');
+  for (const [plain, html] of [
+    ["A  B", '<span style="white-space:pre-wrap">A  <strong>B</strong></span>'],
+    ["A B", "<span>A </span><strong> B</strong>"],
+  ]) {
+    await setCaret(first, 1);
+    await first.evaluate((element, { plain, html }) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", plain);
+      clipboardData.setData("text/html", html);
+      element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+    }, { plain, html });
+    expect(await first.textContent()).toBe(`앞${plain} 복사 추가뒤`);
+    await expect(first.locator('[data-inline-mark="bold"]').first()).toHaveText("B");
+    await first.press("Meta+z");
+    await expect(first).toHaveText("앞 복사 추가뒤");
+  }
+  await setCaret(first, 1);
+  await first.evaluate((element) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", "첫째  줄\n중간\n둘째  줄");
+    clipboardData.setData("text/html", '<span style="white-space:pre-wrap"><div>첫째  줄</div>중간<div>둘째  줄</div></span>');
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  });
+  expect(await first.textContent()).toBe("앞첫째  줄");
+  await expect(editor.locator("[data-block-content]").nth(1)).toHaveText("중간");
+  expect(await editor.locator("[data-block-content]").nth(2).textContent()).toBe("둘째  줄 복사 추가뒤");
+  await expect.poll(async () => (await activeCaret(page))?.offset).toBe(5);
+  await expect(editor.locator(".block")).toHaveCount(types.length + 2);
+});
+
 test("Markdown 제목 4-6, fenced code 언어와 핵심 inline 문법을 붙여넣을 수 있다", async ({ page, request }) => {
   const { editor: liveEditor } = await createEmptyResource(page);
   let liveContent = liveEditor.locator("[data-block-content]").first();
@@ -739,6 +815,7 @@ test("표 셀 편집과 두 가장자리 확장이 저장되고 드래그 단위
   expect(await widths()).toEqual(resizedWidths);
   await cell(0, 0).click();
   await cell(0, 0).press("Escape");
+  await cell(0, 0).press("Escape");
   await expect(block).toHaveClass(/is-selected/);
   await expect(block).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await expect(table.locator("th").first()).toHaveCSS("background-color", "rgba(35, 131, 226, 0.12)");
@@ -779,6 +856,114 @@ test("표 셀 편집과 두 가장자리 확장이 저장되고 드래그 단위
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "허용하지 않는 수정" }));
   });
   expect((await persistedResource(request, FIXTURE_IDS.readOnlyResource)).blocks[0].text).toBe(tableText);
+});
+
+test("표 클릭 추가와 셀 선택 이동, 행·열 삭제는 내용과 실행 취소를 보존한다", async ({ page, request }) => {
+  const resourceId = FIXTURE_IDS.bodySearchResource;
+  await seedResourceBlocks(request, resourceId, [
+    { ...paragraph("cell-table", "| A | B | C |\n| --- | --- | --- |\n| 첫 행 | 값 | 오른쪽 |\n| 끝 행 | 아래 | 끝 |"), type: "table", columnWidths: [160, 200, 180] },
+    paragraph("after-cell-table", "본문 보존"),
+  ]);
+  const editor = await openResource(page, resourceId);
+  const block = editor.locator('[data-block-id="cell-table"]');
+  const table = block.locator("table");
+  const cell = (row, column) => block.locator(`[data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
+  const saved = async () => (await persistedResource(request, resourceId)).blocks.find((entry) => entry.id === "cell-table");
+  await block.hover();
+  await block.locator('[data-resource-table-edge="rows"]').click();
+  await expect(table.locator("tr")).toHaveCount(4);
+  await block.locator('[data-resource-table-edge="columns"]').click();
+  await expect(table.locator("thead th")).toHaveCount(4);
+  await expect.poll(async () => (await saved()).text.split("\n").length).toBe(5);
+  await page.keyboard.press("Meta+z");
+  await expect(table.locator("thead th")).toHaveCount(3);
+  await expect(cell(0, 0)).toBeFocused();
+  await page.keyboard.press("Meta+Shift+z");
+  await expect(table.locator("thead th")).toHaveCount(4);
+  await expect(cell(0, 0)).toBeFocused();
+
+  await setCaret(cell(1, 1), 0);
+  await cell(1, 1).press("Escape");
+  await expect(cell(1, 1)).toHaveClass(/is-cell-selected/);
+  await expect(cell(1, 1)).toHaveAttribute("contenteditable", "false");
+  await expect(cell(1, 1)).toBeFocused();
+  await expect(block).not.toHaveClass(/is-selected/);
+  expect(await page.evaluate(() => window.getSelection().toString())).toBe("");
+  for (const [key, row, column] of [["ArrowRight", 1, 2], ["ArrowDown", 2, 2], ["ArrowLeft", 2, 1], ["ArrowUp", 1, 1]]) {
+    await page.keyboard.press(key);
+    await expect(cell(row, column)).toHaveClass(/is-cell-selected/);
+    await expect(cell(row, column)).toBeFocused();
+    await expect(block.locator(".resource-table-cell.is-cell-selected")).toHaveCount(1);
+  }
+  await page.keyboard.press("Enter");
+  await expect(cell(1, 1)).toHaveAttribute("contenteditable", "true");
+  await expect(cell(1, 1)).toBeFocused();
+  expect(await cell(1, 1).evaluate((element) => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.setEnd(selection.focusNode, selection.focusOffset);
+    return range.toString().length === element.textContent.length && selection.isCollapsed;
+  })).toBe(true);
+  await page.keyboard.insertText(" 추가");
+  await expect(cell(1, 1)).toHaveText("값 추가");
+  await page.keyboard.press("Tab");
+  await expect(cell(1, 2)).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(cell(1, 1)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(cell(2, 1)).toBeFocused();
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.insertText("줄바꿈");
+  await expect(cell(2, 1)).toBeFocused();
+  await expect.poll(async () => (await saved()).text).toContain("아래<br>줄바꿈");
+  await expect(table.locator("tr")).toHaveCount(4);
+
+  await cell(1, 1).click();
+  await cell(1, 1).press("Escape");
+  await block.locator('[data-resource-table-delete="row"]').click();
+  await expect(table.locator("tr")).toHaveCount(3);
+  await expect(cell(1, 0)).toHaveText("끝 행");
+  await expect(cell(1, 1)).toHaveClass(/is-cell-selected/);
+  await page.keyboard.press("Meta+z");
+  await expect(table.locator("tr")).toHaveCount(4);
+  await expect(cell(1, 1)).toHaveText("값 추가");
+  await expect(cell(1, 1)).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(cell(1, 1)).toHaveClass(/is-cell-selected/);
+  await block.locator('[data-resource-table-delete="column"]').click();
+  await expect(table.locator("thead th")).toHaveText(["A", "C", ""]);
+  await expect(cell(1, 1)).toHaveText("오른쪽");
+  await expect.poll(async () => (await saved()).columnWidths).toEqual([160, 180, 160]);
+  await page.keyboard.press("Meta+z");
+  await expect(table.locator("thead th")).toHaveText(["A", "B", "C", ""]);
+  await expect(cell(1, 1)).toBeFocused();
+  await page.keyboard.press("Meta+Shift+z");
+  await expect(table.locator("thead th")).toHaveText(["A", "C", ""]);
+  await expect(cell(1, 1)).toBeFocused();
+
+  await cell(0, 0).click();
+  await cell(0, 0).press("Escape");
+  await block.locator('[data-resource-table-delete="row"]').click();
+  await expect(table.locator("thead th")).toHaveText(["첫 행", "오른쪽", ""]);
+  await block.locator('[data-resource-table-delete="column"]').click();
+  await block.locator('[data-resource-table-delete="column"]').click();
+  await expect(table.locator("thead th")).toHaveCount(1);
+  await expect(block.locator('[data-resource-table-delete="column"]')).toBeDisabled();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowUp");
+  await expect(cell(0, 0)).toHaveClass(/is-cell-selected/);
+  await block.locator('[data-resource-table-delete="row"]').click();
+  await block.locator('[data-resource-table-delete="row"]').click();
+  await expect(table.locator("tr")).toHaveCount(1);
+  await expect(block.locator('[data-resource-table-delete="row"]')).toBeDisabled();
+  await page.keyboard.press("Enter");
+  await page.keyboard.insertText("한 칸");
+  await expect.poll(async () => (await saved()).text).toBe("| 한 칸 |\n| --- |");
+  await openResource(page, resourceId);
+  await expect(table.locator("tr")).toHaveCount(1);
+  await expect(cell(0, 0)).toHaveText("한 칸");
+  await expect(editor.locator('[data-block-content="after-cell-table"]')).toHaveText("본문 보존");
 });
 
 test("표 열 너비와 서식은 잘못된 저장 요청을 거부한다", async ({ request }) => {
@@ -1613,4 +1798,79 @@ test("Resource 토글은 첫 줄 중앙에 맞고 list 자식도 펼침과 접�
   await button.click();
   await expect(child).toBeVisible();
   await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.find((block) => block.id === toggleId)?.collapsed).toBe(false);
+});
+
+test("슬래시 표는 미완성 backtick과 파이프를 입력해도 닫기와 재접속 후 표로 남는다", async ({ page, request }) => {
+  const demotedText = "| `구버전 | 남은 내용 |\n| --- | --- |\n| 본문 | 복구 |";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { ...paragraph("single-column-table", "| 제목 |\n| --- |\n| 내용 |"), type: "table" },
+    { ...paragraph("legacy-code-pipe-table", "| 코드 | 값 |\n| --- | --- |\n| `a|b` | 유지 |"), type: "table" },
+    paragraph("demoted-table", demotedText),
+    { ...paragraph("marked-table-text", demotedText), marks: [{ type: "bold", start: 0, end: 1 }] },
+  ]);
+  await seedResourceBlocks(request, FIXTURE_IDS.readOnlyResource, [paragraph("readonly-table-text", demotedText)]);
+  const { document, editor, resourceId } = await createEmptyResource(page);
+  await editor.locator("[data-block-content]").fill("/표");
+  await page.keyboard.press("Enter");
+  await expect(editor.locator("table")).toHaveCount(1);
+  await document.getByRole("button", { name: "자료 닫기", exact: true }).click();
+  await page.locator(`[data-resource-open="${resourceId}"]`).click();
+  await expect(editor.locator("table tr")).toHaveCount(3);
+
+  const values = ["`미완성", "`다른 셀", "끝 | 값"];
+  for (let column = 0; column < values.length; column += 1) {
+    await editor.locator(`[data-table-row="0"][data-table-column="${column}"]`).fill(values[column]);
+  }
+  await document.getByRole("button", { name: "자료 닫기", exact: true }).click();
+  await page.locator(`[data-resource-open="${resourceId}"]`).click();
+  await expect(editor.locator("table thead th [data-resource-table-cell]")).toHaveText(values);
+  await expect.poll(async () => (await persistedResource(request, resourceId))?.blocks[0]?.type).toBe("table");
+  const reopened = await openResource(page, resourceId);
+  await expect(reopened.locator("table thead th [data-resource-table-cell]")).toHaveText(values);
+
+  const existing = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(existing.locator('[data-block-id="single-column-table"] table thead th')).toHaveText(["제목"]);
+  await expect(existing.locator('[data-block-id="single-column-table"] table tbody td')).toHaveText(["내용"]);
+  await expect(existing.locator('[data-block-id="legacy-code-pipe-table"] table tbody td')).toHaveText(["a|b", "유지"]);
+  await expect(existing.locator('[data-block-id="demoted-table"]')).toHaveAttribute("data-type", "table");
+  await expect(existing.locator('[data-block-id="marked-table-text"]')).toHaveAttribute("data-type", "paragraph");
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource)).blocks.find((block) => block.id === "demoted-table")).toMatchObject({ type: "table", text: demotedText });
+  const readOnly = await openResource(page, FIXTURE_IDS.readOnlyResource);
+  await expect(readOnly.locator('[data-block-id="readonly-table-text"]')).toHaveAttribute("data-type", "paragraph");
+  expect((await persistedResource(request, FIXTURE_IDS.readOnlyResource)).blocks[0]).toMatchObject({ type: "paragraph", text: demotedText });
+});
+
+test("긴 표의 높이는 본문 줄바꿈과 코멘트 사이드바 크기 변경 후에도 다음 문장과 겹치지 않는다", async ({ page, request }) => {
+  const tableText = [
+    "| 분류 | 설명 | 상태 | 값 |",
+    "| --- | --- | --- | --- |",
+    ...Array.from({ length: 16 }, (_, index) => `| 항목 ${index} | ${"실제 문서의 문장으로 셀이 여러 줄에 걸치도록 채웁니다. ".repeat(3)} | 연구실 현장 검증 | X |`),
+  ].join("\n");
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { ...paragraph("long-table", tableText), type: "table" },
+    { ...paragraph("after-table-heading", "4개년 계획"), type: "heading2" },
+    paragraph("after-table-body", "겹치면 안 되는 표 아래 본문입니다."),
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const gap = () => editor.evaluate((root) => {
+    const table = root.querySelector("table").getBoundingClientRect();
+    const block = root.querySelector('[data-block-id="long-table"]').getBoundingClientRect();
+    const heading = root.querySelector('[data-block-id="after-table-heading"]').getBoundingClientRect();
+    return { block: block.bottom - table.bottom, heading: heading.top - table.bottom };
+  });
+  const expectNoOverlap = async () => {
+    await expect.poll(async () => (await gap()).block).toBeGreaterThanOrEqual(14);
+    expect((await gap()).heading).toBeGreaterThanOrEqual(14);
+  };
+  await expectNoOverlap();
+  await page.locator("[data-resource-comments-toggle]").click();
+  await expect.poll(() => page.locator("[data-resource-document]").getAttribute("class")).toContain("comments-open");
+  await page.waitForTimeout(300);
+  await expectNoOverlap();
+  await page.locator("[data-resource-comments-toggle]").click();
+  await page.waitForTimeout(300);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoOverlap();
+  const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
+  expect(resource.blocks[0].text).toBe(tableText);
 });

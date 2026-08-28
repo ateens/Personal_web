@@ -6,6 +6,7 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 }
 
 const baseURL = `http://127.0.0.1:${port}`;
+const browserName = process.env.E2E_BROWSER || "chromium";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -17,8 +18,8 @@ export default defineConfig({
   reporter: [["line"]],
   use: {
     baseURL,
-    browserName: "chromium",
-    channel: process.env.PLAYWRIGHT_CHANNEL || "chrome",
+    browserName,
+    ...(browserName === "chromium" ? { channel: process.env.PLAYWRIGHT_CHANNEL || "chrome" } : {}),
     headless: true,
     locale: "ko-KR",
     timezoneId: "Asia/Seoul",
