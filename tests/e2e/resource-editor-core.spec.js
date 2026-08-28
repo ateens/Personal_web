@@ -316,6 +316,62 @@ test("Markdown 목록, 인용, 토글과 Tab 계층 이동이 같은 편집기�
   ]);
 });
 
+test("기존 문장 앞의 Markdown 단축 입력은 본문과 인라인 서식을 보존하고 커서를 앞에 둔다", async ({ page, request }) => {
+  const resourceId = FIXTURE_IDS.bodySearchResource;
+  const text = "기존 강조와 자료 연결";
+  const marks = [{ type: "bold", start: 3, end: 5 }, { type: "resourceLink", start: 7, end: 9, resourceId: FIXTURE_IDS.resource }];
+  const shortcuts = [["#", "heading1"], ["##", "heading2"], ["######", "heading6"], ["-", "bullet"], ["3.", "numbered"], ["[x]", "todo"], [">", "toggle"], ["|", "quote"]];
+  await seedResourceBlocks(request, resourceId, [
+    ...shortcuts.map((_, index) => ({ ...paragraph(`prefix-${index}`, text), marks })),
+    { ...paragraph("prefix-code", text), type: "code", language: "javascript" },
+    paragraph("prefix-midline", "중간 문장"),
+  ]);
+  let editor = await openResource(page, resourceId);
+  for (const [index, [prefix, type]] of shortcuts.entries()) {
+    const content = editor.locator(`[data-block-content="prefix-${index}"]`);
+    await setCaret(content, 0);
+    await content.type(`${prefix} `);
+    await expect(editor.locator(`[data-block-id="prefix-${index}"]`)).toHaveAttribute("data-type", type);
+    await expect(content).toHaveText(text);
+    await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("강조");
+    await expect(content.locator('[data-inline-mark="resourceLink"]')).toHaveText("자료");
+    await expect.poll(async () => (await activeCaret(page))?.offset).toBe(0);
+    if (index === 0) {
+      await content.press("Meta+z");
+      await expect(content).toHaveText(`# ${text}`);
+      await expect(editor.locator('[data-block-id="prefix-0"]')).toHaveAttribute("data-type", "paragraph");
+      await content.press("Meta+Shift+z");
+      await expect(content).toHaveText(text);
+      await content.type("추가");
+      await expect(content).toHaveText(`추가${text}`);
+      await content.press("Meta+z");
+      await expect(content).toHaveText(text);
+    }
+  }
+  const code = editor.locator('[data-block-content="prefix-code"]');
+  await setCaret(code, 0);
+  await code.type("# ");
+  await expect(editor.locator('[data-block-id="prefix-code"]')).toHaveAttribute("data-type", "code");
+  await expect(code).toHaveText(`# ${text}`);
+  const midline = editor.locator('[data-block-content="prefix-midline"]');
+  await setCaret(midline, 3);
+  await midline.type("- ");
+  await expect(midline).toHaveText("중간 - 문장");
+  await expect(editor.locator('[data-block-id="prefix-midline"]')).toHaveAttribute("data-type", "paragraph");
+  await midline.fill("");
+  await midline.type("- 기존 글");
+  await setCaret(midline, 0);
+  await midline.type("# ");
+  await expect(midline).toHaveText("기존 글");
+  await expect(editor.locator('[data-block-id="prefix-midline"]')).toHaveAttribute("data-type", "heading1");
+  await expect.poll(async () => (await persistedResource(request, resourceId)).blocks.slice(0, shortcuts.length).map((block) => ({ type: block.type, text: block.text, marks: block.marks }))).toEqual(shortcuts.map(([, type]) => ({ type, text, marks })));
+  editor = await openResource(page, resourceId);
+  for (const [index, [, type]] of shortcuts.entries()) {
+    await expect(editor.locator(`[data-block-id="prefix-${index}"]`)).toHaveAttribute("data-type", type);
+    await expect(editor.locator(`[data-block-content="prefix-${index}"]`)).toHaveText(text);
+  }
+});
+
 test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 순서대로 다시 매겨진다", async ({ page, request }) => {
   const firstId = "numbered-enter-first";
   const secondId = "numbered-enter-second";
@@ -652,6 +708,68 @@ test("표 셀 편집과 두 가장자리 확장이 저장되고 드래그 단위
   await expect(reloaded.locator('[data-table-row="2"][data-table-column="2"]')).toHaveText("한글 받침");
   await expect(reloaded.locator('[data-table-row="2"][data-table-column="0"]')).toHaveText(literal + addedLiteral);
   await expect(reloaded.locator('[data-table-row="2"][data-table-column="0"] [data-inline-mark]')).toHaveCount(0);
+  await reloaded.evaluate((element) => Promise.all(element.closest("[data-resource-window]").getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => {}))));
+  const widths = () => table.locator("tr").first().evaluate((row) => [...row.cells].map((cell) => Math.round(cell.getBoundingClientRect().width)));
+  const beforeWidths = await widths();
+  const resize = block.locator('[data-resource-table-width="0"]');
+  const resizeBounds = await resize.boundingBox();
+  await page.mouse.move(resizeBounds.x + resizeBounds.width / 2, resizeBounds.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(resizeBounds.x + resizeBounds.width / 2 + 72, resizeBounds.y + 16, { steps: 8 });
+  expect((await persistedResource(request, resourceId)).blocks.find((entry) => entry.id === "editable-table").columnWidths).toBeUndefined();
+  await page.mouse.up();
+  const resizedWidths = [beforeWidths[0] + 72, ...beforeWidths.slice(1)];
+  expect(await widths()).toEqual(resizedWidths);
+  await expect.poll(async () => (await persistedResource(request, resourceId)).blocks.find((entry) => entry.id === "editable-table").columnWidths).toEqual(resizedWidths);
+  await page.keyboard.press("Meta+z");
+  expect(await widths()).toEqual(beforeWidths);
+  await page.keyboard.press("Meta+Shift+z");
+  expect(await widths()).toEqual(resizedWidths);
+  await resize.focus();
+  await resize.press("ArrowRight");
+  expect(await widths()).toEqual([resizedWidths[0] + 16, ...resizedWidths.slice(1)]);
+  await page.keyboard.press("Meta+z");
+  expect(await widths()).toEqual(resizedWidths);
+  const cancelBounds = await resize.boundingBox();
+  await page.mouse.move(cancelBounds.x + 4, cancelBounds.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(cancelBounds.x + 44, cancelBounds.y + 16);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  expect(await widths()).toEqual(resizedWidths);
+  await cell(0, 0).click();
+  await cell(0, 0).press("Escape");
+  await expect(block).toHaveClass(/is-selected/);
+  await expect(block).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(table.locator("th").first()).toHaveCSS("background-color", "rgba(35, 131, 226, 0.12)");
+  const format = block.locator(".resource-table-format");
+  await expect(format).toBeVisible();
+  await format.locator('[data-resource-table-format="tableHeader"]').click();
+  await format.locator('[data-resource-table-format="tableBold"]').click();
+  for (const [field, value] of [["color", "blue"], ["backgroundColor", "yellow"], ["align", "center"]]) {
+    const picker = format.locator("[data-finance-select]").filter({ has: page.locator(`[data-resource-table-format="${field}"]`) });
+    await picker.locator("[data-finance-select-trigger]").click();
+    await picker.locator(`[data-finance-select-option="${value}"]`).click();
+  }
+  await expect(table.locator("th")).toHaveCount(0);
+  await expect(table.locator("td").first()).toHaveCSS("font-weight", "750");
+  await expect(table.locator("td").first()).toHaveCSS("color", "rgb(51, 126, 169)");
+  await expect(table.locator("td").first()).toHaveCSS("text-align", "center");
+  for (const edge of await block.locator("[data-resource-table-edge]").all()) {
+    const geometry = await edge.evaluate((element) => {
+      const outer = element.getBoundingClientRect();
+      const inner = element.querySelector("span").getBoundingClientRect();
+      return { dx: Math.abs((inner.left + inner.right - outer.left - outer.right) / 2), dy: Math.abs((inner.top + inner.bottom - outer.top - outer.bottom) / 2), inside: inner.top >= outer.top && inner.bottom <= outer.bottom && inner.left >= outer.left && inner.right <= outer.right };
+    });
+    expect(geometry.dx).toBeLessThan(0.6);
+    expect(geometry.dy).toBeLessThan(0.6);
+    expect(geometry.inside).toBe(true);
+  }
+  await expect.poll(async () => (await persistedResource(request, resourceId)).blocks.find((entry) => entry.id === "editable-table").tableBold).toBe(true);
+  await openResource(page, resourceId);
+  await expect.poll(widths).toEqual(resizedWidths);
+  await expect(table.locator("th")).toHaveCount(0);
+  await expect(table.locator("td").first()).toHaveCSS("background-color", "rgb(251, 243, 219)");
   await seedResourceBlocks(request, FIXTURE_IDS.readOnlyResource, [{ ...paragraph("readonly-table", tableText), type: "table" }]);
   const readonlyEditor = await openResource(page, FIXTURE_IDS.readOnlyResource);
   await expect(readonlyEditor.locator("[data-resource-table-edge]")).toHaveCount(0);
@@ -661,6 +779,20 @@ test("표 셀 편집과 두 가장자리 확장이 저장되고 드래그 단위
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "허용하지 않는 수정" }));
   });
   expect((await persistedResource(request, FIXTURE_IDS.readOnlyResource)).blocks[0].text).toBe(tableText);
+});
+
+test("표 열 너비와 서식은 잘못된 저장 요청을 거부한다", async ({ request }) => {
+  const before = await fixtureSnapshot(request);
+  for (const fields of [{ columnWidths: [-1] }, { columnWidths: [1201] }, { columnWidths: [80.5] }, { columnWidths: "160" }, { tableHeader: "false" }, { tableBold: 1 }]) {
+    const state = structuredClone(before.state);
+    state.resources.find((entry) => entry.id === FIXTURE_IDS.resource).blocks.push({ ...paragraph("invalid-table", "| A | B |\n| --- | --- |\n| 1 | 2 |"), type: "table", ...fields });
+    const response = await request.put("/api/state", {
+      headers: { "If-Match": `"state-${before.serverRevision}"` },
+      data: { state, baseRevision: before.serverRevision },
+    });
+    expect(response.status()).toBe(422);
+  }
+  expect((await fixtureSnapshot(request)).state).toEqual(before.state);
 });
 
 test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도 inline과 전체 줄을 구분한다", async ({ page, request }) => {
@@ -883,7 +1015,21 @@ test("슬래시 메뉴는 고정된 DOM에서 검색하고 서식과 표를 생�
   }).toEqual({ text: "Heading", type: "heading2" });
 
   await page.keyboard.press("Enter");
-  await page.keyboard.type("/table");
+  await page.keyboard.type("/");
+  const composing = editor.locator('[data-block-content]:focus');
+  await composing.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    element.textContent = "/표";
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", isComposing: true, data: "표" }));
+  });
+  await expect(page.locator('.resource-slash-option:not([hidden])')).toHaveCount(1);
+  await expect(page.locator('.resource-slash-option:not([hidden])')).toHaveAttribute("data-resource-slash-id", "table");
+  await composing.evaluate((element) => element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "표" })));
   await page.keyboard.press("Enter");
   await expect(editor.locator('.block[data-type="table"] table')).toBeVisible();
   await expect(editor.locator('.block[data-type="table"] tr')).toHaveCount(3);

@@ -370,7 +370,8 @@ test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를
   await expect(document).toHaveAttribute("aria-modal", "false");
   await expect(title).toHaveValue("E2E Notion Parity Resource");
   await expect(document).toBeFocused();
-  await expect(document.locator(":scope > .resource-document-title + [data-resource-relations] + .resource-document-divider + .resource-document-body")).toHaveCount(1);
+  await expect(document.locator(":scope > .resource-document-title + [data-resource-relations] + .resource-document-divider + .resource-document-layout > .resource-document-body")).toHaveCount(1);
+  await expect(document.locator(".resource-document-layout > [data-resource-comments]")).toHaveAttribute("aria-hidden", "true");
   await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
   await expect(document.locator("[data-block-drag], [data-block-add]")).toHaveCount(0);
 
@@ -582,7 +583,8 @@ test("Resource nonmodal 창은 열린 순서로 교체하고 겹친 도킹, 원�
   for (const id of [a, b, c]) {
     await expect(windowFor(id).locator("[data-resource-document]")).toHaveAttribute("aria-modal", "false");
     await expect(windowFor(id).locator("[data-resource-resize]")).toHaveCount(8);
-    await expect(windowFor(id).locator("[data-resource-window-drag] button")).toHaveCount(1);
+    await expect(windowFor(id).locator("[data-resource-window-drag] button")).toHaveCount(2);
+    await expect(windowFor(id).locator("[data-resource-comments-toggle]")).toHaveCount(1);
   }
   const background = await page.locator("#viewRoot").evaluate((element) => {
     const ancestors = [];

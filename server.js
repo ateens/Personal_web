@@ -1058,6 +1058,14 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
     if (block.toggleHeading !== undefined && (block.type !== "toggle" || !/^heading[1-6]$/.test(block.toggleHeading))) {
       addValidationIssue(issues, `${blockPath}.toggleHeading`, "invalid_toggle_heading", "Toggle heading must be heading1 through heading6.");
     }
+    for (const field of ["tableHeader", "tableBold"]) {
+      if (block[field] !== undefined && (block.type !== "table" || typeof block[field] !== "boolean")) {
+        addValidationIssue(issues, `${blockPath}.${field}`, "invalid_table_format", "Table format flags must be booleans on a table block.");
+      }
+    }
+    if (block.columnWidths !== undefined && (block.type !== "table" || !Array.isArray(block.columnWidths) || block.columnWidths.length > 1000 || block.columnWidths.some((width) => !Number.isInteger(width) || width < 80 || width > 1200))) {
+      addValidationIssue(issues, `${blockPath}.columnWidths`, "invalid_table_widths", "Table column widths must be integers from 80 to 1200 pixels.");
+    }
     const indent = block.indent === undefined ? 0 : block.indent;
     if (!Number.isInteger(indent) || indent < 0 || indent > MAX_BLOCK_INDENT) {
       addValidationIssue(issues, `${blockPath}.indent`, "invalid_indent", `Block indent must be between 0 and ${MAX_BLOCK_INDENT}.`);

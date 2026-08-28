@@ -780,7 +780,7 @@ function init() {
   const pointerDownEvent = pointerEventsSupported ? "pointerdown" : "mousedown";
   const pointerMoveEvent = pointerEventsSupported ? "pointermove" : "mousemove";
   const pointerUpEvent = pointerEventsSupported ? "pointerup" : "mouseup";
-  for (const type of ["beforeinput", "input", "compositionstart", "compositionend", "focusin", "focusout", "keydown", "paste", "click", pointerDownEvent]) {
+  for (const type of ["beforeinput", "input", "change", "compositionstart", "compositionend", "focusin", "focusout", "keydown", "paste", "click", pointerDownEvent]) {
     app.addEventListener(type, handleMarkdownTableCellEvent, true);
   }
   app.addEventListener(pointerDownEvent, beginMarkdownTableEdgeDrag, true);
@@ -1790,6 +1790,7 @@ function renderResourceDocument(resource) {
       <h2 class="visually-hidden" id="resource-dialog-label-${esc(resource.id)}">자료 편집</h2>
       <div class="visually-hidden" data-resource-announcements role="status" aria-live="polite" aria-atomic="true"></div>
       <div class="resource-window-titlebar" data-resource-window-drag="${esc(resource.id)}" tabindex="0" aria-label="자료 창 이동, 방향키로 이동, Shift와 방향키로 크기 조절">
+        <button class="resource-comments-toggle" type="button" data-resource-comments-toggle="${esc(resource.id)}" aria-label="코멘트 사이드바" aria-controls="resource-comments-${esc(resource.id)}" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"></path><path d="M7 8h10M7 12h7"></path></svg></button>
         <button class="resource-document-close" type="button" data-resource-back="${esc(resource.id)}" aria-label="자료 닫기">×</button>
       </div>
       <label class="visually-hidden" for="resource-title-${esc(resource.id)}">자료 제목</label>
@@ -1804,15 +1805,192 @@ function renderResourceDocument(resource) {
       >${esc(resource.title || "")}</textarea>
       ${renderResourceRelations(resource)}
       <hr class="resource-document-divider">
+      <div class="resource-document-layout">
       <section class="resource-document-body" aria-label="자료 내용">
         <div class="block-editor" data-owner-type="resources" data-owner-id="${esc(resource.id)}">
           ${renderBlocks(blocksList, "resources", resource.id)}
         </div>
       </section>
+      <aside class="resource-comments-sidebar" id="resource-comments-${esc(resource.id)}" data-resource-comments="${esc(resource.id)}" aria-label="코멘트" aria-hidden="true" inert></aside>
+      </div>
     </article>
     ${["n", "ne", "e", "se", "s", "sw", "w", "nw"].map((direction) => `<span class="resource-window-resize" data-resource-resize="${direction}" aria-hidden="true"></span>`).join("")}
     </div>
   `;
+}
+
+function renderResourceComments(resource, record) {
+  const draft = record.commentDraft;
+  const editable = resourceMutationAllowed(resource);
+  const blockOrder = new Map(resource.blocks.map((block, index) => [block.id, index]));
+  const threads = (resource.commentThreads || []).filter((thread) => !thread.deletedAt);
+  if (draft && !threads.some((thread) => thread.id === draft.commentId)) threads.push({ id: draft.commentId, anchor: draft.blockId ? { blockId: draft.blockId, start: draft.start } : null, replies: [] });
+  threads.sort((left, right) => {
+    const order = (thread) => blockOrder.get(thread.anchor?.blockId) ?? resource.blocks.length;
+    return order(left) - order(right) || (left.anchor?.start || 0) - (right.anchor?.start || 0);
+  });
+  const form = () => `<form class="resource-comment-form" data-resource-comment-form="${esc(resource.id)}" data-inline-comment-popover>
+    <textarea data-resource-comment-input data-inline-comment-input rows="3" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" aria-label="코멘트 내용" placeholder="코멘트 입력">${esc(draft?.body || "")}</textarea>
+    <div class="resource-comment-form-actions"><button type="button" data-resource-comment-action="cancel">취소</button><button type="submit">저장</button></div>
+  </form>`;
+  const action = (name, label, commentId, path) => `<button type="button" data-resource-comment-action="${name}" data-comment-id="${esc(commentId)}" aria-label="${label}" title="${label}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="${path}"></path></svg></button>`;
+  return `<div class="resource-comments-list">${threads.map((thread) => {
+    const comments = thread.body === undefined ? [] : [thread, ...(thread.replies || []).filter((reply) => !reply.deletedAt)];
+    return `<section class="resource-comment-card ${record.activeCommentId === thread.id ? "is-active" : ""}" data-comment-thread="${esc(thread.id)}" data-comment-anchor="${esc(thread.anchor?.blockId || "")}" tabindex="-1" aria-label="문장 코멘트">
+      <ol class="inline-comment-list">${comments.map((comment) => `<li data-comment-entry="${esc(comment.id)}"><span class="resource-comment-body">${esc(comment.body)}</span>${editable ? `<span class="resource-comment-actions">${action("edit", "코멘트 수정", comment.id, "M3 13 13 3l4 4L7 17H3v-4ZM11 5l4 4")}${action("delete", "코멘트 삭제", comment.id, "M4 5h12M8 3h4M6 5l1 12h6l1-12M9 8v6M11 8v6")}</span>` : ""}</li>`).join("")}</ol>
+      ${draft?.commentId === thread.id ? form() : editable ? `<button class="resource-comment-add" type="button" data-resource-comment-action="reply">코멘트 추가</button>` : ""}
+    </section>`;
+  }).join("")}
+  <div class="resource-comments-tail">${!threads.length && !draft ? '<p class="resource-comments-empty">코멘트가 없습니다.</p>' : ""}${editable && !draft ? '<button class="resource-comment-add" type="button" data-resource-comment-action="new">코멘트 추가</button>' : ""}</div></div>`;
+}
+
+function syncResourceComments(resourceId, force = false) {
+  const record = resourceWindowById(resourceId);
+  const resource = itemById("resources", resourceId);
+  const element = resourceWindowElement(resourceId);
+  const sidebar = element?.querySelector("[data-resource-comments]");
+  if (!record || !resource || !sidebar) return;
+  element.querySelector(".resource-document").classList.toggle("comments-open", record.commentsOpen === true);
+  element.querySelector("[data-resource-comments-toggle]").setAttribute("aria-expanded", String(record.commentsOpen === true));
+  sidebar.inert = !record.commentsOpen;
+  sidebar.setAttribute("aria-hidden", String(!record.commentsOpen));
+  if (force || !sidebar.contains(document.activeElement)) {
+    const markup = renderResourceComments(resource, record);
+    if (sidebar.resourceCommentsMarkup !== markup) {
+      sidebar.querySelectorAll(".resource-comment-card").forEach((card) => element.resourceCommentsObserver?.unobserve(card));
+      sidebar.innerHTML = markup;
+      sidebar.resourceCommentsMarkup = markup;
+      sidebar.querySelectorAll(".resource-comment-card").forEach((card) => element.resourceCommentsObserver?.observe(card));
+    }
+  }
+  requestAnimationFrame(() => positionResourceComments(resourceId));
+}
+
+function positionResourceComments(resourceId) {
+  const record = resourceWindowById(resourceId);
+  const element = resourceWindowElement(resourceId);
+  const list = element?.querySelector(".resource-comments-list");
+  if (!record?.commentsOpen || !list?.isConnected) return;
+  const resource = itemById("resources", resourceId);
+  const threads = new Map((resource.commentThreads || []).map((thread) => [thread.id, thread]));
+  const top = list.getBoundingClientRect().top;
+  let bottom = 0;
+  list.querySelectorAll("[data-comment-thread]").forEach((card) => {
+    const thread = threads.get(card.dataset.commentThread);
+    const anchor = element.querySelector(`[data-inline-comment-id="${cssEscape(thread?.id || "")}"]`)
+      || element.querySelector(`[data-block-id="${cssEscape(card.dataset.commentAnchor)}"]`);
+    const rect = anchor?.getClientRects()[0];
+    const desired = rect?.height ? rect.top - top : bottom;
+    const y = Math.round(Math.max(0, bottom, desired));
+    card.style.top = `${y}px`;
+    bottom = y + card.offsetHeight + 12;
+  });
+  const tail = list.querySelector(".resource-comments-tail");
+  tail.style.top = `${bottom}px`;
+  const height = Math.ceil(bottom + tail.offsetHeight);
+  if (list.style.height !== `${height}px`) list.style.height = `${height}px`;
+}
+
+function openResourceCommentSidebar(resourceId, options = {}) {
+  const record = resourceWindowById(resourceId);
+  if (!record) return false;
+  if (options.draft && record.commentDraft?.body.trim() && (record.commentDraft.commentId !== options.draft.commentId || record.commentDraft.editId !== options.draft.editId)) {
+    showToast("작성 중인 코멘트를 먼저 저장하거나 취소해 주세요.");
+    return false;
+  }
+  record.commentsOpen = true;
+  if (options.commentId) record.activeCommentId = options.commentId;
+  if (options.draft) record.commentDraft = options.draft;
+  ui.inlineToolbar = null;
+  ui.commentPopover = null;
+  window.getSelection()?.removeAllRanges();
+  renderOverlays();
+  syncResourceComments(resourceId, true);
+  if (options.draft) resourceWindowElement(resourceId)?.querySelector("[data-resource-comment-input]")?.focus({ preventScroll: true });
+  requestAnimationFrame(() => resourceWindowElement(resourceId)?.querySelector(`[data-comment-thread="${cssEscape(options.commentId || "")}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }));
+  return true;
+}
+
+function handleResourceCommentAction(control) {
+  const resourceId = control.closest("[data-resource-comments]")?.dataset.resourceComments;
+  const resource = itemById("resources", resourceId);
+  const record = resourceWindowById(resourceId);
+  if (!record || !resourceMutationAllowed(resource) || app.dataset.workspaceAuthority !== "ready") return;
+  const action = control.dataset.resourceCommentAction;
+  const thread = resource.commentThreads?.find((entry) => entry.id === control.closest("[data-comment-thread]")?.dataset.commentThread && !entry.deletedAt);
+  if (action === "cancel") { record.commentDraft = null; syncResourceComments(resourceId, true); return; }
+  if (action === "new" || action === "reply") {
+    const commentId = thread?.id || id();
+    openResourceCommentSidebar(resourceId, { commentId, draft: { commentId, body: "", ...(thread?.anchor || {}) } });
+    return;
+  }
+  const comment = thread && [thread, ...thread.replies].find((entry) => entry.id === control.dataset.commentId && !entry.deletedAt);
+  if (!comment) return;
+  if (action === "edit") {
+    openResourceCommentSidebar(resourceId, { commentId: thread.id, draft: { commentId: thread.id, editId: comment.id, body: comment.body, ...(thread.anchor || {}) } });
+    return;
+  }
+  if (action !== "delete") return;
+  const history = beginEditorHistory("resources", resourceId, { blockId: thread.anchor?.blockId });
+  const now = new Date().toISOString();
+  if (comment === thread) {
+    const next = thread.replies.find((reply) => !reply.deletedAt);
+    if (next) { thread.body = next.body; next.deletedAt = now; }
+    else {
+      thread.deletedAt = now;
+      for (const block of resource.blocks) block.marks = (block.marks || []).filter((mark) => mark.type !== "comment" || mark.commentId !== thread.id);
+    }
+  } else comment.deletedAt = now;
+  comment.updatedAt = now;
+  thread.updatedAt = now;
+  record.commentDraft = null;
+  reconcileResourceCommentThreads(resource);
+  markResourceChanged(resource);
+  commitEditorHistory(history, { blockId: thread.anchor?.blockId });
+  saveState();
+  renderEditorMutation("resources", resourceId);
+  syncResourceComments(resourceId, true);
+}
+
+function saveResourceComment(form) {
+  const resourceId = form.dataset.resourceCommentForm;
+  const resource = itemById("resources", resourceId);
+  const record = resourceWindowById(resourceId);
+  const draft = record?.commentDraft;
+  const body = String(form.querySelector("[data-resource-comment-input]")?.value || "").trim();
+  if (!draft || !body || body.length > MAX_INLINE_COMMENT_BODY_LENGTH || !resourceMutationAllowed(resource) || app.dataset.workspaceAuthority !== "ready") return false;
+  reconcileResourceCommentThreads(resource);
+  const history = beginEditorHistory("resources", resourceId, { blockId: draft.blockId, start: draft.start, end: draft.end });
+  const now = new Date().toISOString();
+  const thread = resource.commentThreads.find((entry) => entry.id === draft.commentId && !entry.deletedAt);
+  if (draft.editId) {
+    const comment = thread && [thread, ...thread.replies].find((entry) => entry.id === draft.editId && !entry.deletedAt);
+    if (!comment) return false;
+    comment.body = body;
+    comment.updatedAt = now;
+    thread.updatedAt = now;
+  } else if (thread) {
+    thread.replies.push({ id: id(), body, createdAt: now, updatedAt: now, deletedAt: "" });
+    thread.updatedAt = now;
+  } else {
+    const block = resource.blocks.find((entry) => entry.id === draft.blockId);
+    if (draft.blockId && (!block || draft.end > block.text.length || draft.end <= draft.start || (draft.quote !== undefined && block.text.slice(draft.start, draft.end) !== draft.quote))) {
+      showToast("선택한 문장이 변경됐습니다. 코멘트 내용을 복사한 뒤 문장을 다시 선택해 주세요.");
+      return false;
+    }
+    const anchor = block ? { blockId: block.id, start: draft.start, end: draft.end } : null;
+    resource.commentThreads.push({ id: draft.commentId, scope: anchor ? "inline" : "page", anchor, body, createdAt: now, updatedAt: now, resolvedAt: "", deletedAt: "", replies: [] });
+    if (block) block.marks = normalizeInlineMarks(block.text, [...(block.marks || []), { type: "comment", start: draft.start, end: draft.end, commentId: draft.commentId, body }]);
+  }
+  record.activeCommentId = draft.commentId;
+  record.commentDraft = null;
+  reconcileResourceCommentThreads(resource);
+  markResourceChanged(resource);
+  commitEditorHistory(history, { blockId: draft.blockId, start: draft.start, end: draft.end });
+  saveState();
+  renderEditorMutation("resources", resourceId);
+  syncResourceComments(resourceId, true);
+  return true;
 }
 
 function syncResourceDocumentDialog() {
@@ -1829,6 +2007,7 @@ function syncResourceDocumentDialog() {
     if (resourceWindowById(element.dataset.resourceWindow)) continue;
     if (ui.resourceWindowDrag?.id === element.dataset.resourceWindow) cancelResourceWindowPointer();
     element.resourceGeometryAnimation?.cancel();
+    element.resourceCommentsObserver?.disconnect();
     element.remove();
   }
   const open = ui.resourceWindows.length > 0;
@@ -1841,6 +2020,9 @@ function syncResourceDocumentDialog() {
     if (isNew) {
       els.detailRoot.insertAdjacentHTML("beforeend", renderResourceDocument(resource));
       element = resourceWindowElement(record.id);
+      element.resourceCommentsObserver = new ResizeObserver(() => positionResourceComments(record.id));
+      element.resourceCommentsObserver.observe(element.querySelector(".block-editor"));
+      element.resourceCommentsObserver.observe(element.querySelector("[data-resource-comments]"));
     }
     const relationsMarkup = renderResourceRelations(resource);
     if (!isNew && element.resourceRelationsMarkup !== relationsMarkup) {
@@ -1849,6 +2031,7 @@ function syncResourceDocumentDialog() {
     element.resourceRelationsMarkup = relationsMarkup;
     element.dataset.active = String(record.id === ui.activeResourceId);
     syncResourceWindowGeometry(record);
+    syncResourceComments(record.id);
     if (isNew && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       element.animate([{ opacity: 0, transform: "translateY(8px) scale(0.985)" }, { opacity: 1, transform: "none" }], {
         duration: 240, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
@@ -4955,6 +5138,7 @@ function closeFinanceSelects(except = null) {
 }
 
 function inlinePickerFieldSelector(input) {
+  if (input?.dataset.resourceTableFormat) return `[data-block-id="${cssEscape(input.closest(".block").dataset.blockId)}"] [data-resource-table-format="${cssEscape(input.dataset.resourceTableFormat)}"]`;
   const owner = input?.closest("[data-inline-owner-type][data-inline-owner-id]");
   const field = input?.dataset.field || "";
   if (!owner || !field) return "";
@@ -7845,14 +8029,19 @@ function renderMarkdownTableBlock(block, meta = {}) {
   const columnCount = table?.headers.length || 0;
   const rowCount = table ? table.rows.length + 1 : 0;
   const editable = editorOwnerMutationAllowed(meta.ownerType, meta.ownerId);
+  const widths = markdownTableColumnWidths(block, columnCount);
+  const color = BLOCK_COLOR_OPTIONS[normalizeBlockColorValue(block.color)];
+  const background = BLOCK_COLOR_OPTIONS[normalizeBlockColorValue(block.backgroundColor)];
   return `
     <div class="block resource-table-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="table" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
       ${meta.blockTools || ""}
       <div class="resource-table-shell">
+        ${table && editable ? renderMarkdownTableToolbar(block, table) : ""}
         <div class="resource-table-scroll block-content" data-block-content="${esc(block.id)}" data-resource-table-select tabindex="0" role="group" aria-label="표, ${columnCount}열 ${rowCount}행">
           ${table ? `
-            <table class="resource-markdown-table" style="min-width:${Math.max(480, columnCount * 160)}px">
-              <thead><tr>${renderMarkdownTableRow(table.headers, 0, table.align, editable)}</tr></thead>
+            <table class="resource-markdown-table" data-table-bold="${block.tableBold === true}" style="${widths ? `width:${widths.reduce((sum, width) => sum + width, 0)}px;min-width:0;` : `min-width:${Math.max(480, columnCount * 160)}px;`}${color ? `--table-text:${color.text};` : ""}${background ? `--table-background:${background.background};` : ""}">
+              ${widths ? `<colgroup>${widths.map((width) => `<col style="width:${width}px">`).join("")}</colgroup>` : ""}
+              <thead><tr>${renderMarkdownTableRow(table.headers, 0, table.align, editable, block.tableHeader !== false)}</tr></thead>
               <tbody>${table.rows.map((row, index) => `<tr>${renderMarkdownTableRow(row, index + 1, table.align, editable)}</tr>`).join("")}</tbody>
             </table>
           ` : `<span class="resource-table-error">표 형식을 읽을 수 없습니다.</span>`}
@@ -7866,11 +8055,54 @@ function renderMarkdownTableBlock(block, meta = {}) {
   `;
 }
 
-function renderMarkdownTableRow(cells, row, align, editable) {
+function renderMarkdownTableRow(cells, row, align, editable, header = true) {
   return cells.map((value, column) => {
-    const tag = row === 0 ? "th" : "td";
-    return `<${tag}${row === 0 ? ' scope="col"' : ""} class="${markdownTableAlignmentClass(align[column])}"><span class="resource-table-cell" contenteditable="${editable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${row + 1}행 ${column + 1}열" data-resource-table-cell data-table-row="${row}" data-table-column="${column}">${renderMarkdownTableCell(value)}</span></${tag}>`;
+    const tag = row === 0 && header ? "th" : "td";
+    return `<${tag}${tag === "th" ? ' scope="col"' : ""} class="${markdownTableAlignmentClass(align[column])}"><span class="resource-table-cell" contenteditable="${editable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${row + 1}행 ${column + 1}열" data-resource-table-cell data-table-row="${row}" data-table-column="${column}">${renderMarkdownTableCell(value)}</span>${row === 0 && editable ? `<span class="resource-table-column-resize" data-resource-table-width="${column}" role="separator" tabindex="0" aria-label="${column + 1}열 너비" aria-orientation="vertical" aria-valuemin="80" aria-valuemax="1200" aria-valuenow="160"></span>` : ""}</${tag}>`;
   }).join("");
+}
+
+function markdownTableColumnWidths(block, count) {
+  return Array.isArray(block.columnWidths)
+    ? Array.from({ length: count }, (_, index) => Math.max(80, Math.min(1200, Math.round(Number(block.columnWidths[index]) || 160))))
+    : null;
+}
+
+function renderMarkdownTableToolbar(block, table) {
+  const picker = (label, field, options, value) => financeSelectInput(label, `table-${block.id}-${field}`, options, { value, allowEmpty: false, attributes: `data-resource-table-format="${field}"` });
+  const colors = (field) => picker(field === "color" ? "글자" : "배경", field, [["", "기본"], ...Object.entries(BLOCK_COLOR_OPTIONS).map(([key, option]) => [key, option.label])], block[field] || "");
+  return `<div class="resource-table-format" role="toolbar" aria-label="표 서식">
+    <button type="button" data-resource-table-format="tableHeader" aria-pressed="${block.tableHeader !== false}">머리글</button>
+    <button type="button" data-resource-table-format="tableBold" aria-label="표 굵게" aria-pressed="${block.tableBold === true}"><strong>B</strong></button>
+    ${colors("color")}${colors("backgroundColor")}
+    ${picker("정렬", "align", [["left", "왼쪽"], ["center", "가운데"], ["right", "오른쪽"]], table.align.every((alignment) => alignment === table.align[0]) ? table.align[0] : "")}
+  </div>`;
+}
+
+function applyMarkdownTableFormat(control) {
+  const context = markdownTableCellContext(control);
+  if (!context || app.dataset.workspaceAuthority !== "ready" || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return;
+  const { block, table, ownerType, ownerId } = context;
+  const field = control.dataset.resourceTableFormat;
+  if (!["tableHeader", "tableBold", "color", "backgroundColor", "align"].includes(field)) return;
+  const history = beginEditorHistory(ownerType, ownerId, { blockId: block.id });
+  if (field === "align") {
+    if (!["left", "center", "right"].includes(control.value)) return;
+    table.align.fill(control.value);
+    block.text = serializeMarkdownTable(table);
+  } else if (field === "tableHeader") block.tableHeader = block.tableHeader === false;
+  else if (field === "tableBold") block.tableBold = block.tableBold !== true;
+  else {
+    const color = normalizeBlockColorValue(control.value);
+    if (color) block[field] = color;
+    else delete block[field];
+  }
+  commitEditorHistory(history, { blockId: block.id });
+  saveState();
+  renderEditorMutation(ownerType, ownerId);
+  restoreBlockSelection(ownerType, ownerId, [block.id]);
+  const replacement = document.querySelector(`[data-block-id="${cssEscape(block.id)}"] [data-resource-table-format="${field}"]`);
+  (replacement?.closest("[data-finance-select]")?.querySelector("[data-finance-select-trigger]") || replacement)?.focus({ preventScroll: true });
 }
 
 function renderMarkdownTableCell(value = "") {
@@ -7962,6 +8194,28 @@ function updateMarkdownTableCell(cell) {
 }
 
 function handleMarkdownTableCellEvent(event) {
+  const format = event.target.closest?.("[data-resource-table-format]");
+  if (format) {
+    event.stopPropagation();
+    if ((event.type === "click" && format.tagName === "BUTTON") || event.type === "change") applyMarkdownTableFormat(format);
+    return;
+  }
+  const resize = event.target.closest?.("[data-resource-table-width]");
+  if (resize && event.type === "keydown" && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const context = markdownTableCellContext(resize);
+    if (!context || app.dataset.workspaceAuthority !== "ready" || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return;
+    const widths = [...context.blockElement.querySelector("table").rows[0].cells].map((cell) => Math.round(cell.getBoundingClientRect().width));
+    const column = Number(resize.dataset.resourceTableWidth);
+    const history = beginEditorHistory(context.ownerType, context.ownerId, { blockId: context.block.id });
+    widths[column] = Math.max(80, Math.min(1200, widths[column] + (event.key === "ArrowRight" ? 16 : -16)));
+    context.block.columnWidths = widths;
+    commitEditorHistory(history, { blockId: context.block.id });
+    saveState();
+    syncMarkdownTableSize(context.blockElement, context.table);
+    return;
+  }
   if (ui.markdownTableDrag && event.type === "keydown" && event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
@@ -8061,6 +8315,12 @@ function handleMarkdownTableCellEvent(event) {
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
     event.preventDefault();
+    const offsets = selectionOffsetsInside(cell);
+    if (offsets && offsets.start === 0 && offsets.end === cell.textContent.length && !offsets.collapsed) {
+      cell.blur();
+      selectSingleBlock(ownerType, ownerId, block.id);
+      return;
+    }
     const range = document.createRange();
     range.selectNodeContents(cell);
     window.getSelection()?.removeAllRanges();
@@ -8098,9 +8358,11 @@ function handleMarkdownTableCellEvent(event) {
   focusMarkdownTableCell(block.id, row, column);
 }
 
-function syncMarkdownTableSize(blockElement, table) {
+function syncMarkdownTableSize(blockElement, table, widths = undefined) {
   const tableElement = blockElement.querySelector("table");
   if (!tableElement) return;
+  const block = markdownTableCellContext(blockElement)?.block;
+  if (widths === undefined) widths = markdownTableColumnWidths(block || {}, table.headers.length);
   const rows = [table.headers, ...table.rows];
   while (tableElement.rows.length > rows.length) tableElement.deleteRow(-1);
   rows.forEach((values, index) => {
@@ -8112,18 +8374,22 @@ function syncMarkdownTableSize(blockElement, table) {
     while (row.cells.length > values.length) row.deleteCell(-1);
     if (row.cells.length < values.length) {
       const first = row.cells.length;
-      const added = renderMarkdownTableRow(values, index, table.align, true);
+      const added = renderMarkdownTableRow(values, index, table.align, true, block?.tableHeader !== false);
       const scratch = document.createElement("tr");
       scratch.innerHTML = added;
       for (const cell of [...scratch.cells].slice(first)) row.appendChild(cell);
     }
   });
-  tableElement.style.minWidth = `${Math.max(480, table.headers.length * 160)}px`;
+  tableElement.querySelector("colgroup")?.remove();
+  if (widths) tableElement.insertAdjacentHTML("afterbegin", `<colgroup>${widths.map((width) => `<col style="width:${width}px">`).join("")}</colgroup>`);
+  tableElement.style.width = widths ? `${widths.reduce((sum, width) => sum + width, 0)}px` : "100%";
+  tableElement.style.minWidth = widths ? "0" : `${Math.max(480, table.headers.length * 160)}px`;
+  blockElement.querySelectorAll("[data-resource-table-width]").forEach((handle, column) => handle.setAttribute("aria-valuenow", String(widths?.[column] || Math.round(tableElement.rows[0].cells[column].getBoundingClientRect().width))));
   blockElement.querySelector("[data-resource-table-select]").setAttribute("aria-label", `표, ${table.headers.length}열 ${rows.length}행`);
 }
 
 function beginMarkdownTableEdgeDrag(event) {
-  const handle = event.target.closest?.("[data-resource-table-edge]");
+  const handle = event.target.closest?.("[data-resource-table-edge], [data-resource-table-width]");
   if (!handle || !canStartCustomPointerDrag(event)) return;
   event.preventDefault();
   event.stopPropagation();
@@ -8136,10 +8402,13 @@ function beginMarkdownTableEdgeDrag(event) {
   clearInlineEditingOverlaysForBlockSelection();
   window.getSelection()?.removeAllRanges();
   const tableElement = latest.blockElement.querySelector("table");
-  const axis = handle.dataset.resourceTableEdge;
+  const axis = handle.hasAttribute("data-resource-table-width") ? "width" : handle.dataset.resourceTableEdge;
   ui.markdownTableDrag = {
     ...latest,
     originalText: latest.block.text,
+    originalWidths: markdownTableColumnWidths(latest.block, latest.table.headers.length),
+    widths: [...tableElement.rows[0].cells].map((cell) => Math.round(cell.getBoundingClientRect().width)),
+    column: Number(handle.dataset.resourceTableWidth),
     preview: latest.table,
     handle,
     axis,
@@ -8156,7 +8425,15 @@ function beginMarkdownTableEdgeDrag(event) {
 function moveMarkdownTableEdgeDrag(event) {
   const drag = ui.markdownTableDrag;
   if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return;
+  if (event.buttons === 0) return finishMarkdownTableEdgeDrag(event, true);
   event.preventDefault();
+  if (drag.axis === "width") {
+    drag.previewWidths = drag.widths.slice();
+    drag.previewWidths[drag.column] = Math.max(80, Math.min(1200, Math.round(drag.widths[drag.column] + event.clientX - drag.start)));
+    drag.extra = drag.previewWidths[drag.column] - drag.widths[drag.column];
+    syncMarkdownTableSize(drag.blockElement, drag.table, drag.previewWidths);
+    return;
+  }
   const original = drag.axis === "rows" ? drag.table.rows.length + 1 : drag.table.headers.length;
   const limit = drag.axis === "rows" ? RESOURCE_TABLE_MAX_ROWS : RESOURCE_TABLE_MAX_COLUMNS;
   const distance = (drag.axis === "rows" ? event.clientY : event.clientX) - drag.start;
@@ -8188,11 +8465,12 @@ function finishMarkdownTableEdgeDrag(event, cancelled = false) {
     return;
   }
   if (cancelled || !drag.extra) {
-    syncMarkdownTableSize(drag.blockElement, drag.table);
+    syncMarkdownTableSize(drag.blockElement, drag.table, drag.originalWidths);
     return;
   }
   const history = beginEditorHistory(drag.ownerType, drag.ownerId, { blockId: current.id, tableRow: 0, tableColumn: 0 });
-  current.text = serializeMarkdownTable(drag.preview);
+  if (drag.axis === "width") current.columnWidths = drag.previewWidths;
+  else current.text = serializeMarkdownTable(drag.preview);
   commitEditorHistory(history, { blockId: current.id, tableRow: 0, tableColumn: 0 });
   saveState();
 }
@@ -8437,6 +8715,17 @@ function normalizeEditableBlock(block) {
   } else if (!BLOCK_TYPES[block.type]) {
     block.type = "paragraph";
     changed = true;
+  }
+  if (block.type === TABLE_BLOCK_TYPE) {
+    const widths = markdownTableColumnWidths(block, parseMarkdownTable(block.text)?.headers.length || 0);
+    if (widths && JSON.stringify(widths) !== JSON.stringify(block.columnWidths)) { block.columnWidths = widths; changed = true; }
+    for (const field of ["tableHeader", "tableBold"]) {
+      if (block[field] !== undefined && typeof block[field] !== "boolean") { delete block[field]; changed = true; }
+    }
+  } else {
+    for (const field of ["columnWidths", "tableHeader", "tableBold"]) {
+      if (block[field] !== undefined) { delete block[field]; changed = true; }
+    }
   }
   if (typeof block.text !== "string") {
     block.text = block.text === undefined || block.text === null ? "" : String(block.text);
@@ -10211,20 +10500,12 @@ function resourceCitationMenuEntries(query = "", sourceResourceId = "", existing
 function renderCommentPopover() {
   const popover = ui.commentPopover;
   if (!popover) return "";
-  const item = itemById(popover.ownerType, popover.ownerId);
-  const thread = popover.ownerType === "resources"
-    ? item?.commentThreads?.find((entry) => entry.id === popover.commentId && !entry.deletedAt)
-    : null;
-  const comments = thread
-    ? [thread, ...(thread.replies || []).filter((reply) => !reply.deletedAt)]
-    : [];
   return `
     <form class="inline-comment-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-comment-popover>
-      ${comments.length ? `<ol class="inline-comment-list" aria-label="댓글 ${comments.length}개">${comments.map((comment) => `<li>${esc(comment.body)}</li>`).join("")}</ol>` : ""}
-      <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" placeholder="${thread ? "답글 추가" : "댓글 추가"}" aria-label="${thread ? "답글" : "댓글"}">${esc(popover.body || "")}</textarea>
+      <textarea class="inline-comment-input" data-inline-comment-input rows="2" maxlength="${MAX_INLINE_COMMENT_BODY_LENGTH}" placeholder="댓글 추가" aria-label="댓글">${esc(popover.body || "")}</textarea>
       <div class="inline-comment-actions">
-        <button class="inline-comment-action" type="submit">${thread ? "댓글 추가" : "저장"}</button>
-        ${thread || popover.ownerType !== "resources" ? '<button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>' : ""}
+        <button class="inline-comment-action" type="submit">저장</button>
+        <button class="inline-comment-action secondary" type="button" data-inline-comment-remove>제거</button>
       </div>
     </form>
   `;
@@ -10432,6 +10713,19 @@ function relationField(label, field, value, items, nameField) {
 }
 
 function handleClick(event) {
+  const commentsToggle = event.target.closest("[data-resource-comments-toggle]");
+  if (commentsToggle) {
+    event.preventDefault();
+    const record = resourceWindowById(commentsToggle.dataset.resourceCommentsToggle);
+    if (record) { record.commentsOpen = !record.commentsOpen; syncResourceComments(record.id); }
+    return;
+  }
+  const commentAction = event.target.closest("[data-resource-comment-action]");
+  if (commentAction) {
+    event.preventDefault();
+    handleResourceCommentAction(commentAction);
+    return;
+  }
   if (ui.suppressResourceClickUntil > Date.now() && event.target.closest("[data-resource-view] .resource-groups")) {
     event.preventDefault();
     event.stopPropagation();
@@ -12597,6 +12891,7 @@ function handleSubmit(event) {
   const form = event.target.closest("form");
   if (!form) return;
   event.preventDefault();
+  if (form.hasAttribute("data-resource-comment-form")) { saveResourceComment(form); return; }
   if (form.dataset.form === "finance-login") {
     submitFinanceLogin(form);
     return;
@@ -12684,6 +12979,12 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const commentInput = event.target.closest("[data-resource-comment-input]");
+  if (commentInput) {
+    const record = resourceWindowById(commentInput.closest("[data-resource-comments]").dataset.resourceComments);
+    if (record?.commentDraft) record.commentDraft.body = commentInput.value;
+    return;
+  }
   const financeIntegerInput = event.target.closest("[data-finance-integer-input]");
   if (financeIntegerInput && !event.isComposing) formatFinanceIntegerInput(financeIntegerInput);
 
@@ -12763,6 +13064,7 @@ if (financeInstallmentPayment && !event.isComposing) {
     }
     if (isComposingBlock(blockContent)) {
       syncComposingBlockEmptyState(blockContent, event);
+      refreshResourceSlashFromContent(blockContent);
       return;
     }
     updateBlockText(blockContent, event);
@@ -12974,6 +13276,9 @@ function handleCompositionUpdate(event) {
   const editor = blockContent.closest(".block-editor");
   if (editor && !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
   syncComposingBlockEmptyState(blockContent, event);
+  requestAnimationFrame(() => {
+    if (blockContent.isConnected) refreshResourceSlashFromContent(blockContent);
+  });
 }
 
 function handleCompositionEnd(event) {
@@ -13758,6 +14063,7 @@ function refreshBlockEditorsAfterMutation(ownerType, ownerId) {
   if (!editors.length) return false;
   const blocksHtml = renderBlocks(item.blocks, ownerType, ownerId);
   for (const editor of editors) patchBlockEditorStructure(editor, blocksHtml);
+  if (ownerType === "resources") syncResourceComments(ownerId);
   return true;
 }
 
@@ -15412,6 +15718,11 @@ function clipboardBlockFromBlock(block) {
   if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) clipboardBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
   if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
   if (type === "code" && normalizeCodeLanguage(block.language)) clipboardBlock.language = normalizeCodeLanguage(block.language);
+  if (type === TABLE_BLOCK_TYPE) {
+    const widths = markdownTableColumnWidths(block, parseMarkdownTable(block.text)?.headers.length || 0);
+    if (widths) clipboardBlock.columnWidths = widths;
+    for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") clipboardBlock[field] = block[field];
+  }
   return clipboardBlock;
 }
 
@@ -15844,6 +16155,11 @@ function normalizeClipboardBlocks(blocks) {
     if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) normalizedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
     if (type === "code" && normalizeCodeLanguage(block.language)) normalizedBlock.language = normalizeCodeLanguage(block.language);
+    if (type === TABLE_BLOCK_TYPE) {
+      const widths = markdownTableColumnWidths(block, parseMarkdownTable(rawText)?.headers.length || 0);
+      if (widths) normalizedBlock.columnWidths = widths;
+      for (const field of ["tableHeader", "tableBold"]) if (typeof block[field] === "boolean") normalizedBlock[field] = block[field];
+    }
     normalized.push(normalizedBlock);
   }
   return normalized;
@@ -18632,6 +18948,11 @@ function handlePendingMarkdownTextBeforeInput(event, blockContent) {
     return false;
   }
   if (blockContent?.dataset.blockContent !== pending.blockId) return false;
+  const offsets = selectionOffsetsInside(blockContent);
+  if (!offsets?.collapsed || offsets.start !== (blockContent.textContent || "").length) {
+    ui.pendingMarkdownTextTarget = null;
+    return false;
+  }
   if (!appendPendingMarkdownText(pending.ownerType, pending.ownerId, pending.blockId, event.data)) {
     ui.pendingMarkdownTextTarget = null;
     return false;
@@ -18893,6 +19214,7 @@ function inlineToolbarEqual(left, right) {
 function handleDocumentClick(event) {
   if (!event.target.closest?.("[data-resource-view] .resource-groups")) setResourceListSelection([]);
   if (!event.target.closest?.("[data-finance-select]")) closeFinanceSelects();
+  if (event.target.closest?.(".resource-table-format")) return;
   document.querySelectorAll(".code-language-picker[open]").forEach((picker) => {
     if (!picker.contains(event.target)) closeCodeLanguagePicker(picker);
   });
@@ -20872,21 +21194,26 @@ function updateBlockText(blockContent, event = null) {
     return;
   }
   closeResourceSlashMenu();
+  const offsets = selectionOffsetsInside(blockContent);
+  const shortcutLength = event?.inputType === "insertText" && event.data === " " && offsets?.collapsed
+    ? offsets.start
+    : rawText.length;
   let markdownHistory = null;
-  if (textMatchesMarkdownShortcut(rawText)) {
+  if (block.type !== "code" && textMatchesMarkdownShortcut(rawText.slice(0, shortcutLength))) {
+    block.marks = inlineMarksForContentUpdate(block, blockContent, rawText);
     block.text = rawText;
-    block.marks = [];
-    markdownHistory = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start: rawText.length, end: rawText.length });
+    markdownHistory = beginEditorHistory(editor.dataset.ownerType, editor.dataset.ownerId, { blockId: block.id, start: shortcutLength, end: shortcutLength });
   }
-  if (applyMarkdownShortcut(block, rawText, editor.dataset.ownerType, editor.dataset.ownerId)) {
+  if (applyMarkdownShortcut(block, rawText, editor.dataset.ownerType, editor.dataset.ownerId, shortcutLength)) {
     ui.selectedBlockMenu = null;
     ui.pageCommand = null;
     ui.emojiCommand = null;
     const focusBlock = block.type === "divider"
       ? insertParagraphAfterDividerShortcut(item, block) || block
       : block;
-    schedulePendingMarkdownTextTarget(editor.dataset.ownerType, editor.dataset.ownerId, focusBlock);
-    commitEditorHistory(markdownHistory, { blockId: focusBlock.id, start: (focusBlock.text || "").length, end: (focusBlock.text || "").length });
+    if (shortcutLength === rawText.length) schedulePendingMarkdownTextTarget(editor.dataset.ownerType, editor.dataset.ownerId, focusBlock);
+    else ui.pendingMarkdownTextTarget = null;
+    commitEditorHistory(markdownHistory, { blockId: focusBlock.id, start: 0, end: 0 });
     saveState();
     renderEditorMutation(editor.dataset.ownerType, editor.dataset.ownerId, { forceView: block.type === "divider" });
     if (block.type === "divider") {
@@ -20894,7 +21221,7 @@ function updateBlockText(blockContent, event = null) {
       focusBlockContentAfterRender(focusBlock.id, { position: "start", transaction: true });
       return;
     }
-    focusBlockContentAfterRender(focusBlock.id);
+    focusBlockContentAfterRender(focusBlock.id, { range: { start: 0, end: 0 } });
     return;
   }
   const pageCommand = pageCommandFromText(rawText);
@@ -21345,18 +21672,19 @@ function modifyCurrentBlockFromKeyboard(ownerType, ownerId, blockId) {
   return false;
 }
 
-function applyMarkdownShortcut(block, rawText, ownerType = "", ownerId = "") {
-  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+function applyMarkdownShortcut(block, rawText, ownerType = "", ownerId = "", shortcutLength = rawText.length) {
+  if (block.type === "code" || !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   for (const [pattern, type, text, checked = false] of MARKDOWN_SHORTCUTS) {
-    if (!pattern.test(rawText)) continue;
+    if (!pattern.test(rawText.slice(0, shortcutLength))) continue;
+    const marks = splitInlineMarksAtSelection(block.marks, rawText, 0, shortcutLength).after;
     applyBlockType(block, type);
     if (type === "numbered") {
       const listStart = Number.parseInt(/^\d+/.exec(rawText)?.[0] || "", 10);
       if (listStart > 1) block.listStart = listStart;
       else delete block.listStart;
     }
-    block.text = text;
-    block.marks = [];
+    block.text = text + rawText.slice(shortcutLength);
+    block.marks = shiftInlineMarks(marks, text.length);
     block.checked = checked;
     block.collapsed = false;
     return true;
@@ -23184,10 +23512,10 @@ function applyResourceCitation(resourceId = "") {
   marks.push({ type: "resourceLink", start: popover.start, end: popover.end, resourceId: target.id });
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
   block.marks = normalizeInlineMarks(block.text, marks);
-  commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
+  commitEditorHistory(history, { blockId: popover.blockId, start: popover.end, end: popover.end });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
-  const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
+  const selection = { blockId: popover.blockId, start: popover.end, end: popover.end };
   ui.resourceCitationPopover = null;
   ui.inlineToolbar = null;
   renderOverlays();
@@ -23270,7 +23598,7 @@ function handleResourceCitationKeydown(event) {
 }
 
 function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, anchorRect = null) {
-  if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  if (ownerType !== "resources" && !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks.find((entry) => entry.id === blockId);
   if (!block || block.type === "code" || !block.text) return false;
@@ -23279,6 +23607,14 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
   if (ownerType === "resources") reconcileResourceCommentThreads(item);
   const marks = normalizeInlineMarks(block.text, block.marks);
   const existing = marks.find((mark) => mark.type === "comment" && mark.start <= range.start && mark.end >= range.end);
+  if (ownerType === "resources") {
+    if (!existing && !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+    const commentId = existing?.commentId || id();
+    return openResourceCommentSidebar(ownerId, {
+      commentId,
+      ...(!existing ? { draft: { commentId, blockId, start: range.start, end: range.end, quote: block.text.slice(range.start, range.end), body: "" } } : {}),
+    });
+  }
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
   const fallbackX = window.innerWidth / 2 - 150;
   const fallbackY = Math.min(120, window.innerHeight - 118);
@@ -23291,7 +23627,7 @@ function openCommentPopover(ownerType, ownerId, blockId, rangeInfo = null, ancho
     start: range.start,
     end: range.end,
     commentId: existing?.commentId || id(),
-    body: ownerType === "resources" ? "" : existing?.body || "",
+    body: existing?.body || "",
     x: Math.max(12, Math.min(rawX, window.innerWidth - 312)),
     y: Math.max(12, Math.min(rawY, window.innerHeight - 124)),
   };
@@ -23420,7 +23756,7 @@ function applyInlineComment(value) {
   if (!popover) return false;
   if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const body = String(value || "").trim();
-  if (!body) return popover.ownerType === "resources" ? false : removeInlineComment();
+  if (!body) return removeInlineComment();
   if (body.length > MAX_INLINE_COMMENT_BODY_LENGTH) {
     showToast(`댓글은 최대 ${MAX_INLINE_COMMENT_BODY_LENGTH}자입니다.`);
     return false;
@@ -23429,42 +23765,6 @@ function applyInlineComment(value) {
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
   const commentId = popover.commentId || id();
-  if (popover.ownerType === "resources") {
-    reconcileResourceCommentThreads(item);
-    const now = new Date().toISOString();
-    const thread = item.commentThreads.find((entry) => entry.id === commentId && !entry.deletedAt);
-    const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-    if (thread) {
-      thread.replies.push({ id: id(), body, createdAt: now, updatedAt: now, deletedAt: "" });
-      thread.updatedAt = now;
-    } else {
-      item.commentThreads.push({
-        id: commentId,
-        scope: "inline",
-        anchor: { blockId: block.id, start: popover.start, end: popover.end },
-        body,
-        createdAt: now,
-        updatedAt: now,
-        resolvedAt: "",
-        deletedAt: "",
-        replies: [],
-      });
-      block.marks = normalizeInlineMarks(block.text, [
-        ...normalizeInlineMarks(block.text, block.marks),
-        { type: "comment", start: popover.start, end: popover.end, commentId, body },
-      ]);
-    }
-    markResourceChanged(item);
-    commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
-    saveState();
-    renderEditorMutation(popover.ownerType, popover.ownerId);
-    const selection = { blockId: popover.blockId, start: popover.start, end: popover.end };
-    ui.commentPopover = null;
-    ui.inlineToolbar = null;
-    renderOverlays();
-    focusBlockContentAfterRender(selection.blockId, { range: { start: selection.start, end: selection.end } });
-    return true;
-  }
   const marks = removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end);
   marks.push({ type: "comment", start: popover.start, end: popover.end, commentId, body });
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
@@ -23522,23 +23822,10 @@ function removeInlineComment() {
   const block = item?.blocks.find((entry) => entry.id === popover.blockId);
   if (!block || !block.text) return false;
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: popover.start, end: popover.end });
-  if (popover.ownerType === "resources") {
-    const now = new Date().toISOString();
-    const thread = item.commentThreads?.find((entry) => entry.id === popover.commentId);
-    if (thread) {
-      thread.deletedAt = now;
-      thread.updatedAt = now;
-    }
-    block.marks = normalizeInlineMarks(block.text, block.marks).filter((mark) => (
-      mark.type !== "comment" || mark.commentId !== popover.commentId
-    ));
-    markResourceChanged(item);
-  } else {
   block.marks = normalizeInlineMarks(
     block.text,
     removeInlineMarkRange(normalizeInlineMarks(block.text, block.marks), "comment", popover.start, popover.end),
   );
-  }
   commitEditorHistory(history, { blockId: popover.blockId, start: popover.start, end: popover.end });
   saveState();
   renderEditorMutation(popover.ownerType, popover.ownerId);
@@ -23798,7 +24085,13 @@ function textPointAtOffset(element, targetOffset) {
   while (node) {
     lastNode = node;
     const length = node.textContent.length;
-    if (remaining <= length) return { node, offset: remaining };
+    if (remaining <= length) {
+      const atomic = node.parentElement?.closest('a[contenteditable="false"]');
+      if (atomic && element.contains(atomic)) {
+        return { node: atomic.parentNode, offset: [...atomic.parentNode.childNodes].indexOf(atomic) + (remaining > 0 ? 1 : 0) };
+      }
+      return { node, offset: remaining };
+    }
     remaining -= length;
     node = walker.nextNode();
   }
@@ -24205,9 +24498,16 @@ function handleResourceSlashPointerDown(event) {
 
 function syncResourceSlashSelection() {
   const command = ui.resourceSlash;
-  if (!command || isComposingBlock(command.content)) return;
+  if (!command) return;
   const selection = window.getSelection();
-  if (!command.content.isConnected || !selection?.isCollapsed || !command.content.contains(selection.anchorNode)) closeResourceSlashMenu();
+  if (!command.content.isConnected || !selection?.isCollapsed || !command.content.contains(selection.anchorNode)) return closeResourceSlashMenu();
+  refreshResourceSlashFromContent(command.content);
+}
+
+function refreshResourceSlashFromContent(content) {
+  const command = resourceSlashCommandFor(content, normalizeEditorPlainText(content.textContent || ""));
+  if (command) updateResourceSlashMenu(content, command);
+  else if (ui.resourceSlash?.content === content) closeResourceSlashMenu();
 }
 
 function applyResourceSlashSelection(selectedId, pending = ui.resourceSlash, image = null) {

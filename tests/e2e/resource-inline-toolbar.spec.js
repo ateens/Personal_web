@@ -102,6 +102,15 @@ test("선택한 글자로 Resource를 추천하고 직접 검색한 Resource를 
   const citation = content.locator(`[data-inline-mark="resourceLink"][data-resource-citation="${FIXTURE_IDS.titleSearchResource}"]`);
   await expect(content).toHaveText(`${selectedText} 관련 메모`);
   await expect(citation).toHaveText(selectedText);
+  await expect(citation).toHaveCSS("text-decoration-line", "none");
+  await expect(page.locator("[data-inline-toolbar]")).toHaveCount(0);
+  expect(await content.evaluate((element) => {
+    const selection = window.getSelection();
+    return selection.isCollapsed && element.contains(selection.focusNode) && !element.querySelector("a").contains(selection.focusNode);
+  })).toBe(true);
+  await page.keyboard.type(" 바로");
+  await expect(content).toHaveText(`${selectedText} 바로 관련 메모`);
+  await expect(citation).toHaveText(selectedText);
   await expect.poll(async () => {
     const snapshot = await fixtureSnapshot(request);
     return snapshot.state.resources
@@ -121,6 +130,31 @@ test("선택한 글자로 Resource를 추천하고 직접 검색한 Resource를 
   await reloadedCitation.press("Enter");
   await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.titleSearchResource}"]`)).toBeVisible();
   await expect(page.locator(`[data-resource-title="${FIXTURE_IDS.titleSearchResource}"]`)).toHaveValue("Database Needle Resource");
+});
+
+test("자료 슬래시 링크를 넣으면 선택 툴바 없이 링크 바로 뒤에서 입력한다", async ({ page, request }) => {
+  await seedParagraphText(request, "");
+  await openResource(page);
+  const content = page.locator(`[data-block-content="${PARAGRAPH_ID}"]`);
+  await content.fill("/자료");
+  await page.locator('[data-resource-slash-id="inline-resourceLink"]').click();
+  await page.locator("[data-resource-citation-query]").fill("Database Needle");
+  await page.locator("[data-resource-citation-query]").press("Enter");
+  const citation = content.locator('[data-inline-mark="resourceLink"]');
+  await expect(citation).toHaveText("자료");
+  await expect(citation).toHaveCSS("text-decoration-line", "none");
+  await expect(page.locator("[data-inline-toolbar]")).toHaveCount(0);
+  expect(await content.evaluate((element) => {
+    const selection = window.getSelection();
+    return selection.isCollapsed && selection.focusNode === element && selection.focusOffset === 1;
+  })).toBe(true);
+  await page.keyboard.type(" 다음 내용");
+  await expect(content).toHaveText("자료 다음 내용");
+  await expect(citation).toHaveText("자료");
+  await expect.poll(async () => {
+    const snapshot = await fixtureSnapshot(request);
+    return snapshot.state.resources.find((resource) => resource.id === FIXTURE_IDS.resource).blocks.find((block) => block.id === PARAGRAPH_ID).text;
+  }).toBe("자료 다음 내용");
 });
 
 test("server rejects broken Resource citation targets without mutating state", async ({ request }) => {

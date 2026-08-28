@@ -6191,6 +6191,46 @@ button:focus-visible {
   -webkit-user-select: none;
 }
 
+.resource-comments-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 7px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.resource-comments-toggle[aria-expanded="true"] { background: #edf4fc; color: #1769aa; }
+.resource-comments-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.resource-document-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0fr); gap: 0; transition: grid-template-columns 240ms ease, gap 240ms ease; }
+.resource-document-body { min-width: 0; }
+.comments-open .resource-document-layout { grid-template-columns: minmax(0, 1fr) minmax(0, .48fr); gap: 20px; }
+.resource-comments-sidebar { min-width: 0; height: 0; overflow: hidden; opacity: 0; visibility: hidden; transition: opacity 180ms ease, visibility 180ms; }
+.comments-open .resource-comments-sidebar { height: auto; opacity: 1; visibility: visible; }
+.resource-comments-list { position: relative; min-width: 0; }
+.resource-comment-card { position: absolute; left: 0; right: 0; border: 1px solid #e5e7eb; border-radius: 9px; padding: 10px; background: #fff; color: #37352f; box-shadow: 0 2px 6px rgba(15, 23, 42, .035); outline: none; overflow-wrap: anywhere; }
+.resource-comment-card.is-active { border-color: #a9c9e9; }
+.resource-comment-card .inline-comment-list { display: grid; gap: 8px; margin: 0; padding: 0; }
+.resource-comment-card .inline-comment-list li { display: block; padding: 0; border: 0; background: transparent; }
+.resource-comment-body { display: block; white-space: pre-wrap; font-size: 13px; line-height: 1.55; }
+.resource-comment-actions { display: flex; justify-content: flex-end; gap: 3px; margin-top: 4px; }
+.resource-comment-actions button { display: grid; place-items: center; width: 25px; height: 25px; padding: 4px; border-radius: 4px; background: transparent; color: #838892; }
+.resource-comment-actions button:hover { background: #f3f4f6; color: #37352f; }
+.resource-comment-actions svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.resource-comment-add { padding: 6px 0; background: transparent; color: #6b7280; font-size: 12px; text-align: left; }
+.resource-comments-tail { position: absolute; left: 0; right: 0; }
+.resource-comments-empty { margin: 0 0 8px; color: #8b909a; font-size: 12px; }
+.resource-comment-form { margin-top: 8px; background: #fff; color: #37352f; }
+.resource-comment-form textarea { display: block; width: 100%; min-height: 74px; resize: vertical; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; background: #fafbfc; color: inherit; font-size: 13px; line-height: 1.5; }
+.resource-comment-form-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.resource-comment-form-actions button { padding: 5px 8px; border-radius: 5px; background: #f1f3f5; color: #576071; font-size: 12px; }
+.resource-comment-form-actions button[type="submit"] { background: #e8f1fb; color: #1769aa; }
+@media (prefers-reduced-motion: reduce) {
+  .resource-document-layout, .resource-comments-sidebar { transition: none; }
+}
+
 .resource-window-resize {
   position: absolute;
   z-index: 3;
@@ -6734,9 +6774,7 @@ button:focus-visible {
 .inline-mark-resource-link {
   color: #1769aa;
   font-weight: 560;
-  text-decoration-line: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-decoration: none;
   cursor: pointer;
 }
 
@@ -6750,7 +6788,7 @@ button:focus-visible {
 .inline-mark-resource-link[data-resource-citation-state="trashed"] {
   color: #78736d;
   text-decoration-style: dashed;
-  text-decoration-line: underline line-through;
+  text-decoration-line: line-through;
 }
 
 .inline-mark-resource-link[data-resource-citation-state="missing"] {
@@ -6845,6 +6883,61 @@ button:focus-visible {
   padding-block: 7px;
 }
 
+.block.resource-table-block.is-selected {
+  background: transparent;
+}
+
+.resource-table-block.is-selected .resource-table-scroll {
+  outline: 2px solid #2383e2;
+  outline-offset: -2px;
+}
+
+.resource-table-block.is-selected .resource-markdown-table :is(th, td) {
+  background: rgba(35, 131, 226, 0.12);
+}
+
+.resource-table-format {
+  position: absolute;
+  z-index: 4;
+  bottom: calc(100% + 6px);
+  left: 0;
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+  background: #fff;
+  color: #37352f;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12);
+}
+
+.resource-table-block.is-selected .resource-table-format { display: flex; }
+.resource-table-format .field { display: flex; align-items: center; gap: 4px; }
+.resource-table-format .field > span { font-size: 11px; }
+.resource-table-format button { min-height: 28px; padding: 3px 7px; border-radius: 4px; background: #f6f7f9; color: inherit; font-size: 12px; }
+.resource-table-format .finance-picker-trigger { width: auto; min-width: 66px; min-height: 28px; padding: 3px 7px; border: 0; box-shadow: none; }
+.resource-table-format button[aria-pressed="true"] { background: #e5f1fc; color: #1769aa; }
+
+.resource-table-column-resize {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resource-table-column-resize:is(:hover, :focus-visible, .is-dragging) {
+  background: rgba(35, 131, 226, 0.3);
+  outline: 0;
+}
+
 .resource-table-shell {
   position: relative;
   min-width: 0;
@@ -6881,12 +6974,17 @@ button:focus-visible {
 }
 
 .resource-markdown-table :is(th, td) {
+  position: relative;
   border-right: 1px solid rgba(55, 53, 47, 0.1);
   border-bottom: 1px solid rgba(55, 53, 47, 0.1);
   padding: 0;
   vertical-align: top;
   white-space: normal;
+  color: var(--table-text, inherit);
+  background: var(--table-background, transparent);
 }
+
+.resource-markdown-table[data-table-bold="true"] :is(th, td) { font-weight: 750; }
 
 .resource-table-cell {
   display: block;
@@ -6916,6 +7014,7 @@ button:focus-visible {
   color: rgba(55, 53, 47, 0.5);
   font-size: 14px;
   line-height: 1;
+  overflow: hidden;
   box-shadow: none;
   opacity: 0;
   transition: opacity 120ms ease, background-color 120ms ease;
@@ -6923,6 +7022,29 @@ button:focus-visible {
   user-select: none;
   -webkit-user-select: none;
 }
+
+.resource-table-edge > span {
+  position: relative;
+  display: block;
+  width: 8px;
+  height: 8px;
+  font-size: 0;
+  line-height: 0;
+}
+
+.resource-table-edge > span::before,
+.resource-table-edge > span::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 1px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.resource-table-edge > span::after { width: 1px; height: 8px; }
 
 .resource-table-edge.is-rows {
   right: 0;
@@ -6956,8 +7078,8 @@ button:focus-visible {
 }
 
 .resource-markdown-table th {
-  background: #f6f7f9;
-  color: #344054;
+  background: var(--table-background, #f6f7f9);
+  color: var(--table-text, #344054);
   font-weight: 750;
 }
 

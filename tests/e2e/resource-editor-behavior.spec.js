@@ -204,11 +204,11 @@ test("토글과 제목은 적용 순서와 무관하게 함께 저장되고 접�
   await expect(editor.locator(`[data-block-id="${headingFirstChildId}"]`)).toBeHidden();
 });
 
-test("Resource 댓글은 흰색 스레드에서 답글을 누적하고 정확한 anchor로 복원된다", async ({ page, request }) => {
+test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제하고 anchor를 보존한다", async ({ page, request }) => {
   const blockId = "comment-target";
   const text = "댓글 대상 텍스트";
   const selectedText = "댓글 대상";
-  await seedResource(request, [paragraph(blockId, text)]);
+  await seedResource(request, [paragraph("earlier-comment-target", "앞선 문장"), paragraph(blockId, text)]);
   let editor = await openResource(page);
   let content = editor.locator(`[data-block-content="${blockId}"]`);
 
@@ -246,14 +246,15 @@ test("Resource 댓글은 흰색 스레드에서 답글을 누적하고 정확한
 
   for (const reply of ["두 번째 댓글", "세 번째 댓글"]) {
     await mark.click();
+    await page.locator(`[data-comment-thread="${commentId}"] [data-resource-comment-action="reply"]`).click();
     popover = page.locator("[data-inline-comment-popover]");
     await popover.locator("[data-inline-comment-input]").fill(reply);
     await popover.locator('button[type="submit"]').click();
   }
 
   await mark.click();
-  popover = page.locator("[data-inline-comment-popover]");
-  await expect(popover.locator(".inline-comment-list li")).toHaveText(["첫 댓글", "두 번째 댓글", "세 번째 댓글"]);
+  const sidebar = page.locator("[data-resource-comments]");
+  await expect(sidebar.locator(".resource-comment-body")).toHaveText(["첫 댓글", "두 번째 댓글", "세 번째 댓글"]);
   await expect.poll(async () => {
     const resource = await persistedResource(request);
     const thread = resource.commentThreads.find((entry) => entry.id === commentId);
@@ -266,9 +267,44 @@ test("Resource 댓글은 흰색 스레드에서 답글을 누적하고 정확한
     replies: ["두 번째 댓글", "세 번째 댓글"],
   });
 
-  await page.keyboard.press("Escape");
+  await selectTextRange(editor.locator('[data-block-content="earlier-comment-target"]'), 0, 5);
+  await page.locator('[data-inline-mark-toggle="comment"]').click();
+  const draftCard = sidebar.locator(".resource-comment-card").filter({ has: page.locator("[data-resource-comment-input]") });
+  await expect.poll(async () => (await draftCard.boundingBox()).y < (await sidebar.locator(`[data-comment-thread="${commentId}"]`).boundingBox()).y).toBe(true);
+  await draftCard.locator('[data-resource-comment-action="cancel"]').click();
+  await expect(sidebar.locator(".resource-comment-body")).toHaveCount(3);
+
+  const contentNode = await content.elementHandle();
+  await page.locator("[data-resource-comments-toggle]").click();
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+  await expect(sidebar).toHaveCSS("height", "0px");
+  await mark.click();
+  await expect(sidebar).toHaveAttribute("aria-hidden", "false");
+  expect(await content.evaluate((element, previous) => element === previous, contentNode)).toBe(true);
+  await expect(page.locator(".inline-comment-popover")).toHaveCount(0);
+  const card = sidebar.locator(`[data-comment-thread="${commentId}"]`);
+  await expect.poll(async () => Math.abs((await card.boundingBox()).y - (await mark.boundingBox()).y)).toBeLessThan(2);
+  await card.locator('[data-resource-comment-action="edit"]').first().click();
+  await page.locator("[data-resource-comment-input]").fill("수정한 첫 댓글");
+  await page.locator("[data-resource-comment-form] button[type=submit]").click();
+  await expect(card.locator(".resource-comment-body").first()).toHaveText("수정한 첫 댓글");
+  await card.locator('[data-resource-comment-action="delete"]').nth(1).click();
+  await expect(card.locator(".resource-comment-body")).toHaveText(["수정한 첫 댓글", "세 번째 댓글"]);
+  await expect.poll(async () => (await persistedResource(request)).commentThreads.find((entry) => entry.id === commentId)?.body).toBe("수정한 첫 댓글");
   editor = await openResource(page);
   content = editor.locator(`[data-block-content="${blockId}"]`);
   await content.locator(`[data-inline-comment-id="${commentId}"]`).click();
-  await expect(page.locator(".inline-comment-list li")).toHaveText(["첫 댓글", "두 번째 댓글", "세 번째 댓글"]);
+  await expect(page.locator(".resource-comment-body")).toHaveText(["수정한 첫 댓글", "세 번째 댓글"]);
+  await page.locator('[data-resource-comment-action="delete"]').first().click();
+  await expect(page.locator(".resource-comment-body")).toHaveText(["세 번째 댓글"]);
+  await expect(content.locator("[data-inline-mark=comment]")).toHaveText(selectedText);
+  await page.locator('[data-resource-comment-action="delete"]').first().click();
+  await expect(content.locator("[data-inline-mark=comment]")).toHaveCount(0);
+  await expect.poll(async () => Boolean((await persistedResource(request)).commentThreads.find((entry) => entry.id === commentId)?.deletedAt)).toBe(true);
+  await editor.locator("[data-block-content]").first().click();
+  await page.locator("[data-resource-back]").click();
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.readOnlyResource}"]`).click();
+  await page.locator("[data-resource-comments-toggle]").click();
+  await expect(page.locator(".resource-comment-body")).toHaveText("Read-only page discussion");
+  await expect(page.locator("[data-resource-comment-action]")).toHaveCount(0);
 });

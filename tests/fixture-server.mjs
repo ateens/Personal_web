@@ -150,7 +150,7 @@ const server = createServer(async (request, response) => {
         ...fixtureGlobalDuplicateIdIssues(body.state),
         ...fixtureResourceHierarchyIssues(body.state),
         ...fixtureResourceLinkIssues(body.state),
-        ...fixtureInlineColorIssues(body.state),
+        ...fixtureBlockFormatIssues(body.state),
         ...fixtureUrlBlockIssues(body.state),
         ...fixtureCommentAnchorIssues(body.state),
         ...fixtureCommentReferenceIssues(body.state),
@@ -326,7 +326,7 @@ const server = createServer(async (request, response) => {
         ...fixtureGlobalDuplicateIdIssues(nextState),
         ...fixtureResourceHierarchyIssues(nextState),
         ...fixtureResourceLinkIssues(nextState),
-        ...fixtureInlineColorIssues(nextState),
+        ...fixtureBlockFormatIssues(nextState),
         ...fixtureUrlBlockIssues(nextState),
         ...fixtureCommentAnchorIssues(nextState),
         ...fixtureCommentReferenceIssues(nextState),
@@ -769,7 +769,7 @@ function fixtureResourceLinkIssues(incomingState) {
   return issues;
 }
 
-function fixtureInlineColorIssues(incomingState) {
+function fixtureBlockFormatIssues(incomingState) {
   const issues = [];
   const collections = ["boxes", "projects", "tasks", "resources", "habits", "journals"];
   for (const collection of collections) {
@@ -777,6 +777,16 @@ function fixtureInlineColorIssues(incomingState) {
     for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
       const blocks = Array.isArray(items[itemIndex]?.blocks) ? items[itemIndex].blocks : [];
       for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+        const block = blocks[blockIndex] || {};
+        const path = `state.${collection}[${itemIndex}].blocks[${blockIndex}]`;
+        for (const field of ["tableHeader", "tableBold"]) {
+          if (block[field] !== undefined && (block.type !== "table" || typeof block[field] !== "boolean")) {
+            issues.push({ path: `${path}.${field}`, code: "invalid_table_format", message: "Table format flags must be booleans on a table block." });
+          }
+        }
+        if (block.columnWidths !== undefined && (block.type !== "table" || !Array.isArray(block.columnWidths) || block.columnWidths.length > 1000 || block.columnWidths.some((width) => !Number.isInteger(width) || width < 80 || width > 1200))) {
+          issues.push({ path: `${path}.columnWidths`, code: "invalid_table_widths", message: "Table column widths must be integers from 80 to 1200 pixels." });
+        }
         const marks = Array.isArray(blocks[blockIndex]?.marks) ? blocks[blockIndex].marks : [];
         for (let markIndex = 0; markIndex < marks.length; markIndex += 1) {
           const mark = marks[markIndex];
