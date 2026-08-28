@@ -100,11 +100,15 @@ test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시�
   await expect(list.locator('[data-resource-group="all"]')).toHaveCount(1);
   const floating = await openSettledResource(page, FIXTURE_IDS.resource);
   await floating.locator(".block-editor").evaluate((element) => { globalThis.__groupEditor = element; });
+  await page.locator(".resource-view-toolbar").evaluate((element) => { globalThis.__groupToolbar = element; });
   for (const mode of ["boxes", "projects", "all"]) {
     await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).evaluate((button) => button.click());
     expect(await listed()).toEqual(allIds);
     expect(new Set(await listed()).size).toBe(allIds.length);
     expect(await floating.locator(".block-editor").evaluate((element) => element === globalThis.__groupEditor)).toBe(true);
+    expect(await page.locator(".resource-view-toolbar").evaluate((element) => element === globalThis.__groupToolbar)).toBe(true);
+    await expect(page.locator(".resource-groups")).toHaveAttribute("data-resource-group-mode", mode);
+    expect(await page.locator(".resource-view-toolbar").evaluate((element) => element.style.getPropertyValue("--resource-mode-index").trim())).toBe(String(["all", "boxes", "projects"].indexOf(mode)));
     if (mode === "boxes") {
       await expect(list.locator('[data-resource-group="fixture-empty-box"] h2')).toHaveText("Empty Box");
       await expect(list.locator('[data-resource-group="fixture-empty-box"] [data-resource-open]')).toHaveCount(0);
@@ -133,6 +137,81 @@ test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시�
   await expect(panel.locator(`[data-resource-open="${FIXTURE_IDS.bodySearchResource}"]`)).toHaveCount(0);
   await panel.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).click();
   await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+});
+
+test("Resource 그룹은 실제 부모 너비에 맞춰 열을 배치하고 빈 목록 여백과 전환 시간을 유지한다", async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  await page.locator('[data-view-control-mode="resources"][data-control-mode="boxes"]').click();
+  const groups = page.locator(".resource-groups");
+  const toolbar = page.locator(".resource-view-toolbar");
+  expect(await toolbar.locator(".view-mode-group").evaluate((element) => getComputedStyle(element, "::before").transitionDuration.split(",").map((value) => Number.parseFloat(value)))).toContain(0.22);
+  expect(await groups.evaluate((element) => {
+    element.classList.add("is-entering");
+    return getComputedStyle(element).animationDuration;
+  })).toBe("0.18s");
+  for (const [width, columns] of [[1200, 3], [760, 2], [360, 1]]) {
+    await groups.evaluate((element, size) => {
+      element.parentElement.style.width = `${size}px`;
+      element.parentElement.style.maxWidth = "none";
+    }, width);
+    await expect.poll(() => groups.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(/\s+/).length)).toBe(columns);
+    expect(await groups.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  }
+  await expect(groups.locator('[data-resource-group="fixture-empty-box"] > .panel-title + .empty')).toHaveCSS("margin-top", "24px");
+  await expect(groups.locator(`[data-resource-group="${FIXTURE_IDS.box}"] > ul`)).toHaveCSS("margin-top", "24px");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  expect(await groups.evaluate((element) => {
+    element.classList.add("is-entering");
+    return Number.parseFloat(getComputedStyle(element).animationDuration);
+  })).toBeLessThanOrEqual(0.001);
+});
+
+test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리기를 지원하고 본문 포커스를 보호한다", async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  const before = await fixtureSnapshot(request);
+  const groups = page.locator(".resource-groups");
+  const rows = groups.locator("[data-resource-open]");
+  const first = await rows.first().boundingBox();
+  const last = await rows.last().boundingBox();
+  await page.mouse.move(first.x + 10, first.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(last.x + last.width - 10, last.y + last.height - 4, { steps: 15 });
+  await page.mouse.up();
+  await expect(groups.locator('.resource-list-item.is-selected')).toHaveCount(await rows.count());
+  await expect(groups.locator('[data-resource-open][aria-pressed="true"]')).toHaveCount(await rows.count());
+  await expect(page.locator("[data-resource-window]")).toHaveCount(0);
+  await groups.focus();
+  await page.keyboard.press("Escape");
+  await expect(groups.locator(".is-selected")).toHaveCount(0);
+  await rows.first().focus();
+  await page.keyboard.press("Space");
+  await expect(rows.first()).toHaveAttribute("aria-pressed", "true");
+  await rows.last().click({ modifiers: ["Meta"] });
+  await expect(groups.locator('[aria-pressed="true"]')).toHaveCount(2);
+  await expect(page.locator("[data-resource-window]")).toHaveCount(0);
+  await page.keyboard.press("Meta+a");
+  await expect(groups.locator('[aria-pressed="true"]')).toHaveCount(await rows.count());
+  await page.keyboard.press("Backspace");
+  const writableIds = before.state.resources.filter((item) => !item.trashedAt && !item.readOnly && !item.locked).map((item) => item.id);
+  await expect.poll(async () => (await fixtureSnapshot(request)).state.resources.filter((item) => writableIds.includes(item.id) && item.trashedAt).length).toBe(writableIds.length);
+  const deleted = await fixtureSnapshot(request);
+  expect(deleted.state.resources.map((item) => item.id).sort()).toEqual(before.state.resources.map((item) => item.id).sort());
+  for (const original of before.state.resources) {
+    const actual = deleted.state.resources.find((item) => item.id === original.id);
+    for (const field of ["blocks", "boxId", "projectId", "commentThreads"]) expect(actual[field]).toEqual(original[field]);
+    if (original.readOnly || original.locked) expect(actual.trashedAt).toBe(original.trashedAt);
+  }
+  await page.locator("[data-toast-action]").filter({ hasText: "되돌리기" }).click();
+  await expect.poll(async () => (await fixtureSnapshot(request)).state.resources.filter((item) => writableIds.includes(item.id) && item.trashedAt).length).toBe(0);
+  const opened = await openSettledResource(page, FIXTURE_IDS.resource);
+  await groups.focus();
+  await page.keyboard.press("Control+a");
+  await opened.locator("[data-resource-title]").focus();
+  await page.keyboard.press("Backspace");
+  await opened.locator("[data-block-content]").first().focus();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(650);
+  expect((await fixtureSnapshot(request)).state.resources.filter((item) => writableIds.includes(item.id) && item.trashedAt)).toHaveLength(0);
 });
 
 test("Resource 읽기 전용과 잠긴 자료의 연결 필드는 비활성화되고 강제 change도 저장하지 않는다", async ({ page, request }) => {

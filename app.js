@@ -690,6 +690,9 @@ let ui = {
   habitDeleteConfirmId: "",
   activeResourceId: "",
   resourceGroupBy: "all",
+  resourceSelection: [],
+  resourceListDrag: null,
+  suppressResourceClickUntil: 0,
   resourceWindows: [],
   resourceWindowOrder: 0,
   resourceWindowZ: 0,
@@ -773,6 +776,7 @@ function init() {
   document.addEventListener("scroll", scheduleFinanceSelectPositionSync, true);
   document.addEventListener("scroll", scheduleCodeLanguagePositionSync, true);
   document.addEventListener(pointerMoveEvent, handleResourceWindowPointerMove, true);
+  document.addEventListener(pointerMoveEvent, handleResourceListPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleNavPointerMove, true);
   document.addEventListener(pointerMoveEvent, handleEditorMarqueePointerMove, true);
   document.addEventListener(pointerMoveEvent, handleBlockPointerMove, true);
@@ -781,6 +785,7 @@ function init() {
   document.addEventListener(pointerMoveEvent, handleSchedulePointerMove, true);
   document.addEventListener(pointerUpEvent, finishNavPointerDrag, true);
   document.addEventListener(pointerUpEvent, finishResourceWindowPointer, true);
+  document.addEventListener(pointerUpEvent, finishResourceListDrag, true);
   document.addEventListener(pointerUpEvent, finishEditorMarqueeDrag, true);
   document.addEventListener(pointerUpEvent, finishBlockDrag, true);
   document.addEventListener(pointerUpEvent, finishTodayTaskDrag, true);
@@ -788,6 +793,8 @@ function init() {
   document.addEventListener(pointerUpEvent, finishScheduleDrag, true);
   if (pointerEventsSupported) {
     document.addEventListener("pointercancel", cancelResourceWindowPointer, true);
+    document.addEventListener("pointercancel", cancelResourceListDrag, true);
+    document.addEventListener("lostpointercapture", cancelResourceListDrag, true);
     document.addEventListener("lostpointercapture", cancelResourceWindowPointer, true);
     document.addEventListener("pointercancel", cancelNavPointerDrag, true);
     document.addEventListener("pointercancel", cancelEditorMarqueeDrag, true);
@@ -811,6 +818,7 @@ function init() {
   window.addEventListener("resize", scheduleCodeLanguagePositionSync);
   window.addEventListener("resize", reflowResourceWindows);
   window.addEventListener("blur", cancelResourceWindowPointer);
+  window.addEventListener("blur", cancelResourceListDrag);
   window.visualViewport?.addEventListener("resize", reflowResourceWindows);
   window.visualViewport?.addEventListener("scroll", reflowResourceWindows);
   window.visualViewport?.addEventListener("resize", scheduleInlineToolbarPositionSync);
@@ -1250,6 +1258,8 @@ function decorateButtons(root = app) {
 }
 
 function renderView({ transition = false, soft = false, animateCards = false } = {}) {
+  cancelResourceListDrag();
+  if (ui.view !== "resources") ui.resourceSelection = [];
   const renderers = {
     today: renderToday,
     tasks: renderTasks,
@@ -1669,43 +1679,44 @@ function renderBoxes() {
 
 function renderResources() {
   const resources = state.resources.filter((resource) => !resource.trashedAt);
-  let lists = "";
-  if (ui.resourceGroupBy !== "all") {
-    const field = ui.resourceGroupBy === "boxes" ? "boxId" : "projectId";
-    const groups = new Map(state[ui.resourceGroupBy].map((item) => [item.id, { title: item.name, resources: [] }]));
-    const unclassified = [];
-    for (const resource of resources) {
-      (groups.get(resource[field])?.resources || unclassified).push(resource);
-    }
-    lists = [...groups].map(([groupId, group]) => renderResourceList(group.resources, group.title, groupId)).join("")
-      + renderResourceList(unclassified, "미분류", "");
-  } else lists = renderResourceList(resources);
   return `
     <section class="view" data-resource-view>
       ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
         <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
       `)}
-      <div class="resource-view-toolbar">
+      <div class="resource-view-toolbar" style="--resource-mode-index: ${["all", "boxes", "projects"].indexOf(ui.resourceGroupBy)}">
         ${renderViewModeButtons("resources", [["all", "전체"], ["boxes", "Box별 보기"], ["projects", "Project별 보기"]], ui.resourceGroupBy)}
       </div>
-      <div class="resource-groups">${lists}</div>
+      <div class="resource-groups" data-resource-group-mode="${ui.resourceGroupBy}" tabindex="0" role="group" aria-label="자료 목록, 드래그 또는 Space로 선택 후 Delete로 삭제">${renderResourceGroups(resources)}</div>
     </section>
   `;
+}
+
+function renderResourceGroups(resources) {
+  if (ui.resourceGroupBy === "all") return renderResourceList(resources);
+  const field = ui.resourceGroupBy === "boxes" ? "boxId" : "projectId";
+  const groups = new Map(state[ui.resourceGroupBy].map((item) => [item.id, { title: item.name, resources: [] }]));
+  const unclassified = [];
+  for (const resource of resources) {
+    (groups.get(resource[field])?.resources || unclassified).push(resource);
+  }
+  return [...groups].map(([groupId, group]) => renderResourceList(group.resources, group.title, groupId)).join("")
+    + renderResourceList(unclassified, "미분류", "");
 }
 
 function renderResourceList(resources, title = "자료 목록", groupId = "all") {
   return `
     <section class="panel resource-list-panel" data-resource-group="${esc(groupId)}" aria-label="${esc(title)}">
       <h2 class="panel-title">${esc(title)}</h2>
-      ${resources.length ? renderResourceLinks(resources) : empty("자료가 없습니다.")}
+      ${resources.length ? renderResourceLinks(resources, true) : empty("자료가 없습니다.")}
     </section>
   `;
 }
 
-function renderResourceLinks(resources) {
+function renderResourceLinks(resources, selectable = false) {
   return `<ul class="resource-list">
     ${resources.map((resource) => `
-      <li><button class="resource-list-item" type="button" data-resource-open="${esc(resource.id)}">${esc(resource.title || "제목 없음")}</button></li>
+      <li><button class="resource-list-item ${selectable && ui.resourceSelection.includes(resource.id) ? "is-selected" : ""}" type="button" data-resource-open="${esc(resource.id)}"${selectable ? ` aria-pressed="${ui.resourceSelection.includes(resource.id)}" aria-keyshortcuts="Space"` : ""}>${esc(resource.title || "제목 없음")}</button></li>
     `).join("")}
   </ul>`;
 }
@@ -10192,6 +10203,11 @@ function relationField(label, field, value, items, nameField) {
 }
 
 function handleClick(event) {
+  if (ui.suppressResourceClickUntil > Date.now() && event.target.closest("[data-resource-view] .resource-groups")) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const workspaceRetry = event.target.closest('[data-action="retry-workspace-authority"]');
   if (workspaceRetry) {
     event.preventDefault();
@@ -10322,6 +10338,11 @@ function handleClick(event) {
   const resourceOpen = event.target.closest("[data-resource-open]");
   if (resourceOpen) {
     event.preventDefault();
+    if (resourceOpen.closest("[data-resource-view] .resource-groups") && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+      toggleResourceListSelection(resourceOpen.dataset.resourceOpen);
+      return;
+    }
+    setResourceListSelection([]);
     openResourceDocument(resourceOpen.dataset.resourceOpen);
     return;
   }
@@ -10654,9 +10675,22 @@ function handleClick(event) {
     if (viewMode.dataset.viewControlMode === "resources") {
       const mode = viewMode.dataset.controlMode;
       if (!["all", "boxes", "projects"].includes(mode) || mode === ui.resourceGroupBy) return;
+      cancelResourceListDrag();
+      setResourceListSelection([]);
       ui.resourceGroupBy = mode;
-      renderView({ soft: true });
-      requestAnimationFrame(() => els.viewRoot.querySelector(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`)?.focus({ preventScroll: true }));
+      const toolbar = viewMode.closest(".resource-view-toolbar");
+      toolbar.style.setProperty("--resource-mode-index", ["all", "boxes", "projects"].indexOf(mode));
+      toolbar.querySelectorAll("[data-control-mode]").forEach((button) => {
+        const active = button.dataset.controlMode === mode;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+      const groups = els.viewRoot.querySelector(".resource-groups");
+      groups.classList.remove("is-entering");
+      groups.dataset.resourceGroupMode = mode;
+      groups.innerHTML = renderResourceGroups(state.resources.filter((resource) => !resource.trashedAt));
+      void groups.offsetWidth;
+      groups.classList.add("is-entering");
       return;
     }
     updateViewControl(viewMode.dataset.viewControlMode, "mode", viewMode.dataset.controlMode || "");
@@ -11483,6 +11517,177 @@ function closeResourceDocument(resourceId = ui.activeResourceId) {
       next?.focus({ preventScroll: true });
     });
   }
+}
+
+function setResourceListSelection(ids) {
+  const next = [...new Set(ids)].filter((id) => {
+    const resource = itemById("resources", id);
+    return resource && !resource.trashedAt;
+  });
+  if (next.length === ui.resourceSelection.length && next.every((id, index) => id === ui.resourceSelection[index])) return;
+  ui.resourceSelection = next;
+  if (next.length) {
+    clearBlockSelection();
+    ui.recentBlockFocus = null;
+  }
+  els.viewRoot.querySelectorAll(".resource-groups [data-resource-open]").forEach((button) => {
+    const selected = next.includes(button.dataset.resourceOpen);
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function toggleResourceListSelection(id) {
+  setResourceListSelection(ui.resourceSelection.includes(id)
+    ? ui.resourceSelection.filter((selectedId) => selectedId !== id)
+    : [...ui.resourceSelection, id]);
+  announceAppStatus(`${ui.resourceSelection.length}개 자료 선택됨`);
+}
+
+function beginResourceListDrag(event) {
+  const root = event.target.closest("[data-resource-view] .resource-groups");
+  if (!root || !canStartCustomPointerDrag(event) || event.pointerType === "touch") return false;
+  cancelResourceListDrag();
+  ui.suppressResourceClickUntil = 0;
+  ui.resourceListDrag = {
+    root,
+    captureTarget: root,
+    pointerId: eventPointerId(event),
+    startX: event.clientX + window.scrollX,
+    startY: event.clientY + window.scrollY,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    baseIds: event.metaKey || event.ctrlKey || event.shiftKey ? ui.resourceSelection.slice() : [],
+    startedOnItem: Boolean(event.target.closest("[data-resource-open]")),
+  };
+  return true;
+}
+
+function handleResourceListPointerMove(event) {
+  const drag = ui.resourceListDrag;
+  if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return;
+  if (event.buttons === 0) return finishResourceListDrag(event);
+  drag.clientX = event.clientX;
+  drag.clientY = event.clientY;
+  if (!drag.active) {
+    if (Math.hypot(event.clientX + window.scrollX - drag.startX, event.clientY + window.scrollY - drag.startY) < POINTER_DRAG_ACTIVATION_DISTANCE) return;
+    drag.active = true;
+    clearBlockSelection();
+    deactivateActiveBlockContent(true);
+    window.getSelection()?.removeAllRanges();
+    drag.root.focus({ preventScroll: true });
+    drag.marqueeElement = document.createElement("div");
+    drag.marqueeElement.className = "resource-list-marquee";
+    drag.marqueeElement.setAttribute("aria-hidden", "true");
+    document.body.append(drag.marqueeElement);
+    try {
+      if (event.pointerId !== undefined) drag.root.setPointerCapture(event.pointerId);
+    } catch (_) {}
+    const tick = () => {
+      if (ui.resourceListDrag !== drag) return;
+      if (!drag.root.isConnected) return cancelResourceListDrag();
+      const velocity = drag.clientY < 36 ? Math.max(-16, (drag.clientY - 36) / 3)
+        : drag.clientY > innerHeight - 36 ? Math.min(16, (drag.clientY - innerHeight + 36) / 3) : 0;
+      if (velocity) document.scrollingElement.scrollTop += velocity;
+      updateResourceListDrag(drag);
+      drag.frame = requestAnimationFrame(tick);
+    };
+    drag.frame = requestAnimationFrame(tick);
+  }
+  event.preventDefault();
+  updateResourceListDrag(drag);
+}
+
+function updateResourceListDrag(drag) {
+  const left = Math.min(drag.startX - window.scrollX, drag.clientX);
+  const top = Math.min(drag.startY - window.scrollY, drag.clientY);
+  const right = Math.max(drag.startX - window.scrollX, drag.clientX);
+  const bottom = Math.max(drag.startY - window.scrollY, drag.clientY);
+  const ids = drag.baseIds.slice();
+  drag.root.querySelectorAll("[data-resource-open]").forEach((button) => {
+    const rect = button.getBoundingClientRect();
+    if (rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom) ids.push(button.dataset.resourceOpen);
+  });
+  setResourceListSelection(ids);
+  Object.assign(drag.marqueeElement.style, {
+    left: `${Math.max(0, left)}px`,
+    top: `${Math.max(0, top)}px`,
+    width: `${Math.max(1, Math.min(innerWidth, right) - Math.max(0, left))}px`,
+    height: `${Math.max(1, Math.min(innerHeight, bottom) - Math.max(0, top))}px`,
+  });
+}
+
+function finishResourceListDrag(event, cancelled = false) {
+  const drag = ui.resourceListDrag;
+  if (!drag || (event?.pointerId !== undefined && !sameMouseLikePointer(drag.pointerId, event))) return;
+  ui.resourceListDrag = null;
+  cancelAnimationFrame(drag.frame);
+  drag.marqueeElement?.remove();
+  releaseEditorMarqueePointerCapture(drag);
+  if (drag.active) {
+    ui.suppressResourceClickUntil = Date.now() + 260;
+    if (cancelled) setResourceListSelection(drag.baseIds);
+    announceAppStatus(`${ui.resourceSelection.length}개 자료 선택됨`);
+  } else if (!cancelled && !drag.startedOnItem) setResourceListSelection(drag.baseIds);
+}
+
+function cancelResourceListDrag(event) {
+  finishResourceListDrag(event, true);
+}
+
+function handleResourceListKeydown(event) {
+  const root = event.target.closest("[data-resource-view] .resource-groups");
+  if (!root || isEditableShortcutTarget(event.target) || event.isComposing || event.keyCode === 229 || app.dataset.workspaceAuthority !== "ready") return false;
+  const item = event.target.closest("[data-resource-open]");
+  if (event.key === "Escape" && (ui.resourceSelection.length || ui.resourceListDrag)) {
+    cancelResourceListDrag();
+    setResourceListSelection([]);
+  } else if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
+    setResourceListSelection([...root.querySelectorAll("[data-resource-open]")].map((button) => button.dataset.resourceOpen));
+    announceAppStatus(`${ui.resourceSelection.length}개 자료 선택됨`);
+  } else if (item && isPlainSpaceKey(event)) {
+    toggleResourceListSelection(item.dataset.resourceOpen);
+  } else if (ui.resourceSelection.length && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && ["Backspace", "Delete"].includes(event.key)) {
+    if (!event.repeat && !ui.resourceListDrag) deleteSelectedResources();
+  } else return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function deleteSelectedResources() {
+  const resources = ui.resourceSelection.map((id) => itemById("resources", id)).filter((resource) => resourceMutationAllowed(resource));
+  if (!resources.length) {
+    showToast("읽기 전용이거나 잠긴 자료는 삭제할 수 없습니다.");
+    return;
+  }
+  const skipped = ui.resourceSelection.length - resources.length;
+  const trashedAt = new Date().toISOString();
+  for (const resource of resources) {
+    flushResourceWindowInputs(resource.id);
+    markResourceChanged(resource);
+    resource.trashedAt = trashedAt;
+  }
+  if (resources.some((resource) => resource.id === ui.activeResourceId)) clearResourceWindowEditingState();
+  setResourceListSelection([]);
+  saveState();
+  renderView({ soft: true });
+  renderOverlays();
+  els.viewRoot.querySelector(".resource-groups")?.focus({ preventScroll: true });
+  showToast(`${resources.length}개 자료를 삭제했습니다.${skipped ? ` 잠금·읽기 전용 ${skipped}개는 유지했습니다.` : ""}`, {
+    actionLabel: "되돌리기",
+    onAction: () => {
+      for (const deleted of resources) {
+        const resource = itemById("resources", deleted.id);
+        if (!resourceMutationAllowed(resource, { allowTrashed: true }) || resource.trashedAt !== trashedAt) continue;
+        resource.trashedAt = "";
+        markResourceChanged(resource);
+      }
+      saveState();
+      renderView({ soft: true });
+      showToast("자료 삭제를 되돌렸습니다.");
+    },
+  });
 }
 
 function resourceWindowById(id) {
@@ -12850,6 +13055,7 @@ function canStartCustomPointerDrag(event) {
 
 function customPointerDragPendingOrActive() {
   return Boolean(
+    ui.resourceListDrag ||
     ui.resourceWindowDrag ||
     ui.pendingNavDrag ||
     ui.navPointerDrag ||
@@ -12872,6 +13078,7 @@ function handleCustomPointerDragSelectStart(event) {
 }
 
 function cancelPendingPointerDrags() {
+  if (ui.resourceListDrag && !ui.resourceListDrag.active) cancelResourceListDrag();
   ui.pendingNavDrag = null;
   ui.pendingBlockToolDrag = null;
   if (ui.pendingEditorMarquee) {
@@ -16167,8 +16374,13 @@ function canBypassBlockClickSuppressionForDrag(event) {
 
 function handlePointerDown(event) {
   preferredVerticalCaretX = null;
+  if (!event.target.closest("[data-resource-view] .resource-groups")) {
+    cancelResourceListDrag();
+    setResourceListSelection([]);
+  }
   if (event.target.closest(".layout, .fab")) ui.resourceWindowFocused = false;
   if (beginResourceWindowPointer(event)) return;
+  if (beginResourceListDrag(event)) return;
   if (handleSelectedBlocksMenuOutsidePointerDown(event)) return;
 
   const todayBatchTask = event.target.closest("[data-today-batch-task]");
@@ -17136,6 +17348,7 @@ function trapTodayBatchFocus(event) {
 }
 
 function handleKeydown(event) {
+  if (handleResourceListKeydown(event)) return;
   if (handleResourceWindowKeydown(event)) return;
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && !event.isComposing) preferredVerticalCaretX = null;
   if (handleFinancePickerKeydown(event)) return;
@@ -18370,6 +18583,7 @@ function inlineToolbarEqual(left, right) {
 }
 
 function handleDocumentClick(event) {
+  if (!event.target.closest?.("[data-resource-view] .resource-groups")) setResourceListSelection([]);
   if (!event.target.closest?.("[data-finance-select]")) closeFinanceSelects();
   document.querySelectorAll(".code-language-picker[open]").forEach((picker) => {
     if (!picker.contains(event.target)) closeCodeLanguagePicker(picker);
