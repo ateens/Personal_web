@@ -11,13 +11,12 @@ The main window has no visible title bar or traffic-light buttons. Its invisible
 24-point strip remains draggable. Use `⌘R` or **View > 새로고침** to save pending web
 changes and then reload the current page.
 
-## Quick Notes
+## Quick Resource
 
-Press `⌥⌘N` from any app to show or hide the always-on-top Notes panel. Notes use real
-Markdown files in Application Support, render Markdown with `⌘⇧M` or the `T` button,
-and keep pasted images inline as local PNG assets. Use `⌘N` for a new note, `⌘[` and
-`⌘]` for previous/next, or `⌘1` through `⌘9` for direct selection. `Esc` hides the
-panel. The app's **Notes** menu is the fallback if another app already owns `⌥⌘N`.
+Press `⌘⇧L` from any app to show or hide the always-on-top Resource panel without
+bringing the main SYGMA window forward. It uses the same Resource list, editor, and
+server-backed sync as the website. `⌘W` closes the active Resource first, then hides
+the panel. Change the shortcut in **SYGMA > Settings**.
 
 ## Inbox 바로 추가
 

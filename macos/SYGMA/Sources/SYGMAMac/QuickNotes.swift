@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 import Combine
 import CoreGraphics
 import SwiftUI
+import WebKit
 
 private let quickNotesPanelIdentifier = NSUserInterfaceItemIdentifier("SYGMAQuickNotesPanel")
 private let quickNotesHotKeySignature: OSType = 0x5359474E // SYGN
@@ -213,6 +214,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
     private static let defaultsKey = "SYGMAQuickNotesShortcutsV2"
     private static let legacyDefaultsKey = "SYGMAQuickNotesShortcutsV1"
     private static let legacyHideShortcut = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
+    private static let activeActions: Set<QuickNoteShortcutAction> = [.togglePanel, .captureInbox, .hidePanel]
     @Published private(set) var shortcuts: [QuickNoteShortcutAction: QuickNoteShortcut]
     @Published var capturingAction: QuickNoteShortcutAction?
     @Published private(set) var message = ""
@@ -228,16 +230,17 @@ final class QuickNoteShortcutSettings: ObservableObject {
             let previous = Dictionary(uniqueKeysWithValues: previousActions.compactMap { action in
                 stored[action.rawValue].map { (action, $0) }
             })
+            let activePrevious = previous.filter { Self.activeActions.contains($0.key) }
             var loaded = previous.count == previousActions.count
-                && Set(previous.values).count == previous.count
+                && Set(activePrevious.values).count == activePrevious.count
                 && previous.values.allSatisfy(\.isSafe)
                 ? Self.defaultShortcuts.merging(previous) { _, saved in saved }
                 : Self.defaultShortcuts
             if let saved = stored[QuickNoteShortcutAction.captureInbox.rawValue],
                saved.isSafe,
-               !loaded.contains(where: { $0.key != .captureInbox && $0.value == saved }) {
+               !loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == saved }) {
                 loaded[.captureInbox] = saved
-            } else if loaded.contains(where: { $0.key != .captureInbox && $0.value == loaded[.captureInbox] }) {
+            } else if loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == loaded[.captureInbox] }) {
                 let fallbackKeyCodes = [
                     kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F,
                     kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L,
@@ -246,14 +249,14 @@ final class QuickNoteShortcutSettings: ObservableObject {
                 if let available = fallbackKeyCodes.lazy.map({ keyCode in
                     QuickNoteShortcut(keyCode: UInt16(keyCode), modifiers: [.control, .option, .command], key: "Key")
                 }).first(where: { candidate in
-                    !loaded.contains(where: { $0.key != .captureInbox && $0.value == candidate })
+                    !loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == candidate })
                 }) {
                     loaded[.captureInbox] = available
                 }
             }
             if legacyData != nil,
                loaded[.hidePanel] == Self.legacyHideShortcut,
-               !loaded.contains(where: { $0.key != .hidePanel && $0.value == Self.defaultShortcuts[.hidePanel] }) {
+               !loaded.contains(where: { $0.key != .hidePanel && Self.activeActions.contains($0.key) && $0.value == Self.defaultShortcuts[.hidePanel] }) {
                 loaded[.hidePanel] = Self.defaultShortcuts[.hidePanel]
             }
             shortcuts = loaded
@@ -281,7 +284,9 @@ final class QuickNoteShortcutSettings: ObservableObject {
         if [.togglePanel, .captureInbox].contains(action), !shortcut.hasPrimaryModifier {
             return "전역 단축키에는 Command, Option 또는 Control이 필요합니다."
         }
-        return shortcuts.contains(where: { $0.key != action && $0.value == shortcut }) ? "이미 사용 중인 단축키입니다." : nil
+        return shortcuts.contains(where: {
+            $0.key != action && $0.value == shortcut && (!Self.activeActions.contains(action) || Self.activeActions.contains($0.key))
+        }) ? "이미 사용 중인 단축키입니다." : nil
     }
 
     func save(_ shortcut: QuickNoteShortcut, for action: QuickNoteShortcutAction) {
@@ -297,7 +302,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
     static let defaultShortcuts: [QuickNoteShortcutAction: QuickNoteShortcut] = {
         let command: NSEvent.ModifierFlags = .command
         return [
-            .togglePanel: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: [.command, .option], key: "N"),
+            .togglePanel: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_L), modifiers: [.command, .shift], key: "L"),
             .captureInbox: QuickNoteShortcut(keyCode: UInt16(kVK_Space), modifiers: .option, key: "Space"),
             .newNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_N), modifiers: command, key: "N"),
             .previousNote: QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_LeftBracket), modifiers: command, key: "["),
@@ -1146,32 +1151,17 @@ private struct QuickNotePreview: View {
 
 private struct QuickNotesSettingsView: View {
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
-    @Binding var transparency: Double
-    @State private var screenCaptureAllowed = CGPreflightScreenCaptureAccess()
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if transparency >= 0.45, !screenCaptureAllowed {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button("배경 자동 대비 허용") {
-                            screenCaptureAllowed = CGRequestScreenCaptureAccess()
-                        }
-                        .buttonStyle(.bordered)
-                        Text("시스템 모드에서 배경에 맞춰 글자색을 바꿀 때 필요합니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
                 if !shortcuts.message.isEmpty {
                     Text(shortcuts.message)
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
 
-                shortcutSection(Array(QuickNoteShortcutAction.allCases.prefix(7)), title: "단축키")
-                shortcutSection(Array(QuickNoteShortcutAction.allCases.dropFirst(7)), title: "노트 바로 이동")
+                shortcutSection([.togglePanel, .captureInbox, .hidePanel], title: "단축키")
             }
             .padding(18)
         }
@@ -1203,10 +1193,9 @@ private struct QuickNotesSettingsView: View {
 
 struct SYGMASettingsView: View {
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
-    @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
 
     var body: some View {
-        QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
+        QuickNotesSettingsView(shortcuts: shortcuts)
     }
 }
 
@@ -1297,7 +1286,7 @@ private struct QuickNotesView: View {
                         .buttonStyle(.plain)
                         .help("Quick Notes 설정")
                         .popover(isPresented: $showingSettings, arrowEdge: .top) {
-                            QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
+                            QuickNotesSettingsView(shortcuts: shortcuts)
                         }
                     }
                 .padding(.trailing, 14)
@@ -1467,7 +1456,9 @@ private final class GlobalHotKeys {
 final class QuickNotesController: NSObject, NSWindowDelegate {
     private let store: QuickNotesStore
     private let shortcuts: QuickNoteShortcutSettings
+    private let webCoordinator = SYGMAWebCoordinator()
     private var panel: NSPanel?
+    private weak var webView: WKWebView?
     private var hotKeys: GlobalHotKeys?
     private var inboxHotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
@@ -1475,6 +1466,8 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     private var themeObserver: NSObjectProtocol?
     private var suppressLocalKeysUntil = Date.distantPast
     private var suppressedToggleKeyCode: UInt16?
+    private var hideInFlight = false
+    private var resourceCloseInFlight = false
     var onCaptureInbox: ((QuickNoteShortcut) -> Void)?
 
     var shortcutSettings: QuickNoteShortcutSettings { shortcuts }
@@ -1526,15 +1519,20 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             if self.isSuppressedGlobalDuplicate(event) { return nil }
             guard self.shortcuts.capturingAction != nil || self.panel?.isKeyWindow == true else { return event }
             if self.handle(event) { return nil }
-            return event.keyCode == UInt16(kVK_ANSI_W)
-                && event.modifierFlags.intersection([.control, .option, .shift, .command]) == .command ? nil : event
+            return event
         }
     }
 
     func flush() { store.flush() }
 
+    func flushPendingChanges() async -> Bool {
+        store.flush()
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else { return true }
+        return await SYGMAWebRuntime.flushPendingChanges(in: webView)
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        hide()
+        requestHide()
         return false
     }
 
@@ -1568,14 +1566,14 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         trackingView.onTitlebarHover = { [weak panel] hovering in
             panel?.setQuickNotesTrafficLightsVisible(hovering)
         }
-        let hostingView = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts))
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
-        trackingView.addSubview(hostingView)
+        let webView = webCoordinator.makeCompanionWebView(url: SYGMAWebRuntime.quickResourceURL)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        trackingView.addSubview(webView)
         NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: trackingView.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: trackingView.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
         ])
         panel.contentView = trackingView
         panel.delegate = self
@@ -1586,13 +1584,14 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             frame.origin.y = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
             panel.setFrame(frame, display: false)
         }
+        self.webView = webView
         self.panel = panel
         return panel
     }
 
     func toggle() {
         let panel = panelWindow()
-        panel.isVisible ? hide() : show()
+        panel.isVisible ? requestHide() : show()
     }
 
     private func show() {
@@ -1601,13 +1600,61 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         startContrastUpdates()
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else { return }
+        Task { @MainActor [weak webView] in
+            guard let webView else { return }
+            _ = try? await webView.callAsyncJavaScript(
+                "if (typeof refreshRemoteStateIfNewer === 'function') await refreshRemoteStateIfNewer(); return true;",
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            )
+        }
     }
 
-    private func hide() {
+    private func requestHide() {
+        guard !hideInFlight else { return }
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else {
+            hideNow()
+            return
+        }
+        hideInFlight = true
+        Task { @MainActor [weak self, weak webView] in
+            guard let self else { return }
+            defer { self.hideInFlight = false }
+            guard let webView, await SYGMAWebRuntime.flushPendingChanges(in: webView) else {
+                NSSound.beep()
+                return
+            }
+            self.hideNow()
+        }
+    }
+
+    private func hideNow() {
         store.flush()
         contrastTimer?.invalidate()
         contrastTimer = nil
         panel?.orderOut(nil)
+    }
+
+    private func closeResourceOrHide() {
+        guard !resourceCloseInFlight else { return }
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else {
+            requestHide()
+            return
+        }
+        resourceCloseInFlight = true
+        Task { @MainActor [weak self, weak webView] in
+            guard let self else { return }
+            defer { self.resourceCloseInFlight = false }
+            guard let webView else { return }
+            do {
+                if try await SYGMAWebRuntime.closeActiveResourceWindow(in: webView) { return }
+                self.requestHide()
+            } catch {
+                NSSound.beep()
+            }
+        }
     }
 
     private func startContrastUpdates() {
@@ -1713,22 +1760,14 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             return true
         }
 
-        guard let action = QuickNoteShortcutAction.allCases.first(where: {
-            ![.togglePanel, .captureInbox].contains($0) && shortcuts.shortcut(for: $0).matches(event)
-        }) else {
-            return false
+        let modifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        if modifiers == .command,
+           event.keyCode == UInt16(kVK_ANSI_W) || event.charactersIgnoringModifiers?.lowercased() == "w" {
+            if !event.isARepeat { closeResourceOrHide() }
+            return true
         }
-        if event.isARepeat { return true }
-        switch action {
-        case .togglePanel, .captureInbox: break
-        case .newNote: store.createNote()
-        case .previousNote: store.select(offset: -1)
-        case .nextNote: store.select(offset: 1)
-        case .togglePreview: store.togglePreview()
-        case .hidePanel: hide()
-        case .note1, .note2, .note3, .note4, .note5, .note6, .note7, .note8, .note9:
-            store.select(number: action.noteNumber!)
-        }
+        guard shortcuts.shortcut(for: .hidePanel).matches(event) else { return false }
+        if !event.isARepeat { requestHide() }
         return true
     }
 }

@@ -11,6 +11,11 @@ import AppKit
 
 enum SYGMAWebRuntime {
     static let homeURL = URL(string: "https://personalweb-production-81a6.up.railway.app/")!
+    static let quickResourceURL: URL = {
+        var components = URLComponents(url: homeURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "surface", value: "quick-resource")]
+        return components.url!
+    }()
     static let mutationBridge = #"""
     (() => {
       if (window.__sygmaNativeMutationBridge) return;
@@ -40,6 +45,58 @@ enum SYGMAWebRuntime {
 
     static func isGoogleAuthStart(_ url: URL?) -> Bool {
         isInternal(url) && url?.path == "/api/google/auth/start"
+    }
+
+    @MainActor
+    static func flushPendingChanges(in webView: WKWebView) async -> Bool {
+        let script = #"""
+        if (typeof persistLocalResourceDraft !== "function" || typeof flushRemoteStateSave !== "function") return true;
+        if (typeof flushResourceWindowInputs === "function" && typeof ui === "object") {
+          for (const record of [...(ui.resourceWindows || [])]) flushResourceWindowInputs(record.id);
+        }
+        if (typeof flushPendingEditorTextHistory === "function") flushPendingEditorTextHistory();
+        const locallyPersisted = await persistLocalResourceDraft();
+        if (locallyPersisted !== true) return false;
+        const waitForSave = async () => {
+          const deadline = Date.now() + 12000;
+          while (remoteStateSaveInFlight && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 40));
+          }
+          return !remoteStateSaveInFlight;
+        };
+        if (!(await waitForSave())) return false;
+        if (typeof hasAutomaticallySaveableLocalOperations === "function" && hasAutomaticallySaveableLocalOperations()) {
+          remoteStateSavePending = true;
+        }
+        if (remoteStateSavePending) {
+          const saved = await flushRemoteStateSave({ singleAttempt: true, preserveConflict: true });
+          if (!saved) return false;
+        }
+        if (!(await waitForSave())) return false;
+        return !remoteStateSavePending && !remoteStateSaveBlocked;
+        """#
+        do {
+            let result = try await webView.callAsyncJavaScript(
+                script,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            )
+            return (result as? Bool) == true
+        } catch {
+            return false
+        }
+    }
+
+    @MainActor
+    static func closeActiveResourceWindow(in webView: WKWebView) async throws -> Bool {
+        let handled = try await webView.callAsyncJavaScript(
+            "return typeof window.closeActiveResourceWindowFromShortcut === 'function' ? window.closeActiveResourceWindowFromShortcut() : false;",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        return (handled as? Bool) == true
     }
 }
 
@@ -98,6 +155,7 @@ struct SYGMAWebView: NSViewRepresentable {
 @MainActor
 final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     private weak var mainWebView: WKWebView?
+    private weak var rootWebView: WKWebView?
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var appActivationObserver: NSObjectProtocol?
 
@@ -111,6 +169,28 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     #endif
 
     func makeMainWebView() -> WKWebView {
+        let webView = WKWebView(frame: .zero, configuration: makeConfiguration())
+        mainWebView = webView
+        rootWebView = webView
+        configure(webView)
+        observeAppActivation()
+        configureWorkspaceBridge(for: webView)
+        #if canImport(AppKit) && !canImport(UIKit)
+        configureResourceCloseShortcut(for: webView)
+        #endif
+        webView.load(URLRequest(url: SYGMAWebRuntime.homeURL))
+        return webView
+    }
+
+    func makeCompanionWebView(url: URL) -> WKWebView {
+        let webView = WKWebView(frame: .zero, configuration: makeConfiguration())
+        rootWebView = webView
+        configure(webView)
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    private func makeConfiguration() -> WKWebViewConfiguration {
         let contentController = WKUserContentController()
         contentController.addUserScript(WKUserScript(
             source: SYGMAWebRuntime.mutationBridge,
@@ -123,17 +203,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         configuration.websiteDataStore = .default()
         configuration.userContentController = contentController
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        mainWebView = webView
-        configure(webView)
-        observeAppActivation()
-        configureWorkspaceBridge(for: webView)
-        #if canImport(AppKit) && !canImport(UIKit)
-        configureResourceCloseShortcut(for: webView)
-        #endif
-        webView.load(URLRequest(url: SYGMAWebRuntime.homeURL))
-        return webView
+        return configuration
     }
 
     func tearDown(_ webView: WKWebView) {
@@ -156,6 +226,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
             SYGMAWorkspaceBridge.reloadHandler = nil
             mainWebView = nil
         }
+        if rootWebView === webView { rootWebView = nil }
         closeAllPopups()
     }
 
@@ -181,17 +252,11 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
                       webView.window === window,
                       SYGMAWebRuntime.isInternal(webView.url) else { return }
                 do {
-                    let handled = try await webView.callAsyncJavaScript(
-                        "return typeof window.closeActiveResourceWindowFromShortcut === 'function' ? await window.closeActiveResourceWindowFromShortcut() : false;",
-                        arguments: [:],
-                        in: nil,
-                        contentWorld: .page
-                    )
+                    let handled = try await SYGMAWebRuntime.closeActiveResourceWindow(in: webView)
                     guard self.resourceCloseKeyMonitor != nil,
                           window === NSApp.keyWindow,
                           webView.window === window,
                           SYGMAWebRuntime.isInternal(webView.url) else { return }
-                    guard let handled = handled as? Bool else { NSSound.beep(); return }
                     if !handled { window.performClose(nil) }
                 } catch {
                     NSSound.beep()
@@ -205,39 +270,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     private func configureWorkspaceBridge(for webView: WKWebView) {
         SYGMAWorkspaceBridge.flushHandler = { [weak webView] in
             guard let webView else { return true }
-            let script = #"""
-            if (typeof persistLocalResourceDraft !== "function" || typeof flushRemoteStateSave !== "function") return true;
-            const locallyPersisted = await persistLocalResourceDraft();
-            if (locallyPersisted !== true) return false;
-            const waitForSave = async () => {
-              const deadline = Date.now() + 12000;
-              while (remoteStateSaveInFlight && Date.now() < deadline) {
-                await new Promise(resolve => setTimeout(resolve, 40));
-              }
-              return !remoteStateSaveInFlight;
-            };
-            if (!(await waitForSave())) return false;
-            if (typeof hasAutomaticallySaveableLocalOperations === "function" && hasAutomaticallySaveableLocalOperations()) {
-              remoteStateSavePending = true;
-            }
-            if (remoteStateSavePending) {
-              const saved = await flushRemoteStateSave({ singleAttempt: true, preserveConflict: true });
-              if (!saved) return false;
-            }
-            if (!(await waitForSave())) return false;
-            return !remoteStateSavePending && !remoteStateSaveBlocked;
-            """#
-            do {
-                let result = try await webView.callAsyncJavaScript(
-                    script,
-                    arguments: [:],
-                    in: nil,
-                    contentWorld: .page
-                )
-                return (result as? Bool) == true
-            } catch {
-                return false
-            }
+            return await SYGMAWebRuntime.flushPendingChanges(in: webView)
         }
         SYGMAWorkspaceBridge.reloadHandler = { [weak webView] in
             webView?.reload()
@@ -296,9 +329,9 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
 
         // Google rejects OAuth inside embedded user agents. Keep the web flow,
         // but complete its one secure sign-in hop in the system browser.
-        if webView !== mainWebView, SYGMAWebRuntime.isGoogleAuthStart(url) {
+        if SYGMAWebRuntime.isGoogleAuthStart(url) {
             openExternally(url)
-            closePopup(webView)
+            if webView !== rootWebView { closePopup(webView) }
             decisionHandler(.cancel)
             return
         }
@@ -314,7 +347,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
             return
         }
 
-        if webView !== mainWebView, url.scheme?.lowercased() == "https" {
+        if webView !== rootWebView, url.scheme?.lowercased() == "https" {
             decisionHandler(.allow)
             return
         }

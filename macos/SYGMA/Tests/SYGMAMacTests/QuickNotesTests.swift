@@ -405,6 +405,8 @@ final class QuickNotesTests: XCTestCase {
         XCTAssertEqual(settings.shortcut(for: .hidePanel).display, "⌘W")
         XCTAssertEqual(settings.shortcut(for: .togglePanel), customizedToggle)
         XCTAssertEqual(settings.shortcut(for: .captureInbox).display, "⌥Space")
+        XCTAssertEqual(QuickNoteShortcutSettings.defaultShortcuts[.togglePanel]?.display, "⇧⌘L")
+        XCTAssertEqual(SYGMAWebRuntime.quickResourceURL.query, "surface=quick-resource")
         XCTAssertNotNil(defaults.data(forKey: "SYGMAQuickNotesShortcutsV2"))
         XCTAssertEqual(settings.shortcut(for: .note1).display, "⌘1")
         XCTAssertEqual(settings.shortcut(for: .note9).display, "⌘9")
@@ -415,6 +417,9 @@ final class QuickNotesTests: XCTestCase {
         let custom = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_P), modifiers: [.command, .option], key: "P")
         settings.save(custom, for: .newNote)
         XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .newNote), custom)
+        XCTAssertNil(settings.validationMessage(for: custom, action: .togglePanel))
+        settings.save(custom, for: .togglePanel)
+        XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .togglePanel), custom)
 
         let escape = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
         settings.save(escape, for: .hidePanel)
@@ -424,7 +429,7 @@ final class QuickNotesTests: XCTestCase {
         legacy[QuickNoteShortcutAction.newNote.rawValue] = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_W), modifiers: .command, key: "W")
         defaults.set(try JSONEncoder().encode(legacy), forKey: "SYGMAQuickNotesShortcutsV1")
         let conflictSettings = QuickNoteShortcutSettings(defaults: defaults)
-        XCTAssertEqual(conflictSettings.shortcut(for: .hidePanel), escape)
+        XCTAssertEqual(conflictSettings.shortcut(for: .hidePanel), QuickNoteShortcutSettings.defaultShortcuts[.hidePanel])
         XCTAssertEqual(conflictSettings.shortcut(for: .newNote).display, "⌘W")
 
         let plainLetter = try XCTUnwrap(NSEvent.keyEvent(

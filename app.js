@@ -2,6 +2,7 @@ const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
 const RESOURCE_WINDOW_SIZE_KEY = "sygma-resource-window-size-v1";
 const APP_STATE_VERSION = 4;
 const VIEW_HISTORY_STATE_KEY = "sygmaView";
+const QUICK_RESOURCE_SURFACE = new URLSearchParams(window.location.search).get("surface") === "quick-resource";
 const TASK_DONE_REORDER_GRACE_MS = 520;
 const EDITOR_TEXT_HISTORY_IDLE_MS = 720;
 const MAX_INLINE_COMMENT_BODY_LENGTH = 20_000;
@@ -748,6 +749,7 @@ function init() {
   const googleRedirect = handleGoogleRedirectResult();
   prepareInitialRoute();
   app.innerHTML = renderShell();
+  app.classList.toggle("is-quick-resource-surface", QUICK_RESOURCE_SURFACE);
   els = {
     skipLink: document.querySelector("[data-skip-link]"),
     navTrack: app.querySelector("#navTrack"),
@@ -1308,7 +1310,7 @@ function decorateButtons(root = app) {
   });
 }
 
-function renderView({ transition = false, soft = false, animateCards = false } = {}) {
+function renderView({ transition = false, soft = false, animateCards = false, syncResourceContents = false } = {}) {
   cancelResourceListDrag();
   if (ui.view !== "resources") ui.resourceSelection = [];
   const renderers = {
@@ -1345,7 +1347,7 @@ function renderView({ transition = false, soft = false, animateCards = false } =
     window.setTimeout(() => transitionTarget.classList.remove("is-entering"), 320);
   }
   syncViewChrome();
-  syncResourceDocumentDialog();
+  syncResourceDocumentDialog({ syncContents: syncResourceContents });
   if (ui.view === "finance" && financeWorkspace.status === "idle") {
     requestAnimationFrame(() => loadFinanceWorkspace());
   }
@@ -2014,7 +2016,7 @@ function saveResourceComment(form) {
   return true;
 }
 
-function syncResourceDocumentDialog() {
+function syncResourceDocumentDialog(options = {}) {
   ui.resourceWindows = ui.resourceWindows.filter((record) => {
     const resource = itemById("resources", record.id);
     return resource && !resource.trashedAt;
@@ -2048,6 +2050,10 @@ function syncResourceDocumentDialog() {
       element.resourceCommentsObserver.observe(element.querySelector(".block-editor"));
       element.resourceCommentsObserver.observe(element.querySelector("[data-resource-comments]"));
       element.resourceCommentsObserver.observe(element.querySelector("[data-resource-document]"));
+    } else if (options.syncContents === true) {
+      const title = element.querySelector("[data-resource-title]");
+      if (title && title.value !== resource.title) title.value = resource.title;
+      refreshBlockEditorsAfterMutation("resources", resource.id);
     }
     const relationsMarkup = renderResourceRelations(resource);
     if (!isNew && element.resourceRelationsMarkup !== relationsMarkup) {
@@ -5675,7 +5681,7 @@ function replaceViewHistoryState(view, options = {}) {
     focusOnPop: options.focusOnPop === "nav" ? "nav" : "view",
   };
   const useRootPath = financeViewFromLocation() || legacyResourcePathFromLocation();
-  const targetUrl = view === "finance" ? "/finance" : useRootPath ? "/" : currentRelativeUrl();
+  const targetUrl = QUICK_RESOURCE_SURFACE ? currentRelativeUrl() : view === "finance" ? "/finance" : useRootPath ? "/" : currentRelativeUrl();
   const method = options.replace === true || targetUrl === currentRelativeUrl() ? "replaceState" : "pushState";
   window.history[method](nextState, "", targetUrl);
   return true;
@@ -5697,7 +5703,9 @@ function currentRelativeUrl() {
 }
 
 function prepareInitialRoute() {
-  if (financeViewFromLocation()) {
+  if (QUICK_RESOURCE_SURFACE) {
+    ui.view = "resources";
+  } else if (financeViewFromLocation()) {
     ui.view = "finance";
   } else if (legacyResourcePathFromLocation()) {
     ui.view = "resources";
@@ -15187,14 +15195,14 @@ function beginEditorHistory(ownerType, ownerId, focus = null, options = {}) {
 
 
 
-function commitEditorHistory(token, focus = null) {
+function commitEditorHistory(token, focus = null, options = {}) {
   if (!token || !token.ownerType || !token.ownerId) return false;
   if (!editorOwnerMutationAllowed(token.ownerType, token.ownerId)) return false;
   const item = itemById(token.ownerType, token.ownerId);
   if (!item?.blocks) return false;
   const afterBlocks = cloneEditorBlocks(item.blocks);
   if (JSON.stringify(token.beforeBlocks) === JSON.stringify(afterBlocks)) return false;
-  if (token.ownerType === "resources") markResourceChanged(token.ownerId);
+  if (token.ownerType === "resources" && options.touch !== false) markResourceChanged(token.ownerId);
   return pushEditorHistoryEntry({
     ownerType: token.ownerType,
     ownerId: token.ownerId,
@@ -26142,7 +26150,7 @@ function stopRemoteStateRefresh() {
   remoteStateRefreshTimer = 0;
 }
 
-function scheduleRemoteStateRefresh() {
+function scheduleRemoteStateRefresh(delay = REMOTE_STATE_REFRESH_INTERVAL_MS) {
   stopRemoteStateRefresh();
   if (document.visibilityState === "hidden") return;
   if (
@@ -26160,7 +26168,7 @@ function scheduleRemoteStateRefresh() {
   remoteStateRefreshTimer = window.setTimeout(() => {
     remoteStateRefreshTimer = 0;
     refreshRemoteStateIfNewer();
-  }, REMOTE_STATE_REFRESH_INTERVAL_MS);
+  }, delay);
 }
 
 function handleRemoteStateWakeRefresh() {
@@ -26201,6 +26209,7 @@ function connectRemoteStateEvents() {
 }
 
 async function refreshRemoteStateIfNewer() {
+  const pendingLocalWork = hasPendingLocalWorkspaceWork();
   if (
     remoteStateRefreshInFlight
     || databaseInitializationPromise
@@ -26208,9 +26217,9 @@ async function refreshRemoteStateIfNewer() {
     || databaseBackendStatus.loading
     || navigator.onLine === false
     || document.visibilityState === "hidden"
-    || hasPendingLocalWorkspaceWork()
+    || pendingLocalWork
   ) {
-    scheduleRemoteStateRefresh();
+    scheduleRemoteStateRefresh(pendingLocalWork ? 250 : undefined);
     return false;
   }
 
@@ -26349,7 +26358,7 @@ async function initializeDatabaseStateNow() {
 function rerenderAfterStateReplace() {
   clearStateIndexes();
   renderNav();
-  if (ui.view !== "finance") renderView({ soft: true });
+  if (ui.view !== "finance") renderView({ soft: true, syncResourceContents: true });
   renderOverlays();
   updateTopbarStickiness();
 }
@@ -26989,6 +26998,7 @@ async function saveQueuedResourceOperations(options = {}) {
 async function commitLocalResourceOperationSuccess(operation, outgoingResource, savedResource, savedRevision) {
   const currentResource = itemById("resources", operation.entityId);
   const unchangedDuringSave = currentResource && currentResource.revision === outgoingResource.revision && currentResource.updatedAt === outgoingResource.updatedAt;
+  if (unchangedDuringSave) dirtyResourceIds.delete(operation.entityId);
   if (unchangedDuringSave && savedResource) {
     const index = state.resources.findIndex((resource) => resource.id === operation.entityId);
     if (index >= 0) {

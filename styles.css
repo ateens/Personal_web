@@ -13807,3 +13807,21 @@ body.is-task-placement-open {
   .today-inbox-summary { padding-inline: 24px; }
   .today-inbox-body { margin-inline: 24px; }
 }
+
+.app.is-quick-resource-surface .nav-float-toggle,
+.app.is-quick-resource-surface .sidebar-shell,
+.app.is-quick-resource-surface .sidebar-scrim,
+.app.is-quick-resource-surface .topbar,
+.app.is-quick-resource-surface .fab {
+  display: none;
+}
+
+.app.is-quick-resource-surface .layout {
+  width: 100%;
+}
+
+.app.is-quick-resource-surface .main,
+.app.is-quick-resource-surface.has-docked-nav .main {
+  min-height: 100dvh;
+  padding: 30px 24px 56px;
+}

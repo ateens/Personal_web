@@ -268,6 +268,33 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
 });
 
+test("Quick Resource 화면은 기존 자료 목록과 편집기만 compact 패널에 표시한다", async ({ page, request }) => {
+  const before = await fixtureSnapshot(request);
+  await page.setViewportSize({ width: 496, height: 900 });
+  await page.goto("/?surface=quick-resource");
+  const app = page.locator("#app");
+  await expect(app).toHaveAttribute("data-workspace-authority", "ready");
+  await expect(app).toHaveClass(/is-quick-resource-surface/);
+  await expect(page.locator("[data-resource-view]")).toBeVisible();
+  for (const selector of [".nav-float-toggle", ".sidebar-shell", ".topbar", ".fab"]) {
+    await expect(page.locator(selector)).toBeHidden();
+  }
+  await expect(page.locator("main.main")).toHaveCSS("padding-left", "24px");
+  await expect(page.locator("main.main")).toHaveCSS("padding-right", "24px");
+
+  await page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).click();
+  const document = page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
+  await expect(document).toBeVisible();
+  await expect(document.locator("[data-resource-title]")).toHaveValue("E2E Notion Parity Resource");
+  await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
+  expect(new URL(page.url()).searchParams.get("surface")).toBe("quick-resource");
+
+  await page.waitForTimeout(650);
+  const after = await fixtureSnapshot(request);
+  expect(after.serverRevision).toBe(before.serverRevision);
+  expect(after.writes).toEqual(before.writes);
+});
+
 test("Resource 도킹은 겹친 창의 최대 너비만 배경에서 빼고 resize와 해제 뒤 복원한다", async ({ page }) => {
   await openResourceList(page);
   const a = await openSettledResource(page, FIXTURE_IDS.resource);

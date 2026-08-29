@@ -52,6 +52,61 @@ test("two active clients converge through state events without focus or reload",
   }
 });
 
+test("열린 Resource는 일반 화면과 Quick Resource 패널 사이에서 즉시 동기화된다", async ({ browser, request }, testInfo) => {
+  const mainContext = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
+  const quickContext = await newAppContext(browser, testInfo, { width: 496, height: 900 });
+  const mainPage = await mainContext.newPage();
+  const quickPage = await quickContext.newPage();
+  const firstTitle = "Synced from main Resource";
+  const firstBody = "Main Resource body synced live";
+  const secondTitle = "Synced back from Quick Resource";
+  const secondBody = "Quick Resource body synced live";
+
+  try {
+    const mainEventStream = waitForStateEventStream(mainPage);
+    const quickEventStream = waitForStateEventStream(quickPage);
+    await Promise.all([mainPage.goto("/"), quickPage.goto("/?surface=quick-resource"), mainEventStream, quickEventStream]);
+    await mainPage.locator('[data-action="toggle-nav"]').click();
+    await expect(mainPage.locator("[data-sidebar]")).toHaveClass(/is-open/);
+    await mainPage.locator('[data-nav-key="resources"]').click();
+    await expect(mainPage.locator("[data-resource-view]")).toBeVisible();
+    await expect(quickPage.locator("[data-resource-view]")).toBeVisible();
+
+    for (const page of [mainPage, quickPage]) {
+      await page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).evaluate((button) => button.click());
+      await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+    }
+    const mainDocument = mainPage.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
+    const quickDocument = quickPage.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
+    const mainTitle = mainDocument.locator("[data-resource-title]");
+    const quickTitle = quickDocument.locator("[data-resource-title]");
+    const mainBody = mainDocument.locator("[data-block-content]").first();
+    const quickBody = quickDocument.locator("[data-block-content]").first();
+
+    await mainTitle.fill(firstTitle);
+    await mainBody.fill(firstBody);
+    await expect.poll(async () => {
+      const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+      return [resource?.title, resource?.blocks?.[0]?.text];
+    }).toEqual([firstTitle, firstBody]);
+    await expect(quickTitle).toHaveValue(firstTitle);
+    await expect(quickBody).toHaveText(firstBody);
+    expect(await mainPage.evaluate(() => document.visibilityState)).toBe("visible");
+    expect(await quickPage.evaluate(() => document.visibilityState)).toBe("visible");
+
+    await quickTitle.fill(secondTitle);
+    await quickBody.fill(secondBody);
+    await expect.poll(async () => {
+      const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+      return [resource?.title, resource?.blocks?.[0]?.text];
+    }).toEqual([secondTitle, secondBody]);
+    await expect(mainTitle).toHaveValue(secondTitle);
+    await expect(mainBody).toHaveText(secondBody);
+  } finally {
+    await Promise.all([mainContext.close(), quickContext.close()]);
+  }
+});
+
 for (const wakeEvent of ["focus", "pageshow"]) {
   test(`a second device pulls a newer revision on ${wakeEvent} without reloading`, async ({ browser, request }, testInfo) => {
     const macContext = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });

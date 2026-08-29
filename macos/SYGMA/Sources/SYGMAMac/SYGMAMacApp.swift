@@ -43,6 +43,7 @@ private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
     private var keyWindowObserver: NSObjectProtocol?
     private let quickNotes = QuickNotesController()
     private let inboxCapture = InboxCaptureController()
+    private var terminationInFlight = false
 
     var shortcutSettings: QuickNoteShortcutSettings { quickNotes.shortcutSettings }
 
@@ -69,6 +70,19 @@ private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         quickNotes.flush()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationInFlight else { return .terminateLater }
+        terminationInFlight = true
+        Task { @MainActor in
+            let mainSaved = await SYGMAWorkspaceBridge.flushPendingChanges()
+            let quickResourceSaved = await quickNotes.flushPendingChanges()
+            terminationInFlight = false
+            sender.reply(toApplicationShouldTerminate: mainSaved && quickResourceSaved)
+            if !mainSaved || !quickResourceSaved { NSSound.beep() }
+        }
+        return .terminateLater
     }
 
     func toggleQuickNotes() {
