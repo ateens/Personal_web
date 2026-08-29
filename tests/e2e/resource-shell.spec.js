@@ -1,6 +1,42 @@
 import { expect, test } from "@playwright/test";
 import { FIXTURE_IDS, fixtureSnapshot, resetFixture } from "./helpers.js";
 
+const PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8GQAAAAASUVORK5CYII=",
+  "base64",
+);
+
+async function localResourceOperationCount(page) {
+  return page.evaluate(async () => {
+    const open = indexedDB.open("sygma-resource-local-v1");
+    const database = await new Promise((resolve, reject) => {
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    const transaction = database.transaction("operations", "readonly");
+    const request = transaction.objectStore("operations").count();
+    const count = await new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    return count;
+  });
+}
+
+async function selectTextRange(content, start, end) {
+  await content.evaluate((element, offsets) => {
+    element.focus();
+    const range = document.createRange();
+    range.setStart(element.firstChild, offsets.start);
+    range.setEnd(element.firstChild, offsets.end);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  }, { start, end });
+}
+
 async function openSettledResource(page, id) {
   await page.locator(`[data-resource-open="${id}"]`).evaluate((button) => button.click());
   const window = page.locator(`[data-resource-window="${id}"]`);
@@ -268,31 +304,259 @@ test.beforeEach(async ({ page, request }) => {
   await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
 });
 
-test("Quick Resource 화면은 기존 자료 목록과 편집기만 compact 패널에 표시한다", async ({ page, request }) => {
-  const before = await fixtureSnapshot(request);
+test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기만 제공하고 로컬 메모를 서버에 저장하지 않는다", async ({ page, request }) => {
+  const localPngDataURL = `data:image/png;base64,${PIXEL_PNG.toString("base64")}`;
+  let resourceImageRequests = 0;
+  page.on("request", (entry) => {
+    if (new URL(entry.url()).pathname === "/api/resource-images") resourceImageRequests += 1;
+  });
+  await page.addInitScript((pngDataURL) => {
+    window.__quickMemoMessages = [];
+    window.__quickLocalImageIndex = 0;
+    window.addEventListener("sygma:quickMemo", (event) => {
+      const message = event.detail;
+      window.__quickMemoMessages.push(message);
+      if (message.type === "saveLocalImage") {
+        const assetIndex = ++window.__quickLocalImageIndex;
+        setTimeout(() => window.sygmaQuickEditor.resolveLocalImage(message.requestId, {
+          path: assetIndex === 1
+            ? "assets/22222222-2222-4222-8222-222222222222.png"
+            : "assets/33333333-3333-4333-8333-333333333333.png",
+          dataURL: pngDataURL,
+        }), 0);
+      }
+    });
+    window.__quickServiceWorkerCalls = [];
+    const serviceWorker = {
+      controller: {},
+      addEventListener: (...args) => window.__quickServiceWorkerCalls.push(["listen", args[0]]),
+      register: (...args) => {
+        window.__quickServiceWorkerCalls.push(["register", args[0]]);
+        return Promise.resolve({ addEventListener() {}, update: () => Promise.resolve() });
+      },
+    };
+    try {
+      Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: serviceWorker });
+    } catch {}
+    window.__quickServiceWorkerStubbed = navigator.serviceWorker === serviceWorker;
+  }, localPngDataURL);
   await page.setViewportSize({ width: 496, height: 900 });
-  await page.goto("/?surface=quick-resource");
+  await page.goto("/?surface=quick-editor");
   const app = page.locator("#app");
   await expect(app).toHaveAttribute("data-workspace-authority", "ready");
-  await expect(app).toHaveClass(/is-quick-resource-surface/);
-  await expect(page.locator("[data-resource-view]")).toBeVisible();
-  for (const selector of [".nav-float-toggle", ".sidebar-shell", ".topbar", ".fab"]) {
-    await expect(page.locator(selector)).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "ready").length)).toBe(1);
+  expect(await page.evaluate(() => window.__quickServiceWorkerStubbed)).toBe(true);
+  expect(await page.evaluate(() => window.__quickServiceWorkerCalls)).toEqual([]);
+  await expect(app).toHaveClass(/is-quick-editor-surface/);
+  for (const selector of [".layout", ".nav-float-toggle", ".sidebar-shell", ".topbar", ".fab", "[data-resource-view]", ".resource-window", ".resource-document", "[data-resource-title]", "[data-resource-relations]"]) {
+    await expect(page.locator(selector)).toHaveCount(0);
   }
-  await expect(page.locator("main.main")).toHaveCSS("padding-left", "24px");
-  await expect(page.locator("main.main")).toHaveCSS("padding-right", "24px");
 
-  await page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).click();
-  const document = page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
-  await expect(document).toBeVisible();
-  await expect(document.locator("[data-resource-title]")).toHaveValue("E2E Notion Parity Resource");
-  await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
-  expect(new URL(page.url()).searchParams.get("surface")).toBe("quick-resource");
+  const existingAssetDataURL = localPngDataURL;
+  await page.evaluate(({ assetDataURL }) => {
+    window.sygmaQuickEditor.loadLocal({
+      id: "fixture-local-note",
+      markdown: "ignored when exact blocks exist",
+      assets: { "assets/11111111-1111-4111-8111-111111111111.png": assetDataURL },
+      blocks: [
+        { id: "local-image", type: "image", text: "기존 이미지", alt: "기존 이미지", url: "assets/11111111-1111-4111-8111-111111111111.png", marks: [], checked: false, indent: 0, collapsed: false },
+        { id: "local-marks", type: "paragraph", text: "굵게 기울임 링크 수식", marks: [
+          { type: "bold", start: 0, end: 2 },
+          { type: "italic", start: 3, end: 6 },
+          { type: "link", start: 7, end: 9, href: "https://example.com" },
+          { type: "equation", start: 10, end: 12, formula: "x^2" },
+        ], checked: false, indent: 0, collapsed: false },
+        { id: "local-body", type: "paragraph", text: "기존 내용", marks: [], checked: false, indent: 0, collapsed: false },
+      ],
+    });
+  }, { assetDataURL: existingAssetDataURL });
+  const editor = page.locator('.block-editor[data-owner-type="resources"]');
+  await expect(editor).toHaveAttribute("data-owner-id", "quick-note:fixture-local-note");
+  await expect(editor.locator('[data-block-id="local-image"] img')).toHaveAttribute("src", existingAssetDataURL);
+  const body = editor.locator('[data-block-content="local-body"]');
+  await expect(body).toBeFocused();
+  expect(await body.evaluate((element) => {
+    const selection = window.getSelection();
+    const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    return range && element.contains(range.startContainer) ? range.startOffset : -1;
+  })).toBe("기존 내용".length);
+
+  await page.evaluate(() => window.sygmaQuickEditor.flush());
+  const serialized = await page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1));
+  expect(serialized.markdown).toContain("![기존 이미지](assets/11111111-1111-4111-8111-111111111111.png)");
+  expect(serialized.markdown).toContain("**굵게** *기울임* [링크](https://example.com) \\(x^2\\)");
+  expect(serialized.blocks.find((block) => block.id === "local-image")).toMatchObject({ url: "assets/11111111-1111-4111-8111-111111111111.png" });
+  expect(serialized.blocks.find((block) => block.id === "local-image")).not.toHaveProperty("localAssetPath");
+  expect(JSON.stringify(serialized.blocks)).not.toContain("data:image");
+
+  await selectTextRange(body, 0, 2);
+  const toolbar = page.locator("[data-inline-toolbar]");
+  await expect(toolbar).toBeVisible();
+  await expect(toolbar.locator('[data-inline-mark-toggle="comment"]')).toHaveCount(0);
+  await expect(toolbar.locator('[data-inline-mark-toggle="bold"]')).toHaveCount(1);
+
+  await editor.evaluate((element) => { window.__localQuickEditor = element; });
+  await page.evaluate(() => window.sygmaQuickEditor.openResourcePicker());
+  const remoteBefore = await fixtureSnapshot(request);
+  const remoteState = structuredClone(remoteBefore.state);
+  const remoteResource = remoteState.resources.find((resource) => resource.id === FIXTURE_IDS.resource);
+  remoteResource.title = "Remote Picker Title";
+  remoteResource.updatedAt = new Date().toISOString();
+  remoteResource.revision += 1;
+  const remoteWrite = await request.put("/api/state", {
+    headers: { "If-Match": `"state-${remoteBefore.serverRevision}"` },
+    data: { state: remoteState, baseRevision: remoteBefore.serverRevision },
+  });
+  expect(remoteWrite.ok()).toBeTruthy();
+  await expect(page.locator(`[data-quick-editor-resource="${FIXTURE_IDS.resource}"]`)).toHaveText("Remote Picker Title");
+  expect(await editor.evaluate((element) => element === window.__localQuickEditor)).toBe(true);
+  expect(await page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "ready").length)).toBe(1);
+  await page.keyboard.press("Escape");
+
+  const operationsBefore = await localResourceOperationCount(page);
+  const persistenceBefore = await fixtureSnapshot(request);
+  await body.evaluate(async (element) => {
+    element.focus();
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.getContext("2d").fillRect(0, 0, 1, 1);
+    const jpeg = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg"));
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(new File([jpeg], "clipboard.jpg", { type: "image/jpeg" }));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  });
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").length)).toBe(1);
+  expect(await page.evaluate(() => window.__quickMemoMessages.find((message) => message.type === "saveLocalImage").dataURL.startsWith("data:image/jpeg;base64,"))).toBe(true);
+  await expect(editor.locator('[data-type="image"] img[alt="clipboard"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1))).toMatchObject({
+    type: "localChange",
+    id: "fixture-local-note",
+    markdown: expect.stringContaining("assets/22222222-2222-4222-8222-222222222222.png"),
+    blocks: expect.arrayContaining([expect.objectContaining({ type: "image", url: "assets/22222222-2222-4222-8222-222222222222.png" })]),
+  });
+
+  await page.evaluate(() => window.sygmaQuickEditor.loadLocal({
+    id: "fixture-local-note",
+    markdown: "",
+    blocks: [{ id: "slash-image", type: "paragraph", text: "", marks: [], checked: false, indent: 0, collapsed: false }],
+  }));
+  const slashContent = editor.locator('[data-block-content="slash-image"]');
+  await slashContent.type("/image");
+  const fileChooser = page.waitForEvent("filechooser");
+  await page.locator('[data-resource-slash-id="image"]').click();
+  await (await fileChooser).setFiles({ name: "slash.png", mimeType: "image/png", buffer: PIXEL_PNG });
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").length)).toBe(2);
+  await expect(editor.locator('[data-block-id="slash-image"] img')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1))).toMatchObject({
+    markdown: expect.stringContaining("assets/33333333-3333-4333-8333-333333333333.png"),
+    blocks: expect.arrayContaining([expect.objectContaining({ id: "slash-image", type: "image", url: "assets/33333333-3333-4333-8333-333333333333.png" })]),
+  });
+  const savedImageChange = await page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1));
+  expect(JSON.stringify(savedImageChange.blocks)).not.toMatch(/localAssetPath|data:image/i);
+
+  expect(resourceImageRequests).toBe(0);
+  await page.evaluate(() => window.sygmaQuickEditor.openResourcePicker());
+  const pickerQuery = page.locator("[data-quick-editor-query]");
+  await pickerQuery.fill("Remote Picker");
+  await pickerQuery.press("ArrowDown");
+  const resourceChoice = page.locator(`[data-quick-editor-resource="${FIXTURE_IDS.resource}"]`);
+  await expect(resourceChoice).toBeFocused();
+  await resourceChoice.press("Enter");
+  await expect(editor).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
+  await page.evaluate(() => window.sygmaQuickEditor.openLocal());
+  await expect(editor).toHaveAttribute("data-owner-id", "quick-note:fixture-local-note");
+
+  await page.waitForTimeout(650);
+  const after = await fixtureSnapshot(request);
+  expect(after.serverRevision).toBe(persistenceBefore.serverRevision);
+  expect(after.writes).toEqual(persistenceBefore.writes);
+  expect(await localResourceOperationCount(page)).toBe(operationsBefore);
+  expect(new URL(page.url()).searchParams.get("surface")).toBe("quick-editor");
+});
+
+test("Quick Editor는 로컬 이미지 응답 전 Resource 전환 시 paste와 /image 삽입을 취소한다", async ({ page, request }) => {
+  const pngDataURL = `data:image/png;base64,${PIXEL_PNG.toString("base64")}`;
+  let resourceImageRequests = 0;
+  page.on("request", (entry) => {
+    if (new URL(entry.url()).pathname === "/api/resource-images") resourceImageRequests += 1;
+  });
+  await page.addInitScript(() => {
+    window.__quickMemoMessages = [];
+    window.addEventListener("sygma:quickMemo", (event) => window.__quickMemoMessages.push(event.detail));
+  });
+  await page.goto("/?surface=quick-editor");
+  await page.evaluate(() => window.sygmaQuickEditor.loadLocal({
+    id: "race-local",
+    blocks: [{ id: "paste-race", type: "paragraph", text: "", marks: [], indent: 0 }],
+  }));
+  const before = await fixtureSnapshot(request);
+  const operationsBefore = await localResourceOperationCount(page);
+  const editor = page.locator('.block-editor[data-owner-type="resources"]');
+  const pasteBlock = editor.locator('[data-block-content="paste-race"]');
+  await pasteBlock.evaluate((element, base64) => {
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const clipboardData = new DataTransfer();
+    clipboardData.items.add(new File([bytes], "race.png", { type: "image/png" }));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  }, PIXEL_PNG.toString("base64"));
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").length)).toBe(1);
+  await page.evaluate((resourceId) => window.sygmaQuickEditor.openResource(resourceId), FIXTURE_IDS.resource);
+  await expect(editor).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
+  expect(await page.evaluate(({ path, dataURL }) => {
+    const request = window.__quickMemoMessages.find((message) => message.type === "saveLocalImage");
+    return window.sygmaQuickEditor.resolveLocalImage(request.requestId, { path, dataURL });
+  }, { path: "assets/44444444-4444-4444-8444-444444444444.png", dataURL: pngDataURL })).toBe(false);
+  await page.evaluate(() => window.sygmaQuickEditor.openLocal());
+  await expect(editor.locator('[data-block-id="paste-race"]')).toHaveAttribute("data-type", "paragraph");
+  await expect(editor.locator('[data-block-id="paste-race"] img')).toHaveCount(0);
+
+  await page.evaluate(() => window.sygmaQuickEditor.loadLocal({
+    id: "race-local",
+    blocks: [{ id: "slash-race", type: "paragraph", text: "", marks: [], indent: 0 }],
+  }));
+  const slashBlock = editor.locator('[data-block-content="slash-race"]');
+  await slashBlock.type("/image");
+  const fileChooser = page.waitForEvent("filechooser");
+  await page.locator('[data-resource-slash-id="image"]').click();
+  await (await fileChooser).setFiles({ name: "race.png", mimeType: "image/png", buffer: PIXEL_PNG });
+  await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").length)).toBe(2);
+  expect(await page.evaluate(({ resourceId, path, dataURL }) => {
+    const request = window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").at(-1);
+    const resolved = window.sygmaQuickEditor.resolveLocalImage(request.requestId, { path, dataURL });
+    const opened = window.sygmaQuickEditor.openResource(resourceId);
+    return { resolved, opened };
+  }, {
+    resourceId: FIXTURE_IDS.resource,
+    path: "assets/55555555-5555-4555-8555-555555555555.png",
+    dataURL: pngDataURL,
+  })).toEqual({ resolved: true, opened: true });
+  await expect(editor).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
+  await page.evaluate(() => window.sygmaQuickEditor.openLocal());
+  await expect(editor.locator('[data-block-id="slash-race"]')).toHaveAttribute("data-type", "paragraph");
+  await expect(editor.locator('[data-block-id="slash-race"] img')).toHaveCount(0);
 
   await page.waitForTimeout(650);
   const after = await fixtureSnapshot(request);
   expect(after.serverRevision).toBe(before.serverRevision);
   expect(after.writes).toEqual(before.writes);
+  expect(await localResourceOperationCount(page)).toBe(operationsBefore);
+  expect(resourceImageRequests).toBe(0);
+});
+
+test("Quick Editor는 오프라인 로컬 snapshot의 Resource도 선택해 연다", async ({ page }) => {
+  await page.route(/\/api\/state(?:\/.*)?(?:\?.*)?$/, (route) => route.abort());
+  await page.addInitScript(() => {
+    window.__quickMemoMessages = [];
+    window.addEventListener("sygma:quickMemo", (event) => window.__quickMemoMessages.push(event.detail));
+  });
+  await page.goto("/?surface=quick-editor");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await expect.poll(() => page.evaluate((resourceId) => window.__quickMemoMessages
+    .filter((message) => message.type === "ready")
+    .at(-1)?.resources?.some((resource) => resource.id === resourceId), FIXTURE_IDS.resource)).toBe(true);
+  expect(await page.evaluate((resourceId) => window.sygmaQuickEditor.openResource(resourceId), FIXTURE_IDS.resource)).toBe(true);
+  await expect(page.locator(`.block-editor[data-owner-id="${FIXTURE_IDS.resource}"]`)).toBeVisible();
 });
 
 test("Resource 도킹은 겹친 창의 최대 너비만 배경에서 빼고 resize와 해제 뒤 복원한다", async ({ page }) => {

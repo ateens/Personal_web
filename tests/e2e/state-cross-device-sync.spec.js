@@ -52,36 +52,62 @@ test("two active clients converge through state events without focus or reload",
   }
 });
 
-test("열린 Resource는 일반 화면과 Quick Resource 패널 사이에서 즉시 동기화된다", async ({ browser, request }, testInfo) => {
+test("열린 Resource 본문은 일반 화면과 Quick Editor 사이에서 즉시 동기화된다", async ({ browser, request }, testInfo) => {
   const mainContext = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
   const quickContext = await newAppContext(browser, testInfo, { width: 496, height: 900 });
   const mainPage = await mainContext.newPage();
   const quickPage = await quickContext.newPage();
   const firstTitle = "Synced from main Resource";
   const firstBody = "Main Resource body synced live";
-  const secondTitle = "Synced back from Quick Resource";
-  const secondBody = "Quick Resource body synced live";
+  const secondBody = "Quick Editor body synced live";
 
   try {
+    await quickPage.addInitScript(() => {
+      window.__quickMemoMessages = [];
+      window.addEventListener("sygma:quickMemo", (event) => window.__quickMemoMessages.push(event.detail));
+    });
     const mainEventStream = waitForStateEventStream(mainPage);
     const quickEventStream = waitForStateEventStream(quickPage);
-    await Promise.all([mainPage.goto("/"), quickPage.goto("/?surface=quick-resource"), mainEventStream, quickEventStream]);
+    await Promise.all([mainPage.goto("/"), quickPage.goto("/?surface=quick-editor"), mainEventStream, quickEventStream]);
+    await quickPage.evaluate(() => window.sygmaQuickEditor.loadLocal({
+      id: "fallback-local",
+      blocks: [{ id: "fallback-body", type: "paragraph", text: "Fallback local body", marks: [], indent: 0 }],
+    }));
     await mainPage.locator('[data-action="toggle-nav"]').click();
     await expect(mainPage.locator("[data-sidebar]")).toHaveClass(/is-open/);
     await mainPage.locator('[data-nav-key="resources"]').click();
     await expect(mainPage.locator("[data-resource-view]")).toBeVisible();
-    await expect(quickPage.locator("[data-resource-view]")).toBeVisible();
-
-    for (const page of [mainPage, quickPage]) {
-      await page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).evaluate((button) => button.click());
-      await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
-    }
+    await mainPage.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).evaluate((button) => button.click());
+    await expect(mainPage.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
+    await expect.poll(() => quickPage.evaluate((resourceId) => window.sygmaQuickEditor.openResource(resourceId), FIXTURE_IDS.resource)).toBe(true);
     const mainDocument = mainPage.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
-    const quickDocument = quickPage.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`);
     const mainTitle = mainDocument.locator("[data-resource-title]");
-    const quickTitle = quickDocument.locator("[data-resource-title]");
     const mainBody = mainDocument.locator("[data-block-content]").first();
-    const quickBody = quickDocument.locator("[data-block-content]").first();
+    const quickEditor = quickPage.locator(`.block-editor[data-owner-id="${FIXTURE_IDS.resource}"]`);
+    const quickBody = quickEditor.locator("[data-block-content]").first();
+    const quickFocusedBody = quickEditor.locator('[data-block-content][contenteditable="true"]').last();
+    await expect(quickEditor).toBeVisible();
+    await expect(quickFocusedBody).toBeFocused();
+    expect(await quickFocusedBody.evaluate((element) => {
+      const selection = getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      return Boolean(range?.collapsed
+        && element.contains(range.startContainer)
+        && range.startOffset === (range.startContainer.textContent || "").length);
+    })).toBe(true);
+    await quickEditor.evaluate((element) => { window.__quickEditorIdentity = element; });
+    await quickBody.evaluate((element) => {
+      element.focus();
+      const range = document.createRange();
+      range.setStart(element.firstChild || element, Math.min(3, element.textContent.length));
+      range.collapse(true);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    for (const selector of ["[data-resource-view]", ".resource-window", ".resource-document", "[data-resource-title]", "[data-resource-relations]"]) {
+      await expect(quickPage.locator(selector)).toHaveCount(0);
+    }
 
     await mainTitle.fill(firstTitle);
     await mainBody.fill(firstBody);
@@ -89,19 +115,64 @@ test("열린 Resource는 일반 화면과 Quick Resource 패널 사이에서 즉
       const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
       return [resource?.title, resource?.blocks?.[0]?.text];
     }).toEqual([firstTitle, firstBody]);
-    await expect(quickTitle).toHaveValue(firstTitle);
     await expect(quickBody).toHaveText(firstBody);
+    expect(await quickEditor.evaluate((element) => element === window.__quickEditorIdentity)).toBe(true);
+    await expect(quickBody).toBeFocused();
+    expect(await quickBody.evaluate((element) => {
+      const selection = getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      return range && element.contains(range.startContainer) ? range.startOffset : -1;
+    })).toBe(3);
     expect(await mainPage.evaluate(() => document.visibilityState)).toBe("visible");
     expect(await quickPage.evaluate(() => document.visibilityState)).toBe("visible");
 
-    await quickTitle.fill(secondTitle);
+    await quickBody.evaluate((element) => {
+      element.focus();
+      element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "한" }));
+      element.textContent = "한글 조합 중";
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const editor = element.closest(".block-editor");
+      const resource = itemById("resources", editor.dataset.ownerId);
+      resource.blocks.find((block) => block.id === element.dataset.blockContent).text = "원격 교체 내용";
+      rerenderAfterStateReplace();
+    });
+    await expect(quickBody).toHaveText("한글 조합 중");
+    await expect(quickBody).toBeFocused();
+    expect(await quickEditor.evaluate((element) => element === window.__quickEditorIdentity)).toBe(true);
+    await quickBody.dispatchEvent("compositionend", { data: "중" });
+    await expect(quickBody).toHaveText("한글 조합 중");
+
     await quickBody.fill(secondBody);
     await expect.poll(async () => {
       const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
       return [resource?.title, resource?.blocks?.[0]?.text];
-    }).toEqual([secondTitle, secondBody]);
-    await expect(mainTitle).toHaveValue(secondTitle);
+    }).toEqual([firstTitle, secondBody]);
+    await expect(mainTitle).toHaveValue(firstTitle);
     await expect(mainBody).toHaveText(secondBody);
+
+    const beforeTrash = await fixtureSnapshot(request);
+    const trashedResource = structuredClone(beforeTrash.state.resources.find((resource) => resource.id === FIXTURE_IDS.resource));
+    trashedResource.trashedAt = new Date().toISOString();
+    trashedResource.updatedAt = trashedResource.trashedAt;
+    trashedResource.revision = Number(trashedResource.revision || 0) + 1;
+    const trashResponse = await request.put(`/api/resources/${encodeURIComponent(trashedResource.id)}`, {
+      headers: { "If-Match": `"state-${beforeTrash.serverRevision}"` },
+      data: { resource: trashedResource, baseRevision: beforeTrash.serverRevision },
+    });
+    expect(trashResponse.ok()).toBeTruthy();
+    await expect(quickPage.locator('.block-editor[data-owner-id="quick-note:fallback-local"]')).toBeVisible();
+    await expect(quickPage.locator('[data-block-content="fallback-body"]')).toHaveText("Fallback local body");
+    await expect.poll(() => quickPage.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localSelected").at(-1))).toMatchObject({
+      type: "localSelected",
+      id: "fallback-local",
+      title: "Fallback local body",
+      characterCount: "Fallback local body".length,
+    });
   } finally {
     await Promise.all([mainContext.close(), quickContext.close()]);
   }

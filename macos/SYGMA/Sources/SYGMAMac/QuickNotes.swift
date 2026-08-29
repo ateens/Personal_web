@@ -214,7 +214,6 @@ final class QuickNoteShortcutSettings: ObservableObject {
     private static let defaultsKey = "SYGMAQuickNotesShortcutsV2"
     private static let legacyDefaultsKey = "SYGMAQuickNotesShortcutsV1"
     private static let legacyHideShortcut = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
-    private static let activeActions: Set<QuickNoteShortcutAction> = [.togglePanel, .captureInbox, .hidePanel]
     @Published private(set) var shortcuts: [QuickNoteShortcutAction: QuickNoteShortcut]
     @Published var capturingAction: QuickNoteShortcutAction?
     @Published private(set) var message = ""
@@ -230,17 +229,16 @@ final class QuickNoteShortcutSettings: ObservableObject {
             let previous = Dictionary(uniqueKeysWithValues: previousActions.compactMap { action in
                 stored[action.rawValue].map { (action, $0) }
             })
-            let activePrevious = previous.filter { Self.activeActions.contains($0.key) }
             var loaded = previous.count == previousActions.count
-                && Set(activePrevious.values).count == activePrevious.count
+                && Set(previous.values).count == previous.count
                 && previous.values.allSatisfy(\.isSafe)
                 ? Self.defaultShortcuts.merging(previous) { _, saved in saved }
                 : Self.defaultShortcuts
             if let saved = stored[QuickNoteShortcutAction.captureInbox.rawValue],
                saved.isSafe,
-               !loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == saved }) {
+               !loaded.contains(where: { $0.key != .captureInbox && $0.value == saved }) {
                 loaded[.captureInbox] = saved
-            } else if loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == loaded[.captureInbox] }) {
+            } else if loaded.contains(where: { $0.key != .captureInbox && $0.value == loaded[.captureInbox] }) {
                 let fallbackKeyCodes = [
                     kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F,
                     kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L,
@@ -249,14 +247,14 @@ final class QuickNoteShortcutSettings: ObservableObject {
                 if let available = fallbackKeyCodes.lazy.map({ keyCode in
                     QuickNoteShortcut(keyCode: UInt16(keyCode), modifiers: [.control, .option, .command], key: "Key")
                 }).first(where: { candidate in
-                    !loaded.contains(where: { $0.key != .captureInbox && Self.activeActions.contains($0.key) && $0.value == candidate })
+                    !loaded.contains(where: { $0.key != .captureInbox && $0.value == candidate })
                 }) {
                     loaded[.captureInbox] = available
                 }
             }
             if legacyData != nil,
                loaded[.hidePanel] == Self.legacyHideShortcut,
-               !loaded.contains(where: { $0.key != .hidePanel && Self.activeActions.contains($0.key) && $0.value == Self.defaultShortcuts[.hidePanel] }) {
+               !loaded.contains(where: { $0.key != .hidePanel && $0.value == Self.defaultShortcuts[.hidePanel] }) {
                 loaded[.hidePanel] = Self.defaultShortcuts[.hidePanel]
             }
             shortcuts = loaded
@@ -284,9 +282,7 @@ final class QuickNoteShortcutSettings: ObservableObject {
         if [.togglePanel, .captureInbox].contains(action), !shortcut.hasPrimaryModifier {
             return "전역 단축키에는 Command, Option 또는 Control이 필요합니다."
         }
-        return shortcuts.contains(where: {
-            $0.key != action && $0.value == shortcut && (!Self.activeActions.contains(action) || Self.activeActions.contains($0.key))
-        }) ? "이미 사용 중인 단축키입니다." : nil
+        return shortcuts.contains(where: { $0.key != action && $0.value == shortcut }) ? "이미 사용 중인 단축키입니다." : nil
     }
 
     func save(_ shortcut: QuickNoteShortcut, for action: QuickNoteShortcutAction) {
@@ -335,6 +331,10 @@ struct QuickNotesIndex: Codable, Equatable {
 
 @MainActor
 final class QuickNotesStore: ObservableObject {
+    static let maximumLocalImageBytes = 25 * 1024 * 1024
+    private static let localAssetPattern = try! NSRegularExpression(
+        pattern: #"assets/[0-9a-fA-F-]{36}\.png"#
+    )
     @Published private(set) var notes: [QuickNoteRecord] = []
     @Published private(set) var selectedID: UUID?
     @Published private(set) var contentRevision = 0
@@ -343,7 +343,9 @@ final class QuickNotesStore: ObservableObject {
 
     let rootURL: URL
     private var bodies: [UUID: String] = [:]
+    private var editorBlocks: [UUID: Data] = [:]
     private var dirtyBodyIDs = Set<UUID>()
+    private var dirtyEditorIDs = Set<UUID>()
     private var saveTimer: Timer?
 
     init(rootURL: URL = QuickNotesStore.defaultRootURL()) {
@@ -371,6 +373,14 @@ final class QuickNotesStore: ObservableObject {
         let body = (try? String(contentsOf: noteFileURL(id), encoding: .utf8)) ?? ""
         bodies[id] = body
         return body
+    }
+
+    func blocks(for id: UUID) -> Any? {
+        if let data = editorBlocks[id] { return try? JSONSerialization.jsonObject(with: data) }
+        guard let data = try? Data(contentsOf: editorFileURL(id)),
+              let value = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        editorBlocks[id] = data
+        return value
     }
 
     @discardableResult
@@ -421,11 +431,25 @@ final class QuickNotesStore: ObservableObject {
         scheduleSave()
     }
 
+    func updateBody(_ body: String, blocks: Any?, for id: UUID) {
+        updateBody(body, for: id)
+        guard let blocks,
+              JSONSerialization.isValidJSONObject(blocks),
+              let data = try? JSONSerialization.data(withJSONObject: blocks, options: [.sortedKeys]),
+              editorBlocks[id] != data,
+              notes.contains(where: { $0.id == id }) else { return }
+        editorBlocks[id] = data
+        dirtyEditorIDs.insert(id)
+        scheduleSave()
+    }
+
     func deleteSelected() {
         guard let selectedID, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
         notes.remove(at: index)
         bodies.removeValue(forKey: selectedID)
+        editorBlocks.removeValue(forKey: selectedID)
         dirtyBodyIDs.remove(selectedID)
+        dirtyEditorIDs.remove(selectedID)
         try? FileManager.default.removeItem(at: noteDirectoryURL(selectedID))
         if notes.isEmpty {
             createNote()
@@ -464,6 +488,42 @@ final class QuickNotesStore: ObservableObject {
         return NSImage(contentsOf: url)
     }
 
+    func localAssetDataURLs(for noteID: UUID) -> [String: String] {
+        guard notes.contains(where: { $0.id == noteID }) else { return [:] }
+        var source = body(for: noteID)
+        if let blocks = blocks(for: noteID),
+           JSONSerialization.isValidJSONObject(blocks),
+           let data = try? JSONSerialization.data(withJSONObject: blocks),
+           let json = String(data: data, encoding: .utf8) {
+            source += "\n\(json)"
+        }
+        let range = NSRange(source.startIndex..., in: source)
+        let paths = Set(Self.localAssetPattern.matches(in: source, range: range).compactMap { match in
+            Range(match.range, in: source).map { String(source[$0]) }
+        })
+        return Dictionary(uniqueKeysWithValues: paths.compactMap { path in
+            localAssetDataURL(noteID: noteID, relativePath: path).map { (path, $0) }
+        })
+    }
+
+    func saveLocalImage(dataURL: String, for noteID: UUID) -> (path: String, dataURL: String)? {
+        let supportedMIMEs = ["png", "jpeg", "gif", "webp"]
+        guard notes.contains(where: { $0.id == noteID }),
+              let mime = supportedMIMEs.first(where: { dataURL.hasPrefix("data:image/\($0);base64,") }) else { return nil }
+        let prefix = "data:image/\(mime);base64,"
+        let encoded = String(dataURL.dropFirst(prefix.count))
+        let maximumEncodedBytes = ((Self.maximumLocalImageBytes + 2) / 3) * 4
+        guard !encoded.isEmpty,
+              encoded.utf8.count <= maximumEncodedBytes,
+              let data = Data(base64Encoded: encoded),
+              data.count <= Self.maximumLocalImageBytes,
+              Self.isSupportedImage(data, mime: mime),
+              let image = NSImage(data: data),
+              let attachment = saveImage(image, for: noteID),
+              let savedDataURL = localAssetDataURL(noteID: noteID, relativePath: attachment.relativePath) else { return nil }
+        return (attachment.relativePath, savedDataURL)
+    }
+
     func assetURL(noteID: UUID, relativePath: String) -> URL? {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2,
@@ -471,6 +531,34 @@ final class QuickNotesStore: ObservableObject {
               parts[1].hasSuffix(".png"),
               UUID(uuidString: String(parts[1].dropLast(4))) != nil else { return nil }
         return noteDirectoryURL(noteID).appendingPathComponent(relativePath)
+    }
+
+    private func localAssetDataURL(noteID: UUID, relativePath: String) -> String? {
+        guard let url = assetURL(noteID: noteID, relativePath: relativePath),
+              let data = try? Data(contentsOf: url),
+              Self.isPNG(data) else { return nil }
+        return "data:image/png;base64,\(data.base64EncodedString())"
+    }
+
+    private nonisolated static func isPNG(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    }
+
+    private nonisolated static func isSupportedImage(_ data: Data, mime: String) -> Bool {
+        switch mime {
+        case "png":
+            return isPNG(data)
+        case "jpeg":
+            return data.starts(with: [0xFF, 0xD8, 0xFF])
+        case "gif":
+            return data.starts(with: Array("GIF87a".utf8)) || data.starts(with: Array("GIF89a".utf8))
+        case "webp":
+            return data.count >= 12
+                && data.starts(with: Array("RIFF".utf8))
+                && data.dropFirst(8).starts(with: Array("WEBP".utf8))
+        default:
+            return false
+        }
     }
 
     func flush() {
@@ -483,12 +571,19 @@ final class QuickNotesStore: ObservableObject {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try (bodies[id] ?? "").write(to: url, atomically: true, encoding: .utf8)
             }
+            for id in dirtyEditorIDs {
+                guard let data = editorBlocks[id] else { continue }
+                let url = editorFileURL(id)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: url, options: .atomic)
+            }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(QuickNotesIndex(selectedID: selectedID, notes: notes))
             try data.write(to: indexURL, options: .atomic)
             dirtyBodyIDs.removeAll()
+            dirtyEditorIDs.removeAll()
             saveError = ""
         } catch {
             saveError = error.localizedDescription
@@ -499,6 +594,7 @@ final class QuickNotesStore: ObservableObject {
     private var notesDirectoryURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     private func noteDirectoryURL(_ id: UUID) -> URL { notesDirectoryURL.appendingPathComponent(id.uuidString.lowercased(), isDirectory: true) }
     private func noteFileURL(_ id: UUID) -> URL { noteDirectoryURL(id).appendingPathComponent("note.md") }
+    private func editorFileURL(_ id: UUID) -> URL { noteDirectoryURL(id).appendingPathComponent("editor.json") }
 
     private func load() {
         do {
@@ -551,6 +647,197 @@ final class QuickNotesStore: ObservableObject {
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flush() }
+        }
+    }
+}
+
+@MainActor
+final class QuickMemoEditorSession: ObservableObject {
+    @Published private(set) var resourceID: String?
+    @Published private(set) var resourceTitle = ""
+    @Published private(set) var characterCount = 0
+
+    private let store: QuickNotesStore
+    private let coordinator: SYGMAWebCoordinator
+    private weak var webView: WKWebView?
+    private var ready = false
+    private var pendingLocal: (id: UUID, revision: Int, payload: [String: Any])?
+    private var loadedLocalID: UUID?
+    private var loadedRevision = -1
+    private var loadGeneration = 0
+    private var readOnly = false
+    private var theme = "dark"
+    private var pendingPicker = false
+
+    init(store: QuickNotesStore) {
+        let coordinator = SYGMAWebCoordinator()
+        self.store = store
+        self.coordinator = coordinator
+        coordinator.quickMemoMessageHandler = { [weak self] message in self?.handleBridgeMessage(message) }
+    }
+
+    var isResourceOpen: Bool { resourceID != nil }
+
+    func makeWebView() -> WKWebView {
+        let webView = coordinator.makeCompanionWebView(url: SYGMAWebRuntime.quickEditorURL)
+        self.webView = webView
+        ready = false
+        loadedRevision = -1
+        return webView
+    }
+
+    func detach(_ webView: WKWebView) {
+        guard self.webView === webView else { return }
+        coordinator.tearDown(webView)
+        self.webView = nil
+        ready = false
+    }
+
+    func loadLocal(_ id: UUID, revision: Int) {
+        if loadedLocalID == id, loadedRevision == revision { return }
+        var payload: [String: Any] = [
+            "id": id.uuidString.lowercased(),
+            "markdown": store.body(for: id),
+        ]
+        if let blocks = store.blocks(for: id) { payload["blocks"] = blocks }
+        let assets = store.localAssetDataURLs(for: id)
+        if !assets.isEmpty { payload["assets"] = assets }
+        pendingLocal = (id, revision, payload)
+        resourceID = nil
+        resourceTitle = ""
+        characterCount = store.body(for: id).count
+        sendPendingLocal()
+    }
+
+    func openResourcePicker() {
+        guard ready else {
+            pendingPicker = true
+            return
+        }
+        call("return window.sygmaQuickEditor?.openResourcePicker?.() ?? false;")
+    }
+
+    func returnToLocal() {
+        guard isResourceOpen else { return }
+        resourceID = nil
+        resourceTitle = ""
+        characterCount = store.selectedBody.count
+        call("return window.sygmaQuickEditor?.openLocal?.() ?? false;")
+    }
+
+    func setReadOnly(_ value: Bool) {
+        guard readOnly != value else { return }
+        readOnly = value
+        call("return window.sygmaQuickEditor?.setReadOnly?.(readOnly) ?? false;", arguments: ["readOnly": value])
+    }
+
+    func setTheme(_ value: String) {
+        guard ["dark", "light"].contains(value) else { return }
+        theme = value
+        call("document.documentElement.dataset.quickTheme = theme; return true;", arguments: ["theme": value])
+    }
+
+    func refreshRemoteState() {
+        call("if (typeof refreshRemoteStateIfNewer === 'function') await refreshRemoteStateIfNewer(); return true;")
+    }
+
+    func flushPendingChanges() async -> Bool {
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else {
+            store.flush()
+            return true
+        }
+        let saved = await SYGMAWebRuntime.flushPendingChanges(in: webView)
+        store.flush()
+        return saved
+    }
+
+    func handleBridgeMessage(_ message: [String: Any]) {
+        switch message["type"] as? String {
+        case "ready":
+            ready = true
+            setTheme(theme)
+            call("return window.sygmaQuickEditor?.setReadOnly?.(readOnly) ?? false;", arguments: ["readOnly": readOnly])
+            if let resourceID {
+                call("return window.sygmaQuickEditor?.openResource?.(resourceID) ?? false;", arguments: ["resourceID": resourceID])
+            } else if pendingLocal == nil, let selectedID = store.selectedID {
+                loadedRevision = -1
+                loadLocal(selectedID, revision: store.contentRevision)
+            } else {
+                sendPendingLocal()
+            }
+            if pendingPicker, pendingLocal == nil {
+                pendingPicker = false
+                openResourcePicker()
+            }
+        case "localChange":
+            guard let idValue = message["id"] as? String,
+                  let id = UUID(uuidString: idValue),
+                  let markdown = message["markdown"] as? String else { return }
+            store.updateBody(markdown, blocks: message["blocks"], for: id)
+            loadedLocalID = id
+            loadedRevision = store.contentRevision
+            if id == store.selectedID, !isResourceOpen {
+                characterCount = (message["characterCount"] as? NSNumber)?.intValue ?? markdown.count
+            }
+        case "resourceSelected", "resourceChange":
+            guard let id = message["id"] as? String else { return }
+            store.isPreviewing = false
+            resourceID = id
+            resourceTitle = message["title"] as? String ?? "자료"
+            characterCount = (message["characterCount"] as? NSNumber)?.intValue ?? 0
+        case "localSelected":
+            resourceID = nil
+            resourceTitle = ""
+            characterCount = (message["characterCount"] as? NSNumber)?.intValue ?? store.selectedBody.count
+        case "saveLocalImage":
+            saveLocalImage(message)
+        default:
+            break
+        }
+    }
+
+    private func saveLocalImage(_ message: [String: Any]) {
+        guard let requestID = message["requestId"] as? String,
+              !requestID.isEmpty, requestID.utf8.count <= 128 else { return }
+        guard let idValue = message["id"] as? String,
+              let id = UUID(uuidString: idValue),
+              id == loadedLocalID,
+              let dataURL = message["dataURL"] as? String,
+              let saved = store.saveLocalImage(dataURL: dataURL, for: id) else {
+            resolveLocalImage(requestID: requestID, result: ["error": "invalid-image"])
+            return
+        }
+        resolveLocalImage(requestID: requestID, result: ["path": saved.path, "dataURL": saved.dataURL])
+    }
+
+    private func resolveLocalImage(requestID: String, result: [String: Any]) {
+        call(
+            "return window.sygmaQuickEditor?.resolveLocalImage?.(requestId, result) ?? false;",
+            arguments: ["requestId": requestID, "result": result]
+        )
+    }
+
+    private func sendPendingLocal() {
+        guard ready, let pendingLocal else { return }
+        self.pendingLocal = nil
+        loadedLocalID = pendingLocal.id
+        loadedRevision = pendingLocal.revision
+        loadGeneration += 1
+        let generation = loadGeneration
+        let openPicker = pendingPicker
+        pendingPicker = false
+        call(
+            "const loader = window.sygmaQuickEditor?.loadLocal; const loaded = typeof loader === 'function' ? await loader(payload) : false; if (openPicker) window.sygmaQuickEditor?.openResourcePicker?.(); return loaded;",
+            arguments: ["payload": pendingLocal.payload, "openPicker": openPicker],
+            generation: generation
+        )
+    }
+
+    private func call(_ script: String, arguments: [String: Any] = [:], generation: Int? = nil) {
+        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else { return }
+        Task { @MainActor [weak self, weak webView] in
+            guard let self, let webView, generation == nil || generation == self.loadGeneration else { return }
+            _ = try? await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
         }
     }
 }
@@ -1116,6 +1403,37 @@ private struct QuickNoteEditor: NSViewRepresentable {
     }
 }
 
+private struct QuickMemoEditorView: NSViewRepresentable {
+    @ObservedObject var store: QuickNotesStore
+    @ObservedObject var session: QuickMemoEditorSession
+    let noteID: UUID
+
+    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let webView = session.makeWebView()
+        webView.setValue(false, forKey: "drawsBackground")
+        session.loadLocal(noteID, revision: store.contentRevision)
+        session.setReadOnly(store.isPreviewing)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        session.loadLocal(noteID, revision: store.contentRevision)
+        session.setReadOnly(store.isPreviewing)
+    }
+
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.session.detach(webView)
+    }
+
+    @MainActor
+    final class Coordinator {
+        let session: QuickMemoEditorSession
+        init(session: QuickMemoEditorSession) { self.session = session }
+    }
+}
+
 private struct QuickNotePreview: View {
     @ObservedObject var store: QuickNotesStore
     let noteID: UUID
@@ -1151,17 +1469,32 @@ private struct QuickNotePreview: View {
 
 private struct QuickNotesSettingsView: View {
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @Binding var transparency: Double
+    @State private var screenCaptureAllowed = CGPreflightScreenCaptureAccess()
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if transparency >= 0.45, !screenCaptureAllowed {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button("배경 자동 대비 허용") {
+                            screenCaptureAllowed = CGRequestScreenCaptureAccess()
+                        }
+                        .buttonStyle(.bordered)
+                        Text("시스템 모드에서 배경에 맞춰 글자색을 바꿀 때 필요합니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if !shortcuts.message.isEmpty {
                     Text(shortcuts.message)
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
 
-                shortcutSection([.togglePanel, .captureInbox, .hidePanel], title: "단축키")
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.prefix(7)), title: "단축키")
+                shortcutSection(Array(QuickNoteShortcutAction.allCases.dropFirst(7)), title: "노트 바로 이동")
             }
             .padding(18)
         }
@@ -1193,15 +1526,17 @@ private struct QuickNotesSettingsView: View {
 
 struct SYGMASettingsView: View {
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
 
     var body: some View {
-        QuickNotesSettingsView(shortcuts: shortcuts)
+        QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
     }
 }
 
 private struct QuickNotesView: View {
     @ObservedObject var store: QuickNotesStore
     @ObservedObject var shortcuts: QuickNoteShortcutSettings
+    @ObservedObject var session: QuickMemoEditorSession
     @AppStorage(quickNotesTransparencyKey) private var transparency = 0.70
     @AppStorage(quickNotesThemeKey) private var themeRawValue = QuickNotesColorMode.dark.rawValue
     @State private var showingSettings = false
@@ -1215,10 +1550,10 @@ private struct QuickNotesView: View {
             header
             hairline
             if let noteID = store.selectedID {
-                if store.isPreviewing {
+                if store.isPreviewing, !session.isResourceOpen {
                     QuickNotePreview(store: store, noteID: noteID)
                 } else {
-                    QuickNoteEditor(store: store, noteID: noteID)
+                    QuickMemoEditorView(store: store, session: session, noteID: noteID)
                 }
             }
             hairline
@@ -1242,7 +1577,7 @@ private struct QuickNotesView: View {
 
     private var header: some View {
         ZStack {
-            Text(store.selectedNote.map(displayTitle) ?? "새 노트")
+            Text(session.isResourceOpen ? session.resourceTitle : (store.selectedNote.map(displayTitle) ?? "새 노트"))
                 .font(.system(size: 14, weight: .semibold))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1259,7 +1594,17 @@ private struct QuickNotesView: View {
                             Button("\(index + 1). \(displayTitle(note))") { store.select(note.id) }
                         }
                         Divider()
-                        Button("현재 노트 삭제", role: .destructive) { store.deleteSelected() }
+                        Button("Resource 열기…") {
+                            store.isPreviewing = false
+                            session.openResourcePicker()
+                        }
+                        if session.isResourceOpen {
+                            Button("Quick Memo로 돌아가기") { session.returnToLocal() }
+                        }
+                        Divider()
+                        if !session.isResourceOpen {
+                            Button("현재 노트 삭제", role: .destructive) { store.deleteSelected() }
+                        }
                     } label: {
                         Image(systemName: "rectangle.stack")
                     }
@@ -1286,7 +1631,7 @@ private struct QuickNotesView: View {
                         .buttonStyle(.plain)
                         .help("Quick Notes 설정")
                         .popover(isPresented: $showingSettings, arrowEdge: .top) {
-                            QuickNotesSettingsView(shortcuts: shortcuts)
+                            QuickNotesSettingsView(shortcuts: shortcuts, transparency: $transparency)
                         }
                     }
                 .padding(.trailing, 14)
@@ -1297,7 +1642,7 @@ private struct QuickNotesView: View {
 
     private var footer: some View {
         ZStack {
-            Text("\(store.selectedBody.count) characters")
+            Text("\(session.isResourceOpen ? session.characterCount : store.selectedBody.count) characters")
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
             HStack {
@@ -1317,6 +1662,7 @@ private struct QuickNotesView: View {
                     Text("T").font(.system(size: 15, weight: store.isPreviewing ? .bold : .regular, design: .serif))
                 }
                 .buttonStyle(.plain)
+                .disabled(session.isResourceOpen)
                 .foregroundStyle(store.isPreviewing ? Color.blue : Color.secondary)
                 .help("Markdown \(store.isPreviewing ? "편집" : "미리보기") · \(shortcuts.shortcut(for: .togglePreview).display)")
             }
@@ -1456,9 +1802,8 @@ private final class GlobalHotKeys {
 final class QuickNotesController: NSObject, NSWindowDelegate {
     private let store: QuickNotesStore
     private let shortcuts: QuickNoteShortcutSettings
-    private let webCoordinator = SYGMAWebCoordinator()
+    private let session: QuickMemoEditorSession
     private var panel: NSPanel?
-    private weak var webView: WKWebView?
     private var hotKeys: GlobalHotKeys?
     private var inboxHotKeys: GlobalHotKeys?
     private var localKeyMonitor: Any?
@@ -1473,8 +1818,10 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
     var shortcutSettings: QuickNoteShortcutSettings { shortcuts }
 
     override init() {
-        store = QuickNotesStore()
+        let store = QuickNotesStore()
+        self.store = store
         shortcuts = QuickNoteShortcutSettings()
+        session = QuickMemoEditorSession(store: store)
         super.init()
         themeObserver = NotificationCenter.default.addObserver(
             forName: quickNotesThemeChanged,
@@ -1519,16 +1866,16 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             if self.isSuppressedGlobalDuplicate(event) { return nil }
             guard self.shortcuts.capturingAction != nil || self.panel?.isKeyWindow == true else { return event }
             if self.handle(event) { return nil }
-            return event
+            let modifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
+            return modifiers == .command
+                && (event.keyCode == UInt16(kVK_ANSI_W) || event.charactersIgnoringModifiers?.lowercased() == "w") ? nil : event
         }
     }
 
     func flush() { store.flush() }
 
     func flushPendingChanges() async -> Bool {
-        store.flush()
-        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else { return true }
-        return await SYGMAWebRuntime.flushPendingChanges(in: webView)
+        await session.flushPendingChanges()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1566,14 +1913,14 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         trackingView.onTitlebarHover = { [weak panel] hovering in
             panel?.setQuickNotesTrafficLightsVisible(hovering)
         }
-        let webView = webCoordinator.makeCompanionWebView(url: SYGMAWebRuntime.quickResourceURL)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        trackingView.addSubview(webView)
+        let hostingView = NSHostingView(rootView: QuickNotesView(store: store, shortcuts: shortcuts, session: session))
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        trackingView.addSubview(hostingView)
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: trackingView.topAnchor),
-            webView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: trackingView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trackingView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: trackingView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: trackingView.bottomAnchor),
         ])
         panel.contentView = trackingView
         panel.delegate = self
@@ -1584,7 +1931,6 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             frame.origin.y = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
             panel.setFrame(frame, display: false)
         }
-        self.webView = webView
         self.panel = panel
         return panel
     }
@@ -1600,29 +1946,16 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         panel.orderFrontRegardless()
         panel.makeKeyAndOrderFront(nil)
         startContrastUpdates()
-        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else { return }
-        Task { @MainActor [weak webView] in
-            guard let webView else { return }
-            _ = try? await webView.callAsyncJavaScript(
-                "if (typeof refreshRemoteStateIfNewer === 'function') await refreshRemoteStateIfNewer(); return true;",
-                arguments: [:],
-                in: nil,
-                contentWorld: .page
-            )
-        }
+        session.refreshRemoteState()
     }
 
     private func requestHide() {
         guard !hideInFlight else { return }
-        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else {
-            hideNow()
-            return
-        }
         hideInFlight = true
-        Task { @MainActor [weak self, weak webView] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.hideInFlight = false }
-            guard let webView, await SYGMAWebRuntime.flushPendingChanges(in: webView) else {
+            guard await self.session.flushPendingChanges() else {
                 NSSound.beep()
                 return
             }
@@ -1639,21 +1972,19 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
 
     private func closeResourceOrHide() {
         guard !resourceCloseInFlight else { return }
-        guard let webView, SYGMAWebRuntime.isInternal(webView.url) else {
+        guard session.isResourceOpen else {
             requestHide()
             return
         }
         resourceCloseInFlight = true
-        Task { @MainActor [weak self, weak webView] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.resourceCloseInFlight = false }
-            guard let webView else { return }
-            do {
-                if try await SYGMAWebRuntime.closeActiveResourceWindow(in: webView) { return }
-                self.requestHide()
-            } catch {
+            guard await self.session.flushPendingChanges() else {
                 NSSound.beep()
+                return
             }
+            self.session.returnToLocal()
         }
     }
 
@@ -1681,6 +2012,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             panel.appearance = nil
         }
         panel.contentView?.needsDisplay = true
+        syncEditorTheme(with: panel)
     }
 
     private func refreshContrast() {
@@ -1691,6 +2023,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             : defaults.double(forKey: quickNotesTransparencyKey)
         guard transparency >= 0.45, CGPreflightScreenCaptureAccess() else {
             panel.appearance = nil
+            syncEditorTheme(with: panel)
             return
         }
         let windowID = CGWindowID(panel.windowNumber)
@@ -1704,6 +2037,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
                 [.bestResolution]
               ) else {
             panel.appearance = nil
+            syncEditorTheme(with: panel)
             return
         }
         let bitmap = NSBitmapImageRep(cgImage: image)
@@ -1718,6 +2052,7 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
         }
         guard count > 0 else {
             panel.appearance = nil
+            syncEditorTheme(with: panel)
             return
         }
         let appearanceName: NSAppearance.Name = Self.prefersLightText(luminance: luminance / count) ? .darkAqua : .aqua
@@ -1726,6 +2061,12 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             panel.contentView?.needsDisplay = true
             NSLog("SYGMA Quick Notes contrast %@ (luminance %.2f).", appearanceName.rawValue, luminance / count)
         }
+        syncEditorTheme(with: panel)
+    }
+
+    private func syncEditorTheme(with panel: NSPanel) {
+        let dark = panel.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        session.setTheme(dark ? "dark" : "light")
     }
 
     static func prefersLightText(luminance: CGFloat) -> Bool { luminance < 0.52 }
@@ -1760,14 +2101,21 @@ final class QuickNotesController: NSObject, NSWindowDelegate {
             return true
         }
 
-        let modifiers = event.modifierFlags.intersection([.control, .option, .shift, .command])
-        if modifiers == .command,
-           event.keyCode == UInt16(kVK_ANSI_W) || event.charactersIgnoringModifiers?.lowercased() == "w" {
-            if !event.isARepeat { closeResourceOrHide() }
-            return true
+        guard let action = QuickNoteShortcutAction.allCases.first(where: {
+            ![.togglePanel, .captureInbox].contains($0) && shortcuts.shortcut(for: $0).matches(event)
+        }) else { return false }
+        if event.isARepeat { return true }
+        if session.isResourceOpen, action == .togglePreview { return true }
+        switch action {
+        case .togglePanel, .captureInbox: break
+        case .newNote: store.createNote()
+        case .previousNote: store.select(offset: -1)
+        case .nextNote: store.select(offset: 1)
+        case .togglePreview: store.togglePreview()
+        case .hidePanel: closeResourceOrHide()
+        case .note1, .note2, .note3, .note4, .note5, .note6, .note7, .note8, .note9:
+            store.select(number: action.noteNumber!)
         }
-        guard shortcuts.shortcut(for: .hidePanel).matches(event) else { return false }
-        if !event.isARepeat { requestHide() }
         return true
     }
 }

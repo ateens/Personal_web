@@ -77,10 +77,10 @@ private final class SYGMAMacDelegate: NSObject, NSApplicationDelegate {
         terminationInFlight = true
         Task { @MainActor in
             let mainSaved = await SYGMAWorkspaceBridge.flushPendingChanges()
-            let quickResourceSaved = await quickNotes.flushPendingChanges()
+            let quickMemoSaved = await quickNotes.flushPendingChanges()
             terminationInFlight = false
-            sender.reply(toApplicationShouldTerminate: mainSaved && quickResourceSaved)
-            if !mainSaved || !quickResourceSaved { NSSound.beep() }
+            sender.reply(toApplicationShouldTerminate: mainSaved && quickMemoSaved)
+            if !mainSaved || !quickMemoSaved { NSSound.beep() }
         }
         return .terminateLater
     }

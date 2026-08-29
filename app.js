@@ -2,7 +2,9 @@ const LEGACY_STORAGE_KEY = "sygma-personal-web-state-v2";
 const RESOURCE_WINDOW_SIZE_KEY = "sygma-resource-window-size-v1";
 const APP_STATE_VERSION = 4;
 const VIEW_HISTORY_STATE_KEY = "sygmaView";
-const QUICK_RESOURCE_SURFACE = new URLSearchParams(window.location.search).get("surface") === "quick-resource";
+const QUICK_EDITOR_SURFACE = new URLSearchParams(window.location.search).get("surface") === "quick-editor";
+const QUICK_EDITOR_LOCAL_ID_PREFIX = "quick-note:";
+const QUICK_EDITOR_IMAGE_TIMEOUT_MS = 15_000;
 const TASK_DONE_REORDER_GRACE_MS = 520;
 const EDITOR_TEXT_HISTORY_IDLE_MS = 720;
 const MAX_INLINE_COMMENT_BODY_LENGTH = 20_000;
@@ -585,6 +587,16 @@ const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
 const FINANCE_SESSION_RECHECK_MS = 5_000;
 const GOOGLE_OAUTH_MESSAGE_TYPE = "sygma:google-oauth";
 let state = loadState();
+const quickEditor = {
+  localResource: null,
+  localAssets: {},
+  localImageRequests: new Map(),
+  pendingRemoteResourceSync: false,
+  activeResourceId: "",
+  pickerOpen: false,
+  pickerQuery: "",
+  readOnly: false,
+};
 const collectionIndexCache = new Map();
 let habitInstanceIndexCache = null;
 let relationIndexCache = null;
@@ -743,13 +755,27 @@ let ui = {
   captureDrafts: {},
 };
 
+if (QUICK_EDITOR_SURFACE) {
+  window.sygmaQuickEditor = {
+    loadLocal: loadQuickEditorLocal,
+    openResource: openQuickEditorResource,
+    openResourcePicker,
+    openLocal: openQuickEditorLocal,
+    setReadOnly: setQuickEditorReadOnly,
+    resolveLocalImage: resolveQuickEditorLocalImage,
+    flush: notifyQuickEditorChange,
+  };
+}
+
 init();
 
 function init() {
   const googleRedirect = handleGoogleRedirectResult();
   prepareInitialRoute();
   app.innerHTML = renderShell();
-  app.classList.toggle("is-quick-resource-surface", QUICK_RESOURCE_SURFACE);
+  app.classList.toggle("is-quick-editor-surface", QUICK_EDITOR_SURFACE);
+  document.documentElement.classList.toggle("is-quick-editor-surface", QUICK_EDITOR_SURFACE);
+  document.body.classList.toggle("is-quick-editor-surface", QUICK_EDITOR_SURFACE);
   els = {
     skipLink: document.querySelector("[data-skip-link]"),
     navTrack: app.querySelector("#navTrack"),
@@ -757,14 +783,14 @@ function init() {
     navToggle: app.querySelector("[data-action='toggle-nav']"),
     navScrim: app.querySelector("[data-nav-scrim]"),
     topbar: app.querySelector("[data-capture-zone]"),
-    main: app.querySelector(".main"),
+    main: app.querySelector(".main, .quick-editor-main"),
     fab: app.querySelector(".fab"),
     viewRoot: app.querySelector("#viewRoot"),
     detailRoot: app.querySelector("#detailRoot"),
     overlayRoot: app.querySelector("#overlayRoot"),
     appAnnouncements: app.querySelector("#appAnnouncements"),
   };
-  setWorkspaceAuthorityMode("loading");
+  setWorkspaceAuthorityMode(QUICK_EDITOR_SURFACE ? "ready" : "loading");
 
   decorateButtons(app);
   app.addEventListener("click", handleClick);
@@ -915,6 +941,7 @@ function init() {
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
   initializeLocalResourcePersistence({ applySnapshot: false }).then(initializeDatabaseState).finally(() => {
     replaceViewHistoryState(ui.view, { replace: true });
+    if (QUICK_EDITOR_SURFACE) notifyQuickEditorReady();
     refreshGoogleBackendStatus({ silent: true, fetchEvents: googleRedirect.connected || ui.view === "calendar" });
   });
 }
@@ -955,6 +982,16 @@ function handleGoogleAuthMessage(event) {
 }
 
 function renderShell() {
+  if (QUICK_EDITOR_SURFACE) {
+    return `
+      <main class="quick-editor-main">
+        <section class="view-root" id="viewRoot" tabindex="-1"></section>
+        <div class="visually-hidden" id="appAnnouncements" role="status" aria-live="polite" aria-atomic="true"></div>
+      </main>
+      <div id="detailRoot" hidden></div>
+      <div id="overlayRoot"></div>
+    `;
+  }
   return `
     <div class="layout">
       <button class="nav-float-toggle" type="button" data-action="toggle-nav" aria-label="목차 열기" aria-expanded="${ui.navOpen ? "true" : "false"}">
@@ -1002,16 +1039,398 @@ function renderShell() {
   `;
 }
 
+function quickEditorLocalResourceId(value = "") {
+  const localId = String(value || "local").trim() || "local";
+  return `${QUICK_EDITOR_LOCAL_ID_PREFIX}${localId}`;
+}
+
+function quickEditorActiveResource() {
+  if (quickEditor.localResource?.id === quickEditor.activeResourceId) return quickEditor.localResource;
+  return itemById("resources", quickEditor.activeResourceId) || quickEditor.localResource;
+}
+
+function quickEditorLocalIsActive() {
+  return Boolean(QUICK_EDITOR_SURFACE && quickEditor.localResource?.id === quickEditor.activeResourceId);
+}
+
+function normalizeQuickEditorAssetPath(value = "") {
+  const path = String(value || "").trim();
+  return /^assets\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.png$/i.test(path) ? path : "";
+}
+
+function normalizeQuickEditorImageDataUrl(value = "") {
+  const dataUrl = String(value || "").trim();
+  return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/]+=*$/i.test(dataUrl) ? dataUrl : "";
+}
+
+function normalizeQuickEditorLocalAssets(assets) {
+  const normalized = {};
+  if (!isPlainObject(assets)) return normalized;
+  for (const [rawPath, rawDataUrl] of Object.entries(assets)) {
+    const path = normalizeQuickEditorAssetPath(rawPath);
+    const dataUrl = normalizeQuickEditorImageDataUrl(rawDataUrl);
+    if (path && dataUrl) normalized[path] = dataUrl;
+  }
+  return normalized;
+}
+
+function normalizeQuickEditorLocalBlocks(blocksList, markdown = "") {
+  const fromMarkdown = !Array.isArray(blocksList);
+  const parsed = fromMarkdown ? plainTextToClipboardBlocks(String(markdown || "")) : cloneEditorBlocks(blocksList);
+  const seen = new Set();
+  for (const block of parsed) {
+    if (!isPlainObject(block)) continue;
+    if (fromMarkdown && block.type === "paragraph") {
+      const image = String(block.text || "").match(/^!\[([^\]\n]*)\]\((assets\/[^)\s]+)\)$/i);
+      const localAssetPath = normalizeQuickEditorAssetPath(image?.[2]);
+      if (localAssetPath) Object.assign(block, { type: IMAGE_BLOCK_TYPE, text: image[1], alt: image[1], url: localAssetPath, localAssetPath, marks: [] });
+    } else if (block.type === IMAGE_BLOCK_TYPE) {
+      const localAssetPath = normalizeQuickEditorAssetPath(block.localAssetPath || block.url);
+      if (localAssetPath) Object.assign(block, { url: localAssetPath, localAssetPath });
+    }
+    const blockId = String(block.id || "").trim();
+    block.id = blockId && !seen.has(blockId) ? blockId : id();
+    seen.add(block.id);
+  }
+  return parsed.filter(isPlainObject);
+}
+
+function loadQuickEditorLocal(payload = {}) {
+  if (!QUICK_EDITOR_SURFACE || !isPlainObject(payload)) return false;
+  const now = new Date().toISOString();
+  const nativeId = String(payload.id || "local").trim() || "local";
+  quickEditor.localAssets = normalizeQuickEditorLocalAssets(payload.assets);
+  const resource = {
+    id: quickEditorLocalResourceId(nativeId),
+    quickEditorNativeId: nativeId,
+    title: String(payload.title || ""),
+    type: "note",
+    importance: "normal",
+    pinned: false,
+    readLater: false,
+    url: "",
+    boxId: "",
+    projectId: "",
+    createdAt: now,
+    updatedAt: now,
+    revision: 1,
+    timestampSource: "quick-memo",
+    blocks: normalizeQuickEditorLocalBlocks(payload.blocks, payload.markdown),
+    commentThreads: [],
+    pageSettings: {},
+    trashedAt: "",
+    readOnly: false,
+    locked: false,
+  };
+  ensureEditableBlocks(resource, { save: false });
+  flushPendingEditorTextHistory();
+  clearResourceWindowEditingState();
+  quickEditor.localResource = resource;
+  quickEditor.activeResourceId = resource.id;
+  quickEditor.pickerOpen = false;
+  quickEditor.pickerQuery = "";
+  renderView({ soft: true });
+  renderOverlays();
+  focusQuickEditorBodyEnd();
+  return true;
+}
+
+function focusQuickEditorBodyEnd() {
+  requestAnimationFrame(() => {
+    const editable = [...document.querySelectorAll('.quick-editor-surface [data-block-content][contenteditable="true"]')].at(-1);
+    if (editable) focusBlockContentAfterRender(editable.dataset.blockContent, { position: "end" });
+  });
+}
+
+function openQuickEditorResource(resourceId) {
+  if (!QUICK_EDITOR_SURFACE) return false;
+  const resource = itemById("resources", String(resourceId || ""));
+  if (!resource || resource.trashedAt) return false;
+  flushPendingEditorTextHistory();
+  clearResourceWindowEditingState();
+  quickEditor.activeResourceId = resource.id;
+  quickEditor.pickerOpen = false;
+  quickEditor.pickerQuery = "";
+  ensureEditableBlocks(resource, { save: false });
+  renderView({ soft: true });
+  renderOverlays();
+  notifyQuickEditorResource("resourceSelected", resource);
+  focusQuickEditorBodyEnd();
+  return true;
+}
+
+function openQuickEditorLocal() {
+  if (!QUICK_EDITOR_SURFACE || !quickEditor.localResource) return false;
+  flushPendingEditorTextHistory();
+  clearResourceWindowEditingState();
+  quickEditor.activeResourceId = quickEditor.localResource.id;
+  quickEditor.pickerOpen = false;
+  quickEditor.pickerQuery = "";
+  renderView({ soft: true });
+  renderOverlays();
+  notifyQuickEditorLocalSelected();
+  focusQuickEditorBodyEnd();
+  return true;
+}
+
+function openResourcePicker() {
+  if (!QUICK_EDITOR_SURFACE) return false;
+  quickEditor.pickerOpen = true;
+  quickEditor.pickerQuery = "";
+  renderOverlays();
+  requestAnimationFrame(() => document.querySelector("[data-quick-editor-query]")?.focus({ preventScroll: true }));
+  return true;
+}
+
+function closeQuickEditorResourcePicker() {
+  if (!quickEditor.pickerOpen) return false;
+  quickEditor.pickerOpen = false;
+  quickEditor.pickerQuery = "";
+  renderOverlays();
+  return true;
+}
+
+function setQuickEditorReadOnly(value) {
+  if (!QUICK_EDITOR_SURFACE) return false;
+  quickEditor.readOnly = value === true;
+  renderView({ soft: true });
+  renderOverlays();
+  return true;
+}
+
+function quickEditorResourceEntries() {
+  return (state.resources || [])
+    .filter((resource) => resource && !resource.trashedAt)
+    .map((resource) => ({ id: resource.id, title: String(resource.title || "제목 없는 Resource") }));
+}
+
+function quickEditorFilteredResourceEntries() {
+  const query = normalizeBlockMenuSearch(quickEditor.pickerQuery);
+  return quickEditorResourceEntries().filter((resource) => !query || normalizeBlockMenuSearch(resource.title).includes(query));
+}
+
+function renderQuickEditorPicker() {
+  if (!QUICK_EDITOR_SURFACE || !quickEditor.pickerOpen) return "";
+  const entries = quickEditorFilteredResourceEntries();
+  return `
+    <section class="quick-editor-picker-backdrop" data-quick-editor-picker-close>
+      <div class="quick-editor-picker" role="dialog" aria-modal="true" aria-label="Resource 선택" data-quick-editor-picker>
+        <input data-quick-editor-query value="${esc(quickEditor.pickerQuery)}" placeholder="Resource 검색" autocomplete="off" spellcheck="false" aria-label="Resource 검색">
+        <div class="quick-editor-picker-results" data-quick-editor-results role="listbox">
+          ${renderQuickEditorPickerResults(entries)}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderQuickEditorPickerResults(entries = quickEditorFilteredResourceEntries()) {
+  if (!entries.length) return `<p class="quick-editor-picker-empty">자료가 없습니다.</p>`;
+  return entries.map((resource) => `
+    <button type="button" role="option" data-quick-editor-resource="${esc(resource.id)}">${esc(resource.title)}</button>
+  `).join("");
+}
+
+function syncQuickEditorPickerResults() {
+  const results = document.querySelector("[data-quick-editor-results]");
+  if (results) results.innerHTML = renderQuickEditorPickerResults();
+}
+
+function handleQuickEditorPickerKeydown(event) {
+  if (!QUICK_EDITOR_SURFACE || !quickEditor.pickerOpen || event.defaultPrevented) return false;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeQuickEditorResourcePicker();
+    return true;
+  }
+  const picker = document.querySelector("[data-quick-editor-picker]");
+  const query = picker?.querySelector("[data-quick-editor-query]");
+  const options = [...(picker?.querySelectorAll("[data-quick-editor-resource]") || [])];
+  if (event.key === "Enter" && event.target === query && options.length) {
+    event.preventDefault();
+    event.stopPropagation();
+    options[0].click();
+    return true;
+  }
+  if (!["ArrowDown", "ArrowUp"].includes(event.key) || !options.length) return false;
+  const currentIndex = options.indexOf(document.activeElement);
+  const nextIndex = currentIndex < 0
+    ? event.key === "ArrowDown" ? 0 : options.length - 1
+    : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+  event.preventDefault();
+  event.stopPropagation();
+  options[nextIndex].focus({ preventScroll: true });
+  return true;
+}
+
+function renderQuickEditorSurface() {
+  let resource = quickEditorActiveResource();
+  if (!resource) {
+    loadQuickEditorLocal({ id: "local", markdown: "" });
+    resource = quickEditor.localResource;
+  }
+  if (resource !== quickEditor.localResource && !itemById("resources", resource.id)) {
+    quickEditor.activeResourceId = quickEditor.localResource?.id || "";
+    resource = quickEditor.localResource;
+  }
+  const blocksList = ensureEditableBlocks(resource, { save: false });
+  const readOnly = !editorOwnerMutationAllowed("resources", resource.id);
+  return `
+    <section class="quick-editor-surface" data-quick-editor-surface data-quick-editor-mode="${resource === quickEditor.localResource ? "local" : "resource"}">
+      <div class="block-editor" data-owner-type="resources" data-owner-id="${esc(resource.id)}" aria-readonly="${readOnly}">
+        ${renderBlocks(blocksList, "resources", resource.id)}
+      </div>
+    </section>
+  `;
+}
+
+function postQuickEditorMessage(payload) {
+  if (!QUICK_EDITOR_SURFACE) return false;
+  const handler = window.webkit?.messageHandlers?.quickMemo;
+  if (handler?.postMessage) handler.postMessage(payload);
+  else window.dispatchEvent(new CustomEvent("sygma:quickMemo", { detail: payload }));
+  return true;
+}
+
+async function quickEditorFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(normalizeQuickEditorImageDataUrl(reader.result));
+    reader.onerror = () => reject(reader.error || new Error("이미지를 읽지 못했습니다."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function quickEditorLocalImageOwnerActive(ownerId, resource = quickEditor.localResource) {
+  return Boolean(
+    QUICK_EDITOR_SURFACE
+    && resource
+    && quickEditor.localResource === resource
+    && resource.id === ownerId
+    && quickEditor.activeResourceId === ownerId,
+  );
+}
+
+async function requestQuickEditorLocalImage(file, ownerId) {
+  const resource = quickEditor.localResource;
+  if (!quickEditorLocalImageOwnerActive(ownerId, resource)) throw new Error("로컬 이미지 저장이 취소되었습니다.");
+  const dataURL = await quickEditorFileDataUrl(file);
+  if (!dataURL || !quickEditorLocalImageOwnerActive(ownerId, resource)) throw new Error("로컬 이미지 저장이 취소되었습니다.");
+  const requestId = id();
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      if (!quickEditor.localImageRequests.delete(requestId)) return;
+      reject(new Error("로컬 이미지 저장 응답이 없습니다."));
+    }, QUICK_EDITOR_IMAGE_TIMEOUT_MS);
+    quickEditor.localImageRequests.set(requestId, { resolve, reject, timeout, ownerId, resource });
+    postQuickEditorMessage({
+      type: "saveLocalImage",
+      requestId,
+      id: resource.quickEditorNativeId,
+      dataURL,
+    });
+  });
+}
+
+function resolveQuickEditorLocalImage(requestId, payload = {}) {
+  const pending = quickEditor.localImageRequests.get(String(requestId || ""));
+  if (!pending) return false;
+  quickEditor.localImageRequests.delete(String(requestId || ""));
+  window.clearTimeout(pending.timeout);
+  if (!quickEditorLocalImageOwnerActive(pending.ownerId, pending.resource)) {
+    pending.reject(new Error("로컬 이미지 저장이 취소되었습니다."));
+    return false;
+  }
+  const path = normalizeQuickEditorAssetPath(payload.path);
+  const dataURL = normalizeQuickEditorImageDataUrl(payload.dataURL);
+  if (!path || !dataURL || payload.error) {
+    pending.reject(new Error(String(payload.error || "로컬 이미지를 저장하지 못했습니다.")));
+    return false;
+  }
+  quickEditor.localAssets[path] = dataURL;
+  pending.resolve(path);
+  return true;
+}
+
+function notifyQuickEditorReady() {
+  if (!QUICK_EDITOR_SURFACE) return false;
+  return postQuickEditorMessage({ type: "ready", resources: quickEditorResourceEntries() });
+}
+
+function quickEditorResourceTitle(resource) {
+  const explicit = String(resource?.title || "").trim();
+  if (resource !== quickEditor.localResource) return explicit || "제목 없는 Resource";
+  const firstLine = resource?.blocks?.map((block) => String(block.text || "").split("\n", 1)[0].trim()).find(Boolean) || "";
+  return explicit || firstLine || "새 메모";
+}
+
+function notifyQuickEditorChange() {
+  if (!quickEditorLocalIsActive()) return false;
+  const resource = quickEditor.localResource;
+  const markdown = quickEditorMarkdown(resource);
+  return postQuickEditorMessage({
+    type: "localChange",
+    id: resource.quickEditorNativeId,
+    title: quickEditorResourceTitle(resource),
+    markdown,
+    blocks: quickEditorLocalBlocksPayload(resource.blocks),
+    characterCount: markdown.length,
+  });
+}
+
+function quickEditorLocalBlocksPayload(blocksList = []) {
+  const blocks = cloneEditorBlocks(blocksList);
+  for (const block of blocks) {
+    if (block.type === IMAGE_BLOCK_TYPE) {
+      const path = normalizeQuickEditorAssetPath(block.localAssetPath || block.url);
+      if (path) block.url = path;
+    }
+    for (const field of ["localAssetPath", "dataURL", "dataUrl", "displayUrl"]) delete block[field];
+  }
+  return blocks;
+}
+
+function notifyQuickEditorResource(type = "resourceChange", resource = quickEditorActiveResource()) {
+  if (!QUICK_EDITOR_SURFACE || !resource || resource === quickEditor.localResource) return false;
+  return postQuickEditorMessage({
+    type,
+    id: resource.id,
+    title: quickEditorResourceTitle(resource),
+    characterCount: quickEditorMarkdown(resource).length,
+  });
+}
+
+function notifyQuickEditorLocalSelected() {
+  if (!QUICK_EDITOR_SURFACE || !quickEditor.localResource) return false;
+  const markdown = quickEditorMarkdown(quickEditor.localResource);
+  return postQuickEditorMessage({
+    type: "localSelected",
+    id: quickEditor.localResource.quickEditorNativeId,
+    title: quickEditorResourceTitle(quickEditor.localResource),
+    characterCount: markdown.length,
+  });
+}
+
+function quickEditorMarkdown(resource) {
+  return clipboardBlocksPlainText((resource?.blocks || []).map((block) => {
+    const localAssetPath = resource === quickEditor.localResource ? normalizeQuickEditorAssetPath(block.localAssetPath || block.url) : "";
+    if (block.type !== IMAGE_BLOCK_TYPE || !localAssetPath) return clipboardBlockFromBlock(block);
+    return { type: IMAGE_BLOCK_TYPE, text: String(block.alt || block.text || ""), url: localAssetPath, indent: blockIndent(block) };
+  }), { markdown: true });
+}
+
 function setWorkspaceAuthorityMode(mode = "ready") {
-  app.dataset.workspaceAuthority = mode;
+  const effectiveMode = QUICK_EDITOR_SURFACE ? "ready" : mode;
+  app.dataset.workspaceAuthority = effectiveMode;
   syncWorkspaceAuthorityGate();
   const gate = app.querySelector("[data-workspace-authority-gate]");
   if (!gate) return;
   const title = gate.querySelector("[data-workspace-authority-title]");
   const message = gate.querySelector("[data-workspace-authority-message]");
   const retry = gate.querySelector('[data-action="retry-workspace-authority"]');
-  if (retry) retry.hidden = mode !== "offline";
-  if (mode === "offline") {
+  if (retry) retry.hidden = effectiveMode !== "offline";
+  if (effectiveMode === "offline") {
     if (title) title.textContent = "서버에 연결할 수 없습니다";
     if (message) message.textContent = "로컬 데이터는 서버를 덮지 않습니다. 연결 후 다시 불러옵니다.";
     return;
@@ -1311,6 +1730,11 @@ function decorateButtons(root = app) {
 }
 
 function renderView({ transition = false, soft = false, animateCards = false, syncResourceContents = false } = {}) {
+  if (QUICK_EDITOR_SURFACE) {
+    els.viewRoot.innerHTML = renderQuickEditorSurface();
+    decorateButtons(els.viewRoot);
+    return;
+  }
   cancelResourceListDrag();
   if (ui.view !== "resources") ui.resourceSelection = [];
   const renderers = {
@@ -5681,7 +6105,7 @@ function replaceViewHistoryState(view, options = {}) {
     focusOnPop: options.focusOnPop === "nav" ? "nav" : "view",
   };
   const useRootPath = financeViewFromLocation() || legacyResourcePathFromLocation();
-  const targetUrl = QUICK_RESOURCE_SURFACE ? currentRelativeUrl() : view === "finance" ? "/finance" : useRootPath ? "/" : currentRelativeUrl();
+  const targetUrl = QUICK_EDITOR_SURFACE ? currentRelativeUrl() : view === "finance" ? "/finance" : useRootPath ? "/" : currentRelativeUrl();
   const method = options.replace === true || targetUrl === currentRelativeUrl() ? "replaceState" : "pushState";
   window.history[method](nextState, "", targetUrl);
   return true;
@@ -5703,9 +6127,7 @@ function currentRelativeUrl() {
 }
 
 function prepareInitialRoute() {
-  if (QUICK_RESOURCE_SURFACE) {
-    ui.view = "resources";
-  } else if (financeViewFromLocation()) {
+  if (financeViewFromLocation()) {
     ui.view = "finance";
   } else if (legacyResourcePathFromLocation()) {
     ui.view = "resources";
@@ -8007,6 +8429,8 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
   }
   if (block.type === IMAGE_BLOCK_TYPE) {
     return renderResourceImageBlock(block, {
+      ownerType,
+      ownerId,
       isSelected,
       indent,
       hiddenAttr,
@@ -8046,7 +8470,10 @@ function isSupportedEditorBlockType(type = "") {
 }
 
 function renderResourceImageBlock(block, meta = {}) {
-  const safeUrl = normalizeResourceImageUrl(block.url);
+  const localAssetPath = meta.ownerType === "resources" && meta.ownerId === quickEditor.localResource?.id
+    ? normalizeQuickEditorAssetPath(block.localAssetPath || block.url)
+    : "";
+  const safeUrl = localAssetPath ? quickEditor.localAssets[localAssetPath] || "" : normalizeResourceImageUrl(block.url);
   const alt = String(block.alt || block.text || "").trim();
   return `
     <div class="block resource-image-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="image" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
@@ -8951,7 +9378,8 @@ function urlPreviewParts(value = "") {
 }
 
 function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", ownerId = "") {
-  const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
+  const contentEditable = editorOwnerMutationAllowed(ownerType, ownerId);
+  const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${contentEditable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
   const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : normalizeToggleHeading(block.type);
   if (heading) {
     const level = heading.slice(-1);
@@ -8979,7 +9407,7 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
         </header>
         <div class="code-space-body">
           <span class="code-space-lines" data-code-line-numbers aria-hidden="true">${renderCodeLineNumbers(block.text)}</span>
-          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${codeLanguageLabel(language)} code block` : "Plain text block")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `Edit ${codeLanguageLabel(language)} code` : "Edit plain text")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="${plainText ? "Enter text" : "Enter code"}">${esc(block.text || "")}</code></pre>
+          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${codeLanguageLabel(language)} code block` : "Plain text block")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="${contentEditable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `Edit ${codeLanguageLabel(language)} code` : "Edit plain text")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="${plainText ? "Enter text" : "Enter code"}">${esc(block.text || "")}</code></pre>
         </div>
         <footer class="code-space-footer"><span data-code-line-summary>${codeLineSummary(lineCount)}</span><span>UTF-8</span></footer>
       </section>
@@ -9107,15 +9535,20 @@ function normalizeEditableBlock(block) {
     }
   } else if (block.type === IMAGE_BLOCK_TYPE) {
     const safeUrl = normalizeResourceImageUrl(block.url);
-    if (!safeUrl) {
+    const localAssetPath = QUICK_EDITOR_SURFACE ? normalizeQuickEditorAssetPath(block.localAssetPath || block.url) : "";
+    if (!safeUrl && !localAssetPath) {
       block.type = "paragraph";
       block.text = String(block.alt || block.text || "");
       delete block.url;
       delete block.alt;
       changed = true;
     } else {
-      if (block.url !== safeUrl) {
-        block.url = safeUrl;
+      if (block.url !== (localAssetPath || safeUrl)) {
+        block.url = localAssetPath || safeUrl;
+        changed = true;
+      }
+      if (localAssetPath && block.localAssetPath !== localAssetPath) {
+        block.localAssetPath = localAssetPath;
         changed = true;
       }
       const alt = String(block.alt || block.text || "").slice(0, 2_000);
@@ -9357,6 +9790,7 @@ function activateResourceCitationTarget(citation) {
     return false;
   }
   window.getSelection()?.removeAllRanges();
+  if (QUICK_EDITOR_SURFACE) return openQuickEditorResource(resourceId);
   if (ui.view !== "resources") setView("resources");
   return openResourceDocument(resourceId);
 }
@@ -9924,6 +10358,7 @@ function renderOverlays() {
     ${ui.blockDrag ? renderBlockDragGhost() : ""}
     ${ui.todayTaskDrag ? renderTodayTaskDragGhost() : ""}
     ${renderServiceWorkerUpdateNotice()}
+    ${renderQuickEditorPicker()}
   `;
   decorateButtons(els.overlayRoot);
   syncEditorCommandMenuAria();
@@ -10009,7 +10444,7 @@ function syncEditorCommandMenuAria() {
 }
 
 function registerServiceWorkerUpdateFlow() {
-  if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
+  if (QUICK_EDITOR_SURFACE || !("serviceWorker" in navigator) || location.protocol === "file:") return;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (hasUnsavedResourceWork()) {
       serviceWorkerUpdateApplying = false;
@@ -10088,7 +10523,7 @@ function hasPendingLocalWorkspaceWork() {
 }
 
 function renderServiceWorkerUpdateNotice() {
-  if (!serviceWorkerUpdateAvailable) return "";
+  if (QUICK_EDITOR_SURFACE || !serviceWorkerUpdateAvailable) return "";
   const blocked = hasUnsavedResourceWork();
   return `
     <section class="service-worker-update" role="status">
@@ -10742,7 +11177,7 @@ function renderSelectedBlocksMenuSearch(query = "", count = 0) {
 function renderInlineFormatToolbar() {
   const toolbar = ui.inlineToolbar;
   if (!toolbar) return "";
-  const buttons = INLINE_FORMAT_MARK_TYPES.map((type) => `
+  const buttons = INLINE_FORMAT_MARK_TYPES.filter((type) => !QUICK_EDITOR_SURFACE || type !== "comment").map((type) => `
     <button class="inline-format-button ${toolbar.activeTypes?.includes(type) ? "is-active" : ""}" type="button" data-inline-mark-toggle="${type}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${esc(INLINE_MARK_DESCRIPTIONS[type])}" aria-pressed="${toolbar.activeTypes?.includes(type) ? "true" : "false"}" title="${esc(INLINE_MARK_DESCRIPTIONS[type])}">
       <span class="inline-format-symbol" aria-hidden="true">${esc(INLINE_MARK_LABELS[type])}</span>
       <span class="inline-format-label">${esc(INLINE_MARK_DESCRIPTIONS[type])}</span>
@@ -11146,6 +11581,17 @@ function relationField(label, field, value, items, nameField) {
 }
 
 function handleClick(event) {
+  const quickEditorResource = event.target.closest("[data-quick-editor-resource]");
+  if (quickEditorResource) {
+    event.preventDefault();
+    openQuickEditorResource(quickEditorResource.dataset.quickEditorResource);
+    return;
+  }
+  if (event.target.matches("[data-quick-editor-picker-close]")) {
+    event.preventDefault();
+    closeQuickEditorResourcePicker();
+    return;
+  }
   const commentsToggle = event.target.closest("[data-resource-comments-toggle]");
   if (commentsToggle) {
     event.preventDefault();
@@ -11339,7 +11785,7 @@ function handleClick(event) {
 
   if (
     ui.suppressBlockClickUntil > Date.now()
-    && event.target.closest(".block, .block-editor, .resource-document")
+    && event.target.closest(".block, .block-editor, .resource-document, .quick-editor-surface")
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -13191,6 +13637,11 @@ function updateResourceTitle(input) {
 function markResourceChanged(resourceOrId) {
   const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
   if (!resourceMutationAllowed(resource)) return null;
+  if (QUICK_EDITOR_SURFACE && resource === quickEditor.localResource) {
+    resource.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(resource.updatedAt) + 1)).toISOString();
+    resource.revision = normalizedResourceRevision(resource.revision) + 1;
+    return resource;
+  }
   if (!dirtyResourceIds.has(resource.id)) return touchResource(resource);
   resource.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(resource.updatedAt) + 1)).toISOString();
   return resource;
@@ -13266,7 +13717,8 @@ function updateCodeBlockLanguage(control) {
   return true;
 }
 
-async function uploadResourceImageFile(file) {
+async function uploadResourceImageFile(file, ownerId = "") {
+  if (QUICK_EDITOR_SURFACE && ownerId === quickEditor.localResource?.id) return requestQuickEditorLocalImage(file, ownerId);
   const response = await fetch("/api/resource-images", {
     method: "POST",
     headers: { "Content-Type": file.type },
@@ -13299,6 +13751,8 @@ function insertResourceImageBlock(target, url, alt = "") {
     indent: blockIndent(block),
     collapsed: false,
   };
+  const localAssetPath = target.ownerId === quickEditor.localResource?.id ? normalizeQuickEditorAssetPath(url) : "";
+  if (localAssetPath) imageBlock.localAssetPath = localAssetPath;
   const history = beginEditorHistory("resources", resource.id, { blockId: block.id, position: "end" });
   if (replaceBlock) resource.blocks.splice(index, 1, imageBlock);
   else resource.blocks.splice(index + 1, 0, imageBlock);
@@ -13450,6 +13904,12 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const quickEditorQuery = event.target.closest("[data-quick-editor-query]");
+  if (quickEditorQuery) {
+    quickEditor.pickerQuery = quickEditorQuery.value;
+    syncQuickEditorPickerResults();
+    return;
+  }
   const commentInput = event.target.closest("[data-resource-comment-input]");
   if (commentInput) {
     const record = resourceWindowById(commentInput.closest("[data-resource-comments]").dataset.resourceComments);
@@ -13770,6 +14230,7 @@ function handleCompositionEnd(event) {
     updateBlockText(blockContent);
     commit.pending = false;
     commit.time = Date.now();
+    if (QUICK_EDITOR_SURFACE && quickEditor.pendingRemoteResourceSync) syncQuickEditorAfterStateReplace();
   });
 }
 
@@ -13915,7 +14376,7 @@ function deactivateActiveBlockContent(preserveRecentFocus = false) {
 function editorBottomClickTarget(event) {
   if (!(event.target instanceof Element)) return null;
   if (event.target.closest("button, input, select, textarea, summary, a, [contenteditable='true'], .selected-block-menu")) return null;
-  const shell = event.target.closest(".task-inline-notes, .panel");
+  const shell = event.target.closest(".task-inline-notes, .panel, .quick-editor-surface");
   if (!shell) return null;
   const editor = shell.querySelector(".block-editor");
   if (!editor) return null;
@@ -13937,7 +14398,7 @@ function editorWhitespaceBlockClickTarget(event) {
   if (directBlock && !directBlock.hidden && directBlock.getAttribute("aria-hidden") !== "true") {
     return directBlock.querySelector("[data-block-content]");
   }
-  const shell = event.target.closest(".task-inline-notes, .panel");
+  const shell = event.target.closest(".task-inline-notes, .panel, .quick-editor-surface");
   const editor = shell?.querySelector(".block-editor");
   if (!editor) return null;
   const editorRect = editor.getBoundingClientRect();
@@ -14682,7 +15143,7 @@ function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
 function resourceEditorMarqueeTarget(event) {
   if (!(event?.target instanceof Element) || !canStartCustomPointerDrag(event)) return null;
   if (event.target.closest("button, input, select, textarea, summary, a, .selected-block-menu, .inline-format-toolbar")) return null;
-  const documentPanel = event.target.closest(".resource-document");
+  const documentPanel = event.target.closest(".resource-document, .quick-editor-surface");
   const editor = documentPanel?.querySelector('.block-editor[data-owner-type="resources"]');
   if (!documentPanel || !editor) return null;
   const panelRect = documentPanel.getBoundingClientRect();
@@ -15732,7 +16193,8 @@ async function pasteResourceImageFile(file, target) {
     return false;
   }
   try {
-    const url = await uploadResourceImageFile(file);
+    const url = await uploadResourceImageFile(file, target.ownerId);
+    if (normalizeQuickEditorAssetPath(url) && !quickEditorLocalImageOwnerActive(target.ownerId)) return false;
     const blockContent = document.querySelector(`[data-block-content="${cssEscape(target.blockId)}"]`);
     const range = selectionOffsetsInside(blockContent);
     return insertResourceImageBlock(
@@ -16214,20 +16676,20 @@ function writeBlocksToClipboard(clipboardData, blocks) {
   clipboardData.setData("text/html", clipboardBlocksHtml(blocks));
 }
 
-function clipboardBlocksPlainText(blocks) {
+function clipboardBlocksPlainText(blocks, options = {}) {
   const lines = [];
   const numberedCounters = [];
   for (const block of blocks) {
     const prefix = clipboardBlockTextPrefix(block, clipboardNumberedPrefixForBlock(block, numberedCounters));
-    lines.push(clipboardBlockPlainText(block, prefix));
+    lines.push(clipboardBlockPlainText(block, prefix, options));
   }
   return lines.join("\n");
 }
 
-function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block)) {
+function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block), options = {}) {
   const indent = "\t".repeat(block.indent || 0);
-  const rawText = block.text || "";
-  if (block.type === IMAGE_BLOCK_TYPE) return `${indent}![${rawText}](${normalizeResourceImageUrl(block.url)})`;
+  const rawText = options.markdown ? clipboardInlineMarkdownText(block) : block.text || "";
+  if (block.type === IMAGE_BLOCK_TYPE) return `${indent}![${block.text || ""}](${normalizeResourceImageUrl(block.url) || normalizeQuickEditorAssetPath(block.url)})`;
   const rawLines = rawText.split("\n");
   if (block.type === "code") {
     const longestRun = Math.max(0, ...[...rawText.matchAll(/`+/g)].map((match) => match[0].length));
@@ -16236,6 +16698,51 @@ function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block)
     return `${indent}${fence}${language}\n${rawLines.map((line) => `${indent}${line}`).join("\n")}\n${indent}${fence}`;
   }
   return rawLines.map((line, index) => `${indent}${index === 0 ? prefix : ""}${line}`).join("\n");
+}
+
+function clipboardInlineMarkdownText(block) {
+  const text = String(block.text || "");
+  const marks = normalizeInlineMarks(text, block.marks).filter((mark) => !["comment", "textColor", "backgroundColor"].includes(mark.type));
+  if (!marks.length) return text;
+  const points = new Set([0, text.length]);
+  for (const mark of marks) {
+    points.add(mark.start);
+    points.add(mark.end);
+  }
+  const sorted = [...points].sort((a, b) => a - b);
+  let markdown = "";
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    const start = sorted[index];
+    const end = sorted[index + 1];
+    if (end <= start) continue;
+    let segment = text.slice(start, end);
+    const active = marks
+      .filter((mark) => mark.start <= start && mark.end >= end)
+      .sort((left, right) => INLINE_MARK_TYPES.indexOf(left.type) - INLINE_MARK_TYPES.indexOf(right.type));
+    for (let markIndex = active.length - 1; markIndex >= 0; markIndex -= 1) {
+      const mark = active[markIndex];
+      if (mark.type === "equation") {
+        segment = mark.displayMode === true ? `\\[${mark.formula}\\]` : `\\(${mark.formula}\\)`;
+      } else if (mark.type === "link") {
+        segment = `[${segment}](${mark.href})`;
+      } else if (mark.type === "resourceLink") {
+        segment = `[${segment}](${resourceCitationHref(mark.resourceId)})`;
+      } else if (mark.type === "bold") {
+        segment = `**${segment}**`;
+      } else if (mark.type === "italic") {
+        segment = `*${segment}*`;
+      } else if (mark.type === "underline") {
+        segment = `<u>${segment}</u>`;
+      } else if (mark.type === "strike") {
+        segment = `~~${segment}~~`;
+      } else if (mark.type === "code") {
+        const fence = "`".repeat(Math.max(1, Math.max(0, ...[...segment.matchAll(/`+/g)].map((match) => match[0].length)) + 1));
+        segment = `${fence}${segment}${fence}`;
+      }
+    }
+    markdown += segment;
+  }
+  return markdown;
 }
 
 function clipboardNumberedPrefixForBlock(block, counters) {
@@ -18534,6 +19041,7 @@ function trapTodayBatchFocus(event) {
 }
 
 function handleKeydown(event) {
+  if (handleQuickEditorPickerKeydown(event)) return;
   if (handleResourceListKeydown(event)) return;
   if (handleResourceWindowKeydown(event)) return;
   const commentForm = event.target.closest("[data-resource-comment-form]");
@@ -19124,6 +19632,7 @@ function isPrintableBlockReplacementKey(event) {
 
 function handleDocumentKeydown(event) {
   if (app.dataset.workspaceAuthority !== "ready") return;
+  if (handleQuickEditorPickerKeydown(event)) return;
   if (event.key === "Escape" && (ui.pendingEditorMarquee || ui.editorMarquee)) {
     event.preventDefault();
     event.stopPropagation();
@@ -21678,6 +22187,7 @@ function collectionIdMap(type) {
 
 function itemById(type, itemId) {
   if (!itemId) return null;
+  if (QUICK_EDITOR_SURFACE && type === "resources" && quickEditor.localResource?.id === itemId) return quickEditor.localResource;
   return collectionIdMap(type).get(itemId) || null;
 }
 
@@ -21691,6 +22201,7 @@ function resourceMutationAllowed(resourceOrId, options = {}) {
 }
 
 function editorOwnerMutationAllowed(ownerType, ownerId) {
+  if (QUICK_EDITOR_SURFACE && quickEditor.readOnly && ownerType === "resources" && ownerId === quickEditor.activeResourceId) return false;
   return ownerType !== "resources" || resourceMutationAllowed(ownerId);
 }
 
@@ -25098,7 +25609,8 @@ function applyResourceSlashSelection(selectedId, pending = ui.resourceSlash, ima
         return;
       }
       try {
-        const url = await uploadResourceImageFile(file);
+        const url = await uploadResourceImageFile(file, pending.ownerId);
+        if (normalizeQuickEditorAssetPath(url) && !quickEditorLocalImageOwnerActive(pending.ownerId)) return;
         if (!applyResourceSlashSelection(selectedId, pending, { url, alt: file.name.replace(/\.[^.]+$/, "") })) showToast("본문이 변경되었습니다. 이미지를 다시 선택해 주세요.");
       } catch (error) { showToast(error?.message || "이미지 업로드에 실패했습니다."); }
     }, { once: true });
@@ -25142,7 +25654,14 @@ function applyResourceSlashSelection(selectedId, pending = ui.resourceSlash, ima
     if (entry.toggleHeading) block.toggleHeading = entry.toggleHeading;
     if (entry.type === "code") block.language = entry.language;
     if (entry.type === TABLE_BLOCK_TYPE) { block.text = blankMarkdownTableText(); block.marks = []; }
-    if (image) { block.url = image.url; block.alt = image.alt; block.text = image.alt; block.marks = []; }
+    if (image) {
+      block.url = image.url;
+      block.alt = image.alt;
+      block.text = image.alt;
+      block.marks = [];
+      const localAssetPath = item === quickEditor.localResource ? normalizeQuickEditorAssetPath(image.url) : "";
+      if (localAssetPath) block.localAssetPath = localAssetPath;
+    }
   }
   if (entry.inline) {
     const inserted = entry.inline === "code" ? "코드" : entry.inline === "link" ? "링크" : entry.inline === "resourceLink" ? "자료" : "텍스트";
@@ -26357,10 +26876,47 @@ async function initializeDatabaseStateNow() {
 
 function rerenderAfterStateReplace() {
   clearStateIndexes();
+  if (QUICK_EDITOR_SURFACE) {
+    syncQuickEditorAfterStateReplace();
+    return;
+  }
   renderNav();
   if (ui.view !== "finance") renderView({ soft: true, syncResourceContents: true });
   renderOverlays();
   updateTopbarStickiness();
+}
+
+function syncQuickEditorAfterStateReplace() {
+  if (quickEditor.pickerOpen) syncQuickEditorPickerResults();
+  if (quickEditorLocalIsActive()) return;
+  const resource = itemById("resources", quickEditor.activeResourceId);
+  if (!resource || resource.trashedAt) {
+    quickEditor.pendingRemoteResourceSync = false;
+    openQuickEditorLocal();
+    return;
+  }
+  const editor = document.querySelector(`.quick-editor-surface .block-editor[data-owner-id="${cssEscape(resource.id)}"]`);
+  if (!editor) {
+    renderView({ soft: true });
+  } else {
+    const activeContent = document.activeElement instanceof Element ? document.activeElement.closest("[data-block-content]") : null;
+    if (activeContent && editor.contains(activeContent) && isComposingBlock(activeContent)) {
+      quickEditor.pendingRemoteResourceSync = true;
+      return;
+    }
+    const preserveFocus = activeContent && editor.contains(activeContent)
+      ? { blockId: activeContent.dataset.blockContent, range: selectionOffsetsInside(activeContent) }
+      : null;
+    refreshBlockEditorsAfterMutation("resources", resource.id);
+    if (preserveFocus) {
+      const nextContent = editor.querySelector(`[data-block-content="${cssEscape(preserveFocus.blockId)}"]`);
+      if (nextContent && (nextContent !== activeContent || document.activeElement !== nextContent) && preserveFocus.range) {
+        focusBlockContentAfterRender(preserveFocus.blockId, { range: preserveFocus.range });
+      }
+    }
+  }
+  quickEditor.pendingRemoteResourceSync = false;
+  notifyQuickEditorResource("resourceChange", resource);
 }
 
 function renderDatabaseStatusIfVisible() {
@@ -26669,6 +27225,11 @@ function resourceNeedsMigration(resource) {
 function touchResource(resourceOrId, options = {}) {
   const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
   if (!resourceMutationAllowed(resource, { allowTrashed: true, allowLocked: options.allowLocked === true })) return null;
+  if (QUICK_EDITOR_SURFACE && resource === quickEditor.localResource) {
+    resource.updatedAt = new Date(Math.max(Date.now(), stateTimestamp(resource.updatedAt) + 1)).toISOString();
+    resource.revision = normalizedResourceRevision(resource.revision) + 1;
+    return resource;
+  }
   normalizeResourceRecord(resource, options.at || new Date().toISOString());
   const previousUpdatedAt = stateTimestamp(resource.updatedAt);
   const requestedAt = stateTimestamp(options.at || "") || Date.now();
@@ -27589,6 +28150,11 @@ function isPlainObject(value) {
 }
 
 function saveState(options = {}) {
+  if (quickEditorLocalIsActive()) {
+    notifyQuickEditorChange();
+    return;
+  }
+  if (QUICK_EDITOR_SURFACE) notifyQuickEditorResource("resourceChange");
   for (const resource of state.resources || []) reconcileResourceCommentThreads(resource);
   clearStateIndexes();
   state.version = APP_STATE_VERSION;

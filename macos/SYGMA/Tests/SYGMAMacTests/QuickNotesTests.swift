@@ -107,6 +107,117 @@ final class QuickNotesTests: XCTestCase {
     }
 
     @MainActor
+    func testSharedEditorBlocksPersistBesideMarkdownWithoutReplacingIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-editor-blocks-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let markdown = "# 제목\n본문"
+        let blocks: [[String: Any]] = [[
+            "id": "block-1",
+            "type": "paragraph",
+            "text": "본문",
+            "marks": [["type": "bold", "start": 0, "end": 2]],
+        ]]
+
+        store.updateBody(markdown, blocks: blocks, for: noteID)
+        store.flush()
+
+        let directory = root.appendingPathComponent("notes/\(noteID.uuidString.lowercased())")
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("note.md"), encoding: .utf8), markdown)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("editor.json").path))
+        let restored = QuickNotesStore(rootURL: root)
+        let restoredBlocks = try XCTUnwrap(restored.blocks(for: noteID) as? [[String: Any]])
+        XCTAssertEqual(restoredBlocks.first?["id"] as? String, "block-1")
+        XCTAssertEqual(((restoredBlocks.first?["marks"] as? [[String: Any]])?.first)?["type"] as? String, "bold")
+    }
+
+    @MainActor
+    func testQuickEditorLocalSelectionClearsResourceState() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-editor-session-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let session = QuickMemoEditorSession(store: store)
+        store.isPreviewing = true
+
+        session.handleBridgeMessage([
+            "type": "resourceSelected",
+            "id": "resource-1",
+            "title": "자료 제목",
+            "characterCount": 23,
+        ])
+        XCTAssertTrue(session.isResourceOpen)
+        XCTAssertFalse(store.isPreviewing)
+        XCTAssertEqual(session.resourceTitle, "자료 제목")
+        XCTAssertEqual(session.characterCount, 23)
+
+        session.handleBridgeMessage([
+            "type": "localSelected",
+            "id": store.selectedID?.uuidString.lowercased() ?? "",
+            "title": "로컬 메모",
+            "characterCount": 7,
+        ])
+        XCTAssertFalse(session.isResourceOpen)
+        XCTAssertEqual(session.resourceTitle, "")
+        XCTAssertEqual(session.characterCount, 7)
+    }
+
+    @MainActor
+    func testLocalImageBridgeValidatesAndLoadsOnlyReferencedPNGAssets() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-local-image-bridge-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let image = NSImage(size: NSSize(width: 4, height: 4))
+        image.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(x: 0, y: 0, width: 4, height: 4).fill()
+        image.unlockFocus()
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let jpeg = try XCTUnwrap(bitmap.representation(using: .jpeg, properties: [:]))
+        let dataURL = "data:image/png;base64,\(png.base64EncodedString())"
+
+        let saved = try XCTUnwrap(store.saveLocalImage(dataURL: dataURL, for: noteID))
+        _ = try XCTUnwrap(store.saveImage(image, for: noteID))
+        store.updateBody("![image](\(saved.path))", blocks: [["id": "image", "type": "image", "url": saved.path]], for: noteID)
+        let assets = store.localAssetDataURLs(for: noteID)
+        XCTAssertEqual(assets.count, 1)
+        XCTAssertEqual(assets[saved.path], saved.dataURL)
+        let savedJPEG = try XCTUnwrap(store.saveLocalImage(
+            dataURL: "data:image/jpeg;base64,\(jpeg.base64EncodedString())",
+            for: noteID
+        ))
+        XCTAssertTrue(savedJPEG.path.hasSuffix(".png"))
+        XCTAssertTrue(savedJPEG.dataURL.hasPrefix("data:image/png;base64,"))
+        let savedJPEGURL = try XCTUnwrap(store.assetURL(noteID: noteID, relativePath: savedJPEG.path))
+        XCTAssertTrue(try Data(contentsOf: savedJPEGURL).starts(with: [0x89, 0x50, 0x4E, 0x47]))
+        XCTAssertNil(store.saveLocalImage(dataURL: "data:image/jpeg;base64,\(png.base64EncodedString())", for: noteID))
+        XCTAssertNil(store.saveLocalImage(dataURL: "data:image/png;base64,not-base64", for: noteID))
+        XCTAssertNil(store.saveLocalImage(dataURL: dataURL, for: UUID()))
+
+        let session = QuickMemoEditorSession(store: store)
+        session.loadLocal(noteID, revision: store.contentRevision)
+        session.handleBridgeMessage(["type": "ready"])
+        let assetsDirectory = root.appendingPathComponent("notes/\(noteID.uuidString.lowercased())/assets")
+        let before = try FileManager.default.contentsOfDirectory(atPath: assetsDirectory.path).count
+        session.handleBridgeMessage([
+            "type": "saveLocalImage",
+            "requestId": "wrong-note",
+            "id": UUID().uuidString.lowercased(),
+            "dataURL": dataURL,
+        ])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: assetsDirectory.path).count, before)
+        session.handleBridgeMessage([
+            "type": "saveLocalImage",
+            "requestId": "valid-note",
+            "id": noteID.uuidString.lowercased(),
+            "dataURL": dataURL,
+        ])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: assetsDirectory.path).count, before + 1)
+    }
+
+    @MainActor
     func testLiveMarkdownBlockShortcutsAndPersistenceRoundTrip() throws {
         func insert(_ value: String, into editor: QuickNotesTextView) {
             editor.insertText(value, replacementRange: editor.selectedRange())
@@ -406,7 +517,7 @@ final class QuickNotesTests: XCTestCase {
         XCTAssertEqual(settings.shortcut(for: .togglePanel), customizedToggle)
         XCTAssertEqual(settings.shortcut(for: .captureInbox).display, "⌥Space")
         XCTAssertEqual(QuickNoteShortcutSettings.defaultShortcuts[.togglePanel]?.display, "⇧⌘L")
-        XCTAssertEqual(SYGMAWebRuntime.quickResourceURL.query, "surface=quick-resource")
+        XCTAssertEqual(SYGMAWebRuntime.quickEditorURL.query, "surface=quick-editor")
         XCTAssertNotNil(defaults.data(forKey: "SYGMAQuickNotesShortcutsV2"))
         XCTAssertEqual(settings.shortcut(for: .note1).display, "⌘1")
         XCTAssertEqual(settings.shortcut(for: .note9).display, "⌘9")
@@ -417,19 +528,43 @@ final class QuickNotesTests: XCTestCase {
         let custom = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_P), modifiers: [.command, .option], key: "P")
         settings.save(custom, for: .newNote)
         XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .newNote), custom)
-        XCTAssertNil(settings.validationMessage(for: custom, action: .togglePanel))
-        settings.save(custom, for: .togglePanel)
-        XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .togglePanel), custom)
+        XCTAssertNotNil(settings.validationMessage(for: custom, action: .togglePanel))
 
         let escape = QuickNoteShortcut(keyCode: UInt16(kVK_Escape), modifiers: [], key: "Esc")
         settings.save(escape, for: .hidePanel)
         XCTAssertEqual(QuickNoteShortcutSettings(defaults: defaults).shortcut(for: .hidePanel), escape)
+        let escapeEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\u{1b}",
+            charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false,
+            keyCode: UInt16(kVK_Escape)
+        ))
+        let commandWEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "w",
+            charactersIgnoringModifiers: "w",
+            isARepeat: false,
+            keyCode: UInt16(kVK_ANSI_W)
+        ))
+        XCTAssertTrue(settings.shortcut(for: .hidePanel).matches(escapeEvent))
+        XCTAssertFalse(settings.shortcut(for: .hidePanel).matches(commandWEvent))
 
         defaults.removeObject(forKey: "SYGMAQuickNotesShortcutsV2")
         legacy[QuickNoteShortcutAction.newNote.rawValue] = QuickNoteShortcut(keyCode: UInt16(kVK_ANSI_W), modifiers: .command, key: "W")
         defaults.set(try JSONEncoder().encode(legacy), forKey: "SYGMAQuickNotesShortcutsV1")
         let conflictSettings = QuickNoteShortcutSettings(defaults: defaults)
-        XCTAssertEqual(conflictSettings.shortcut(for: .hidePanel), QuickNoteShortcutSettings.defaultShortcuts[.hidePanel])
+        XCTAssertEqual(conflictSettings.shortcut(for: .hidePanel), escape)
         XCTAssertEqual(conflictSettings.shortcut(for: .newNote).display, "⌘W")
 
         let plainLetter = try XCTUnwrap(NSEvent.keyEvent(

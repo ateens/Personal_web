@@ -11,9 +11,9 @@ import AppKit
 
 enum SYGMAWebRuntime {
     static let homeURL = URL(string: "https://personalweb-production-81a6.up.railway.app/")!
-    static let quickResourceURL: URL = {
+    static let quickEditorURL: URL = {
         var components = URLComponents(url: homeURL, resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "surface", value: "quick-resource")]
+        components.queryItems = [URLQueryItem(name: "surface", value: "quick-editor")]
         return components.url!
     }()
     static let mutationBridge = #"""
@@ -158,6 +158,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     private weak var rootWebView: WKWebView?
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var appActivationObserver: NSObjectProtocol?
+    var quickMemoMessageHandler: (([String: Any]) -> Void)?
 
     #if canImport(UIKit)
     private var popupControllers: [ObjectIdentifier: UIViewController] = [:]
@@ -198,6 +199,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
             forMainFrameOnly: true
         ))
         contentController.add(self, name: "sygmaStateChanged")
+        contentController.add(self, name: "quickMemo")
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
@@ -217,6 +219,7 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "sygmaStateChanged")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "quickMemo")
         if let appActivationObserver {
             NotificationCenter.default.removeObserver(appActivationObserver)
             self.appActivationObserver = nil
@@ -304,12 +307,13 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "sygmaStateChanged",
-              message.frameInfo.isMainFrame,
-              message.webView === mainWebView,
-              SYGMAWebRuntime.isInternal(message.webView?.url) else { return }
-        WidgetCenter.shared.reloadTimelines(ofKind: "SYGMAFourWeekCalendar")
-        WidgetCenter.shared.reloadTimelines(ofKind: "SYGMATodayTasks")
+        guard message.frameInfo.isMainFrame, SYGMAWebRuntime.isInternal(message.webView?.url) else { return }
+        if message.name == "quickMemo", let body = message.body as? [String: Any] {
+            quickMemoMessageHandler?(body)
+        } else if message.name == "sygmaStateChanged", message.webView === mainWebView {
+            WidgetCenter.shared.reloadTimelines(ofKind: "SYGMAFourWeekCalendar")
+            WidgetCenter.shared.reloadTimelines(ofKind: "SYGMATodayTasks")
+        }
     }
 
     func webView(
