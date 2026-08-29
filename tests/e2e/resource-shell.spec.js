@@ -24,19 +24,6 @@ async function localResourceOperationCount(page) {
   });
 }
 
-async function selectTextRange(content, start, end) {
-  await content.evaluate((element, offsets) => {
-    element.focus();
-    const range = document.createRange();
-    range.setStart(element.firstChild, offsets.start);
-    range.setEnd(element.firstChild, offsets.end);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-    document.dispatchEvent(new Event("selectionchange"));
-  }, { start, end });
-}
-
 async function openSettledResource(page, id) {
   await page.locator(`[data-resource-open="${id}"]`).evaluate((button) => button.click());
   const window = page.locator(`[data-resource-window="${id}"]`);
@@ -389,11 +376,20 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   expect(serialized.blocks.find((block) => block.id === "local-image")).not.toHaveProperty("localAssetPath");
   expect(JSON.stringify(serialized.blocks)).not.toContain("data:image");
 
-  await selectTextRange(body, 0, 2);
-  const toolbar = page.locator("[data-inline-toolbar]");
-  await expect(toolbar).toBeVisible();
-  await expect(toolbar.locator('[data-inline-mark-toggle="comment"]')).toHaveCount(0);
-  await expect(toolbar.locator('[data-inline-mark-toggle="bold"]')).toHaveCount(1);
+  await body.evaluate((element) => {
+    element.focus();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.keyboard.press("Shift+ArrowLeft");
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe("용");
+  await expect(page.locator("#overlayRoot > *")).toHaveCount(0);
+  await page.waitForTimeout(550);
+  await expect(page.locator("#overlayRoot > *")).toHaveCount(0);
 
   await editor.evaluate((element) => { window.__localQuickEditor = element; });
   await page.evaluate(() => window.sygmaQuickEditor.openResourcePicker());

@@ -20093,6 +20093,7 @@ function cancelInlineToolbarSelectionDelay() {
 }
 
 function inlineToolbarFromSelection() {
+  if (QUICK_EDITOR_SURFACE) return null;
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
   const range = selection.getRangeAt(0);
