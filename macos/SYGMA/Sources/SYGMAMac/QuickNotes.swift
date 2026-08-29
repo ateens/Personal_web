@@ -695,6 +695,7 @@ final class QuickMemoEditorSession: ObservableObject {
 
     func loadLocal(_ id: UUID, revision: Int) {
         if loadedLocalID == id, loadedRevision == revision { return }
+        if pendingLocal?.id == id, pendingLocal?.revision == revision { return }
         var payload: [String: Any] = [
             "id": id.uuidString.lowercased(),
             "markdown": store.body(for: id),
@@ -703,9 +704,10 @@ final class QuickMemoEditorSession: ObservableObject {
         let assets = store.localAssetDataURLs(for: id)
         if !assets.isEmpty { payload["assets"] = assets }
         pendingLocal = (id, revision, payload)
-        resourceID = nil
-        resourceTitle = ""
-        characterCount = store.body(for: id).count
+        if resourceID != nil { resourceID = nil }
+        if !resourceTitle.isEmpty { resourceTitle = "" }
+        let count = store.body(for: id).count
+        if characterCount != count { characterCount = count }
         sendPendingLocal()
     }
 
@@ -1413,14 +1415,21 @@ private struct QuickMemoEditorView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let webView = session.makeWebView()
         webView.setValue(false, forKey: "drawsBackground")
-        session.loadLocal(noteID, revision: store.contentRevision)
-        session.setReadOnly(store.isPreviewing)
+        syncEditorState()
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        session.loadLocal(noteID, revision: store.contentRevision)
-        session.setReadOnly(store.isPreviewing)
+        syncEditorState()
+    }
+
+    private func syncEditorState() {
+        let revision = store.contentRevision
+        let previewing = store.isPreviewing
+        DispatchQueue.main.async {
+            session.loadLocal(noteID, revision: revision)
+            session.setReadOnly(previewing)
+        }
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {

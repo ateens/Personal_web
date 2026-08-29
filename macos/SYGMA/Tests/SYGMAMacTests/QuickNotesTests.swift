@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
 import XCTest
 @testable import SYGMAMac
 
@@ -160,6 +161,24 @@ final class QuickNotesTests: XCTestCase {
         XCTAssertFalse(session.isResourceOpen)
         XCTAssertEqual(session.resourceTitle, "")
         XCTAssertEqual(session.characterCount, 7)
+    }
+
+    @MainActor
+    func testPendingLocalLoadDoesNotRepublishBeforeWebReady() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-pending-local-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        store.updateBody("반복 방지", for: noteID)
+        let session = QuickMemoEditorSession(store: store)
+        var changes = 0
+        let observation = session.objectWillChange.sink { changes += 1 }
+
+        session.loadLocal(noteID, revision: store.contentRevision)
+        session.loadLocal(noteID, revision: store.contentRevision)
+
+        XCTAssertEqual(changes, 1)
+        withExtendedLifetime(observation) {}
     }
 
     @MainActor
