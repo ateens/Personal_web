@@ -1174,6 +1174,27 @@ test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공�
   await expect(reloadedEditor.locator("[data-code-language-trigger]")).toContainText("TypeScript");
 });
 
+test("슬래시 검색은 검색어 뒤 첫 공백까지만 유지한다", async ({ page }) => {
+  const { editor } = await createEmptyResource(page);
+  const content = editor.locator("[data-block-content]").first();
+  const menu = page.locator(".resource-slash-menu");
+
+  await content.type("/");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(menu).toHaveCount(0);
+
+  await content.fill("");
+  await content.type("/heading");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(menu).toBeVisible();
+  await page.keyboard.type("2");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Space");
+  await expect(menu).toHaveCount(0);
+});
+
 test("슬래시 메뉴는 고정된 DOM에서 검색하고 서식과 표를 생성한다", async ({ page, request }) => {
   const { editor, resourceId } = await createEmptyResource(page);
   const content = editor.locator("[data-block-content]").first();

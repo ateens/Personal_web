@@ -80,6 +80,40 @@ test("Resource 텍스트 선택 툴바는 흰색 배경과 한글 기능 라벨�
   }).toBe(true);
 });
 
+test("Cmd+B는 이후 입력의 굵기를 켰다가 다시 끈다", async ({ page, request }) => {
+  await seedParagraphText(request, "");
+  await openResource(page);
+  const content = page.locator(`[data-block-content="${PARAGRAPH_ID}"]`);
+
+  await content.click();
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type("굵게");
+  await page.keyboard.press("Enter");
+  const continued = page.locator('[data-block-content]:focus');
+  const continuedId = await continued.getAttribute("data-block-content");
+  await expect(continued).toHaveAttribute("data-inline-typing-mark", "bold");
+  await page.keyboard.type(" 계속");
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type(" 기본");
+
+  await expect(content).toHaveText("굵게");
+  await expect(continued).toHaveText(" 계속 기본");
+  await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("굵게");
+  await expect(continued.locator('[data-inline-mark="bold"]')).toHaveText(" 계속");
+  await expect(content.locator('[data-inline-mark="bold"]')).toHaveCSS("font-weight", "700");
+  await expect.poll(async () => {
+    const snapshot = await fixtureSnapshot(request);
+    const blocks = snapshot.state.resources.find((resource) => resource.id === FIXTURE_IDS.resource)?.blocks || [];
+    return {
+      first: blocks.find((block) => block.id === PARAGRAPH_ID)?.marks,
+      continued: blocks.find((block) => block.id === continuedId)?.marks,
+    };
+  }).toEqual({
+    first: [{ type: "bold", start: 0, end: 2 }],
+    continued: [{ type: "bold", start: 0, end: 3 }],
+  });
+});
+
 test("선택한 글자로 Resource를 추천하고 직접 검색한 Resource를 인용 링크로 저장해 연다", async ({ page, request }) => {
   const selectedText = "Body Search";
   await seedParagraphText(request, `${selectedText} 관련 메모`);

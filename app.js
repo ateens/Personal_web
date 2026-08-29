@@ -19228,7 +19228,14 @@ function handleKeydown(event) {
       openLinkPopover(ownerType, ownerId, blockId);
       return;
     }
-    toggleInlineMark(ownerType, ownerId, blockId, inlineShortcut);
+    const range = currentBlockSelectionRange(ownerType, ownerId, blockId);
+    if (range?.collapsed && inlineShortcut === "bold" && currentBlock?.type !== "code") {
+      document.execCommand("bold");
+      if (document.queryCommandState("bold")) blockContent.dataset.inlineTypingMark = inlineShortcut;
+      else delete blockContent.dataset.inlineTypingMark;
+    } else {
+      toggleInlineMark(ownerType, ownerId, blockId, inlineShortcut, range);
+    }
     return;
   }
 
@@ -23786,6 +23793,7 @@ function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
 
 function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return;
+  const inlineTypingMark = blockContent.dataset.inlineTypingMark === "bold" ? "bold" : "";
   ui.pendingMarkdownTextTarget = null;
   const item = itemById(ownerType, ownerId);
   if (!item) return;
@@ -23812,7 +23820,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     commitEditorHistory(history, { blockId: current.id, position: "end" });
     saveState();
     renderEditorMutation(ownerType, ownerId);
-    focusBlockContentAfterRender(current.id);
+    focusBlockContentAfterRender(current.id, { inlineTypingMark });
     return;
   }
   if (!split.before && !split.after && current.type !== "paragraph" && !blockHasIndentedDescendants(item.blocks, index)) {
@@ -23825,7 +23833,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     commitEditorHistory(history, { blockId: current.id, start: 0, end: 0 });
     saveState();
     renderEditorMutation(ownerType, ownerId);
-    focusBlockContentAfterRender(current.id);
+    focusBlockContentAfterRender(current.id, { inlineTypingMark });
     return;
   }
   const originalType = current.type;
@@ -23879,6 +23887,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   renderEditorMutation(ownerType, ownerId);
   focusBlockContentAfterRender(focusBlock.id, {
     caret: split.after && !splitAtStart ? "start" : "end",
+    inlineTypingMark,
     transaction: true,
     reserveLines: RESOURCE_CARET_ENTER_RESERVE_LINES,
   });
@@ -25077,10 +25086,18 @@ function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
 
 function focusBlockContentAfterRender(blockId, options = {}) {
   const focusTarget = () => {
-    if (options.range) return focusBlockContentAtRange(blockId, options.range.start, options.range.end ?? options.range.start);
-    if (options.position) return focusBlockContentAtPosition(blockId, options.position);
-    const target = focusBlockContent(blockId);
-    if (target && options.caret === "start") placeCaretAtStart(target);
+    let target;
+    if (options.range) target = focusBlockContentAtRange(blockId, options.range.start, options.range.end ?? options.range.start);
+    else if (options.position) target = focusBlockContentAtPosition(blockId, options.position);
+    else {
+      target = focusBlockContent(blockId);
+      if (target && options.caret === "start") placeCaretAtStart(target);
+    }
+    if (target && options.inlineTypingMark === "bold") {
+      ui.pendingMarkdownTextTarget = null;
+      if (!document.queryCommandState("bold")) document.execCommand("bold");
+      target.dataset.inlineTypingMark = "bold";
+    }
     return target;
   };
   const focusIsSettled = (candidate) => Boolean(candidate && document.activeElement === candidate);
@@ -25425,6 +25442,7 @@ function resourceSlashCommandFor(content, text) {
   if (!range || range.start !== range.end) return null;
   const match = /(^|\s)\/([^/\r\n]{0,100})$/.exec(text.slice(0, range.end));
   if (!match) return null;
+  if (/^\s|\s.*\s/.test(match[2])) return null;
   const start = match.index + match[1].length;
   if (inlineMarksFromContent(content, text).some((mark) => ["code", "equation", "link", "resourceLink"].includes(mark.type) && mark.start <= start && mark.end > start)) return null;
   if (ui.dismissedResourceSlash?.blockId === block.id && ui.dismissedResourceSlash.start === start) return null;
