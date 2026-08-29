@@ -703,7 +703,11 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   const window = await openSettledResource(page, FIXTURE_IDS.resource);
   const block = window.locator('[data-block-id="table-selection-handles"]');
   const rowHandle = (row) => block.locator(`[data-resource-table-scope="row"][data-table-row="${row}"]`);
+  const columnHandle = (column) => block.locator(`[data-resource-table-scope="column"][data-table-column="${column}"]`);
   const selected = block.locator("[data-resource-table-cell].is-cell-selected");
+  const visibleHandles = () => block.locator("[data-resource-table-scope]").evaluateAll((buttons) => buttons
+    .filter((button) => Number(getComputedStyle(button).opacity) > 0.99)
+    .map((button) => `${button.dataset.resourceTableScope}:${button.dataset.tableRow ?? button.dataset.tableColumn ?? "all"}`));
   const aligned = () => expect.poll(() => block.evaluate((element) => [...element.querySelectorAll('[data-resource-table-scope="row"]')].every((button, row) => {
     const handle = button.getBoundingClientRect();
     const bounds = element.querySelector("table").rows[row].getBoundingClientRect();
@@ -714,9 +718,58 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   await expect(block.locator('[data-resource-table-scope="row"]')).toHaveCount(9);
   await expect(block.locator('[data-resource-table-scope="column"]')).toHaveCount(3);
   await aligned();
+  await block.hover();
+  await expect.poll(visibleHandles).toEqual([]);
+  await rowHandle(2).hover();
+  await expect.poll(visibleHandles).toEqual(["row:2"]);
+  await columnHandle(1).hover();
+  await expect.poll(visibleHandles).toEqual(["column:1"]);
+  const handleGeometry = await block.evaluate((element) => {
+    const row = element.querySelector('[data-resource-table-scope="row"][data-table-row="2"]');
+    const column = element.querySelector('[data-resource-table-scope="column"][data-table-column="1"]');
+    const header = column.closest("th");
+    const rowBounds = row.getBoundingClientRect();
+    const columnBounds = column.getBoundingClientRect();
+    const headerBounds = header.getBoundingClientRect();
+    return {
+      rowWidth: rowBounds.width,
+      rowHeight: rowBounds.height,
+      columnWidth: columnBounds.width,
+      columnHeight: columnBounds.height,
+      columnBottom: columnBounds.bottom,
+      headerTop: headerBounds.top,
+      columnCenter: columnBounds.left + columnBounds.width / 2,
+      headerCenter: headerBounds.left + headerBounds.width / 2,
+      rowIcon: row.querySelector("span").textContent,
+      rowIconTransform: getComputedStyle(row.querySelector("span")).transform,
+      transition: getComputedStyle(row).transitionProperty,
+    };
+  });
+  expect(handleGeometry.rowWidth).toBe(handleGeometry.columnHeight);
+  expect(handleGeometry.rowHeight).toBe(handleGeometry.columnWidth);
+  expect(handleGeometry.columnBottom).toBeLessThanOrEqual(handleGeometry.headerTop);
+  expect(Math.abs(handleGeometry.columnCenter - handleGeometry.headerCenter)).toBeLessThan(1);
+  expect(handleGeometry.rowIcon).toBe("");
+  expect(handleGeometry.rowIconTransform).not.toBe("none");
+  expect(handleGeometry.transition).toContain("opacity");
   await rowHandle(2).click();
   await expect(selected).toHaveCount(3);
   expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableRow === "2"))).toBe(true);
+  const rowSelection = await selected.evaluateAll((cells) => cells.map((cell) => {
+    const style = getComputedStyle(cell.parentElement);
+    return {
+      borderRightColor: style.borderRightColor,
+      topLeft: parseFloat(style.borderTopLeftRadius),
+      bottomLeft: parseFloat(style.borderBottomLeftRadius),
+      topRight: parseFloat(style.borderTopRightRadius),
+      bottomRight: parseFloat(style.borderBottomRightRadius),
+    };
+  }));
+  expect(rowSelection[0].topLeft).toBeGreaterThan(0);
+  expect(rowSelection[0].bottomLeft).toBeGreaterThan(0);
+  expect(rowSelection[1]).toMatchObject({ borderRightColor: "rgba(0, 0, 0, 0)", topLeft: 0, bottomLeft: 0, topRight: 0, bottomRight: 0 });
+  expect(rowSelection[2].topRight).toBeGreaterThan(0);
+  expect(rowSelection[2].bottomRight).toBeGreaterThan(0);
   await expect(block.locator(".resource-table-format")).toBeVisible();
   await block.locator('[data-resource-table-format="tableBold"]').click();
   await expect(block.locator(".resource-table-format")).toBeVisible();
@@ -724,10 +777,25 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   const scrolledLeft = await block.locator(".resource-table-scroll").evaluate((element) => element.scrollLeft);
   expect(scrolledLeft).toBeGreaterThan(0);
   await aligned();
-  await block.locator('[data-resource-table-scope="column"][data-table-column="1"]').click();
+  await columnHandle(1).click();
   expect(await block.locator(".resource-table-scroll").evaluate((element) => element.scrollLeft)).toBe(scrolledLeft);
   await expect(selected).toHaveCount(9);
   expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableColumn === "1"))).toBe(true);
+  const columnSelection = await selected.evaluateAll((cells) => cells.map((cell) => {
+    const style = getComputedStyle(cell.parentElement);
+    return {
+      borderBottomColor: style.borderBottomColor,
+      topLeft: parseFloat(style.borderTopLeftRadius),
+      topRight: parseFloat(style.borderTopRightRadius),
+      bottomLeft: parseFloat(style.borderBottomLeftRadius),
+      bottomRight: parseFloat(style.borderBottomRightRadius),
+    };
+  }));
+  expect(columnSelection[0].topLeft).toBeGreaterThan(0);
+  expect(columnSelection[0].topRight).toBeGreaterThan(0);
+  expect(columnSelection[1]).toMatchObject({ borderBottomColor: "rgba(0, 0, 0, 0)", topLeft: 0, topRight: 0, bottomLeft: 0, bottomRight: 0 });
+  expect(columnSelection.at(-1).bottomLeft).toBeGreaterThan(0);
+  expect(columnSelection.at(-1).bottomRight).toBeGreaterThan(0);
   await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveCount(1);
   await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveAttribute("data-resource-table-scope", "column");
   await page.screenshot({ path: testInfo.outputPath("table-selection-handles.png") });

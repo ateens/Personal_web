@@ -114,6 +114,54 @@ test("Cmd+B는 이후 입력의 굵기를 켰다가 다시 끈다", async ({ pag
   });
 });
 
+test("볼드 입력 모드는 한글 조합 직후 Enter와 Shift+Enter 뒤에도 유지된다", async ({ page, request }) => {
+  await seedParagraphText(request, "");
+  await openResource(page);
+  const content = page.locator(`[data-block-content="${PARAGRAPH_ID}"]`);
+
+  await content.click();
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type("x");
+  await page.keyboard.press("Backspace");
+  await content.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    element.textContent = "안녕";
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "안녕" }));
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, data: "안녕", inputType: "insertText" }));
+    element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" }));
+  });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)))));
+
+  const continued = page.locator('[data-block-content]:focus');
+  const continuedId = await continued.getAttribute("data-block-content");
+  await expect(continued).toHaveAttribute("data-inline-typing-mark", "bold");
+  await page.keyboard.type("계속");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("다음");
+  await page.keyboard.press("Meta+b");
+  await page.keyboard.type("기본");
+
+  await expect.poll(async () => {
+    const snapshot = await fixtureSnapshot(request);
+    const blocks = snapshot.state.resources.find((resource) => resource.id === FIXTURE_IDS.resource)?.blocks || [];
+    return {
+      first: blocks.find((block) => block.id === PARAGRAPH_ID),
+      continued: blocks.find((block) => block.id === continuedId),
+    };
+  }).toMatchObject({
+    first: { text: "안녕", marks: [{ type: "bold", start: 0, end: 2 }] },
+    continued: {
+      text: "계속\n다음기본",
+      marks: [{ type: "bold", start: 0, end: 2 }, { type: "bold", start: 3, end: 5 }],
+    },
+  });
+});
+
 test("선택한 글자로 Resource를 추천하고 직접 검색한 Resource를 인용 링크로 저장해 연다", async ({ page, request }) => {
   const selectedText = "Body Search";
   await seedParagraphText(request, `${selectedText} 관련 메모`);

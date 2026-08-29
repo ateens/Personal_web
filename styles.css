@@ -6990,7 +6990,7 @@ button:focus-visible {
   overflow-x: auto;
   border: 1px solid rgba(55, 53, 47, 0.14);
   border-radius: 10px;
-  padding: 0;
+  padding: 13px 0 0;
   background: #fff;
   color: var(--ink);
   cursor: default;
@@ -7053,7 +7053,7 @@ button:focus-visible {
 
 .resource-table-scope {
   position: absolute;
-  z-index: 3;
+  z-index: 5;
   display: grid;
   place-items: center;
   min-width: 0;
@@ -7073,18 +7073,24 @@ button:focus-visible {
 }
 
 .resource-table-row-handles { position: absolute; inset: 0; pointer-events: none; }
-.resource-table-scope.is-row { left: -22px; width: 18px; height: 22px; font-size: 18px; pointer-events: auto; }
-.resource-table-scope.is-column { top: 0; left: 50%; width: 28px; height: 11px; font-size: 18px; transform: translateX(-50%); }
-.resource-table-scope.is-column > span { width: 2px; height: 2px; border-radius: 50%; background: currentColor; box-shadow: -5px 0 0 currentColor, 5px 0 0 currentColor; }
+.resource-table-scope.is-row { left: -15px; width: 11px; height: 28px; pointer-events: auto; }
+.resource-table-scope.is-column { top: -12px; left: 50%; width: 28px; height: 11px; transform: translateX(-50%); }
+.resource-table-scope:is(.is-row, .is-column) > span { width: 2px; height: 2px; border-radius: 50%; background: currentColor; box-shadow: -5px 0 0 currentColor, 5px 0 0 currentColor; }
+.resource-table-scope.is-row > span { transform: rotate(90deg); }
 .resource-table-scope.is-all { top: -23px; left: -23px; width: 20px; height: 20px; font-size: 16px; }
-.resource-table-shell:is(:hover, :focus-within) .resource-table-scope,
-.resource-table-scope:focus-visible,
-.resource-table-scope[aria-pressed="true"] { opacity: 1; }
-.resource-table-scope:is(:hover, :focus-visible, [aria-pressed="true"]) { background: #e5f1fc; color: #1769aa; }
+.resource-table-scope:is(:hover, :focus-visible, [aria-pressed="true"]) { opacity: 1; background: #e5f1fc; color: #1769aa; }
 .resource-table-scope:focus-visible { outline: 2px solid #2383e2; outline-offset: 1px; }
 .resource-table-block.has-table-range-selection .resource-table-format { display: flex; }
 .resource-table-block.has-table-range-selection > .resource-table-shell > .resource-table-cell-actions { display: none; }
-.resource-table-block.has-table-range-selection :is(th, td).has-cell-selection { background: rgba(35, 131, 226, 0.12); box-shadow: inset 0 0 0 1px #2383e2; }
+.resource-table-block.has-table-range-selection :is(th, td).has-cell-selection { z-index: 1; border-radius: 0; background: rgba(35, 131, 226, 0.12); box-shadow: none; }
+.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection { border-right-color: transparent; box-shadow: inset 0 1px #2383e2, inset 0 -1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:first-child { border-radius: 8px 0 0 8px; box-shadow: inset 1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:last-child { border-radius: 0 8px 8px 0; box-shadow: inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:only-child { border-radius: 8px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) :is(th, td).has-cell-selection { border-bottom-color: transparent; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) thead > tr:first-child > .has-cell-selection { border-radius: 8px 8px 0 0; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) tbody > tr:last-child > .has-cell-selection { border-radius: 0 0 8px 8px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 -1px #2383e2; }
+.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) table:not(:has(tbody tr)) thead > tr:first-child > .has-cell-selection { border-radius: 8px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
 
 .resource-table-edge {
   position: absolute;

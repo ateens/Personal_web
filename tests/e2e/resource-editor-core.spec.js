@@ -633,7 +633,15 @@ test("중간 pipe table과 text fence를 native table 및 Plain Text Code Space�
   await expect(table.locator("tbody tr").nth(2).locator("td")).toHaveText(["2층", "2", String.raw`(3+2\times2)`, "7"]);
   await expect(table.locator("tbody tr").nth(3).locator("td")).toHaveText(["3층", "4", String.raw`(7+2\times4)`, "15"]);
   await expect.poll(() => table.locator("thead th").last().evaluate((cell) => getComputedStyle(cell).textAlign)).toBe("right");
-  expect(await table.evaluate((element) => element.closest("[data-resource-table-select]").getBoundingClientRect().height - element.getBoundingClientRect().height)).toBeLessThanOrEqual(2);
+  expect(await table.evaluate((element) => {
+    const scroller = element.closest("[data-resource-table-select]");
+    const style = getComputedStyle(scroller);
+    return scroller.getBoundingClientRect().height
+      - element.getBoundingClientRect().height
+      - parseFloat(style.paddingTop)
+      - parseFloat(style.borderTopWidth)
+      - parseFloat(style.borderBottomWidth);
+  })).toBeLessThanOrEqual(2);
   await expect.poll(() => editor.evaluate((root) => {
     const contents = [...root.querySelectorAll("[data-block-content]")];
     const before = contents.find((element) => element.textContent === "표 앞 일반 문단");
@@ -1398,6 +1406,46 @@ test("Resource 저장 중 붙여넣은 PNG는 이전 저장 응답에 덮이지 
     return resource?.blocks.find((block) => block.type === "image")?.url || "";
   }, { timeout: 3_000 }).toBe(src);
   await expect(localImage).toBeVisible();
+});
+
+test("Cmd+위아래 방향키는 표 안에서도 편집기 최상단과 최하단으로 이동한다", async ({ page, request }) => {
+  const firstId = "command-edge-first";
+  const middleId = "command-edge-middle";
+  const lastId = "command-edge-last";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { ...paragraph("command-edge-top-divider"), type: "divider" },
+    { ...paragraph(firstId, "| 처음 |\n| --- |\n| 첫 셀 |"), type: "table" },
+    { ...paragraph(middleId, "| 중간 |\n| --- |\n| 가운데 |"), type: "table" },
+    { ...paragraph(lastId, "| 마지막 |\n| --- |\n| 끝 셀 |"), type: "table" },
+    { ...paragraph("command-edge-bottom-divider"), type: "divider" },
+  ]);
+  const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const cell = editor.locator(`[data-block-id="${middleId}"] [data-resource-table-cell]`).last();
+  const firstCell = editor.locator(`[data-block-id="${firstId}"] [data-resource-table-cell]`).first();
+  const lastCell = editor.locator(`[data-block-id="${lastId}"] [data-resource-table-cell]`).last();
+  const caretOffset = (target) => target.evaluate((element) => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.setEnd(selection.focusNode, selection.focusOffset);
+    return range.toString().length;
+  });
+
+  await setCaret(cell, 1);
+  await cell.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "ArrowUp", metaKey: true, isComposing: true, keyCode: 229 }));
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+  });
+  await expect(cell).toBeFocused();
+  await page.keyboard.press("Meta+ArrowUp");
+  await expect(firstCell).toBeFocused();
+  expect(await caretOffset(firstCell)).toBe(0);
+
+  await setCaret(cell, 1);
+  await page.keyboard.press("Meta+ArrowDown");
+  await expect(lastCell).toBeFocused();
+  expect(await caretOffset(lastCell)).toBe((await lastCell.textContent()).length);
 });
 
 test("긴 문서에서 위아래 이동은 선호 열을 유지하고 커서를 화면 안에 두며 모바일에서 넘치지 않는다", async ({ page, request }) => {
