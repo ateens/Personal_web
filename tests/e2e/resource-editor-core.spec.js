@@ -1916,6 +1916,7 @@ test("긴 표의 높이는 본문 줄바꿈과 코멘트 사이드바 크기 변
     ...Array.from({ length: 16 }, (_, index) => `| 항목 ${index} | ${"실제 문서의 문장으로 셀이 여러 줄에 걸치도록 채웁니다. ".repeat(3)} | 연구실 현장 검증 | X |`),
   ].join("\n");
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { ...paragraph("wrapped-body", `명시적 줄바꿈입니다.\n${"좁은 Resource에서 너비 때문에 자동으로 넘어가는 긴 문장입니다. ".repeat(8)}`), marks: [{ type: "bold", start: 0, end: 9 }] },
     { ...paragraph("long-table", tableText), type: "table" },
     { ...paragraph("after-table-heading", "4개년 계획"), type: "heading2" },
     paragraph("after-table-body", "겹치면 안 되는 표 아래 본문입니다."),
@@ -1928,6 +1929,15 @@ test("긴 표의 높이는 본문 줄바꿈과 코멘트 사이드바 크기 변
     return { block: block.bottom - table.bottom, heading: heading.top - table.bottom };
   });
   const expectNoOverlap = async () => {
+    const blocksContainContent = await editor.locator(".block").evaluateAll((blocks) => blocks.every((block, index) => {
+      const content = block.querySelector("[data-block-content]");
+      const next = blocks[index + 1];
+      if (!content) return true;
+      const blockRect = block.getBoundingClientRect();
+      const contentRect = content.getBoundingClientRect();
+      return blockRect.bottom >= contentRect.bottom && (!next || blockRect.bottom <= next.getBoundingClientRect().top);
+    }));
+    expect(blocksContainContent).toBe(true);
     await expect.poll(async () => (await gap()).block).toBeGreaterThanOrEqual(14);
     expect((await gap()).heading).toBeGreaterThanOrEqual(14);
   };
@@ -1941,7 +1951,7 @@ test("긴 표의 높이는 본문 줄바꿈과 코멘트 사이드바 크기 변
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoOverlap();
   const resource = await persistedResource(request, FIXTURE_IDS.bodySearchResource);
-  expect(resource.blocks[0].text).toBe(tableText);
+  expect(resource.blocks.find((block) => block.id === "long-table")?.text).toBe(tableText);
 });
 
 test("행과 열 서식은 선택 범위에만 적용되고 저장과 행열 삭제 뒤에도 유지된다", async ({ page, request }) => {

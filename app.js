@@ -2439,6 +2439,7 @@ function saveResourceComment(form) {
   saveState();
   renderEditorMutation("resources", resourceId);
   syncResourceComments(resourceId, true);
+  if (draft.blockId) focusInlineContentRange(draft.blockId, { ...draft, start: draft.end, end: draft.end });
   return true;
 }
 

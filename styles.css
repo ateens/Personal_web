@@ -6400,11 +6400,13 @@ button:focus-visible {
 
 :is(.resource-document, .quick-editor-surface) .block-editor {
   align-content: start;
+  grid-auto-rows: max-content;
   min-height: 360px;
   margin-top: 0;
 }
 
 :is(.resource-document, .quick-editor-surface) .block {
+  grid-auto-rows: max-content;
   grid-template-columns: minmax(0, 1fr);
   gap: 0;
   padding-right: 0;

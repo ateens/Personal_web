@@ -106,6 +106,7 @@ test("표 셀의 인라인 단축키와 마크다운, 코멘트는 선택 범위
   await page.locator('[data-inline-toolbar] [data-inline-mark-toggle="comment"]').click();
   await page.locator('[data-resource-comment-input]').fill("셀 코멘트");
   await page.locator('[data-resource-comment-input]').press("Meta+Enter");
+  await expect(cell(2, 0)).toBeFocused();
   await expect(cell(2, 0).locator('[data-inline-mark="comment"]')).toHaveText("마지막");
   await expect.poll(async () => (await persistedResource(request)).commentThreads[0]?.anchor).toEqual({ blockId: "inline-table", start: 0, end: 3, tableRow: 2, tableColumn: 0 });
   await page.locator('[data-resource-comments-toggle]').click();
@@ -322,6 +323,7 @@ test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제
   await expect(commentInput).toHaveCSS("outline-width", "0px");
   await expect(commentInput).toHaveCSS("box-shadow", "none");
   await commentInput.press("Meta+Enter");
+  await expect(content).toBeFocused();
   const mark = content.locator('[data-inline-mark="comment"]');
   await expect(mark).toHaveText(selectedText);
 
