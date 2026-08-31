@@ -376,7 +376,7 @@ const EDITOR_MARQUEE_ACTIVATION_DISTANCE = 5;
 const EDITOR_MARQUEE_GUTTER_WIDTH = 42;
 const EDITOR_MARQUEE_AUTOSCROLL_EDGE = 52;
 const RESOURCE_CARET_RESERVE_LINES = 1;
-const RESOURCE_CARET_ENTER_RESERVE_LINES = 1;
+const RESOURCE_CARET_ENTER_RESERVE_LINES = QUICK_EDITOR_SURFACE ? 3 : 1;
 const BLOCK_TYPE_KEYBOARD_SHORTCUTS = {
   "0": "paragraph",
   "1": "heading1",
@@ -15080,8 +15080,8 @@ function patchBlockEditorStructure(editor, blocksHtml) {
   const reusableBlock = (nextBlock) => {
     const currentBlock = existingBlocks.get(nextBlock.dataset.blockId || "");
     if (!currentBlock || currentBlock.dataset.type !== nextBlock.dataset.type) return nextBlock.cloneNode(true);
-    const currentContent = currentBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content]");
-    const nextContent = nextBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content]");
+    const currentContent = currentBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content], :scope > .resource-image-figure > [data-block-content]");
+    const nextContent = nextBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content], :scope > .resource-image-figure > [data-block-content]");
     if (!currentContent || !nextContent || !currentContent.isEqualNode(nextContent)) return nextBlock.cloneNode(true);
     syncElementAttributes(currentBlock, nextBlock);
     for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-list-marker", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
@@ -25278,16 +25278,17 @@ function focusBlockContentAtRange(blockId, start, end = start) {
 
 function ensureResourceCaretVisible(blockContent, options = {}) {
   const resourceDocument = blockContent?.closest?.(".resource-document");
+  const scrollElement = resourceDocument || (blockContent?.closest?.(".quick-editor-surface") ? document.scrollingElement : null);
   const range = blockContent ? selectionRangeInside(blockContent) : null;
-  if (!resourceDocument || !range?.collapsed) return false;
+  if (!scrollElement || !range?.collapsed) return false;
   const caretRect = caretRectFor(blockContent);
   if (!caretRect || (!caretRect.width && !caretRect.height)) return false;
-  const documentRect = resourceDocument.getBoundingClientRect();
+  const documentRect = resourceDocument?.getBoundingClientRect() || visualViewportBounds();
   const style = getComputedStyle(blockContent);
   const fontSize = Number.parseFloat(style.fontSize) || 16;
   const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.55;
   const reserveLines = Math.max(RESOURCE_CARET_RESERVE_LINES, Number(options.reserveLines) || 0);
-  const titlebarBottom = resourceDocument.querySelector("[data-resource-window-drag]")?.getBoundingClientRect().bottom || documentRect.top;
+  const titlebarBottom = resourceDocument?.querySelector("[data-resource-window-drag]")?.getBoundingClientRect().bottom || documentRect.top;
   const safeTop = Math.max(documentRect.top, titlebarBottom) + Math.max(18, lineHeight * 0.75);
   const safeBottom = documentRect.bottom - Math.max(22, lineHeight * reserveLines);
   let delta = 0;
@@ -25295,16 +25296,16 @@ function ensureResourceCaretVisible(blockContent, options = {}) {
   else if (caretRect.top < safeTop) delta = caretRect.top - safeTop;
   if (Math.abs(delta) < 0.5) return false;
   const nextScrollTop = Math.max(0, Math.min(
-    resourceDocument.scrollHeight - resourceDocument.clientHeight,
-    resourceDocument.scrollTop + delta,
+    scrollElement.scrollHeight - scrollElement.clientHeight,
+    scrollElement.scrollTop + delta,
   ));
-  if (Math.abs(nextScrollTop - resourceDocument.scrollTop) < 0.5) return false;
-  resourceDocument.scrollTop = nextScrollTop;
+  if (Math.abs(nextScrollTop - scrollElement.scrollTop) < 0.5) return false;
+  scrollElement.scrollTop = nextScrollTop;
   return true;
 }
 
 function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
-  if (!blockContent?.isConnected || !blockContent.closest(".resource-document")) return;
+  if (!blockContent?.isConnected || !blockContent.closest(".resource-document, .quick-editor-surface")) return;
   if (resourceCaretScrollFrame) cancelAnimationFrame(resourceCaretScrollFrame);
   resourceCaretScrollFrame = requestAnimationFrame(() => {
     resourceCaretScrollFrame = 0;

@@ -477,6 +477,53 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   expect(new URL(page.url()).searchParams.get("surface")).toBe("quick-editor");
 });
 
+test("Quick Editor Enter는 이미지를 유지하고 caret 아래에 세 줄 여유를 둔다", async ({ page }) => {
+  const dataURL = `data:image/png;base64,${PIXEL_PNG.toString("base64")}`;
+  await page.setViewportSize({ width: 496, height: 420 });
+  await page.goto("/?surface=quick-editor");
+  await page.evaluate(({ image, blocks }) => window.sygmaQuickEditor.loadLocal({
+    id: "enter-scroll",
+    assets: { "assets/11111111-1111-4111-8111-111111111111.png": image },
+    blocks,
+  }), {
+    image: dataURL,
+    blocks: [
+      { id: "kept-image", type: "image", text: "", url: "assets/11111111-1111-4111-8111-111111111111.png", marks: [], indent: 0 },
+      ...Array.from({ length: 34 }, (_, index) => ({ id: `quick-line-${index + 1}`, type: "paragraph", text: `퀵 메모 줄 ${index + 1}`, marks: [], indent: 0 })),
+    ],
+  });
+  const editor = page.locator('.block-editor[data-owner-id="quick-note:enter-scroll"]');
+  const last = editor.locator('[data-block-content="quick-line-34"]');
+  const image = editor.locator('[data-block-id="kept-image"] img');
+  await expect(image).toHaveCount(1);
+  await image.scrollIntoViewIfNeeded();
+  await expect.poll(() => image.evaluate((element) => element.complete && element.naturalWidth > 0)).toBe(true);
+  await page.evaluate(() => { window.__quickEditorImage = document.querySelector('[data-block-id="kept-image"] img'); });
+  await last.focus();
+  await last.press("End");
+  const beforeScrollTop = await page.evaluate(() => document.scrollingElement.scrollTop);
+  await page.keyboard.press("Enter");
+
+  await expect(editor.locator("[data-block-content]")).toHaveCount(36);
+  await expect.poll(() => page.evaluate(() => {
+    const content = document.activeElement?.closest?.("[data-block-content]");
+    const selection = window.getSelection();
+    if (!content || !selection?.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    const rawCaret = range.getClientRects()[0] || range.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    const caretBottom = rawCaret && (rawCaret.width || rawCaret.height)
+      ? rawCaret.bottom
+      : Math.min(contentRect.bottom, contentRect.top + 24);
+    const style = getComputedStyle(content);
+    const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.55;
+    const viewportBottom = (window.visualViewport?.offsetTop || 0) + (window.visualViewport?.height || window.innerHeight);
+    return document.scrollingElement.scrollTop > 0 && viewportBottom - caretBottom >= lineHeight * 3 - 2;
+  })).toBe(true);
+  expect(await page.evaluate(() => document.scrollingElement.scrollTop)).toBeGreaterThan(beforeScrollTop);
+  expect(await page.evaluate(() => document.querySelector('[data-block-id="kept-image"] img') === window.__quickEditorImage)).toBe(true);
+});
+
 test("Quick Editor는 로컬 이미지 응답 전 Resource 전환 시 paste와 /image 삽입을 취소한다", async ({ page, request }) => {
   const pngDataURL = `data:image/png;base64,${PIXEL_PNG.toString("base64")}`;
   let resourceImageRequests = 0;
