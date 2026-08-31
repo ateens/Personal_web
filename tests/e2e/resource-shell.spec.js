@@ -778,23 +778,25 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
     const rowBounds = row.getBoundingClientRect();
     const columnBounds = column.getBoundingClientRect();
     const headerBounds = header.getBoundingClientRect();
+    const tableBounds = element.querySelector(".resource-markdown-table").getBoundingClientRect();
     return {
       rowWidth: rowBounds.width,
       rowHeight: rowBounds.height,
       columnWidth: columnBounds.width,
       columnHeight: columnBounds.height,
-      columnBottom: columnBounds.bottom,
-      headerTop: headerBounds.top,
       columnCenter: columnBounds.left + columnBounds.width / 2,
       headerCenter: headerBounds.left + headerBounds.width / 2,
       rowIcon: row.querySelector("span").textContent,
       rowIconTransform: getComputedStyle(row.querySelector("span")).transform,
       transition: getComputedStyle(row).transitionProperty,
+      rowGap: tableBounds.left - rowBounds.right,
+      columnGap: tableBounds.top - columnBounds.bottom,
     };
   });
   expect(handleGeometry.rowWidth).toBe(handleGeometry.columnHeight);
   expect(handleGeometry.rowHeight).toBe(handleGeometry.columnWidth);
-  expect(handleGeometry.columnBottom).toBeLessThanOrEqual(handleGeometry.headerTop);
+  expect(handleGeometry.rowGap).toBeGreaterThan(1);
+  expect(Math.abs(handleGeometry.rowGap - handleGeometry.columnGap)).toBeLessThan(1);
   expect(Math.abs(handleGeometry.columnCenter - handleGeometry.headerCenter)).toBeLessThan(1);
   expect(handleGeometry.rowIcon).toBe("");
   expect(handleGeometry.rowIconTransform).not.toBe("none");
@@ -812,11 +814,12 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
       bottomRight: parseFloat(style.borderBottomRightRadius),
     };
   }));
-  expect(rowSelection[0].topLeft).toBeGreaterThan(0);
-  expect(rowSelection[0].bottomLeft).toBeGreaterThan(0);
+  const tableRadius = await block.locator(".resource-markdown-table").evaluate((table) => parseFloat(getComputedStyle(table).borderTopLeftRadius));
+  expect(rowSelection[0].topLeft).toBe(tableRadius);
+  expect(rowSelection[0].bottomLeft).toBe(tableRadius);
   expect(rowSelection[1]).toMatchObject({ borderRightColor: "rgba(0, 0, 0, 0)", topLeft: 0, bottomLeft: 0, topRight: 0, bottomRight: 0 });
-  expect(rowSelection[2].topRight).toBeGreaterThan(0);
-  expect(rowSelection[2].bottomRight).toBeGreaterThan(0);
+  expect(rowSelection[2].topRight).toBe(tableRadius);
+  expect(rowSelection[2].bottomRight).toBe(tableRadius);
   await expect(block.locator(".resource-table-format")).toBeVisible();
   await block.locator('[data-resource-table-format="tableBold"]').click();
   await expect(block.locator(".resource-table-format")).toBeVisible();
@@ -838,11 +841,11 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
       bottomRight: parseFloat(style.borderBottomRightRadius),
     };
   }));
-  expect(columnSelection[0].topLeft).toBeGreaterThan(0);
-  expect(columnSelection[0].topRight).toBeGreaterThan(0);
+  expect(columnSelection[0].topLeft).toBe(tableRadius);
+  expect(columnSelection[0].topRight).toBe(tableRadius);
   expect(columnSelection[1]).toMatchObject({ borderBottomColor: "rgba(0, 0, 0, 0)", topLeft: 0, topRight: 0, bottomLeft: 0, bottomRight: 0 });
-  expect(columnSelection.at(-1).bottomLeft).toBeGreaterThan(0);
-  expect(columnSelection.at(-1).bottomRight).toBeGreaterThan(0);
+  expect(columnSelection.at(-1).bottomLeft).toBe(tableRadius);
+  expect(columnSelection.at(-1).bottomRight).toBe(tableRadius);
   await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveCount(1);
   await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveAttribute("data-resource-table-scope", "column");
   await page.screenshot({ path: testInfo.outputPath("table-selection-handles.png") });
@@ -860,6 +863,29 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   })).toBe(true);
   await cell.press("Escape");
   await expect(selected).toHaveCount(1);
+  const singleSelection = await selected.evaluate((content) => {
+    const cellElement = content.parentElement;
+    const table = content.closest(".resource-markdown-table");
+    const probe = document.createElement("span");
+    probe.style.boxShadow = "0 0 0 1px #2383e2";
+    document.body.append(probe);
+    const expectedShadow = getComputedStyle(probe).boxShadow;
+    probe.remove();
+    const style = getComputedStyle(cellElement);
+    const tableStyle = getComputedStyle(table);
+    return {
+      shadow: style.boxShadow,
+      expectedShadow,
+      borderRightColor: style.borderRightColor,
+      borderBottomColor: style.borderBottomColor,
+      radii: [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius],
+      tableRadii: [tableStyle.borderTopLeftRadius, tableStyle.borderTopRightRadius, tableStyle.borderBottomRightRadius, tableStyle.borderBottomLeftRadius],
+    };
+  });
+  expect(singleSelection.shadow).toBe(singleSelection.expectedShadow);
+  expect(singleSelection.borderRightColor).toBe("rgba(0, 0, 0, 0)");
+  expect(singleSelection.borderBottomColor).toBe("rgba(0, 0, 0, 0)");
+  expect(singleSelection.radii).toEqual(singleSelection.tableRadii);
   await cell.press("ArrowRight");
   await expect(selected).toHaveAttribute("data-table-column", "2");
   await block.locator('[data-resource-table-scope="all"]').click();
