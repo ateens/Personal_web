@@ -9077,7 +9077,13 @@ function handleMarkdownTableCellEvent(event) {
     if (value !== undefined) cell.innerHTML = renderMarkdownTableCell(value, markdownTableCellMarks(block, row, Number(cell.dataset.tableColumn)));
     return;
   }
-  if (event.isComposing || event.keyCode === 229 || ui.composingBlockId === block.id) return;
+  if (event.isComposing || event.keyCode === 229 || ui.composingBlockId === block.id) {
+    if (event.type === "keydown" && inlineMarkKeyboardShortcut(event) === "bold") {
+      event.preventDefault();
+      toggleBoldTypingMark(cell);
+    }
+    return;
+  }
   if (event.type === "beforeinput") {
     if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
       event.preventDefault();
@@ -15445,7 +15451,7 @@ function handleBlockSelectAll(blockContent, ownerType, ownerId) {
   selectSingleBlock(ownerType, ownerId, blockId);
 }
 
-function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId) {
+function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, backward = false) {
   const blockId = blockContent?.dataset?.blockContent || "";
   if (!blockId) return;
   const textLength = (blockContent.textContent || "").length;
@@ -15464,7 +15470,7 @@ function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId) {
     ui.commentPopover = null;
     blockContent.focus();
     activateBlockContent(blockContent);
-    setSelectionOffsets(blockContent, 0, textLength);
+    setSelectionOffsets(blockContent, backward ? textLength : 0, backward ? 0 : textLength);
     return;
   }
   handleBlockSelectAll(blockContent, ownerType, ownerId);
@@ -19224,7 +19230,14 @@ function handleKeydown(event) {
   const currentBlock = itemById(ownerType, ownerId)?.blocks?.find((block) => block.id === blockId);
   if (currentBlock?.type === IMAGE_BLOCK_TYPE && handleResourceImageBlockKeydown(event, ownerType, ownerId, currentBlock, blockContent)) return;
 
-  if (isComposingInput(event, blockContent)) return;
+  if (isComposingInput(event, blockContent)) {
+    if (inlineMarkKeyboardShortcut(event) === "bold" && currentBlock?.type !== "code") {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleBoldTypingMark(blockContent);
+    }
+    return;
+  }
   if (handleRecentCompositionEnter(event, ownerType, ownerId, blockId, blockContent)) return;
 
   if (handlePendingEmptyContinuationEnter(event)) return;
@@ -19375,7 +19388,7 @@ function handleKeydown(event) {
   ) {
     event.preventDefault();
     event.stopPropagation();
-    handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId);
+    handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, true);
     return;
   }
 
@@ -20117,6 +20130,10 @@ function pendingMarkdownBlockType(pending) {
 function handleDocumentSelectionChange() {
   if (ui.blockDrag || ui.editorMarquee || ui.deleteDrag || ui.todayTaskDrag) return;
   if (ui.inlineSelectionPointer) return;
+  const blockContent = document.activeElement?.closest?.("[data-resource-table-cell], [data-block-content]");
+  if (blockContent && !isComposingBlock(blockContent) && window.getSelection()?.isCollapsed && inlineTypingMarkForContent(blockContent)) {
+    restoreInlineTypingMark(blockContent);
+  }
   window.clearTimeout(inlineToolbarSelectionTimer);
   inlineToolbarSelectionTimer = 0;
   refreshInlineToolbarFromSelection();
@@ -22893,11 +22910,14 @@ function clearInlineTypingMarkForFocusChange(blockContent) {
 function toggleBoldTypingMark(blockContent) {
   const editor = blockContent?.closest?.(".block-editor");
   if (!editor) return false;
-  const enabled = inlineTypingMarkForContent(blockContent) !== "bold" && !document.queryCommandState("bold");
+  const current = inlineTypingMarkForContent(blockContent);
+  const enabled = current ? current !== "bold" : !document.queryCommandState("bold");
   if (document.queryCommandState("bold") !== enabled) document.execCommand("bold");
-  ui.inlineTypingMark = enabled
-    ? { ownerType: editor.dataset.ownerType, ownerId: editor.dataset.ownerId, mark: "bold" }
-    : null;
+  ui.inlineTypingMark = {
+    ownerType: editor.dataset.ownerType,
+    ownerId: editor.dataset.ownerId,
+    mark: enabled ? "bold" : "normal",
+  };
   if (enabled) blockContent.dataset.inlineTypingMark = "bold";
   else delete blockContent.dataset.inlineTypingMark;
   return enabled;
@@ -22906,8 +22926,11 @@ function toggleBoldTypingMark(blockContent) {
 function restoreInlineTypingMark(blockContent) {
   if (!blockContent) return;
   const isCode = blockContent.closest(".block")?.dataset.type === "code";
-  if (inlineTypingMarkForContent(blockContent) !== "bold" || isCode) {
+  const typingMark = inlineTypingMarkForContent(blockContent);
+  if (typingMark !== "bold" || isCode) {
     if (blockContent.dataset.inlineTypingMark === "bold") delete blockContent.dataset.inlineTypingMark;
+    const range = selectionRangeInside(blockContent);
+    if (typingMark === "normal" && document.activeElement === blockContent && range?.collapsed && document.queryCommandState("bold")) document.execCommand("bold");
     return;
   }
   blockContent.dataset.inlineTypingMark = "bold";
@@ -25301,14 +25324,9 @@ function setSelectionOffsets(element, start, end = start) {
   const textLength = (element.textContent || "").length;
   const anchor = Math.max(0, Math.min(textLength, start));
   const focus = Math.max(0, Math.min(textLength, end));
-  const range = document.createRange();
   const startPoint = textPointAtOffset(element, anchor);
   const endPoint = textPointAtOffset(element, focus);
-  range.setStart(startPoint.node, startPoint.offset);
-  range.setEnd(endPoint.node, endPoint.offset);
-  const selection = window.getSelection();
-  selection.removeAllRanges();
-  selection.addRange(range);
+  setDirectionalSelection(startPoint.node, startPoint.offset, endPoint.node, endPoint.offset);
 }
 
 function textPointAtOffset(element, targetOffset) {

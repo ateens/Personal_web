@@ -1629,6 +1629,16 @@ test("Resource Shift+ArrowUp은 현재 줄 텍스트, 현재 블록, 위 인접 
     focusBlock: blockIds[2],
     selectedIds: [],
   });
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({
+    text: blockTexts[2].slice(1),
+    selectedIds: [],
+  });
+  await page.keyboard.press("Shift+ArrowLeft");
+  await expect.poll(() => resourceSelectionState(page)).toMatchObject({
+    text: blockTexts[2],
+    selectedIds: [],
+  });
   await page.keyboard.press("Shift+ArrowUp");
   await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: [blockIds[2]] });
   await page.keyboard.press("Shift+ArrowUp");

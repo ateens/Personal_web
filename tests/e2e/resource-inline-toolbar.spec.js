@@ -94,10 +94,18 @@ test("Cmd+B는 이후 입력의 굵기를 켰다가 다시 끈다", async ({ pag
   await expect(continued).toHaveAttribute("data-inline-typing-mark", "bold");
   await page.keyboard.type(" 계속");
   await page.keyboard.press("Meta+b");
-  await page.keyboard.type(" 기본");
+  await continued.evaluate(() => {
+    const selection = window.getSelection();
+    const range = selection.getRangeAt(0).cloneRange();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await expect.poll(() => continued.evaluate(() => document.queryCommandState("bold"))).toBe(false);
+  await page.keyboard.type("기본");
 
   await expect(content).toHaveText("굵게");
-  await expect(continued).toHaveText(" 계속 기본");
+  await expect(continued).toHaveText(" 계속기본");
   await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("굵게");
   await expect(continued.locator('[data-inline-mark="bold"]')).toHaveText(" 계속");
   await expect(content.locator('[data-inline-mark="bold"]')).toHaveCSS("font-weight", "700");
@@ -143,7 +151,11 @@ test("볼드 입력 모드는 한글 조합 직후 Enter와 Shift+Enter 뒤에�
   await page.keyboard.type("계속");
   await page.keyboard.press("Shift+Enter");
   await page.keyboard.type("다음");
+  await continued.evaluate((element) => element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true })));
   await page.keyboard.press("Meta+b");
+  await expect(continued).not.toHaveAttribute("data-inline-typing-mark", "bold");
+  await continued.evaluate((element) => element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" })));
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.keyboard.type("기본");
 
   await expect.poll(async () => {
