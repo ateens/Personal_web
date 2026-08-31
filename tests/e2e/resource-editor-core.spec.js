@@ -1336,24 +1336,62 @@ test("슬래시 변환은 토글 자식과 인라인 서식, 조합 종료 직�
   }).toEqual({ tables: 2, child: "Child" });
 });
 
-test("붙여넣은 PNG 이미지는 클릭 선택 후 Backspace로 DOM과 저장 상태에서 제거된다", async ({ page, request }) => {
+test("붙여넣은 PNG 이미지는 꼭 맞는 영역과 저장되는 캡션을 사용하며 선택 후 삭제된다", async ({ page, request }) => {
   const { editor, resourceId } = await createEmptyResource(page);
   await pastePng(editor.locator("[data-block-content]").first());
 
   const imageBlock = editor.locator('.block[data-type="image"]');
   const image = imageBlock.locator("img");
+  const caption = imageBlock.locator("[data-resource-image-caption]");
   await expect(image).toBeVisible();
+  await expect(imageBlock).not.toContainText("clipboard");
+  await expect(imageBlock.locator("figcaption")).toHaveCount(0);
+  await expect(caption).toHaveValue("");
   const src = await image.getAttribute("src");
   expect(src).toMatch(/^\/api\/resource-images\/[a-zA-Z0-9_-]+$/);
+  const layout = await imageBlock.evaluate((block) => {
+    const editorRect = block.closest(".block-editor").getBoundingClientRect();
+    const blockRect = block.getBoundingClientRect();
+    const figureRect = block.querySelector("figure").getBoundingClientRect();
+    const mediaRect = block.querySelector(".resource-image-media").getBoundingClientRect();
+    const imageRect = block.querySelector("img").getBoundingClientRect();
+    return {
+      editorWidth: editorRect.width,
+      blockWidth: blockRect.width,
+      mediaWidthDelta: mediaRect.width - imageRect.width,
+      mediaHeightDelta: mediaRect.height - imageRect.height,
+      extraFigureHeight: figureRect.height - imageRect.height,
+    };
+  });
+  expect(layout.blockWidth).toBeLessThan(layout.editorWidth / 2);
+  expect(Math.abs(layout.mediaWidthDelta)).toBeLessThan(1);
+  expect(Math.abs(layout.mediaHeightDelta)).toBeLessThan(1);
+  expect(layout.extraFigureHeight).toBeLessThan(40);
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);
     return resource?.blocks.some((block) => block.type === "image" && block.url === src);
   }).toBe(true);
 
-  await image.click();
-  await expect(imageBlock).toHaveClass(/\bis-selected\b/);
+  await caption.fill("설명 캡션");
+  await expect.poll(async () => {
+    const resource = await persistedResource(request, resourceId);
+    return resource?.blocks.find((block) => block.type === "image")?.caption || "";
+  }).toBe("설명 캡션");
+
+  const reloadedEditor = await openResource(page, resourceId);
+  const reloadedBlock = reloadedEditor.locator('.block[data-type="image"]');
+  const reloadedImage = reloadedBlock.locator("img");
+  const reloadedCaption = reloadedBlock.locator("[data-resource-image-caption]");
+  await expect(reloadedCaption).toHaveValue("설명 캡션");
+  await reloadedCaption.press("End");
+  await reloadedCaption.press("Backspace");
+  await expect(reloadedBlock).toHaveCount(1);
+
+  await reloadedImage.click();
+  await expect(reloadedBlock).toHaveClass(/\bis-selected\b/);
+  await expect(reloadedBlock).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await page.keyboard.press("Backspace");
-  await expect(imageBlock).toHaveCount(0);
+  await expect(reloadedBlock).toHaveCount(0);
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);
     return resource?.blocks.some((block) => block.type === "image" && block.url === src);

@@ -51,6 +51,7 @@ const MAX_COMMENT_THREADS_PER_RESOURCE = 1_000;
 const MAX_COMMENT_REPLIES_PER_THREAD = 500;
 const MAX_COMMENT_BODY_LENGTH = 20_000;
 const MAX_RESOURCE_TITLE_LENGTH = 20_000;
+const MAX_RESOURCE_IMAGE_CAPTION_LENGTH = 2_000;
 const MAX_RESOURCE_METADATA_LENGTH = 128;
 const MAX_RESOURCE_TIMESTAMP_SOURCE_LENGTH = 64;
 const MAX_VALIDATION_ISSUES = 24;
@@ -1099,6 +1100,12 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
         "unsafe_image_url",
         "Resource images require a same-origin uploaded image URL or a credential-free HTTPS URL.",
       );
+    }
+    if (
+      block.caption !== undefined
+      && (block.type !== "image" || typeof block.caption !== "string" || block.caption.length > MAX_RESOURCE_IMAGE_CAPTION_LENGTH)
+    ) {
+      addValidationIssue(issues, `${blockPath}.caption`, "invalid_image_caption", `Image caption must be a string of at most ${MAX_RESOURCE_IMAGE_CAPTION_LENGTH} characters.`);
     }
     if (block.listStart !== undefined && (block.type !== "numbered" || !Number.isInteger(block.listStart) || block.listStart < 1 || block.listStart > 999_999)) {
       addValidationIssue(issues, `${blockPath}.listStart`, "invalid_list_start", "Numbered list start must be an integer between 1 and 999999.");

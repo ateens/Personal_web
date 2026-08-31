@@ -172,6 +172,7 @@ const RESOURCE_TABLE_MAX_ROWS = 200;
 const RESOURCE_TABLE_MAX_COLUMNS = 32;
 const RESOURCE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_RESOURCE_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_RESOURCE_IMAGE_CAPTION_LENGTH = 2_000;
 const MAX_RESOURCE_TITLE_LENGTH = 20_000;
 const URL_PASTE_CHOICE_ACTIONS = Object.freeze([
   { action: "link", label: "링크", hint: "URL을 편집 가능한 링크 텍스트로 유지", icon: "↗" },
@@ -1418,7 +1419,7 @@ function quickEditorMarkdown(resource) {
   return clipboardBlocksPlainText((resource?.blocks || []).map((block) => {
     const localAssetPath = resource === quickEditor.localResource ? normalizeQuickEditorAssetPath(block.localAssetPath || block.url) : "";
     if (block.type !== IMAGE_BLOCK_TYPE || !localAssetPath) return clipboardBlockFromBlock(block);
-    return { type: IMAGE_BLOCK_TYPE, text: String(block.alt || block.text || ""), url: localAssetPath, indent: blockIndent(block) };
+    return { type: IMAGE_BLOCK_TYPE, text: normalizeResourceImageCaption(block.caption) || String(block.alt || block.text || ""), url: localAssetPath, indent: blockIndent(block) };
   }), { markdown: true });
 }
 
@@ -8478,12 +8479,14 @@ function renderResourceImageBlock(block, meta = {}) {
     : "";
   const safeUrl = localAssetPath ? quickEditor.localAssets[localAssetPath] || "" : normalizeResourceImageUrl(block.url);
   const alt = String(block.alt || block.text || "").trim();
+  const caption = normalizeResourceImageCaption(block.caption);
+  const editable = editorOwnerMutationAllowed(meta.ownerType, meta.ownerId);
   return `
     <div class="block resource-image-block ${meta.isSelected ? "is-selected" : ""}" id="${esc(blockAnchorId(block.id))}" data-block-id="${esc(block.id)}" data-type="image" data-checked="false" data-indent="${meta.indent}"${meta.hiddenAttr || ""}${meta.blockStyle || ""}>
       ${meta.blockTools || ""}
-      <figure class="resource-image-figure block-content" data-block-content="${esc(block.id)}" data-resource-image-select tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">
-        ${safeUrl ? `<img src="${esc(safeUrl)}" alt="${esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="resource-image-error" role="status">이미지를 불러올 수 없습니다.</span>`}
-        ${alt ? `<figcaption>${esc(alt)}</figcaption>` : ""}
+      <figure class="resource-image-figure">
+        <span class="resource-image-media block-content" data-block-content="${esc(block.id)}" data-resource-image-select tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">${safeUrl ? `<img src="${esc(safeUrl)}" alt="${esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="resource-image-error" role="status">이미지를 불러올 수 없습니다.</span>`}</span>
+        ${editable || caption ? `<input class="resource-image-caption" data-resource-image-caption="${esc(block.id)}" value="${esc(caption)}" maxlength="${MAX_RESOURCE_IMAGE_CAPTION_LENGTH}" aria-label="이미지 캡션"${editable ? ` placeholder="캡션 추가"` : " readonly"}>` : ""}
       </figure>
     </div>
   `;
@@ -9563,9 +9566,10 @@ function normalizeEditableBlock(block) {
     const localAssetPath = QUICK_EDITOR_SURFACE ? normalizeQuickEditorAssetPath(block.localAssetPath || block.url) : "";
     if (!safeUrl && !localAssetPath) {
       block.type = "paragraph";
-      block.text = String(block.alt || block.text || "");
+      block.text = normalizeResourceImageCaption(block.caption) || String(block.alt || block.text || "");
       delete block.url;
       delete block.alt;
+      delete block.caption;
       changed = true;
     } else {
       if (block.url !== (localAssetPath || safeUrl)) {
@@ -9583,6 +9587,14 @@ function normalizeEditableBlock(block) {
       }
       if (block.text !== alt) {
         block.text = alt;
+        changed = true;
+      }
+      const caption = normalizeResourceImageCaption(block.caption);
+      if (caption && block.caption !== caption) {
+        block.caption = caption;
+        changed = true;
+      } else if (!caption && Object.prototype.hasOwnProperty.call(block, "caption")) {
+        delete block.caption;
         changed = true;
       }
       if (Array.isArray(block.marks) && block.marks.length) {
@@ -10515,7 +10527,7 @@ function hasUnsavedResourceWork() {
 function isResourceDraftingElement(element) {
   return element instanceof Element
     && Boolean(element.closest("[data-resource-window]"))
-    && element.matches("[data-resource-title], [data-resource-comment-input], [contenteditable='true']");
+    && element.matches("[data-resource-title], [data-resource-comment-input], [data-resource-image-caption], [contenteditable='true']");
 }
 
 function focusedResourceDraftId() {
@@ -13659,6 +13671,19 @@ function updateResourceTitle(input) {
   saveState();
 }
 
+function updateResourceImageCaption(input) {
+  const editor = input?.closest(".block-editor[data-owner-type='resources']");
+  const resource = itemById("resources", editor?.dataset.ownerId);
+  const block = resource?.blocks?.find((entry) => entry.id === input?.dataset.resourceImageCaption && entry.type === IMAGE_BLOCK_TYPE);
+  if (!resourceMutationAllowed(resource) || !block) return;
+  const caption = normalizeResourceImageCaption(input.value);
+  if (normalizeResourceImageCaption(block.caption) === caption) return;
+  if (caption) block.caption = caption;
+  else delete block.caption;
+  markResourceChanged(resource);
+  saveState();
+}
+
 function markResourceChanged(resourceOrId) {
   const resource = typeof resourceOrId === "string" ? itemById("resources", resourceOrId) : resourceOrId;
   if (!resourceMutationAllowed(resource)) return null;
@@ -13974,6 +13999,12 @@ if (financeInstallmentPayment && !event.isComposing) {
   const resourceTitle = event.target.closest("[data-resource-title]");
   if (resourceTitle) {
     updateResourceTitle(resourceTitle);
+    return;
+  }
+
+  const resourceImageCaption = event.target.closest("[data-resource-image-caption]");
+  if (resourceImageCaption) {
+    updateResourceImageCaption(resourceImageCaption);
     return;
   }
 
@@ -14327,6 +14358,10 @@ function handleFocusIn(event) {
   else if (event.target.closest(".layout, .fab")) {
     ui.resourceWindowFocused = false;
     ui.resourceWindowFocusVersion += 1;
+  }
+  if (event.target.closest("[data-resource-image-caption]")) {
+    clearBlockSelection();
+    return;
   }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
@@ -16058,7 +16093,11 @@ function duplicateEditorBlock(block) {
     backgroundColor: normalizeBlockColorValue(clone.backgroundColor),
   };
   if (safeUrl) duplicate.url = safeUrl;
-  if (type === IMAGE_BLOCK_TYPE) duplicate.alt = imageAlt;
+  if (type === IMAGE_BLOCK_TYPE) {
+    duplicate.alt = imageAlt;
+    const caption = normalizeResourceImageCaption(clone.caption);
+    if (caption) duplicate.caption = caption;
+  }
   if (type === "toggle" && normalizeToggleHeading(clone.toggleHeading)) duplicate.toggleHeading = normalizeToggleHeading(clone.toggleHeading);
   if (type === "code" && normalizeCodeLanguage(clone.language)) duplicate.language = normalizeCodeLanguage(clone.language);
   return duplicate;
@@ -16352,6 +16391,10 @@ function normalizeResourceImageUrl(value = "") {
   const raw = String(value || "").trim();
   if (/^\/api\/resource-images\/[a-f0-9]{64}$/.test(raw)) return raw;
   return normalizeStandaloneHttpsUrl(raw);
+}
+
+function normalizeResourceImageCaption(value = "") {
+  return typeof value === "string" ? value.slice(0, MAX_RESOURCE_IMAGE_CAPTION_LENGTH) : "";
 }
 
 function openUrlPasteChoice(event, text = "") {
@@ -16690,7 +16733,11 @@ function clipboardBlockFromBlock(block) {
     backgroundColor: normalizeBlockColorValue(block.backgroundColor),
   };
   if (safeUrl) clipboardBlock.url = safeUrl;
-  if (type === IMAGE_BLOCK_TYPE) clipboardBlock.alt = imageAlt;
+  if (type === IMAGE_BLOCK_TYPE) {
+    clipboardBlock.alt = imageAlt;
+    const caption = normalizeResourceImageCaption(block.caption);
+    if (caption) clipboardBlock.caption = caption;
+  }
   if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) clipboardBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
   if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
   if (type === "code" && normalizeCodeLanguage(block.language)) clipboardBlock.language = normalizeCodeLanguage(block.language);
@@ -16723,7 +16770,7 @@ function clipboardBlocksPlainText(blocks, options = {}) {
 function clipboardBlockPlainText(block, prefix = clipboardBlockTextPrefix(block), options = {}) {
   const indent = "\t".repeat(block.indent || 0);
   const rawText = options.markdown ? clipboardInlineMarkdownText(block) : block.text || "";
-  if (block.type === IMAGE_BLOCK_TYPE) return `${indent}![${block.text || ""}](${normalizeResourceImageUrl(block.url) || normalizeQuickEditorAssetPath(block.url)})`;
+  if (block.type === IMAGE_BLOCK_TYPE) return `${indent}![${normalizeResourceImageCaption(block.caption) || block.text || ""}](${normalizeResourceImageUrl(block.url) || normalizeQuickEditorAssetPath(block.url)})`;
   const rawLines = rawText.split("\n");
   if (block.type === "code") {
     const longestRun = Math.max(0, ...[...rawText.matchAll(/`+/g)].map((match) => match[0].length));
@@ -16826,7 +16873,8 @@ function clipboardBlocksHtml(blocks) {
     } else if (block.type === "code") {
       html += `<pre data-block-type="${blockType}" data-block-indent="${blockIndent}"${colorAttr}${backgroundColorAttr}><code>${esc(block.text || "")}</code></pre>`;
     } else if (block.type === IMAGE_BLOCK_TYPE) {
-      html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
+      const caption = normalizeResourceImageCaption(block.caption);
+      html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}${caption ? ` data-block-caption="${esc(caption)}"` : ""}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
     } else {
       const checkedAttr = block.type === "todo" ? ` data-block-checked="${block.checked ? "true" : "false"}"` : "";
       html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
@@ -16898,6 +16946,9 @@ function clipboardBlockFromHtmlElement(element) {
     : isUrlPreviewBlockType(type) ? normalizeStandaloneHttpsUrl(element.dataset.blockUrl || stripped.text) : "";
   if ((isUrlPreviewBlockType(type) || type === IMAGE_BLOCK_TYPE) && !safeUrl) type = "paragraph";
   const imageAlt = type === IMAGE_BLOCK_TYPE ? String(element.querySelector("img")?.getAttribute("alt") || "") : "";
+  const imageCaption = type === IMAGE_BLOCK_TYPE
+    ? normalizeResourceImageCaption(element.dataset.blockCaption || element.querySelector("figcaption")?.textContent || "")
+    : "";
   const block = {
     type,
     text: type === IMAGE_BLOCK_TYPE ? imageAlt : safeUrl || (type === "code" ? text : stripped.text),
@@ -16909,7 +16960,10 @@ function clipboardBlockFromHtmlElement(element) {
     backgroundColor: normalizeBlockColorValue(element.dataset.blockBackground),
   };
   if (safeUrl) block.url = safeUrl;
-  if (type === IMAGE_BLOCK_TYPE) block.alt = imageAlt;
+  if (type === IMAGE_BLOCK_TYPE) {
+    block.alt = imageAlt;
+    if (imageCaption) block.caption = imageCaption;
+  }
   return block;
 }
 
@@ -17201,7 +17255,11 @@ function normalizeClipboardBlocks(blocks) {
       backgroundColor: normalizeBlockColorValue(block.backgroundColor),
     };
     if (safeUrl) normalizedBlock.url = safeUrl;
-    if (type === IMAGE_BLOCK_TYPE) normalizedBlock.alt = imageAlt;
+    if (type === IMAGE_BLOCK_TYPE) {
+      normalizedBlock.alt = imageAlt;
+      const caption = normalizeResourceImageCaption(block.caption);
+      if (caption) normalizedBlock.caption = caption;
+    }
     if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) normalizedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
     if (type === "code" && normalizeCodeLanguage(block.language)) normalizedBlock.language = normalizeCodeLanguage(block.language);
@@ -17749,6 +17807,8 @@ function prepareClipboardBlockPaste(item, target, blocks) {
     if (block.type === IMAGE_BLOCK_TYPE) {
       pastedBlock.url = normalizeResourceImageUrl(block.url);
       pastedBlock.alt = String(block.alt || block.text || "");
+      const caption = normalizeResourceImageCaption(block.caption);
+      if (caption) pastedBlock.caption = caption;
     }
     if (block.type === "toggle" && normalizeToggleHeading(block.toggleHeading)) pastedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
     if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);

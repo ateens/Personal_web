@@ -6350,7 +6350,7 @@ button:focus-visible {
 
 .resource-list-item:focus-visible,
 .resource-document-close:focus-visible,
-.resource-image-figure:focus-visible {
+.resource-image-media:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 3px;
 }
@@ -6871,17 +6871,34 @@ button:focus-visible {
 }
 
 .resource-image-block {
-  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  align-items: start;
+  justify-self: start;
 }
 
-.resource-image-figure {
+.block.resource-image-block > .resource-image-figure {
   display: grid;
-  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  grid-auto-rows: max-content;
+  gap: 6px;
+  justify-self: start;
   margin: 6px 0;
+  white-space: normal;
+}
+
+.resource-image-media {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 0;
+  padding: 0;
+  white-space: normal;
   cursor: default;
 }
 
-.resource-image-figure img {
+.resource-image-media img {
   display: block;
   width: auto;
   max-width: 100%;
@@ -6890,10 +6907,42 @@ button:focus-visible {
   object-fit: contain;
 }
 
-.resource-image-figure figcaption,
+.resource-image-caption,
 .resource-image-error {
   color: var(--muted);
   font-size: 12px;
+}
+
+.resource-image-caption {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.resource-image-caption::placeholder {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.resource-image-caption:focus {
+  color: var(--ink);
+  box-shadow: 0 1px 0 rgba(35, 131, 226, 0.5);
+}
+
+.block.resource-image-block.is-selected {
+  background: transparent;
+}
+
+.resource-image-block.is-selected .resource-image-media {
+  outline: 2px solid rgba(35, 131, 226, 0.72);
+  outline-offset: 3px;
 }
 
 .resource-table-block {
@@ -7791,11 +7840,6 @@ button:focus-visible {
   line-height: 1.5;
   text-align: right;
   user-select: none;
-}
-
-.resource-image-block.is-selected .resource-image-figure {
-  outline: 2px solid rgba(35, 131, 226, 0.72);
-  outline-offset: 3px;
 }
 
 .block-check {

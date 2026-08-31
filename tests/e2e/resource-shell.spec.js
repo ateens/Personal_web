@@ -359,7 +359,10 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   }, { assetDataURL: existingAssetDataURL });
   const editor = page.locator('.block-editor[data-owner-type="resources"]');
   await expect(editor).toHaveAttribute("data-owner-id", "quick-note:fixture-local-note");
-  await expect(editor.locator('[data-block-id="local-image"] img')).toHaveAttribute("src", existingAssetDataURL);
+  const legacyImageBlock = editor.locator('[data-block-id="local-image"]');
+  await expect(legacyImageBlock.locator("img")).toHaveAttribute("src", existingAssetDataURL);
+  await expect(legacyImageBlock.locator("[data-resource-image-caption]")).toHaveValue("");
+  await expect(legacyImageBlock).not.toContainText("기존 이미지");
   const body = editor.locator('[data-block-content="local-body"]');
   await expect(body).toBeFocused();
   expect(await body.evaluate((element) => {
@@ -424,12 +427,15 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   });
   await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "saveLocalImage").length)).toBe(1);
   expect(await page.evaluate(() => window.__quickMemoMessages.find((message) => message.type === "saveLocalImage").dataURL.startsWith("data:image/jpeg;base64,"))).toBe(true);
-  await expect(editor.locator('[data-type="image"] img[alt="clipboard"]')).toBeVisible();
+  const localImageBlock = editor.locator('[data-type="image"]').filter({ has: page.locator('img[alt="clipboard"]') });
+  await expect(localImageBlock.locator('img[alt="clipboard"]')).toBeVisible();
+  await expect(localImageBlock).not.toContainText("clipboard");
+  await localImageBlock.locator("[data-resource-image-caption]").fill("퀵 캡션");
   await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1))).toMatchObject({
     type: "localChange",
     id: "fixture-local-note",
-    markdown: expect.stringContaining("assets/22222222-2222-4222-8222-222222222222.png"),
-    blocks: expect.arrayContaining([expect.objectContaining({ type: "image", url: "assets/22222222-2222-4222-8222-222222222222.png" })]),
+    markdown: expect.stringContaining("![퀵 캡션](assets/22222222-2222-4222-8222-222222222222.png)"),
+    blocks: expect.arrayContaining([expect.objectContaining({ type: "image", caption: "퀵 캡션", url: "assets/22222222-2222-4222-8222-222222222222.png" })]),
   });
 
   await page.evaluate(() => window.sygmaQuickEditor.loadLocal({
