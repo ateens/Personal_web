@@ -693,6 +693,7 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   resource.blocks = [
     { id: "table-selection-handles", type: "table", text: ["| A | B | C |", "| --- | --- | --- |", ...Array.from({ length: 8 }, (_, row) => `| ${row === 2 ? "높이가 다른 긴 내용 ".repeat(16) : `row ${row}`} | value ${row} | end ${row} |`)].join("\n"), columnWidths: [330, 330, 330], marks: [], indent: 0 },
     { id: "after-table-handles", type: "paragraph", text: "다음 문장", marks: [], indent: 0 },
+    { id: "table-narrow-frame", type: "table", text: "| Left | Right |\n| --- | --- |\n| A | B |", columnWidths: [180, 180], marks: [], indent: 0 },
   ].map((block) => ({ ...block, checked: false, collapsed: false }));
   resource.commentThreads = [];
   const response = await request.put("/api/state", { headers: { "If-Match": `"state-${before.serverRevision}"` }, data: { state, baseRevision: before.serverRevision } });
@@ -702,6 +703,7 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   await openResourceList(page);
   const window = await openSettledResource(page, FIXTURE_IDS.resource);
   const block = window.locator('[data-block-id="table-selection-handles"]');
+  const narrow = window.locator('[data-block-id="table-narrow-frame"]');
   const rowHandle = (row) => block.locator(`[data-resource-table-scope="row"][data-table-row="${row}"]`);
   const columnHandle = (column) => block.locator(`[data-resource-table-scope="column"][data-table-column="${column}"]`);
   const selected = block.locator("[data-resource-table-cell].is-cell-selected");
@@ -717,6 +719,51 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   await expect(block.locator("table :is(td, th)")).toHaveCount(27);
   await expect(block.locator('[data-resource-table-scope="row"]')).toHaveCount(9);
   await expect(block.locator('[data-resource-table-scope="column"]')).toHaveCount(3);
+  await narrow.locator('[data-resource-table-scope="all"]').click();
+  const narrowFrame = await narrow.evaluate((element) => {
+    const scroll = element.querySelector(".resource-table-scroll");
+    const table = element.querySelector(".resource-markdown-table");
+    const scrollStyle = getComputedStyle(scroll);
+    const tableStyle = getComputedStyle(table);
+    const rowEdge = element.querySelector('[data-resource-table-edge="rows"]').getBoundingClientRect();
+    const columnEdge = element.querySelector('[data-resource-table-edge="columns"]').getBoundingClientRect();
+    const tableBounds = table.getBoundingClientRect();
+    const corners = [
+      table.tHead.rows[0].cells[0],
+      table.tHead.rows[0].cells[table.tHead.rows[0].cells.length - 1],
+      table.tBodies[0].rows[table.tBodies[0].rows.length - 1].cells[0],
+      table.tBodies[0].rows[table.tBodies[0].rows.length - 1].cells[table.tBodies[0].rows[table.tBodies[0].rows.length - 1].cells.length - 1],
+    ].map((cell) => getComputedStyle(cell));
+    return {
+      tableNarrowerThanScroller: table.getBoundingClientRect().width < scroll.getBoundingClientRect().width,
+      scrollBorders: [scrollStyle.borderTopWidth, scrollStyle.borderRightWidth, scrollStyle.borderBottomWidth, scrollStyle.borderLeftWidth],
+      scrollBackground: scrollStyle.backgroundColor,
+      tableBorders: [tableStyle.borderTopWidth, tableStyle.borderRightWidth, tableStyle.borderBottomWidth, tableStyle.borderLeftWidth],
+      tableBorderColors: [tableStyle.borderTopColor, tableStyle.borderRightColor, tableStyle.borderBottomColor, tableStyle.borderLeftColor],
+      tableRadius: parseFloat(tableStyle.borderTopLeftRadius),
+      rowEdgeWidthDelta: Math.abs(rowEdge.width - tableBounds.width),
+      columnEdgeLeftDelta: Math.abs(columnEdge.left - tableBounds.right - 2),
+      columnEdgeHeightDelta: Math.abs(columnEdge.height - tableBounds.height),
+      cornerRadii: [
+        parseFloat(corners[0].borderTopLeftRadius),
+        parseFloat(corners[1].borderTopRightRadius),
+        parseFloat(corners[2].borderBottomLeftRadius),
+        parseFloat(corners[3].borderBottomRightRadius),
+      ],
+    };
+  });
+  expect(narrowFrame).toMatchObject({
+    tableNarrowerThanScroller: true,
+    scrollBorders: ["0px", "0px", "0px", "0px"],
+    scrollBackground: "rgba(0, 0, 0, 0)",
+    tableBorders: ["1px", "1px", "1px", "1px"],
+    tableBorderColors: ["rgb(35, 131, 226)", "rgb(35, 131, 226)", "rgb(35, 131, 226)", "rgb(35, 131, 226)"],
+  });
+  expect(narrowFrame.tableRadius).toBeGreaterThan(0);
+  expect(narrowFrame.rowEdgeWidthDelta).toBeLessThan(1);
+  expect(narrowFrame.columnEdgeLeftDelta).toBeLessThan(1);
+  expect(narrowFrame.columnEdgeHeightDelta).toBeLessThan(1);
+  expect(narrowFrame.cornerRadii.every((radius) => radius > 0)).toBe(true);
   await aligned();
   await block.hover();
   await expect.poll(visibleHandles).toEqual([]);

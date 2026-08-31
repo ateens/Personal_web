@@ -575,6 +575,7 @@ let databaseInitializationRequested = false;
 let remoteStateRefreshTimer = 0;
 let remoteStateRefreshInFlight = false;
 let remoteStateEventSource = null;
+let remoteStateRenderDeferred = false;
 let localStateChangedBeforeDatabaseReady = false;
 let lastRemoteSaveFailureKind = "";
 let remoteStateRetryDelayMs = 3000;
@@ -9228,6 +9229,7 @@ function positionMarkdownTableHandles(root = document) {
     const shell = block.querySelector(".resource-table-shell");
     const bounds = shell.getBoundingClientRect();
     const scale = bounds.width / shell.offsetWidth || 1;
+    shell.style.setProperty("--resource-table-visible-width", `${Math.min(table.offsetWidth, shell.clientWidth)}px`);
     [...rail.children].forEach((button, row) => {
       const rowBounds = table.rows[row].getBoundingClientRect();
       button.style.top = `${(rowBounds.top - bounds.top + rowBounds.height / 2) / scale - button.offsetHeight / 2}px`;
@@ -10496,22 +10498,26 @@ function observeServiceWorkerRegistration(registration) {
 function setWaitingServiceWorkerRegistration(registration) {
   waitingServiceWorkerRegistration = registration;
   serviceWorkerUpdateAvailable = true;
-  if (!hasUnsavedResourceWork()) {
-    applyWaitingServiceWorkerUpdate();
-    return;
-  }
   renderServiceWorkerUpdateNoticeIfNeeded();
 }
 
 function hasUnsavedResourceWork() {
-  return Boolean(
-    localResourcePersistence.pending ||
-    localResourcePersistence.operations.length ||
-    remoteStateSavePending ||
-    remoteStateSaveInFlight ||
-    databaseBackendStatus.saving ||
-    databaseBackendStatus.conflict
-  );
+  return resourceEditorHasDraftingFocus() || hasPendingLocalWorkspaceWork();
+}
+
+function isResourceDraftingElement(element) {
+  return element instanceof Element
+    && Boolean(element.closest("[data-resource-window]"))
+    && element.matches("[data-resource-title], [data-resource-comment-input], [contenteditable='true']");
+}
+
+function focusedResourceDraftId() {
+  const active = document.activeElement;
+  return isResourceDraftingElement(active) ? active.closest("[data-resource-window]")?.dataset.resourceWindow || "" : "";
+}
+
+function resourceEditorHasDraftingFocus() {
+  return Boolean(focusedResourceDraftId());
 }
 
 function hasPendingLocalWorkspaceWork() {
@@ -10551,10 +10557,6 @@ function renderServiceWorkerUpdateNotice() {
 
 function renderServiceWorkerUpdateNoticeIfNeeded() {
   if (!serviceWorkerUpdateAvailable || !els.overlayRoot || ui.taskPlacement) return;
-  if (!hasUnsavedResourceWork()) {
-    applyWaitingServiceWorkerUpdate();
-    return;
-  }
   renderOverlays();
 }
 
@@ -14333,6 +14335,13 @@ function handleFocusIn(event) {
 function handleFocusOut(event) {
   const financeSelect = event.target.closest("[data-finance-select]");
   if (financeSelect && !financeSelect.contains(event.relatedTarget)) closeFinanceSelect(financeSelect);
+  if (isResourceDraftingElement(event.target) && !isResourceDraftingElement(event.relatedTarget)) {
+    requestAnimationFrame(() => {
+      if (resourceEditorHasDraftingFocus()) return;
+      if (remoteStateRenderDeferred) rerenderAfterStateReplace();
+      handleRemoteStateWakeRefresh();
+    });
+  }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
   if (pendingEditorTextHistoryMatches(
@@ -26888,6 +26897,8 @@ function connectRemoteStateEvents() {
 }
 
 async function refreshRemoteStateIfNewer() {
+  const focusedResourceId = focusedResourceDraftId();
+  const focusedResource = focusedResourceId ? itemById("resources", focusedResourceId) : null;
   const pendingLocalWork = hasPendingLocalWorkspaceWork();
   if (
     remoteStateRefreshInFlight
@@ -26912,6 +26923,7 @@ async function refreshRemoteStateIfNewer() {
     if (
       currentWorkspaceRevision() !== startingRevision
       || localResourceDraftGeneration !== startingDraftGeneration
+      || focusedResourceDraftId() !== focusedResourceId
       || hasPendingLocalWorkspaceWork()
     ) return false;
 
@@ -26921,15 +26933,30 @@ async function refreshRemoteStateIfNewer() {
     if (
       currentWorkspaceRevision() !== startingRevision
       || localResourceDraftGeneration !== startingDraftGeneration
+      || focusedResourceDraftId() !== focusedResourceId
       || hasPendingLocalWorkspaceWork()
     ) return false;
 
     const remoteState = normalizeState(payload.state);
     remoteState.revision = remoteRevision;
+    const remoteFocusedResource = focusedResourceId
+      ? remoteState.resources.find((resource) => resource.id === focusedResourceId)
+      : null;
+    if (
+      focusedResourceId
+      && (
+        !focusedResource
+        || !remoteFocusedResource
+        || focusedResource.revision !== remoteFocusedResource.revision
+        || focusedResource.updatedAt !== remoteFocusedResource.updatedAt
+        || Boolean(focusedResource.trashedAt) !== Boolean(remoteFocusedResource.trashedAt)
+      )
+    ) return false;
 ;
     if (
       currentWorkspaceRevision() !== startingRevision
       || localResourceDraftGeneration !== startingDraftGeneration
+      || focusedResourceDraftId() !== focusedResourceId
       || hasPendingLocalWorkspaceWork()
     ) return false;
 
@@ -26951,7 +26978,7 @@ async function refreshRemoteStateIfNewer() {
         : databaseBackendStatus.e2eFixtureGeneration,
     };
     clearLegacyLocalState();
-    rerenderAfterStateReplace();
+    rerenderAfterStateReplace({ deferResourceRender: Boolean(focusedResourceId) });
     await persistCommittedLocalResourceState(remoteRevision, {
       expectedDraftGeneration: startingDraftGeneration,
     });
@@ -27034,12 +27061,17 @@ async function initializeDatabaseStateNow() {
   }
 }
 
-function rerenderAfterStateReplace() {
+function rerenderAfterStateReplace(options = {}) {
   clearStateIndexes();
   if (QUICK_EDITOR_SURFACE) {
     syncQuickEditorAfterStateReplace();
     return;
   }
+  if (options.deferResourceRender) {
+    remoteStateRenderDeferred = true;
+    return;
+  }
+  remoteStateRenderDeferred = false;
   renderNav();
   if (ui.view !== "finance") renderView({ soft: true, syncResourceContents: true });
   renderOverlays();
@@ -27897,7 +27929,7 @@ async function fetchGoogleCalendarEvents(options = {}) {
     }
     if (!googleBackendStatus.connected) {
       if (!options.silent) showToast("먼저 Google로 로그인하세요.");
-      renderView({ soft: true });
+      if (ui.view === "calendar") renderView({ soft: true });
       return;
     }
 
@@ -27914,7 +27946,7 @@ async function fetchGoogleCalendarEvents(options = {}) {
     state.settings.lastGoogleFetchAt = new Date().toISOString();
     saveState();
     if (!options.silent) showToast(`${state.googleEvents.length}개 Google 일정을 불러왔습니다.`);
-    renderView({ soft: true });
+    if (ui.view === "calendar") renderView({ soft: true });
   } catch {
     if (!options.silent) showToast("Google Calendar API 요청에 실패했습니다.");
   } finally {

@@ -117,9 +117,6 @@ enum SYGMAWorkspaceBridge {
         return true
     }
 
-    static func reloadAfterMutation() {
-        reloadHandler?()
-    }
 }
 
 #if canImport(UIKit)
@@ -157,7 +154,6 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
     private weak var mainWebView: WKWebView?
     private weak var rootWebView: WKWebView?
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
-    private var appActivationObserver: NSObjectProtocol?
     var quickMemoMessageHandler: (([String: Any]) -> Void)?
 
     #if canImport(UIKit)
@@ -174,7 +170,6 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         mainWebView = webView
         rootWebView = webView
         configure(webView)
-        observeAppActivation()
         configureWorkspaceBridge(for: webView)
         #if canImport(AppKit) && !canImport(UIKit)
         configureResourceCloseShortcut(for: webView)
@@ -220,10 +215,6 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         webView.uiDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "sygmaStateChanged")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "quickMemo")
-        if let appActivationObserver {
-            NotificationCenter.default.removeObserver(appActivationObserver)
-            self.appActivationObserver = nil
-        }
         if mainWebView === webView {
             SYGMAWorkspaceBridge.flushHandler = nil
             SYGMAWorkspaceBridge.reloadHandler = nil
@@ -277,26 +268,6 @@ final class SYGMAWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, W
         }
         SYGMAWorkspaceBridge.reloadHandler = { [weak webView] in
             webView?.reload()
-        }
-    }
-
-    private func observeAppActivation() {
-        #if canImport(UIKit)
-        let notification = UIApplication.didBecomeActiveNotification
-        #else
-        let notification = NSApplication.didBecomeActiveNotification
-        #endif
-        appActivationObserver = NotificationCenter.default.addObserver(
-            forName: notification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let webView = self?.mainWebView else { return }
-                _ = try? await webView.evaluateJavaScript(
-                    "if (typeof refreshGoogleBackendStatus === 'function') refreshGoogleBackendStatus({ silent: true, fetchEvents: true });"
-                )
-            }
         }
     }
 

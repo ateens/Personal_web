@@ -67,8 +67,9 @@ const checks = [
     && !files.serviceWorker.includes('url.pathname.startsWith("/icons/")')
   )],
   ["safe service-worker updates do not replace unsaved work", () => (
-    files.app.includes("if (!hasUnsavedResourceWork())")
-    && files.app.includes("applyWaitingServiceWorkerUpdate();")
+    files.app.includes('if (action === "apply-app-update") return applyWaitingServiceWorkerUpdate();')
+    && files.app.includes("return resourceEditorHasDraftingFocus() || hasPendingLocalWorkspaceWork();")
+    && !files.app.includes("if (!hasUnsavedResourceWork())")
     && files.app.includes("activeServiceWorkerRegistration?.update().catch(() => {});")
   )],
   ["index and service worker cache the same app assets", () => cachedAssetUrlsMatchIndex()],

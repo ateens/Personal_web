@@ -147,6 +147,7 @@ test("열린 Resource 본문은 일반 화면과 Quick Editor 사이에서 즉�
     await quickBody.dispatchEvent("compositionend", { data: "중" });
     await expect(quickBody).toHaveText("한글 조합 중");
 
+    await mainDocument.focus();
     await quickBody.fill(secondBody);
     await expect.poll(async () => {
       const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
@@ -175,6 +176,79 @@ test("열린 Resource 본문은 일반 화면과 Quick Editor 사이에서 즉�
     });
   } finally {
     await Promise.all([mainContext.close(), quickContext.close()]);
+  }
+});
+
+test("활성 Resource 작성은 앱 복귀 갱신과 새 버전 대기 중에도 유지된다", async ({ browser, request }, testInfo) => {
+  const context = await newAppContext(browser, testInfo, { width: 1440, height: 1000 });
+  const page = await context.newPage();
+  const draft = "앱 복귀 중에도 유지되는 작성 내용";
+  const remoteProjectName = "작성 뒤 동기화된 프로젝트";
+
+  try {
+    const eventStream = waitForStateEventStream(page);
+    await Promise.all([page.goto("/"), eventStream]);
+    await page.locator('[data-action="toggle-nav"]').click();
+    await expect(page.locator("[data-sidebar]")).toHaveClass(/is-open/);
+    await page.locator('[data-nav-key="resources"]').click();
+    await page.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).evaluate((button) => button.click());
+    const resourceWindow = page.locator(`[data-resource-window="${FIXTURE_IDS.resource}"]`);
+    const body = resourceWindow.locator("[data-block-content]").first();
+    await expect(body).toBeVisible();
+    await body.fill(draft);
+    await body.evaluate((element) => {
+      window.__focusedResourceDraft = element;
+      window.__focusedResourceDocument = crypto.randomUUID();
+      window.__focusedResourceView = document.querySelector("[data-resource-view]");
+    });
+    await expect(body).toBeFocused();
+    await expect.poll(async () => {
+      const resource = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+      return resource?.blocks?.[0]?.text;
+    }).toBe(draft);
+
+    const beforeRemote = await fixtureSnapshot(request);
+    const state = structuredClone(beforeRemote.state);
+    state.projects.find((project) => project.id === FIXTURE_IDS.project).name = remoteProjectName;
+    const response = await request.put("/api/state", {
+      headers: { "If-Match": `"state-${beforeRemote.serverRevision}"` },
+      data: { state, baseRevision: beforeRemote.serverRevision },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    const remoteRevision = beforeRemote.serverRevision + 1;
+
+    await page.evaluate(() => {
+      window.__skipWaitingCalls = 0;
+      setWaitingServiceWorkerRegistration({ waiting: { postMessage: () => { window.__skipWaitingCalls += 1; } } });
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    await page.waitForTimeout(750);
+    await expect(body).toBeFocused();
+    await expect(body).toHaveText(draft);
+    expect(await body.evaluate((element) => element === window.__focusedResourceDraft)).toBe(true);
+    await expect.poll(() => page.evaluate(() => currentWorkspaceRevision())).toBe(remoteRevision);
+    expect(await page.evaluate((projectId) => itemById("projects", projectId)?.name, FIXTURE_IDS.project)).toBe(remoteProjectName);
+    expect(await page.evaluate(() => document.querySelector("[data-resource-view]") === window.__focusedResourceView)).toBe(true);
+    expect(await page.evaluate(() => window.__skipWaitingCalls)).toBe(0);
+    await expect(page.locator(".service-worker-update")).toBeVisible();
+    await expect(page.locator('[data-action="apply-app-update"]')).toBeDisabled();
+    await expect(page.locator("[data-workspace-authority-gate]")).toBeHidden();
+
+    await resourceWindow.locator("[data-resource-document]").focus();
+    await page.evaluate(() => {
+      renderServiceWorkerUpdateNoticeIfNeeded();
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(page.locator('[data-action="apply-app-update"]')).toBeEnabled();
+    await expect.poll(() => page.evaluate(() => document.querySelector("[data-resource-view]") !== window.__focusedResourceView)).toBe(true);
+    await expect(resourceWindow.locator("[data-block-content]").first()).toHaveText(draft);
+    expect(await page.evaluate(() => window.__skipWaitingCalls)).toBe(0);
+    expect(await page.evaluate(() => window.__focusedResourceDocument)).toBeTruthy();
+    const saved = await fixtureSnapshot(request);
+    expect(saved.state.resources.find((item) => item.id === FIXTURE_IDS.resource)?.blocks?.[0]?.text).toBe(draft);
+  } finally {
+    await context.close();
   }
 });
 
@@ -324,7 +398,11 @@ test("overlapping initialization requests keep the workspace locked until the fi
 
     const app = page.locator("#app");
     await expect(app).toHaveAttribute("data-workspace-authority", "loading");
-    await expect(page.locator("[data-workspace-authority-gate]")).toBeVisible();
+    const authorityGate = page.locator("[data-workspace-authority-gate]");
+    await expect(authorityGate).toBeVisible();
+    const authorityBounds = await authorityGate.boundingBox();
+    expect(authorityBounds.width).toBeLessThan(page.viewportSize().width / 2);
+    expect(authorityBounds.height).toBeLessThan(page.viewportSize().height / 3);
     expect(await page.locator(".layout").evaluate((element) => element.inert)).toBe(true);
 
     releaseSecondState();

@@ -152,16 +152,24 @@ button:focus-visible {
 
 .workspace-authority-gate {
   position: fixed;
-  inset: 0;
+  right: 24px;
+  bottom: 24px;
   z-index: 1000;
   display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 10px;
-  padding: 32px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "spinner title action"
+    "spinner message action";
+  align-items: center;
+  gap: 2px 10px;
+  width: min(460px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
   color: var(--ink);
-  text-align: center;
-  background: var(--surface-main);
+  text-align: left;
+  background: var(--panel-strong);
+  box-shadow: var(--shadow-soft);
 }
 
 .workspace-authority-gate[hidden] {
@@ -173,23 +181,29 @@ button:focus-visible {
 }
 
 .workspace-authority-gate strong {
-  font-size: clamp(17px, 2.4vw, 21px);
-}
-
-.workspace-authority-gate > span:last-child {
-  max-width: 34rem;
-  color: var(--muted);
+  grid-area: title;
   font-size: 14px;
 }
 
+.workspace-authority-gate > span:last-child {
+  grid-area: message;
+  max-width: 34rem;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .workspace-authority-spinner {
-  width: 26px;
-  height: 26px;
-  margin-bottom: 4px;
+  grid-area: spinner;
+  width: 18px;
+  height: 18px;
   border: 2px solid rgba(37, 99, 235, 0.18);
   border-top-color: var(--blue);
   border-radius: 50%;
   animation: workspace-authority-spin 760ms linear infinite;
+}
+
+.workspace-authority-gate > button {
+  grid-area: action;
 }
 
 .app[data-workspace-authority="offline"] .workspace-authority-spinner {
@@ -6893,9 +6907,8 @@ button:focus-visible {
   background: transparent;
 }
 
-.resource-table-block.is-selected .resource-table-scroll {
-  outline: 2px solid #2383e2;
-  outline-offset: -2px;
+.resource-table-block.is-selected .resource-markdown-table {
+  border-color: #2383e2;
 }
 
 .resource-table-block.is-selected .resource-markdown-table :is(th, td) {
@@ -6988,26 +7001,33 @@ button:focus-visible {
   width: 100%;
   min-width: 0;
   overflow-x: auto;
-  border: 1px solid rgba(55, 53, 47, 0.14);
-  border-radius: 10px;
+  border: 0;
+  border-radius: 0;
   padding: 13px 0 0;
-  background: #fff;
+  background: transparent;
   color: var(--ink);
   cursor: default;
   white-space: normal;
 }
 
 .resource-table-scroll:focus-visible {
-  outline: 2px solid rgba(37, 99, 235, 0.42);
-  outline-offset: 2px;
+  outline: 0;
+}
+
+.resource-table-block:not(.is-selected) .resource-table-scroll:focus-visible .resource-markdown-table {
+  border-color: rgba(37, 99, 235, 0.6);
 }
 
 .resource-markdown-table {
   width: 100%;
   min-width: 480px;
+  box-sizing: border-box;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
+  border: 1px solid rgba(55, 53, 47, 0.14);
+  border-radius: 10px;
+  background: #fff;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -7138,17 +7158,19 @@ button:focus-visible {
 .resource-table-edge > span::after { width: 1px; height: 8px; }
 
 .resource-table-edge.is-rows {
-  right: 0;
+  right: auto;
   bottom: -13px;
   left: 0;
+  width: var(--resource-table-visible-width, 100%);
   height: 11px;
   cursor: ns-resize;
 }
 
 .resource-table-edge.is-columns {
-  top: 0;
-  right: -13px;
+  top: 13px;
+  right: auto;
   bottom: 0;
+  left: calc(var(--resource-table-visible-width, 100%) + 2px);
   width: 11px;
   cursor: ew-resize;
 }
@@ -7180,6 +7202,30 @@ button:focus-visible {
 
 .resource-markdown-table :is(th, td):last-child {
   border-right: 0;
+}
+
+.resource-markdown-table thead > tr:first-child > :first-child {
+  border-top-left-radius: 9px;
+}
+
+.resource-markdown-table thead > tr:first-child > :last-child {
+  border-top-right-radius: 9px;
+}
+
+.resource-markdown-table tbody > tr:last-child > :first-child {
+  border-bottom-left-radius: 9px;
+}
+
+.resource-markdown-table tbody > tr:last-child > :last-child {
+  border-bottom-right-radius: 9px;
+}
+
+.resource-markdown-table:not(:has(tbody > tr)) thead > tr:first-child > :first-child {
+  border-bottom-left-radius: 9px;
+}
+
+.resource-markdown-table:not(:has(tbody > tr)) thead > tr:first-child > :last-child {
+  border-bottom-right-radius: 9px;
 }
 
 .resource-markdown-table .is-align-center {

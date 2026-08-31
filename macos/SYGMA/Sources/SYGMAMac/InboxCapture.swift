@@ -657,7 +657,6 @@ final class InboxCaptureController: NSObject, NSWindowDelegate {
                     throw InboxCaptureError.server("열려 있는 SYGMA 변경 사항을 먼저 저장해 주세요.", retryable: false)
                 }
                 try await client.save(mutation)
-                SYGMAWorkspaceBridge.reloadAfterMutation()
                 if kind == .task { WidgetCenter.shared.reloadAllTimelines() }
                 hide()
             } catch {
