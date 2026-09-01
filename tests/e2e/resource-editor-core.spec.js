@@ -417,6 +417,62 @@ test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 �
   await expect(markers()).toHaveText(["1.", "2.", "3.", "4."]);
 });
 
+test("번호 목록은 0이나 원하는 숫자에서 시작하고 Backspace 후 1부터 다시 시작할 수 있다", async ({ page, request }) => {
+  const firstId = "numbered-custom-start";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [paragraph(firstId, "")]);
+  let editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const markers = () => editor.locator(".block-list-marker");
+  let current = editor.locator(`[data-block-content="${firstId}"]`);
+
+  await current.pressSequentially("0. 영");
+  await expect(markers()).toHaveText(["0."]);
+  await setCaret(current, "영".length);
+  await page.keyboard.press("Enter");
+  current = editor.locator("[data-block-content]:focus");
+  await current.pressSequentially("하나");
+  await expect(markers()).toHaveText(["0.", "1."]);
+
+  await setCaret(current, "하나".length);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  current = editor.locator("[data-block-content]:focus");
+  await current.pressSequentially("4. 넷");
+  await expect(markers()).toHaveText(["0.", "1.", "4."]);
+  await setCaret(current, "넷".length);
+  await page.keyboard.press("Enter");
+  current = editor.locator("[data-block-content]:focus");
+  await current.pressSequentially("다섯");
+  await expect(markers()).toHaveText(["0.", "1.", "4.", "5."]);
+
+  await setCaret(current, "다섯".length);
+  await page.keyboard.press("Enter");
+  await expect(markers()).toHaveText(["0.", "1.", "4.", "5.", "6."]);
+  await page.keyboard.press("Backspace");
+  current = editor.locator("[data-block-content]:focus");
+  await current.pressSequentially("1. 다시");
+  await expect(markers()).toHaveText(["0.", "1.", "4.", "5.", "1."]);
+  await setCaret(current, "다시".length);
+  await page.keyboard.press("Enter");
+  current = editor.locator("[data-block-content]:focus");
+  await current.pressSequentially("다음");
+  await expect(markers()).toHaveText(["0.", "1.", "4.", "5.", "1.", "2."]);
+
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.map((block) => ({
+    text: block.text,
+    listStart: Object.hasOwn(block, "listStart") ? block.listStart : null,
+  }))).toEqual([
+    { text: "영", listStart: 0 },
+    { text: "하나", listStart: null },
+    { text: "넷", listStart: 4 },
+    { text: "다섯", listStart: null },
+    { text: "다시", listStart: 1 },
+    { text: "다음", listStart: null },
+  ]);
+
+  editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(markers()).toHaveText(["0.", "1.", "4.", "5.", "1.", "2."]);
+});
+
 test("제목에서 번호 단축 입력과 Enter를 사용해도 제목 서식과 연속 번호가 유지된다", async ({ page, request }) => {
   const firstId = "numbered-heading-first";
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [

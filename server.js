@@ -1107,8 +1107,8 @@ function validateBlocks(item, collectionKey, itemIndex, seenIds, issues) {
     ) {
       addValidationIssue(issues, `${blockPath}.caption`, "invalid_image_caption", `Image caption must be a string of at most ${MAX_RESOURCE_IMAGE_CAPTION_LENGTH} characters.`);
     }
-    if (block.listStart !== undefined && (block.type !== "numbered" || !Number.isInteger(block.listStart) || block.listStart < 1 || block.listStart > 999_999)) {
-      addValidationIssue(issues, `${blockPath}.listStart`, "invalid_list_start", "Numbered list start must be an integer between 1 and 999999.");
+    if (block.listStart !== undefined && (block.type !== "numbered" || !Number.isInteger(block.listStart) || block.listStart < 0 || block.listStart > 999_999)) {
+      addValidationIssue(issues, `${blockPath}.listStart`, "invalid_list_start", "Numbered list start must be an integer between 0 and 999999.");
     }
     if (block.toggleHeading !== undefined && (!["toggle", "numbered"].includes(block.type) || !/^heading[1-6]$/.test(block.toggleHeading))) {
       addValidationIssue(issues, `${blockPath}.toggleHeading`, "invalid_toggle_heading", "Toggle or numbered heading must be heading1 through heading6.");

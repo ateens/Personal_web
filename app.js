@@ -8377,14 +8377,14 @@ function numberedListMarkerForBlock(block, indent, counters) {
     counters[indent] = 0;
     return "";
   }
-  const nextNumber = numberedBlockStart(block) || (counters[indent] || 0) + 1;
+  const nextNumber = numberedBlockStart(block) ?? (counters[indent] || 0) + 1;
   counters[indent] = nextNumber;
   return `${nextNumber}.`;
 }
 
 function numberedBlockStart(block) {
   const value = Number.parseInt(block?.listStart, 10);
-  return Number.isInteger(value) && value > 0 && value <= 999_999 ? value : 0;
+  return Number.isInteger(value) && value >= 0 && value <= 999_999 ? value : null;
 }
 
 function blockAnchorId(blockId) {
@@ -9672,7 +9672,7 @@ function normalizeEditableBlock(block) {
   }
   if (block.type === "numbered") {
     const listStart = numberedBlockStart(block);
-    if (listStart) {
+    if (listStart !== null) {
       if (block.listStart !== listStart) {
         block.listStart = listStart;
         changed = true;
@@ -16103,6 +16103,8 @@ function duplicateEditorBlock(block) {
     if (caption) duplicate.caption = caption;
   }
   if (compoundBlockHeading(clone)) duplicate.toggleHeading = compoundBlockHeading(clone);
+  const listStart = numberedBlockStart(clone);
+  if (type === "numbered" && listStart !== null) duplicate.listStart = listStart;
   if (type === "code" && normalizeCodeLanguage(clone.language)) duplicate.language = normalizeCodeLanguage(clone.language);
   return duplicate;
 }
@@ -16743,7 +16745,8 @@ function clipboardBlockFromBlock(block) {
     if (caption) clipboardBlock.caption = caption;
   }
   if (compoundBlockHeading(block)) clipboardBlock.toggleHeading = compoundBlockHeading(block);
-  if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
+  const listStart = numberedBlockStart(block);
+  if (type === "numbered" && listStart !== null) clipboardBlock.listStart = listStart;
   if (type === "code" && normalizeCodeLanguage(block.language)) clipboardBlock.language = normalizeCodeLanguage(block.language);
   if (type === TABLE_BLOCK_TYPE) {
     const widths = markdownTableColumnWidths(block, parseMarkdownTable(block.text)?.headers.length || 0);
@@ -16837,7 +16840,7 @@ function clipboardNumberedPrefixForBlock(block, counters) {
     counters[indent] = 0;
     return "";
   }
-  const nextNumber = numberedBlockStart(block) || (counters[indent] || 0) + 1;
+  const nextNumber = numberedBlockStart(block) ?? (counters[indent] || 0) + 1;
   counters[indent] = nextNumber;
   return `${nextNumber}. `;
 }
@@ -16870,6 +16873,8 @@ function clipboardBlocksHtml(blocks) {
     const colorAttr = block.color ? ` data-block-color="${esc(block.color)}"` : "";
     const backgroundColorAttr = block.backgroundColor ? ` data-block-background="${esc(block.backgroundColor)}"` : "";
     const headingAttr = compoundBlockHeading(block) ? ` data-block-heading="${esc(compoundBlockHeading(block))}"` : "";
+    const listStart = numberedBlockStart(block);
+    const listStartAttr = block.type === "numbered" && listStart !== null ? ` data-block-list-start="${listStart}"` : "";
     const urlAttr = (isUrlPreviewBlockType(block.type) || block.type === IMAGE_BLOCK_TYPE) && normalizeResourceImageUrl(block.url || block.text || "")
       ? ` data-block-url="${esc(normalizeResourceImageUrl(block.url || block.text || ""))}"`
       : "";
@@ -16882,7 +16887,7 @@ function clipboardBlocksHtml(blocks) {
       html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}${caption ? ` data-block-caption="${esc(caption)}"` : ""}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
     } else {
       const checkedAttr = block.type === "todo" ? ` data-block-checked="${block.checked ? "true" : "false"}"` : "";
-      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}${headingAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
+      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}${headingAttr}${listStartAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
     }
   }
   return html;
@@ -16971,6 +16976,8 @@ function clipboardBlockFromHtmlElement(element) {
   }
   const heading = normalizeToggleHeading(element.dataset.blockHeading);
   if (["toggle", "numbered"].includes(type) && heading) block.toggleHeading = heading;
+  const listStart = numberedBlockStart({ listStart: element.dataset.blockListStart });
+  if (type === "numbered" && listStart !== null) block.listStart = listStart;
   return block;
 }
 
@@ -17268,7 +17275,8 @@ function normalizeClipboardBlocks(blocks) {
       if (caption) normalizedBlock.caption = caption;
     }
     if (compoundBlockHeading(block)) normalizedBlock.toggleHeading = compoundBlockHeading(block);
-    if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
+    const listStart = numberedBlockStart(block);
+    if (type === "numbered" && listStart !== null) normalizedBlock.listStart = listStart;
     if (type === "code" && normalizeCodeLanguage(block.language)) normalizedBlock.language = normalizeCodeLanguage(block.language);
     if (type === TABLE_BLOCK_TYPE) {
       const widths = markdownTableColumnWidths(block, parseMarkdownTable(rawText)?.headers.length || 0);
@@ -17818,7 +17826,8 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       if (caption) pastedBlock.caption = caption;
     }
     if (compoundBlockHeading(block)) pastedBlock.toggleHeading = compoundBlockHeading(block);
-    if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
+    const listStart = numberedBlockStart(block);
+    if (block.type === "numbered" && listStart !== null) pastedBlock.listStart = listStart;
     if (block.type === "code" && normalizeCodeLanguage(block.language)) pastedBlock.language = normalizeCodeLanguage(block.language);
     for (const field of ["color", "backgroundColor"]) if (block[field]) pastedBlock[field] = block[field];
     if (block.type === TABLE_BLOCK_TYPE) {
@@ -22883,7 +22892,7 @@ function applyMarkdownShortcut(block, rawText, ownerType = "", ownerId = "", sho
     applyBlockType(block, type);
     if (type === "numbered") {
       const listStart = Number.parseInt(/^\d+/.exec(rawText)?.[0] || "", 10);
-      if (listStart > 1) block.listStart = listStart;
+      if (Number.isInteger(listStart)) block.listStart = listStart;
       else delete block.listStart;
     }
     block.text = text + rawText.slice(shortcutLength);
