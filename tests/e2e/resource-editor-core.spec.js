@@ -417,6 +417,42 @@ test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 �
   await expect(markers()).toHaveText(["1.", "2.", "3.", "4."]);
 });
 
+test("제목에서 번호 단축 입력과 Enter를 사용해도 제목 서식과 연속 번호가 유지된다", async ({ page, request }) => {
+  const firstId = "numbered-heading-first";
+  await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, [
+    { ...paragraph(firstId, "첫 제목"), type: "heading2" },
+  ]);
+  let editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  const first = editor.locator(`[data-block-content="${firstId}"]`);
+  await setCaret(first, 0);
+  await first.type("1. ");
+
+  const firstBlock = editor.locator(`[data-block-id="${firstId}"]`);
+  await expect(firstBlock).toHaveAttribute("data-type", "numbered");
+  await expect(firstBlock.locator(".block-list-marker")).toHaveText("1.");
+  await expect(first.locator("xpath=parent::h2")).toHaveCount(1);
+  await expect(first).toHaveText("첫 제목");
+
+  await setCaret(first, "첫 제목".length);
+  await page.keyboard.press("Enter");
+  const second = editor.locator("[data-block-content]:focus");
+  await expect(second.locator("xpath=parent::h2")).toHaveCount(1);
+  await second.type("둘째 제목");
+  await expect(editor.locator(".block-list-marker")).toHaveText(["1.", "2."]);
+  await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.map((block) => ({
+    type: block.type,
+    text: block.text,
+    heading: block.toggleHeading,
+  }))).toEqual([
+    { type: "numbered", text: "첫 제목", heading: "heading2" },
+    { type: "numbered", text: "둘째 제목", heading: "heading2" },
+  ]);
+
+  editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
+  await expect(editor.locator(".block-list-marker")).toHaveText(["1.", "2."]);
+  await expect(editor.locator("h2 > [data-block-content]")).toHaveCount(2);
+});
+
 test("서식이 있는 복사 내용도 모든 텍스트 서식의 커서 위치에 줄바꿈 없이 붙고 저장된다", async ({ page, request }) => {
   const resourceId = FIXTURE_IDS.bodySearchResource;
   const types = ["paragraph", "heading1", "heading2", "heading3", "heading4", "heading5", "heading6", "bullet", "numbered", "todo", "toggle", "quote", "callout", "code"];

@@ -6419,6 +6419,11 @@ button:focus-visible {
   gap: 5px;
 }
 
+:is(.resource-document, .quick-editor-surface) .block[data-type="numbered"][data-toggle-heading] {
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+}
+
 :is(.resource-document, .quick-editor-surface) .block[data-type="todo"],
 :is(.resource-document, .quick-editor-surface) .block[data-type="toggle"] {
   grid-template-columns: 34px minmax(0, 1fr);
@@ -6498,6 +6503,10 @@ button:focus-visible {
 .block[data-type="bullet"],
 .block[data-type="numbered"] {
   grid-template-columns: 34px 34px 18px minmax(0, 1fr);
+}
+
+.block[data-type="numbered"][data-toggle-heading] {
+  grid-template-columns: 34px 34px max-content minmax(0, 1fr);
 }
 
 .block[data-type="divider"] {
@@ -6829,7 +6838,7 @@ button:focus-visible {
   user-select: none;
 }
 
-:is(.block[data-type="heading1"], .block[data-type="toggle"][data-toggle-heading="heading1"]) .block-content {
+:is(.block[data-type="heading1"], .block[data-type="toggle"][data-toggle-heading="heading1"], .block[data-type="numbered"][data-toggle-heading="heading1"]) :is(.block-content, .block-list-marker) {
   min-height: 42px;
   margin-top: 14px;
   font-size: 30px;
@@ -6837,7 +6846,7 @@ button:focus-visible {
   line-height: 1.25;
 }
 
-:is(.block[data-type="heading2"], .block[data-type="toggle"][data-toggle-heading="heading2"]) .block-content {
+:is(.block[data-type="heading2"], .block[data-type="toggle"][data-toggle-heading="heading2"], .block[data-type="numbered"][data-toggle-heading="heading2"]) :is(.block-content, .block-list-marker) {
   min-height: 35px;
   margin-top: 10px;
   font-size: 24px;
@@ -6845,7 +6854,7 @@ button:focus-visible {
   line-height: 1.3;
 }
 
-:is(.block[data-type="heading3"], .block[data-type="toggle"][data-toggle-heading="heading3"]) .block-content {
+:is(.block[data-type="heading3"], .block[data-type="toggle"][data-toggle-heading="heading3"], .block[data-type="numbered"][data-toggle-heading="heading3"]) :is(.block-content, .block-list-marker) {
   min-height: 30px;
   margin-top: 6px;
   font-size: 20px;
@@ -6853,7 +6862,7 @@ button:focus-visible {
   line-height: 1.35;
 }
 
-:is(.block[data-type="heading4"], .block[data-type="toggle"][data-toggle-heading="heading4"]) .block-content {
+:is(.block[data-type="heading4"], .block[data-type="toggle"][data-toggle-heading="heading4"], .block[data-type="numbered"][data-toggle-heading="heading4"]) :is(.block-content, .block-list-marker) {
   min-height: 28px;
   margin-top: 4px;
   font-size: 18px;
@@ -6861,8 +6870,8 @@ button:focus-visible {
   line-height: 1.4;
 }
 
-:is(.block[data-type="heading5"], .block[data-type="toggle"][data-toggle-heading="heading5"]) .block-content,
-:is(.block[data-type="heading6"], .block[data-type="toggle"][data-toggle-heading="heading6"]) .block-content {
+:is(.block[data-type="heading5"], .block[data-type="toggle"][data-toggle-heading="heading5"], .block[data-type="numbered"][data-toggle-heading="heading5"]) :is(.block-content, .block-list-marker),
+:is(.block[data-type="heading6"], .block[data-type="toggle"][data-toggle-heading="heading6"], .block[data-type="numbered"][data-toggle-heading="heading6"]) :is(.block-content, .block-list-marker) {
   min-height: 27px;
   margin-top: 3px;
   font-size: 16px;

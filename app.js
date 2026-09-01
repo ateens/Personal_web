@@ -8408,8 +8408,8 @@ function renderBlock(block, ownerType = "", ownerId = "", meta = {}) {
     : "";
   const colorAttr = blockColor ? ` data-block-color="${blockColor}"` : "";
   const backgroundColorAttr = blockBackgroundColor ? ` data-block-background="${blockBackgroundColor}"` : "";
-  const toggleHeading = normalizeToggleHeading(block.toggleHeading);
-  const toggleHeadingAttr = block.type === "toggle" && toggleHeading ? ` data-toggle-heading="${toggleHeading}"` : "";
+  const toggleHeading = compoundBlockHeading(block);
+  const toggleHeadingAttr = toggleHeading ? ` data-toggle-heading="${toggleHeading}"` : "";
   const listSemanticAttr = meta.listItem ? ` role="listitem" aria-level="${indent + 1}"` : "";
   const blockStyle = blockStyleForBlock(indent, blockColor, blockBackgroundColor, ownerType === "resources" ? meta.toggleDepth : 0);
   if (block.type === "divider") {
@@ -9408,7 +9408,7 @@ function urlPreviewParts(value = "") {
 function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", ownerId = "") {
   const contentEditable = editorOwnerMutationAllowed(ownerType, ownerId);
   const editable = `<span class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${contentEditable}" spellcheck="true" role="textbox" aria-multiline="true" aria-label="${esc(blockEditorAriaLabel(block))}" data-block-content="${block.id}"${listMarkerAttr} data-placeholder="${blockPlaceholder(block)}">${renderInlineText(block)}</span>`;
-  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : normalizeToggleHeading(block.type);
+  const heading = normalizeToggleHeading(block.type) || compoundBlockHeading(block);
   if (heading) {
     const level = heading.slice(-1);
     return `<h${level} class="block-semantic-wrap">${editable}</h${level}>`;
@@ -9502,13 +9502,17 @@ function blockEditorAriaLabel(block) {
     quote: "인용 블록 편집",
     callout: "콜아웃 블록 편집",
   };
-  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : "";
-  return heading ? `토글 제목 ${heading.slice(-1)} 블록 편집` : labels[block.type] || "블록 편집";
+  const heading = compoundBlockHeading(block);
+  return heading ? `${block.type === "toggle" ? "토글" : "번호 목록"} 제목 ${heading.slice(-1)} 블록 편집` : labels[block.type] || "블록 편집";
 }
 
 function normalizeToggleHeading(value = "") {
   const heading = String(value || "");
   return /^heading[1-6]$/.test(heading) ? heading : "";
+}
+
+function compoundBlockHeading(block) {
+  return ["toggle", "numbered"].includes(block?.type) ? normalizeToggleHeading(block.toggleHeading) : "";
 }
 
 function blockStyleForBlock(indent, color = "", backgroundColor = "", toggleDepth = 0) {
@@ -9681,7 +9685,7 @@ function normalizeEditableBlock(block) {
     delete block.listStart;
     changed = true;
   }
-  const toggleHeading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : "";
+  const toggleHeading = compoundBlockHeading(block);
   if (toggleHeading) {
     if (block.toggleHeading !== toggleHeading) {
       block.toggleHeading = toggleHeading;
@@ -10355,7 +10359,7 @@ function openInlineLink(linkElement) {
 }
 
 function blockPlaceholder(block) {
-  const heading = block.type === "toggle" ? normalizeToggleHeading(block.toggleHeading) : normalizeToggleHeading(block.type);
+  const heading = normalizeToggleHeading(block.type) || compoundBlockHeading(block);
   if (heading) return `제목 ${heading.slice(-1)}`;
   if (block.type === "todo") return "할 일";
   if (block.type === "toggle") return "토글";
@@ -16098,7 +16102,7 @@ function duplicateEditorBlock(block) {
     const caption = normalizeResourceImageCaption(clone.caption);
     if (caption) duplicate.caption = caption;
   }
-  if (type === "toggle" && normalizeToggleHeading(clone.toggleHeading)) duplicate.toggleHeading = normalizeToggleHeading(clone.toggleHeading);
+  if (compoundBlockHeading(clone)) duplicate.toggleHeading = compoundBlockHeading(clone);
   if (type === "code" && normalizeCodeLanguage(clone.language)) duplicate.language = normalizeCodeLanguage(clone.language);
   return duplicate;
 }
@@ -16738,7 +16742,7 @@ function clipboardBlockFromBlock(block) {
     const caption = normalizeResourceImageCaption(block.caption);
     if (caption) clipboardBlock.caption = caption;
   }
-  if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) clipboardBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
+  if (compoundBlockHeading(block)) clipboardBlock.toggleHeading = compoundBlockHeading(block);
   if (type === "numbered" && numberedBlockStart(block)) clipboardBlock.listStart = numberedBlockStart(block);
   if (type === "code" && normalizeCodeLanguage(block.language)) clipboardBlock.language = normalizeCodeLanguage(block.language);
   if (type === TABLE_BLOCK_TYPE) {
@@ -16865,6 +16869,7 @@ function clipboardBlocksHtml(blocks) {
     const prefix = clipboardBlockTextPrefix(block, clipboardNumberedPrefixForBlock(block, numberedCounters));
     const colorAttr = block.color ? ` data-block-color="${esc(block.color)}"` : "";
     const backgroundColorAttr = block.backgroundColor ? ` data-block-background="${esc(block.backgroundColor)}"` : "";
+    const headingAttr = compoundBlockHeading(block) ? ` data-block-heading="${esc(compoundBlockHeading(block))}"` : "";
     const urlAttr = (isUrlPreviewBlockType(block.type) || block.type === IMAGE_BLOCK_TYPE) && normalizeResourceImageUrl(block.url || block.text || "")
       ? ` data-block-url="${esc(normalizeResourceImageUrl(block.url || block.text || ""))}"`
       : "";
@@ -16877,7 +16882,7 @@ function clipboardBlocksHtml(blocks) {
       html += `<figure data-block-type="image" data-block-indent="${blockIndent}"${urlAttr}${caption ? ` data-block-caption="${esc(caption)}"` : ""}><img src="${esc(normalizeResourceImageUrl(block.url))}" alt="${esc(block.alt || block.text || "")}"></figure>`;
     } else {
       const checkedAttr = block.type === "todo" ? ` data-block-checked="${block.checked ? "true" : "false"}"` : "";
-      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
+      html += `<div data-block-type="${blockType}" data-block-indent="${blockIndent}"${checkedAttr}${urlAttr}${colorAttr}${backgroundColorAttr}${headingAttr}>${esc(prefix)}${renderInlineTextForClipboard(block)}</div>`;
     }
   }
   return html;
@@ -16964,6 +16969,8 @@ function clipboardBlockFromHtmlElement(element) {
     block.alt = imageAlt;
     if (imageCaption) block.caption = imageCaption;
   }
+  const heading = normalizeToggleHeading(element.dataset.blockHeading);
+  if (["toggle", "numbered"].includes(type) && heading) block.toggleHeading = heading;
   return block;
 }
 
@@ -17260,7 +17267,7 @@ function normalizeClipboardBlocks(blocks) {
       const caption = normalizeResourceImageCaption(block.caption);
       if (caption) normalizedBlock.caption = caption;
     }
-    if (type === "toggle" && normalizeToggleHeading(block.toggleHeading)) normalizedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
+    if (compoundBlockHeading(block)) normalizedBlock.toggleHeading = compoundBlockHeading(block);
     if (type === "numbered" && numberedBlockStart(block)) normalizedBlock.listStart = numberedBlockStart(block);
     if (type === "code" && normalizeCodeLanguage(block.language)) normalizedBlock.language = normalizeCodeLanguage(block.language);
     if (type === TABLE_BLOCK_TYPE) {
@@ -17810,7 +17817,7 @@ function prepareClipboardBlockPaste(item, target, blocks) {
       const caption = normalizeResourceImageCaption(block.caption);
       if (caption) pastedBlock.caption = caption;
     }
-    if (block.type === "toggle" && normalizeToggleHeading(block.toggleHeading)) pastedBlock.toggleHeading = normalizeToggleHeading(block.toggleHeading);
+    if (compoundBlockHeading(block)) pastedBlock.toggleHeading = compoundBlockHeading(block);
     if (block.type === "numbered" && numberedBlockStart(block)) pastedBlock.listStart = numberedBlockStart(block);
     if (block.type === "code" && normalizeCodeLanguage(block.language)) pastedBlock.language = normalizeCodeLanguage(block.language);
     for (const field of ["color", "backgroundColor"]) if (block[field]) pastedBlock[field] = block[field];
@@ -24067,11 +24074,11 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const originalType = current.type;
   const originalChecked = current.checked === true;
   const originalCollapsed = current.collapsed === true;
-  const originalToggleHeading = normalizeToggleHeading(current.toggleHeading);
+  const originalToggleHeading = compoundBlockHeading(current);
   const splitAtStart = !split.before && Boolean(split.after);
   if (splitAtStart) {
     current.type = CONTINUED_BLOCK_TYPES.has(originalType) ? originalType : "paragraph";
-    if (current.type !== "toggle") delete current.toggleHeading;
+    if (!["toggle", "numbered"].includes(current.type)) delete current.toggleHeading;
     current.text = "";
     current.marks = [];
     current.checked = false;
@@ -24099,7 +24106,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     indent: nextIndent,
     collapsed: splitAtStart && originalType === "toggle" ? originalCollapsed : false,
   };
-  if (newBlock.type === "toggle" && originalToggleHeading) newBlock.toggleHeading = originalToggleHeading;
+  if (["toggle", "numbered"].includes(newBlock.type) && originalToggleHeading) newBlock.toggleHeading = originalToggleHeading;
   item.blocks.splice(index + 1, 0, newBlock);
   const focusBlock = splitAtStart ? current : newBlock;
   schedulePendingEmptyContinuationExit(ownerType, ownerId, focusBlock);
@@ -24433,13 +24440,13 @@ function applyBlockColorAction(ownerType, ownerId, blockIds, action, options = {
 
 function applyBlockType(block, type) {
   const heading = normalizeToggleHeading(type);
-  if (block.type === "toggle" && heading) {
+  if (["toggle", "numbered"].includes(block.type) && heading) {
     block.toggleHeading = heading;
     return;
   }
-  const previousHeading = normalizeToggleHeading(block.type);
+  const previousHeading = normalizeToggleHeading(block.type) || compoundBlockHeading(block);
   block.type = type;
-  if (type === "toggle" && previousHeading) block.toggleHeading = previousHeading;
+  if (["toggle", "numbered"].includes(type) && previousHeading) block.toggleHeading = previousHeading;
   else delete block.toggleHeading;
   if (type !== "numbered") delete block.listStart;
   if (type !== "code") delete block.language;
