@@ -634,6 +634,7 @@ let financeWorkspace = {
   error: "",
   mutationError: "",
   saving: false,
+  saveRequest: null,
   tab: "overview",
   month: monthKey(new Date()),
   request: null,
@@ -655,6 +656,7 @@ let preferredVerticalCaretX = null;
 let resourceCaretScrollFrame = 0;
 const toggleBlockAnimationTimers = new Map();
 const toggleBlockAnimationFrames = new Map();
+const inlineBoundaryTyping = new WeakMap();
 let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
 const todayTaskPropertyResizeTimers = new Map();
@@ -1573,6 +1575,7 @@ function setView(view, options = {}) {
     updateNav();
   }
   renderView({ transition: true });
+  window.scrollTo({ top: 0, left: 0, behavior: "instant" });
   renderOverlays();
   if (view === "calendar") {
     requestCalendarGoogleRefresh({ force: true });
@@ -2859,7 +2862,7 @@ function renderFinanceDashboard() {
           <h1 class="view-title">가계부</h1>
         </div>
         <div class="finance-header-actions toolbar">
-          <div class="finance-month-control" aria-label="조회 월">
+          <div class="finance-month-control" aria-label="조회 월"${financeWorkspace.saving ? " inert" : ""}>
             <button type="button" data-finance-month-shift="-1" aria-label="이전 달">‹</button>
             ${financeSelectInput("조회 월", "financeMonth", financeMonthOptions(financeWorkspace.month, 12, 12), {
               required: true,
@@ -2872,7 +2875,7 @@ function renderFinanceDashboard() {
           <button class="button secondary" type="button" data-action="finance-logout">잠그기</button>
         </div>
       </header>
-      <nav class="finance-tabs view-mode-group" aria-label="가계부 화면">
+      <nav class="finance-tabs view-mode-group" aria-label="가계부 화면"${financeWorkspace.saving ? " inert" : ""}>
         ${FINANCE_TABS.map(([key, label]) => `
           <button
             class="view-mode-button ${financeWorkspace.tab === key ? "is-active" : ""}"
@@ -2888,6 +2891,7 @@ function renderFinanceDashboard() {
         class="finance-tab-panel"
         id="finance-panel-${esc(financeWorkspace.tab)}"
         data-finance-tab-panel="${esc(financeWorkspace.tab)}"
+        ${financeWorkspace.saving ? "inert" : ""}
       >
         ${renderFinanceTab(state)}
       </div>
@@ -3625,7 +3629,10 @@ function toggleFinanceRecordEdit(button) {
   }
   details.open = open;
   button.setAttribute("aria-expanded", String(open));
-  if (!open) return;
+  if (!open) {
+    button.focus({ preventScroll: true });
+    return;
+  }
   requestAnimationFrame(() => {
     details.querySelector(".finance-native-form input:not([type='hidden']):not([disabled]), .finance-native-form [data-finance-select-trigger], .finance-native-form button:not([disabled])")
       ?.focus({ preventScroll: true });
@@ -4402,6 +4409,7 @@ function resetFinanceWorkspace(status = "locked", error = "") {
   financeWorkspace.error = error;
   financeWorkspace.mutationError = "";
   financeWorkspace.saving = false;
+  financeWorkspace.saveRequest = null;
   financeWorkspace.status = status;
 }
 
@@ -4584,6 +4592,16 @@ async function saveFinanceState(nextState, successMessage) {
   if (financeWorkspace.status !== "ready" || financeWorkspace.saving) return false;
   financeWorkspace.saving = true;
   financeWorkspace.mutationError = "";
+  const saveRequest = {};
+  financeWorkspace.saveRequest = saveRequest;
+  const dashboard = els.viewRoot.querySelector('[data-finance-screen="dashboard"]');
+  let preserveDrafts = false;
+  let shouldRender = true;
+  if (dashboard) {
+    for (const surface of dashboard.querySelectorAll(".finance-month-control, .finance-tabs, [data-finance-tab-panel]")) surface.inert = true;
+    dashboard.setAttribute("aria-busy", "true");
+    dashboard.querySelector(".finance-mutation-error")?.remove();
+  }
   try {
     const payload = await apiJson("/api/finance/state", {
       method: "PUT",
@@ -4595,6 +4613,10 @@ async function saveFinanceState(nextState, successMessage) {
         baseRevision: financeWorkspace.revision,
       }),
     });
+    if (financeWorkspace.saveRequest !== saveRequest) {
+      shouldRender = false;
+      return false;
+    }
     const savedState = normalizeFinanceState(payload.state);
     if (!savedState) throw new Error("저장된 가계부 응답 형식을 확인할 수 없습니다.");
     financeWorkspace.state = savedState;
@@ -4603,6 +4625,10 @@ async function saveFinanceState(nextState, successMessage) {
     if (successMessage) showToast(successMessage);
     return true;
   } catch (error) {
+    if (financeWorkspace.saveRequest !== saveRequest) {
+      shouldRender = false;
+      return false;
+    }
     if (error.code === "FINANCE_AUTH_REQUIRED" || error.status === 401) {
       resetFinanceWorkspace("locked", "가계부 세션이 만료됐습니다. 다시 열어주세요.");
       return false;
@@ -4610,6 +4636,10 @@ async function saveFinanceState(nextState, successMessage) {
     if ([409, 412, 428].includes(error.status)) {
       try {
         const latest = await apiJson("/api/finance/state");
+        if (financeWorkspace.saveRequest !== saveRequest) {
+          shouldRender = false;
+          return false;
+        }
         const latestState = normalizeFinanceState(latest.state);
         if (latestState) {
           financeWorkspace.state = latestState;
@@ -4617,6 +4647,10 @@ async function saveFinanceState(nextState, successMessage) {
           financeWorkspace.updatedAt = typeof latest.updatedAt === "string" ? latest.updatedAt : "";
         }
       } catch (refreshError) {
+        if (financeWorkspace.saveRequest !== saveRequest) {
+          shouldRender = false;
+          return false;
+        }
         if (refreshError.status === 401) resetFinanceWorkspace("locked");
       }
       financeWorkspace.mutationError = "다른 창에서 먼저 변경되어 최신 가계부를 다시 불러왔습니다. 덮어쓰지 않았으니 내용을 확인하고 다시 입력해주세요.";
@@ -4626,10 +4660,24 @@ async function saveFinanceState(nextState, successMessage) {
     financeWorkspace.mutationError = issue?.message
       ? `저장할 수 없는 값이 있습니다: ${issue.message}`
       : error.message || "가계부 저장에 실패했습니다.";
+    preserveDrafts = true;
     return false;
   } finally {
-    financeWorkspace.saving = false;
-    if (ui.view === "finance") renderView({ soft: true });
+    if (financeWorkspace.saveRequest === saveRequest) {
+      financeWorkspace.saveRequest = null;
+      financeWorkspace.saving = false;
+    }
+    if (shouldRender && preserveDrafts && financeWorkspace.status === "ready" && dashboard?.isConnected) {
+      for (const surface of dashboard.querySelectorAll(".finance-month-control, .finance-tabs, [data-finance-tab-panel]")) surface.inert = false;
+      dashboard.setAttribute("aria-busy", "false");
+      const alert = document.createElement("p");
+      alert.className = "finance-mutation-error";
+      alert.setAttribute("role", "alert");
+      alert.textContent = financeWorkspace.mutationError;
+      dashboard.querySelector("[data-finance-tab-panel]")?.before(alert);
+    } else if (shouldRender && ui.view === "finance" && !financeWorkspace.saveRequest) {
+      renderView({ soft: true });
+    }
   }
 }
 
@@ -5607,6 +5655,7 @@ function inlinePickerFieldSelector(input) {
 }
 
 function restoreInlinePickerFocus(fieldSelector, pickerSelector, triggerSelector, fallback) {
+  if (hasActiveEditableShortcutTarget()) return;
   const replacement = fieldSelector
     ? app.querySelector(fieldSelector)?.closest(pickerSelector)?.querySelector(triggerSelector)
     : fallback;
@@ -8841,7 +8890,8 @@ function selectMarkdownTableScope(blockId, mode, row = 0, column = 0) {
   actions.querySelector('[data-resource-table-delete="column"]').disabled = context.table.headers.length === 1;
   const shell = context.blockElement.querySelector(".resource-table-shell").getBoundingClientRect();
   const bounds = cell.getBoundingClientRect();
-  actions.style.top = `${bounds.top - shell.top - actions.offsetHeight - 6}px`;
+  const top = row === 0 ? context.blockElement.querySelector(".resource-table-scope.is-column").getBoundingClientRect().top : bounds.top;
+  actions.style.top = `${top - shell.top - actions.offsetHeight - 6}px`;
   actions.style.left = `${Math.max(0, Math.min(bounds.left - shell.left, shell.width - actions.offsetWidth))}px`;
   positionMarkdownTableHandles(context.blockElement);
   return true;
@@ -9060,6 +9110,7 @@ function handleMarkdownTableCellEvent(event) {
   }
   if (event.type === "pointerdown" && event.button === 0 && !cell.classList.contains("is-cell-selected")) beginInlineToolbarPointerSelection(event);
   if (event.type === "compositionstart") {
+    captureInlineBoundaryTyping(cell);
     beginEditorTextHistory(ownerType, ownerId, block.id, markdownTableCellFocus(cell), { forceNew: true });
     ui.composingBlockId = block.id;
     return;
@@ -9088,6 +9139,7 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (event.type === "beforeinput") {
+    captureInlineBoundaryTyping(cell);
     if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
       event.preventDefault();
       cell.blur();
@@ -9132,6 +9184,10 @@ function handleMarkdownTableCellEvent(event) {
       clearMarkdownTableCellSelection();
       selectSingleBlock(ownerType, ownerId, block.id);
     }
+    return;
+  }
+  if (["ArrowLeft", "ArrowRight"].includes(event.key) && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && moveCaretAcrossInlineBoundary(cell, event.key)) {
+    event.preventDefault();
     return;
   }
   const inlineShortcut = inlineMarkKeyboardShortcut(event);
@@ -9788,11 +9844,9 @@ function renderInlineSegment(text, activeMarks) {
     } else if (type === "equation") {
       const formula = mark.formula || text;
       const mode = mark.displayMode === true ? "display" : "inline";
-      const display = renderEquationDisplay(formula);
-      const fullDisplay = mode === "display"
-        ? `<sygma-display-equation data-formula="${esc(formula)}" contenteditable="false" aria-hidden="true"></sygma-display-equation>`
-        : "";
-      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-mode="${mode}" data-equation-formula="${esc(formula)}" data-equation-display="${esc(display)}" role="math" aria-label="${esc(`수식: ${display}`)}" title="${esc(formula)}"><span class="inline-equation-source" aria-hidden="true">${html}</span>${fullDisplay}</span>`;
+      const display = formula;
+      const fullDisplay = `<sygma-display-equation data-formula="${esc(formula)}" data-display-mode="${mode}" contenteditable="false" aria-hidden="true"></sygma-display-equation>`;
+      html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES.equation}" data-inline-mark="equation" data-equation-mode="${mode}" data-equation-formula="${esc(formula)}" data-equation-display="${esc(display)}" role="math" aria-label="${esc(`수식: ${display}`)}" title="${esc(formula)}"><span class="inline-equation-source" style="white-space:pre-wrap" aria-hidden="true">${html}</span>${fullDisplay}</span>`;
     } else {
       html = `<span class="inline-mark ${INLINE_MARK_CLASS_NAMES[type] || ""}" data-inline-mark="${type}">${html}</span>`;
     }
@@ -9992,340 +10046,47 @@ function inlineMarkPayloadEqual(left, right) {
 }
 
 function normalizeEquationFormula(value = "") {
-  return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function renderEquationDisplay(value = "") {
-  let formula = normalizeEquationFormula(value);
-  if (!formula) return "";
-  formula = formula.replace(/\\left\s*/g, "").replace(/\\right\s*/g, "");
-  let previous = "";
-  while (formula !== previous) {
-    previous = formula;
-    formula = formula.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, (_, numerator, denominator) => `${renderEquationDisplay(numerator)}⁄${renderEquationDisplay(denominator)}`);
-    formula = formula.replace(/\\sqrt\s*\{([^{}]+)\}/g, (_, body) => `√${renderEquationDisplay(body)}`);
-  }
-  formula = formula.replace(/\\([a-zA-Z]+)\s*\{([^{}]*)\}/g, (_, command, body) => {
-    if (command === "text" || command === "mathrm" || command === "operatorname") return body;
-    return `${equationCommandSymbol(command)}${body}`;
-  });
-  formula = formula.replace(/\\([a-zA-Z]+)/g, (_, command) => equationCommandSymbol(command));
-  formula = formula.replace(/\^\{([^{}]+)\}/g, (_, body) => equationScriptText(body, "sup"));
-  formula = formula.replace(/_\{([^{}]+)\}/g, (_, body) => equationScriptText(body, "sub"));
-  formula = formula.replace(/\^([A-Za-z0-9+\-=()])/g, (_, body) => equationScriptText(body, "sup"));
-  formula = formula.replace(/_([A-Za-z0-9+\-=()])/g, (_, body) => equationScriptText(body, "sub"));
-  formula = formula.replace(/[{}]/g, "");
-  return formula.replace(/\s+/g, " ").trim();
-}
-
-function renderDisplayEquationMathML(value = "") {
-  const cursor = { source: normalizeEquationFormula(value), index: 0, failed: false, depth: 0, nodes: 0 };
-  if (!cursor.source || cursor.source.length > 4_000) return "";
-  const body = equationMathRow(cursor);
-  equationMathSkipSpaces(cursor);
-  if (cursor.failed || cursor.index !== cursor.source.length || !body) return "";
-  return `<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mstyle displaystyle="true" scriptlevel="0">${body}</mstyle></math>`;
-}
-
-function equationMathRow(cursor, stop = "") {
-  if (cursor.depth >= 64) {
-    cursor.failed = true;
-    return "";
-  }
-  cursor.depth += 1;
-  try {
-    let html = "";
-    while (cursor.index < cursor.source.length) {
-      equationMathSkipSpaces(cursor);
-      const char = cursor.source[cursor.index];
-      if (!char) break;
-      if (stop && char === stop) {
-        cursor.index += 1;
-        return html;
-      }
-      if (char === "}" || char === "]" || char === "^" || char === "_") {
-        cursor.failed = true;
-        return "";
-      }
-      const atom = equationMathAtom(cursor);
-      if (!atom) {
-        cursor.failed = true;
-        return "";
-      }
-      let subscript = "";
-      let superscript = "";
-      while (!cursor.failed) {
-        equationMathSkipSpaces(cursor);
-        const script = cursor.source[cursor.index];
-        if (script !== "_" && script !== "^") break;
-        cursor.index += 1;
-        const argument = equationMathArgument(cursor);
-        if (argument === null || (script === "_" ? subscript : superscript)) {
-          cursor.failed = true;
-          return "";
-        }
-        if (script === "_") subscript = argument;
-        else superscript = argument;
-      }
-      html += equationMathScripts(atom, subscript, superscript);
-    }
-    if (stop) cursor.failed = true;
-    return html;
-  } finally {
-    cursor.depth -= 1;
-  }
-}
-
-function equationMathAtom(cursor) {
-  cursor.nodes += 1;
-  if (cursor.nodes > 2_000) {
-    cursor.failed = true;
-    return null;
-  }
-  const char = cursor.source[cursor.index];
-  if (!char) return null;
-  if (char === "{") {
-    cursor.index += 1;
-    return { html: `<mrow>${equationMathRow(cursor, "}")}</mrow>`, large: false };
-  }
-  if (char === "\\") return equationMathCommand(cursor);
-  if (/\d/.test(char) || (char === "." && /\d/.test(cursor.source[cursor.index + 1] || ""))) {
-    const start = cursor.index;
-    cursor.index += 1;
-    while (/[\d.,]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
-    return { html: `<mn>${esc(cursor.source.slice(start, cursor.index))}</mn>`, large: false };
-  }
-  cursor.index += 1;
-  if (/[A-Za-z]/.test(char)) return { html: `<mi>${esc(char)}</mi>`, large: false };
-  if (/[^\x00-\x7F]/u.test(char) && !/[×÷±∓≤≥≠≈∼∞∂∇∑∏∫→←↔]/u.test(char)) {
-    return { html: `<mtext>${esc(char)}</mtext>`, large: false };
-  }
-  if (/[()[\]|]/.test(char)) return { html: `<mo stretchy="true">${esc(char)}</mo>`, large: false };
-  return { html: `<mo>${esc(char)}</mo>`, large: ["∑", "∏", "∫"].includes(char) };
-}
-
-function equationMathCommand(cursor) {
-  cursor.index += 1;
-  const start = cursor.index;
-  while (/[A-Za-z]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
-  const command = cursor.source.slice(start, cursor.index);
-  if (!command) {
-    const literal = cursor.source[cursor.index] || "";
-    if (!literal) return null;
-    cursor.index += 1;
-    if (literal === " " || literal === "," || literal === ";") return { html: '<mspace width="0.28em"></mspace>', large: false };
-    return { html: `<mo>${esc(literal)}</mo>`, large: false };
-  }
-  if (["frac", "dfrac", "tfrac"].includes(command)) {
-    const numerator = equationMathArgument(cursor);
-    const denominator = equationMathArgument(cursor);
-    if (numerator === null || denominator === null) return null;
-    return {
-      html: `<mfrac data-equation-fraction="true"><mrow data-equation-numerator="true">${numerator}</mrow><mrow data-equation-denominator="true">${denominator}</mrow></mfrac>`,
-      large: false,
-    };
-  }
-  if (command === "sqrt") {
-    equationMathSkipSpaces(cursor);
-    let degree = "";
-    if (cursor.source[cursor.index] === "[") {
-      cursor.index += 1;
-      degree = equationMathRow(cursor, "]");
-    }
-    const body = equationMathArgument(cursor);
-    if (body === null) return null;
-    return { html: degree ? `<mroot><mrow>${body}</mrow><mrow>${degree}</mrow></mroot>` : `<msqrt><mrow>${body}</mrow></msqrt>`, large: false };
-  }
-  if (["text", "operatorname"].includes(command)) {
-    const text = equationMathRawArgument(cursor);
-    if (text === null) return null;
-    const tag = command === "text" ? "mtext" : "mi";
-    return { html: `<${tag} mathvariant="normal">${esc(text)}</${tag}>`, large: command === "operatorname" && text === "lim" };
-  }
-  if (["mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal"].includes(command)) {
-    const body = equationMathArgument(cursor);
-    if (body === null) return null;
-    const variants = { mathrm: "normal", mathbf: "bold", mathit: "italic", mathsf: "sans-serif", mathtt: "monospace", mathcal: "script" };
-    return { html: `<mstyle mathvariant="${variants[command]}">${body}</mstyle>`, large: false };
-  }
-  if (["left", "right"].includes(command)) {
-    equationMathSkipSpaces(cursor);
-    let delimiter = cursor.source[cursor.index] || "";
-    if (delimiter === "\\") {
-      cursor.index += 1;
-      const delimiterStart = cursor.index;
-      while (/[A-Za-z]/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
-      delimiter = equationCommandSymbol(cursor.source.slice(delimiterStart, cursor.index));
-    } else {
-      cursor.index += 1;
-    }
-    if (!delimiter || delimiter === ".") return delimiter === "." ? { html: "", large: false } : null;
-    return { html: `<mo stretchy="true">${esc(delimiter)}</mo>`, large: false };
-  }
-  const spacing = { quad: "1em", qquad: "2em", enspace: "0.5em", thinspace: "0.17em" };
-  if (spacing[command]) return { html: `<mspace width="${spacing[command]}"></mspace>`, large: false };
-  const functions = new Set(["lim", "log", "ln", "sin", "cos", "tan", "min", "max"]);
-  if (functions.has(command)) return { html: `<mi mathvariant="normal">${command}</mi>`, large: command === "lim" };
-  const symbol = equationCommandSymbol(command);
-  if (symbol === command) return null;
-  const large = ["sum", "prod", "int"].includes(command);
-  const tag = /[A-Za-zα-ωΑ-Ω]/u.test(symbol) && !large ? "mi" : "mo";
-  return { html: `<${tag}${large ? ' largeop="true" movablelimits="true"' : ""}>${esc(symbol)}</${tag}>`, large };
-}
-
-function equationMathArgument(cursor) {
-  equationMathSkipSpaces(cursor);
-  if (cursor.source[cursor.index] === "{") {
-    cursor.index += 1;
-    const html = equationMathRow(cursor, "}");
-    return cursor.failed ? null : html;
-  }
-  const atom = equationMathAtom(cursor);
-  return atom?.html ?? null;
-}
-
-function equationMathRawArgument(cursor) {
-  equationMathSkipSpaces(cursor);
-  if (cursor.source[cursor.index] !== "{") return null;
-  cursor.index += 1;
-  let depth = 1;
-  let value = "";
-  while (cursor.index < cursor.source.length) {
-    const char = cursor.source[cursor.index];
-    cursor.index += 1;
-    if (char === "{") {
-      depth += 1;
-      value += char;
-      continue;
-    }
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return value;
-    }
-    value += char;
-  }
-  cursor.failed = true;
-  return null;
-}
-
-function equationMathScripts(atom, subscript, superscript) {
-  if (!subscript && !superscript) return atom.html;
-  const sub = subscript ? `<mrow>${subscript}</mrow>` : "";
-  const sup = superscript ? `<mrow>${superscript}</mrow>` : "";
-  if (atom.large) {
-    if (sub && sup) return `<munderover>${atom.html}${sub}${sup}</munderover>`;
-    if (sub) return `<munder>${atom.html}${sub}</munder>`;
-    return `<mover>${atom.html}${sup}</mover>`;
-  }
-  if (sub && sup) return `<msubsup>${atom.html}${sub}${sup}</msubsup>`;
-  if (sub) return `<msub>${atom.html}${sub}</msub>`;
-  return `<msup>${atom.html}${sup}</msup>`;
-}
-
-function equationMathSkipSpaces(cursor) {
-  while (/\s/.test(cursor.source[cursor.index] || "")) cursor.index += 1;
+  return String(value || "").replace(/\r\n?/g, "\n").trim();
 }
 
 if (window.customElements && !window.customElements.get("sygma-display-equation")) {
   window.customElements.define("sygma-display-equation", class extends HTMLElement {
     connectedCallback() {
       if (this.shadowRoot) return;
-      let mathML = "";
-      try {
-        mathML = renderDisplayEquationMathML(this.dataset.formula || "");
-      } catch (_) {
-        return;
-      }
-      if (!mathML) return;
+      const formula = this.dataset.formula || "";
       const root = this.attachShadow({ mode: "open" });
-      root.innerHTML = `<style>:host{display:block;width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;color:inherit;font-size:1.18em;line-height:normal}math{width:max-content;min-width:min-content;max-width:none;margin:0 auto;padding:2px 0}</style>${mathML}`;
-      this.dataset.equationRendered = "true";
+      root.innerHTML = `<link rel="stylesheet" href="/assets/katex/katex.min.css"><style>
+        :host{display:inline-block;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;vertical-align:middle;color:inherit;line-height:normal}
+        :host([data-display-mode="display"]){display:block;width:100%}
+        .katex{font-size:1.18em}.katex-display{margin:0;padding:2px 0}
+        .equation-error{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:0.85em ui-monospace,monospace}
+      </style>`;
+      const output = document.createElement("span");
+      root.append(output);
+      try {
+        // Keep oversized expressions editable without blocking the whole document.
+        if (formula.length > 20_000) throw new Error("수식은 20,000자 이내로 나누어 입력해 주세요.");
+        // Bound user macros and dimensions; each expression gets its own macro scope.
+        katex.render(formula, output, {
+          displayMode: this.dataset.displayMode === "display",
+          output: "htmlAndMathml",
+          throwOnError: true,
+          trust: false,
+          strict: "ignore",
+          maxExpand: 1_000,
+          maxSize: 20,
+          macros: {},
+        });
+        this.dataset.equationRendered = "true";
+      } catch (error) {
+        output.className = "equation-error";
+        output.textContent = formula;
+        this.dataset.equationError = "true";
+        this.parentElement?.setAttribute("title", `수식 문법을 확인해 주세요: ${error.message}`);
+      }
       this.parentElement?.classList.add("has-full-equation");
     }
   });
-}
-
-function equationCommandSymbol(command = "") {
-  const symbols = {
-    alpha: "α",
-    beta: "β",
-    gamma: "γ",
-    delta: "δ",
-    epsilon: "ε",
-    zeta: "ζ",
-    eta: "η",
-    theta: "θ",
-    iota: "ι",
-    kappa: "κ",
-    lambda: "λ",
-    mu: "μ",
-    nu: "ν",
-    xi: "ξ",
-    pi: "π",
-    rho: "ρ",
-    sigma: "σ",
-    tau: "τ",
-    upsilon: "υ",
-    phi: "φ",
-    chi: "χ",
-    psi: "ψ",
-    omega: "ω",
-    Gamma: "Γ",
-    Delta: "Δ",
-    Theta: "Θ",
-    Lambda: "Λ",
-    Xi: "Ξ",
-    Pi: "Π",
-    Sigma: "Σ",
-    Phi: "Φ",
-    Psi: "Ψ",
-    Omega: "Ω",
-    times: "×",
-    cdot: "⋅",
-    div: "÷",
-    pm: "±",
-    mp: "∓",
-    le: "≤",
-    leq: "≤",
-    ge: "≥",
-    geq: "≥",
-    neq: "≠",
-    approx: "≈",
-    sim: "∼",
-    infty: "∞",
-    partial: "∂",
-    nabla: "∇",
-    sum: "∑",
-    prod: "∏",
-    int: "∫",
-    lim: "lim",
-    log: "log",
-    ln: "ln",
-    sin: "sin",
-    cos: "cos",
-    tan: "tan",
-    to: "→",
-    rightarrow: "→",
-    leftarrow: "←",
-    leftrightarrow: "↔",
-  };
-  return symbols[command] || command;
-}
-
-function equationScriptText(value = "", mode = "sup") {
-  const superscript = {
-    0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹",
-    a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ",
-    A: "ᴬ", B: "ᴮ", D: "ᴰ", E: "ᴱ", G: "ᴳ", H: "ᴴ", I: "ᴵ", J: "ᴶ", K: "ᴷ", L: "ᴸ", M: "ᴹ", N: "ᴺ", O: "ᴼ", P: "ᴾ", R: "ᴿ", T: "ᵀ", U: "ᵁ", V: "ⱽ", W: "ᵂ",
-    "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
-  };
-  const subscript = {
-    0: "₀", 1: "₁", 2: "₂", 3: "₃", 4: "₄", 5: "₅", 6: "₆", 7: "₇", 8: "₈", 9: "₉",
-    a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ",
-    "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
-  };
-  const table = mode === "sub" ? subscript : superscript;
-  return String(value || "").split("").map((char) => table[char] || char).join("");
 }
 
 function normalizeInlineHref(value = "") {
@@ -10486,7 +10247,12 @@ function syncEditorCommandMenuAria() {
 
 function registerServiceWorkerUpdateFlow() {
   if (QUICK_EDITOR_SURFACE || !("serviceWorker" in navigator) || location.protocol === "file:") return;
+  let wasControlled = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!wasControlled) {
+      wasControlled = true;
+      return;
+    }
     if (hasUnsavedResourceWork()) {
       serviceWorkerUpdateApplying = false;
       serviceWorkerUpdateAvailable = true;
@@ -11425,7 +11191,7 @@ function renderEquationPopover() {
   if (!popover) return "";
   return `
     <form class="inline-equation-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-equation-popover role="dialog" aria-label="수식 편집">
-      <input class="inline-equation-input" data-inline-equation-input value="${esc(popover.formula || "")}" placeholder="E = mc^2" aria-label="수식 입력">
+      <textarea class="inline-equation-input" data-inline-equation-input rows="${popover.displayMode ? 3 : 1}" placeholder="E = mc^2" aria-label="수식 입력" title="Enter로 적용 · Shift+Enter로 줄바꿈" spellcheck="false">${esc(popover.formula || "")}</textarea>
       <button class="inline-equation-action" type="submit">적용</button>
       <button class="inline-equation-action secondary" type="button" data-inline-equation-remove>제거</button>
     </form>
@@ -13958,6 +13724,15 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  for (const [attribute, popover, field] of [
+    ["data-inline-link-input", ui.linkPopover, "href"],
+    ["data-inline-comment-input", ui.commentPopover, "body"],
+    ["data-inline-equation-input", ui.equationPopover, "formula"],
+  ]) {
+    if (!popover || !event.target.hasAttribute(attribute)) continue;
+    popover[field] = event.target.value;
+    return;
+  }
   const quickEditorQuery = event.target.closest("[data-quick-editor-query]");
   if (quickEditorQuery) {
     quickEditor.pickerQuery = quickEditorQuery.value;
@@ -14219,6 +13994,7 @@ function handleBeforeInput(event) {
     return;
   }
   if (isComposingInput(event, blockContent)) return;
+  if (!event.inputType?.includes("Composition")) captureInlineBoundaryTyping(blockContent);
   if (handlePendingSoftLineBreakBeforeInput(event, blockContent)) return;
   if (handlePendingMarkdownTextBeforeInput(event, blockContent)) return;
   if (event.inputType === "insertLineBreak" || (event.inputType === "insertParagraph" && (event.shiftKey || ui.shiftKeyDown))) {
@@ -14245,6 +14021,7 @@ function handleCompositionStart(event) {
   if (!blockContent) return;
   const editor = blockContent.closest(".block-editor");
   if (!editor || !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return;
+  captureInlineBoundaryTyping(blockContent);
   const offsets = selectionOffsetsInside(blockContent);
   beginEditorTextHistory(
     editor.dataset.ownerType,
@@ -14381,11 +14158,13 @@ function handleFocusIn(event) {
 function handleFocusOut(event) {
   const financeSelect = event.target.closest("[data-finance-select]");
   if (financeSelect && !financeSelect.contains(event.relatedTarget)) closeFinanceSelect(financeSelect);
-  if (isResourceDraftingElement(event.target) && !isResourceDraftingElement(event.relatedTarget)) {
+  const resourceDraft = isResourceDraftingElement(event.target);
+  const workspaceDraft = !QUICK_EDITOR_SURFACE && ui.view !== "finance" && isEditableShortcutTarget(event.target);
+  if ((resourceDraft || workspaceDraft) && !isEditableShortcutTarget(event.relatedTarget) && !event.target.closest("form")?.contains(event.relatedTarget)) {
     requestAnimationFrame(() => {
-      if (resourceEditorHasDraftingFocus()) return;
+      if (hasActiveEditableShortcutTarget()) return;
       if (remoteStateRenderDeferred) rerenderAfterStateReplace();
-      handleRemoteStateWakeRefresh();
+      if (resourceDraft) handleRemoteStateWakeRefresh();
     });
   }
   const blockContent = event.target.closest("[data-block-content]");
@@ -15515,6 +15294,18 @@ function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, b
   handleBlockSelectAll(blockContent, ownerType, ownerId);
 }
 
+function handleResourceVerticalSelection(blockContent, ownerType, ownerId, direction) {
+  const textLength = (blockContent.textContent || "").length;
+  const offsets = selectionOffsetsInside(blockContent);
+  const extend = textLength > 0 && offsets && !offsets.collapsed && offsets.start === 0 && offsets.end === textLength;
+  handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, direction < 0);
+  if (ui.blockSelection.ids.length) {
+    ui.blockSelection.anchorId = blockContent.dataset.blockContent;
+    ui.blockSelection.focusId = blockContent.dataset.blockContent;
+    if (extend) moveSelectedBlockSelection(direction, true);
+  }
+}
+
 function selectSingleBlock(ownerType, ownerId, blockId) {
   const editor = document.querySelector(`.block-editor[data-owner-type="${ownerType}"][data-owner-id="${ownerId}"]`);
   if (!editor) return;
@@ -15581,12 +15372,14 @@ function moveSelectedBlockSelection(direction, expand = false) {
   const firstIndex = visibleIds.indexOf(selectedVisibleIds[0]);
   const lastIndex = visibleIds.indexOf(selectedVisibleIds[selectedVisibleIds.length - 1]);
   if (expand) {
-    const nextIndex = direction > 0 ? lastIndex + 1 : firstIndex - 1;
-    if (nextIndex < 0 || nextIndex >= visibleIds.length) return true;
-    const nextIds = direction > 0
-      ? [...selectedVisibleIds, visibleIds[nextIndex]]
-      : [visibleIds[nextIndex], ...selectedVisibleIds];
+    const anchorId = selectedVisibleIds.includes(selection.anchorId) ? selection.anchorId : visibleIds[direction > 0 ? firstIndex : lastIndex];
+    const focusId = selectedVisibleIds.includes(selection.focusId) ? selection.focusId : visibleIds[direction > 0 ? lastIndex : firstIndex];
+    const anchorIndex = visibleIds.indexOf(anchorId);
+    const nextIndex = Math.max(0, Math.min(visibleIds.length - 1, visibleIds.indexOf(focusId) + direction));
+    const nextIds = visibleIds.slice(Math.min(anchorIndex, nextIndex), Math.max(anchorIndex, nextIndex) + 1);
     restoreBlockSelection(selection.ownerType, selection.ownerId, nextIds);
+    ui.blockSelection.anchorId = anchorId;
+    ui.blockSelection.focusId = visibleIds[nextIndex];
     return true;
   }
   const nextIndex = Math.max(0, Math.min(visibleIds.length - 1, direction > 0 ? lastIndex + 1 : firstIndex - 1));
@@ -16916,6 +16709,7 @@ function renderInlineTextForClipboard(block) {
 }
 
 function renderInlineSegmentForClipboard(text, activeMarks) {
+  if (activeMarks.some((mark) => mark.type === "equation")) return renderInlineSegment(text, activeMarks);
   const escaped = esc(text).replace(/\n/g, "<br>");
   if (!activeMarks.length) return escaped;
   const marker = `__SYGMA_BR_${id()}__`;
@@ -18201,7 +17995,7 @@ function handlePointerDown(event) {
     return;
   }
 
-  if (event.target.closest("[data-inline-mark-toggle], [data-inline-resource-citation-open], [data-resource-citation-id], [data-resource-citation-remove], [data-inline-equation-open], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], [data-page-command-index], [data-emoji-index]")) {
+  if (event.target.closest("[data-inline-mark-toggle], [data-inline-resource-citation-open], [data-resource-citation-id], [data-resource-citation-remove], [data-inline-equation-open], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], .inline-link-popover button[type='submit'], .inline-comment-popover button[type='submit'], .inline-equation-popover button[type='submit'], [data-page-command-index], [data-emoji-index]")) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -19232,6 +19026,12 @@ function handleKeydown(event) {
     return;
   }
 
+  if (event.target.matches("[data-inline-equation-input]") && event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    event.target.form?.requestSubmit();
+    return;
+  }
+
   const resourceTitle = event.target.closest("[data-resource-title]");
   if (resourceTitle && event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
@@ -19459,12 +19259,11 @@ function handleKeydown(event) {
     !event.metaKey &&
     !event.ctrlKey &&
     !event.altKey &&
-    ownerType === "resources" &&
-    event.key === "ArrowUp"
+    ownerType === "resources"
   ) {
     event.preventDefault();
     event.stopPropagation();
-    handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, true);
+    handleResourceVerticalSelection(blockContent, ownerType, ownerId, event.key === "ArrowUp" ? -1 : 1);
     return;
   }
 
@@ -19510,7 +19309,7 @@ function handleKeydown(event) {
     !event.metaKey &&
     !event.ctrlKey &&
     !event.altKey &&
-    moveCaretHorizontallyBetweenBlocks(blockContent, event.key)
+    (moveCaretAcrossInlineBoundary(blockContent, event.key) || moveCaretHorizontallyBetweenBlocks(blockContent, event.key))
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -22403,7 +22202,12 @@ function updateBlockText(blockContent, event = null) {
   }
   closeResourceSlashMenu();
   const offsets = selectionOffsetsInside(blockContent);
-  const shortcutLength = event?.inputType === "insertText" && event.data === " " && offsets?.collapsed
+  // Composition commits do not carry an insertText/space event.
+  const change = offsets?.collapsed && rawText[offsets.start - 1] === " "
+    ? changedTextRange(previousText, rawText)
+    : null;
+  const shortcutLength = change && change.nextEnd > change.start
+    && change.start <= offsets.start && change.nextEnd >= offsets.start
     ? offsets.start
     : rawText.length;
   let markdownHistory = null;
@@ -23027,10 +22831,40 @@ function changedTextRange(previousText, nextText) {
   return { start, previousEnd, nextEnd };
 }
 
+function captureInlineBoundaryTyping(blockContent) {
+  // Only a boundary deliberately selected with an arrow can override native typing affinity.
+  const pending = inlineBoundaryTyping.get(blockContent);
+  const range = selectionRangeInside(blockContent);
+  if (!pending || !range?.collapsed || range.startContainer !== pending.node || range.startOffset !== pending.nodeOffset) {
+    inlineBoundaryTyping.delete(blockContent);
+    return;
+  }
+  const offset = selectionOffsetsInside(blockContent).start;
+  const node = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer : { parentElement: range.startContainer };
+  const typingMark = inlineTypingMarkForContent(blockContent);
+  const marks = inlineMarkTypesForNode(node, blockContent)
+    .map((mark) => typeof mark === "string" ? { type: mark } : mark)
+    .filter((mark) => typingMark !== "normal" || mark.type !== "bold");
+  if (typingMark === "bold") marks.push({ type: "bold" });
+  inlineBoundaryTyping.set(blockContent, { node: range.startContainer, nodeOffset: range.startOffset, text: normalizeEditorPlainText(blockContent.textContent || ""), offset, marks });
+}
+
 function inlineMarksForContentUpdate(block, blockContent, rawText) {
   const previousText = block?.text || "";
   const previousMarks = normalizeInlineMarks(previousText, block?.marks || []);
   const offsets = selectionOffsetsInside(blockContent);
+  const boundary = inlineBoundaryTyping.get(blockContent);
+  const insertedLength = rawText.length - previousText.length;
+  if (boundary?.text === previousText && insertedLength > 0
+    && rawText.slice(0, boundary.offset) === previousText.slice(0, boundary.offset)
+    && rawText.slice(boundary.offset + insertedLength) === previousText.slice(boundary.offset)) {
+    const split = splitInlineMarksAtSelection(previousMarks, previousText, boundary.offset, boundary.offset);
+    return normalizeInlineMarks(rawText, [
+      ...split.before,
+      ...boundary.marks.map((mark) => ({ ...mark, start: boundary.offset, end: boundary.offset + insertedLength })),
+      ...shiftInlineMarks(split.after, boundary.offset + insertedLength),
+    ]);
+  }
   if (inlineTypingMarkForContent(blockContent) === "bold") {
     blockContent.dataset.inlineTypingMark = "bold";
     const domMarks = inlineMarksFromContent(blockContent, rawText);
@@ -25516,6 +25350,45 @@ function extendExistingHorizontalSelectionBetweenBlocks(selection, blockContent,
   return true;
 }
 
+function moveCaretAcrossInlineBoundary(blockContent, key) {
+  const range = selectionRangeInside(blockContent);
+  if (!range?.collapsed) return false;
+  const selector = '[data-inline-mark]:not([data-inline-mark="equation"]):not([contenteditable="false"])';
+  const nodeElement = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
+  const current = nodeElement.closest(selector);
+  const offset = selectionOffsetsInside(blockContent)?.start;
+  const forward = key === "ArrowRight";
+  const next = document.createRange();
+  const currentRange = current && blockContent.contains(current) ? textRangeForInlineElement(blockContent, current) : null;
+  const edgeText = currentRange ? (forward ? current.textContent.slice(offset - currentRange.start) : current.textContent.slice(0, offset - currentRange.start)) : "";
+  const oneGrapheme = edgeText && new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(edgeText)[Symbol.iterator]().next().value.segment === edgeText;
+  if (currentRange && currentRange[forward ? "end" : "start"] === offset) {
+    if (forward) next.setStartAfter(current);
+    else next.setStartBefore(current);
+    next.collapse(true);
+    if (inlineTypingMarkForContent(blockContent) === current.dataset.inlineMark) ui.inlineTypingMark = null;
+    if (blockContent.dataset.inlineTypingMark === current.dataset.inlineMark) delete blockContent.dataset.inlineTypingMark;
+  } else if (currentRange && oneGrapheme) {
+    next.selectNodeContents(current);
+    next.collapse(!forward);
+  } else {
+    const candidate = [...blockContent.querySelectorAll(selector)].find((mark) => {
+      if (mark.contains(range.startContainer)) return false;
+      const parent = mark.parentElement.closest(selector);
+      return (!parent || parent.contains(range.startContainer))
+        && textRangeForInlineElement(blockContent, mark)[forward ? "start" : "end"] === offset;
+    });
+    if (!candidate) return false;
+    next.selectNodeContents(candidate);
+    next.collapse(forward);
+  }
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(next);
+  inlineBoundaryTyping.set(blockContent, { node: next.startContainer, nodeOffset: next.startOffset });
+  return true;
+}
+
 function moveCaretHorizontallyBetweenBlocks(blockContent, key) {
   const range = selectionRangeInside(blockContent);
   if (!range || !range.collapsed) return false;
@@ -26271,12 +26144,16 @@ async function apiJson(path, options = {}) {
   const response = await fetch(path, {
     cache: "no-store",
     ...options,
+    signal: options.signal || (/^(GET|HEAD)$/i.test(options.method || "GET") ? AbortSignal.timeout(30_000) : undefined),
     headers: {
       ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...(options.headers || {}),
     },
   });
-  const payload = await response.json().catch(() => ({}));
+  const payload = await response.json().catch(() => {
+    if (response.ok) throw new Error("서버 응답을 읽을 수 없습니다. 다시 시도해 주세요.");
+    return {};
+  });
   const responseRevision = responseWorkspaceRevision(response, payload);
   if (responseRevision !== null && isPlainObject(payload) && parseWorkspaceRevision(payload.revision) === null) {
     payload.revision = responseRevision;
@@ -27074,7 +26951,7 @@ async function refreshRemoteStateIfNewer() {
         : databaseBackendStatus.e2eFixtureGeneration,
     };
     clearLegacyLocalState();
-    rerenderAfterStateReplace({ deferResourceRender: Boolean(focusedResourceId) });
+    rerenderAfterStateReplace({ deferEditorRender: Boolean(focusedResourceId) || (ui.view !== "finance" && hasActiveEditableShortcutTarget()) });
     await persistCommittedLocalResourceState(remoteRevision, {
       expectedDraftGeneration: startingDraftGeneration,
     });
@@ -27163,12 +27040,12 @@ function rerenderAfterStateReplace(options = {}) {
     syncQuickEditorAfterStateReplace();
     return;
   }
-  if (options.deferResourceRender) {
+  renderNav();
+  if (options.deferEditorRender) {
     remoteStateRenderDeferred = true;
     return;
   }
   remoteStateRenderDeferred = false;
-  renderNav();
   if (ui.view !== "finance") renderView({ soft: true, syncResourceContents: true });
   renderOverlays();
   updateTopbarStickiness();

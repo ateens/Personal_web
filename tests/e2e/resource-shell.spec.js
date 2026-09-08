@@ -1107,7 +1107,7 @@ test("새 자료 버튼은 빈 문서를 만들고 제목에서 Enter를 누르�
   await expect(document.locator('[data-block-content]').first()).toBeFocused();
 });
 
-test("Resource 일반 링크는 새 창으로 열리고 링크 도구가 열려도 배경의 Tab 이동을 가두지 않는다", async ({ page }) => {
+test("Resource 일반 링크는 새 창으로 열리고 링크 도구가 열려도 배경의 Tab 이동을 가두지 않는다", async ({ page, browserName }) => {
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await openResourceList(page);
@@ -1161,7 +1161,8 @@ test("Resource 일반 링크는 새 창으로 열리고 링크 도구가 열려�
   }));
   await opener.focus();
   await expect(opener).toBeFocused();
-  await page.keyboard.press("Tab");
+  // macOS WebKit uses Option+Tab to include buttons in native keyboard navigation.
+  await page.keyboard.press(browserName === "webkit" && process.platform === "darwin" ? "Alt+Tab" : "Tab");
   await expect(page.locator("[data-resource-open]").nth(1)).toBeFocused();
 
   await page.keyboard.press("Escape");

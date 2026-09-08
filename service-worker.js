@@ -1,10 +1,33 @@
-const CACHE_NAME = "sygma-personal-web-v646-shell-cleanup";
+const CACHE_NAME = "sygma-personal-web-v648-katex-0-18-4";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
   "/styles.css",
   "/finance-model.js",
   "/app.js",
+  "/assets/katex/katex.min.js",
+  "/assets/katex/katex.min.css",
+  "/assets/katex/contrib/mhchem.min.js",
+  "/assets/katex/fonts/KaTeX_AMS-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Caligraphic-Bold.woff2",
+  "/assets/katex/fonts/KaTeX_Caligraphic-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Fraktur-Bold.woff2",
+  "/assets/katex/fonts/KaTeX_Fraktur-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Main-Bold.woff2",
+  "/assets/katex/fonts/KaTeX_Main-BoldItalic.woff2",
+  "/assets/katex/fonts/KaTeX_Main-Italic.woff2",
+  "/assets/katex/fonts/KaTeX_Main-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Math-BoldItalic.woff2",
+  "/assets/katex/fonts/KaTeX_Math-Italic.woff2",
+  "/assets/katex/fonts/KaTeX_SansSerif-Bold.woff2",
+  "/assets/katex/fonts/KaTeX_SansSerif-Italic.woff2",
+  "/assets/katex/fonts/KaTeX_SansSerif-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Script-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Size1-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Size2-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Size3-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Size4-Regular.woff2",
+  "/assets/katex/fonts/KaTeX_Typewriter-Regular.woff2",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
 
@@ -21,7 +44,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith("sygma-") && key !== CACHE_NAME).map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
   );
 });
@@ -35,42 +58,43 @@ function shouldCache(response) {
 }
 
 async function cacheFirst(request) {
-  const cached = await caches.match(request);
+  const cached = await cachedResponse(request);
   if (cached) return cached;
   const response = await fetch(request);
-  if (shouldCache(response)) {
-    const cache = await caches.open(CACHE_NAME);
-    await cache.put(request, response.clone());
-  }
+  await cacheResponse(request, response);
   return response;
 }
 
-async function networkFirst(request) {
+async function cachedResponse(request) {
   try {
-    const response = await fetch(request, { cache: "no-store" });
-    if (shouldCache(response)) {
-      const cache = await caches.open(CACHE_NAME);
-      await cache.put(request, response.clone());
-    }
-    return response;
+    const cache = await caches.open(CACHE_NAME);
+    return await cache.match(request);
   } catch {
-    return (await caches.match(request)) || Response.error();
+    return undefined;
   }
 }
 
-async function navigationFirst(request) {
+async function cacheResponse(request, response) {
+  if (!shouldCache(response)) return;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  } catch {
+    // Cache quota or storage failures must not discard a successful network response.
+  }
+}
+
+async function networkFirst(request) {
+  const navigation = request.mode === "navigate";
+  const cacheKey = navigation ? APP_SHELL_URL : request;
   try {
     const response = await fetch(request, { cache: "no-store" });
-    if (shouldCache(response)) {
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("text/html")) {
-        const cache = await caches.open(CACHE_NAME);
-        await cache.put(new URL(APP_SHELL_URL, self.registration.scope), response.clone());
-      }
+    if (!navigation || (response.headers.get("content-type") || "").includes("text/html")) {
+      await cacheResponse(cacheKey, response);
     }
     return response;
   } catch {
-    return (await caches.match(new URL(APP_SHELL_URL, self.registration.scope))) || Response.error();
+    return (await cachedResponse(cacheKey)) || Response.error();
   }
 }
 
@@ -79,10 +103,10 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/")) return;
+  if (url.pathname === "/api" || url.pathname.startsWith("/api/") || url.pathname === "/health") return;
 
   if (event.request.mode === "navigate") {
-    event.respondWith(navigationFirst(event.request));
+    event.respondWith(networkFirst(event.request));
     return;
   }
 

@@ -110,3 +110,26 @@ test("finance selects escape overflow clips and edit stays beside delete", async
   await expect(edit).toHaveAttribute("aria-expanded", "false");
   await expect(edit).toBeFocused();
 });
+
+test("delayed picker focus restoration preserves typing in the next field", async ({ page }) => {
+  await page.locator('.finance-tabs [data-finance-tab="accounts"]').click();
+  const form = page.locator('form[data-form="finance-payment-method"]').first();
+  const control = form.locator('select[name="type"]').locator("xpath=..");
+  await page.evaluate(() => {
+    const restore = restoreInlinePickerFocus;
+    restoreInlinePickerFocus = (...args) => { window.__delayedPickerFocus = () => restore(...args); };
+  });
+  await control.locator("[data-finance-select-trigger]").click();
+  await control.getByRole("option", { name: "현금", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => Boolean(window.__delayedPickerFocus))).toBe(true);
+  const name = form.locator('[name="name"]');
+  await name.click();
+  await name.fill("Next");
+  await page.evaluate(() => window.__delayedPickerFocus());
+  await expect(name).toBeFocused();
+  await page.keyboard.type(" draft");
+  await expect(name).toHaveValue("Next draft");
+  await name.evaluate((input) => input.blur());
+  await page.evaluate(() => window.__delayedPickerFocus());
+  await expect(control.locator("[data-finance-select-trigger]")).toBeFocused();
+});

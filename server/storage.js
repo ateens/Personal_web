@@ -669,7 +669,9 @@ export function createStorage({
       if (!authoritative.hasRelationalRows) {
         await syncRelationalState(client, normalized.state);
       }
-      const relationalState = await readRelationalAppState(client, normalized.state);
+      const relationalState = !needsHealing && authoritative.hasRelationalRows
+        ? normalized.state
+        : await readRelationalAppState(client, normalized.state);
       if (needsHealing) {
         relationalState.revision = revision;
         const healed = await client.query(

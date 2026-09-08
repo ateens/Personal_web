@@ -240,6 +240,9 @@ const contentTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
 };
 
 function validAbsoluteHttpUrl(value, expectedPath = "") {
@@ -1951,8 +1954,16 @@ async function listGoogleCalendars() {
 }
 
 async function listGoogleCalendarEvents(calendarId, query) {
-  const payload = await googleFetch(`/calendars/${encodeURIComponent(calendarId)}/events?${query}`);
-  return payload.items || [];
+  const events = [];
+  const params = new URLSearchParams(query);
+  let pageToken = "";
+  do {
+    if (pageToken) params.set("pageToken", pageToken);
+    const payload = await googleFetch(`/calendars/${encodeURIComponent(calendarId)}/events?${params}`);
+    events.push(...(payload.items || []));
+    pageToken = payload.nextPageToken || "";
+  } while (pageToken);
+  return events;
 }
 
 async function handleGoogleStatus(response) {
@@ -2370,7 +2381,7 @@ async function handleGoogleCalendarData(requestUrl, response) {
   const calendars = await listGoogleCalendars();
   const eventRequests = [];
   for (const calendar of calendars) {
-    eventRequests.push(listGoogleCalendarEvents(calendar.id, params).catch(() => []));
+    eventRequests.push(listGoogleCalendarEvents(calendar.id, params));
   }
   const eventGroups = await Promise.all(eventRequests);
   const events = [];
@@ -2634,6 +2645,9 @@ function resolveRequestPath(url) {
   }
   const requested = decoded === "/" ? "/index.html" : decoded;
   const normalizedRequest = normalize(requested).replaceAll("\\", "/");
+  if (staticRoot === sourceStaticRoot && /^\/assets\/katex\/(?:katex\.min\.(?:js|css)|contrib\/mhchem\.min\.js|fonts\/KaTeX_[A-Za-z0-9]+-[A-Za-z]+\.(?:woff2|woff|ttf))$/.test(normalizedRequest)) {
+    return resolve(root, "node_modules/katex/dist", normalizedRequest.slice("/assets/katex/".length));
+  }
   if (staticRoot === sourceStaticRoot && !sourceStaticFiles.has(normalizedRequest) && !normalizedRequest.startsWith("/icons/")) return "";
   const absolute = resolve(join(staticRoot, normalizedRequest));
   return absolute === staticRoot || absolute.startsWith(`${staticRoot}${sep}`) ? absolute : "";
@@ -2672,10 +2686,23 @@ const gzipAsync = promisify(gzip);
 
 function responseEncoding(request, extension, size) {
   if (size < 1024 || !compressibleExtensions.has(extension)) return "";
-  const accepted = String(request.headers["accept-encoding"] || "").toLowerCase();
-  if (accepted.includes("br")) return "br";
-  if (accepted.includes("gzip")) return "gzip";
-  return "";
+  const accepted = new Map();
+  for (const entry of String(request.headers["accept-encoding"] || "").toLowerCase().split(",")) {
+    const [name, ...parameters] = entry.trim().split(";");
+    const quality = parameters.map((parameter) => parameter.trim()).find((parameter) => parameter.startsWith("q="));
+    const weight = quality ? Number(quality.slice(2)) : 1;
+    accepted.set(name, Number.isFinite(weight) && weight >= 0 && weight <= 1 ? weight : 0);
+  }
+  let encoding = "";
+  let highestWeight = accepted.get("identity") ?? 0;
+  for (const candidate of ["br", "gzip"]) {
+    const weight = accepted.get(candidate) ?? accepted.get("*") ?? 0;
+    if (weight > highestWeight) {
+      encoding = candidate;
+      highestWeight = weight;
+    }
+  }
+  return encoding;
 }
 
 async function compressedStaticFile(filePath, fileStat, encoding) {

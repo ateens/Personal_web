@@ -35,11 +35,32 @@ assert(
   serviceWorker.includes(appPath) && serviceWorker.includes(financeModelPath) && serviceWorker.includes(stylesPath),
   "service worker does not precache built assets",
 );
-assert(serviceWorker.includes("cache.addAll(ASSETS.slice(0,4))"), "built app assets are not all required during service-worker install");
 assert(serviceWorker.includes('/^\\/assets\\/[^/]+\\.[a-f0-9]{10,}\\./'), "service worker is missing hashed-asset cache-first delivery");
 assert(!serviceWorker.includes("/_sygma/assets/"), "legacy Sites asset proxy remains in the Railway build");
 assert(!serviceWorker.includes('url.pathname.startsWith("/assets/")'), "service worker cache-first must not include unhashed assets");
 assert(!serviceWorker.includes('url.pathname.startsWith("/icons/")'), "service worker cache-first must not include unhashed icons");
+
+const katexCssPath = "/assets/katex/katex.min.css";
+const katexScriptPaths = ["/assets/katex/katex.min.js", "/assets/katex/contrib/mhchem.min.js"];
+assert(index.includes(`href="${katexCssPath}"`), "KaTeX fonts need a document-level stylesheet");
+let previousScriptIndex = -1;
+for (const path of [...katexScriptPaths, financeModelPath, appPath]) {
+  const scriptIndex = index.indexOf(`<script src="${path}"`);
+  assert(scriptIndex > previousScriptIndex, "KaTeX and mhchem must load before the application");
+  previousScriptIndex = scriptIndex;
+}
+const katexCss = await readFile(resolve(client, `.${katexCssPath}`), "utf8");
+assert(!/url\(["']?(?:https?:|\/\/|data:)/i.test(katexCss), "equation fonts must be self-hosted");
+const katexFontPaths = [...katexCss.matchAll(/url\(([^)]+)\)/g)].map((match) => `/assets/katex/${match[1]}`);
+for (const asset of [katexCssPath, ...katexScriptPaths, ...katexFontPaths]) {
+  const built = await readFile(resolve(client, `.${asset}`));
+  const dependency = await readFile(resolve(root, "node_modules/katex/dist", asset.slice("/assets/katex/".length)));
+  assert(built.equals(dependency), `KaTeX asset differs from pinned dependency: ${asset}`);
+  if (!asset.endsWith(".woff") && !asset.endsWith(".ttf")) {
+    assert(serviceWorker.includes(asset), `equation asset missing from built offline cache: ${asset}`);
+  }
+}
+assert((await stat(resolve(client, "assets/katex/LICENSE.txt"))).size > 0, "KaTeX license is missing from the distribution");
 
 const builtBytes = appStat.size + financeModelStat.size + stylesStat.size;
 const sourceBytes = sourceAppStat.size + sourceFinanceModelStat.size + sourceStylesStat.size;

@@ -14,6 +14,7 @@ async function createAccount(page, request, { name = "생활비 통장", balance
   const form = page.locator('form[data-form="finance-account"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
+  await form.locator('[name="name"]').click();
   await form.locator('[name="name"]').fill(name);
   await form.locator('[name="institution"]').fill("테스트 은행");
   await form.locator('[name="openingBalanceKrw"]').fill(balance);
@@ -29,6 +30,7 @@ async function createCreditCard(page, request, { name = "생활 신용카드", d
   const form = page.locator('form[data-form="finance-payment-method"]').filter({
     has: page.locator('input[name="entityId"][value=""]'),
   });
+  await form.locator('[name="name"]').click();
   await form.locator('[name="name"]').fill(name);
   await form.locator('select[name="type"]').selectOption("credit_card");
   await form.locator('select[name="paymentAccountId"]').selectOption(accountId);
@@ -482,6 +484,8 @@ test("card usage dates drive direct and installment payment schedules", async ({
   const saveExpense = async ({ title, amount, paymentType }) => {
     const form = page.locator('form[data-form="finance-expense"]');
     await form.locator("xpath=..").locator(":scope > summary").click();
+    // Native details content may still be clipped while its opening transition starts.
+    await form.locator('[name="title"]').click();
     await form.locator('[name="title"]').fill(title);
     await form.locator('[name="amountKrw"]').fill(amount);
     await form.locator('[name="occurredOn"]').evaluate((input) => {
@@ -521,6 +525,7 @@ test("card usage dates drive direct and installment payment schedules", async ({
   const setupForm = page.locator(`[data-finance-card="${cardId}"] form[data-form="finance-card-installment-setup"]`);
   await setupForm.locator("xpath=..").locator(":scope > summary").click();
   await expect(setupForm.locator('[name="entryId"]')).toHaveValue(installmentEntry.id);
+  await setupForm.locator('[name="installmentCount"]').click();
   await setupForm.locator('[name="installmentCount"]').fill("3");
   const paymentAmounts = setupForm.locator('[name="paymentAmountKrw"]');
   await expect(paymentAmounts).toHaveCount(3);

@@ -18,6 +18,7 @@ GOOGLE_CLIENT_SECRET=...
 ```
 
 ```bash
+npm ci
 npm start
 ```
 
@@ -59,6 +60,18 @@ DATABASE_URL=postgresql://user:password@localhost:5432/sygma_personal_web npm ru
 ```
 
 This starts a temporary app server, writes state through `/api/state`, checks the authenticated `/api/finance/*` boundary, reads both stores back, and checks the JSONB, finance-history, and relational collection tables directly.
+
+## Resource Equations
+
+Inline and display equations use the same locally served KaTeX engine, including the mhchem chemistry/unit extension. Supported math includes `\mathbb`, accents, nested fractions, matrices, `aligned`, `cases`, and expression-local macros. For example:
+
+```latex
+z=E(\ell),\qquad \hat a_t=\mu_\phi(o_t,z)
+```
+
+In the equation editor, Enter applies the formula and Shift+Enter inserts a newline. Source whitespace, comments, and mark positions survive editing, copying, and reloading. Invalid or unsupported formulas remain editable as their original source. This is mathematical TeX support, not a full LaTeX document/package compiler; HTML/URL/image execution is disabled. Rendering is limited to 20,000 characters, 1,000 macro expansions and 20em user-specified dimensions without truncating stored source.
+
+KaTeX 0.18.4 is pinned to retain Node 20 installation compatibility. The build includes the engine, styles, fonts and license, and the service worker precaches the engine and WOFF2 fonts; no CDN is needed. See the [supported functions](https://katex.org/docs/supported.html) and [version history](https://github.com/KaTeX/KaTeX/blob/main/CHANGELOG.md) when upgrading.
 
 ## Production Build
 

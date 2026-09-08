@@ -1629,6 +1629,8 @@ button:focus-visible {
   margin: 4px 0 0;
   font-size: clamp(30px, 5vw, 54px);
   line-height: 1.02;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .toolbar {
@@ -3113,9 +3115,11 @@ button:focus-visible {
   font-weight: 850;
 }
 
-.project-list {
+.project-list,
+.habit-list {
   display: grid;
   gap: 0;
+  container: entity-list / inline-size;
 }
 
 .project-item {
@@ -3594,11 +3598,6 @@ button:focus-visible {
   color: var(--muted);
   font-size: 12px;
   font-weight: 680;
-}
-
-.habit-list {
-  display: grid;
-  gap: 0;
 }
 
 .habit-item {
@@ -6729,6 +6728,8 @@ button:focus-visible {
 
 .inline-mark-equation {
   display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
   min-height: 1.35em;
   border-radius: 4px;
   padding: 0 5px;
@@ -6760,12 +6761,19 @@ button:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.inline-mark-equation[data-equation-mode="display"] > sygma-display-equation {
+.inline-mark-equation > sygma-display-equation {
   display: none;
 }
 
-.inline-mark-equation[data-equation-mode="display"].has-full-equation::before {
+.inline-mark-equation.has-full-equation::before {
   content: none;
+}
+
+.inline-mark-equation.has-full-equation > sygma-display-equation {
+  display: inline-block;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
 }
 
 .inline-mark-equation[data-equation-mode="display"].has-full-equation > sygma-display-equation {
@@ -8896,7 +8904,7 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
   position: fixed;
   z-index: 91;
   display: grid;
-  grid-template-columns: minmax(200px, 300px) 48px 48px;
+  grid-template-columns: minmax(0, 1fr) 48px 48px;
   align-items: center;
   gap: 4px;
   width: min(424px, calc(100vw - 24px));
@@ -8924,10 +8932,12 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
 .inline-equation-input {
   width: 100%;
   min-width: 0;
-  height: 30px;
+  min-height: 30px;
+  max-height: 180px;
+  resize: vertical;
   border: 0;
   border-radius: 4px;
-  padding: 0 8px;
+  padding: 6px 8px;
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -10488,9 +10498,13 @@ body.is-task-placement-open {
   .entity-card .inline-edit-panel {
     padding-inline: 10px;
   }
+}
 
-  .project-row {
+@container entity-list (max-width: 760px) {
+  .project-row,
+  .habit-row {
     grid-template-columns: minmax(0, 1fr) minmax(82px, auto) 18px;
+    gap: 16px;
     min-height: 0;
     padding: 18px 4px 20px;
   }
@@ -10498,12 +10512,6 @@ body.is-task-placement-open {
   .project-actions {
     grid-column: 2;
     grid-row: 1;
-  }
-
-  .habit-row {
-    grid-template-columns: minmax(0, 1fr) minmax(82px, auto) 18px;
-    min-height: 0;
-    padding: 18px 4px 20px;
   }
 
   .habit-preview {
@@ -10521,7 +10529,7 @@ body.is-task-placement-open {
     justify-self: end;
   }
 
-  .habit-chevron {
+  .project-chevron {
     grid-column: 3;
     grid-row: 1;
     justify-self: end;
@@ -10546,7 +10554,6 @@ body.is-task-placement-open {
   .project-task-count,
   .project-end-date {
     grid-column: 1 / -1;
-    justify-items: start;
   }
 
   .project-task-count,
@@ -10554,17 +10561,17 @@ body.is-task-placement-open {
     display: inline-grid;
     grid-auto-flow: column;
     align-items: baseline;
+    justify-items: start;
     justify-content: start;
     gap: 8px;
   }
 
-  .project-chevron {
-    grid-column: 2;
-    grid-row: 1;
-    justify-self: end;
+  .habit-month-stat {
+    display: none;
   }
 
-  .project-relation-strip {
+  .project-relation-strip,
+  .project-task-detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -11080,7 +11087,11 @@ body.is-task-placement-open {
 
   .view-controls {
     grid-template-columns: 1fr;
-    margin-top: -28px;
+  }
+
+  .calendar-view-switcher {
+    justify-content: flex-start;
+    margin-top: 0;
   }
 
   .view-control-topline,
@@ -12087,6 +12098,10 @@ body.is-task-placement-open {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.finance-select-native {
+  appearance: none;
 }
 
 .finance-picker-trigger {
@@ -13400,7 +13415,7 @@ body.is-task-placement-open {
 .service-worker-update {
   position: fixed;
   right: max(18px, env(safe-area-inset-right, 0px));
-  bottom: max(18px, env(safe-area-inset-bottom, 0px));
+  bottom: max(var(--nav-menu-bottom), env(safe-area-inset-bottom, 0px));
   z-index: 240;
   display: flex;
   align-items: center;
@@ -13432,10 +13447,15 @@ body.is-task-placement-open {
 }
 
 
+@media (max-width: 1180px) {
+  .app:not(.has-docked-nav):has(.sidebar-shell.is-open) .service-worker-update {
+    visibility: hidden;
+  }
+}
+
 @media (max-width: 600px) {
   .service-worker-update {
     right: max(8px, env(safe-area-inset-right, 0px));
-    bottom: max(8px, env(safe-area-inset-bottom, 0px));
     left: max(8px, env(safe-area-inset-left, 0px));
     width: auto;
     align-items: stretch;
@@ -13857,6 +13877,11 @@ body.is-task-placement-open {
 }
 
 @container resource-workspace (max-width: 840px) {
+  .calendar-view-switcher {
+    justify-content: flex-start;
+    margin-top: 0;
+  }
+
   .topbar,
   .view-header,
   .view-controls,

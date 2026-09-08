@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateFinanceState } from "../server/finance.js";
@@ -48,7 +48,14 @@ const sourceFiles = new Map([
   ["/manifest.json", ["manifest.json", "application/manifest+json; charset=utf-8"]],
   ["/service-worker.js", ["service-worker.js", "text/javascript; charset=utf-8"]],
   ["/icons/app-icon.svg", ["icons/app-icon.svg", "image/svg+xml"]],
+  ["/assets/katex/katex.min.js", ["node_modules/katex/dist/katex.min.js", "text/javascript; charset=utf-8"]],
+  ["/assets/katex/contrib/mhchem.min.js", ["node_modules/katex/dist/contrib/mhchem.min.js", "text/javascript; charset=utf-8"]],
+  ["/assets/katex/katex.min.css", ["node_modules/katex/dist/katex.min.css", "text/css; charset=utf-8"]],
 ]);
+for (const font of await readdir(resolve(root, "node_modules/katex/dist/fonts"))) {
+  const extension = font.match(/^KaTeX_[A-Za-z0-9]+-[A-Za-z]+\.(woff2|woff|ttf)$/)?.[1];
+  if (extension) sourceFiles.set(`/assets/katex/fonts/${font}`, [`node_modules/katex/dist/fonts/${font}`, `font/${extension}`]);
+}
 
 let state = createFixtureState();
 let writes = [];

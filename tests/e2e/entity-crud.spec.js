@@ -58,6 +58,7 @@ test("Project cards drag across all four statuses without opening the editor", a
 });
 
 test("Project editor reuses custom pickers and keeps four canonical statuses", async ({ page, request }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("about:blank");
   await resetFixture(request);
   const snapshot = await fixtureSnapshot(request);
@@ -120,15 +121,28 @@ test("Project editor reuses custom pickers and keeps four canonical statuses", a
   expect(await statusTrigger.getAttribute("aria-required")).toBeNull();
   await page.setViewportSize({ width: 390, height: 520 });
   await statusTrigger.evaluate((element) => element.scrollIntoView({ block: "end" }));
-  await statusTrigger.click();
+  const beforeOpen = await statusTrigger.boundingBox();
+  if (!beforeOpen) throw new Error("Project status picker bounds unavailable");
+  // Keep the deliberate bottom placement and click the label clear of the floating navigation.
+  const point = { x: beforeOpen.x + 24, y: beforeOpen.y + beforeOpen.height / 2 };
+  expect(await statusTrigger.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), point)).toBe(true);
+  await page.mouse.click(point.x, point.y);
   const statusOptions = statusPicker.locator("[data-finance-select-options]");
+  await expect(statusOptions).toBeVisible();
   await expect(statusPicker.locator("[data-finance-select-option]")).toHaveText(["예정", "진행", "완료", "중단"]);
   const triggerBox = await statusTrigger.boundingBox();
   const optionsBox = await statusOptions.boundingBox();
   if (!triggerBox || !optionsBox) throw new Error("Project status picker bounds unavailable");
+  expect(Math.abs(triggerBox.y - beforeOpen.y)).toBeLessThan(2);
   expect(optionsBox.y).toBeGreaterThanOrEqual(8);
   expect(optionsBox.y + optionsBox.height).toBeLessThanOrEqual(512);
   expect(optionsBox.y + optionsBox.height).toBeLessThanOrEqual(triggerBox.y);
+  const visibleOptions = await statusPicker.locator("[data-finance-select-option]").evaluateAll((options) => options.every((option) => {
+    const rect = option.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return hit === option || option.contains(hit);
+  }));
+  expect(visibleOptions).toBe(true);
   await statusPicker.locator('[data-finance-select-option="active"]').click();
   await expect(editor.locator('[data-finance-select]:has([data-field="status"]) [data-finance-select-trigger]')).toBeFocused();
   await page.setViewportSize({ width: 1440, height: 1000 });

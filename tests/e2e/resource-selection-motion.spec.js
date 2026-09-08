@@ -53,7 +53,7 @@ async function inlineToolbarAnimationStarts(page) {
 async function setCaret(content, offset) {
   await content.evaluate((element, requestedOffset) => {
     element.focus();
-    const textNode = element.firstChild;
+    const textNode = element.firstChild || element;
     const range = document.createRange();
     range.setStart(textNode, Math.min(requestedOffset, textNode.textContent.length));
     range.collapse(true);
@@ -92,6 +92,71 @@ test("Resource 본문에서는 수평 드래그가 텍스트를 선택하고 세
 
   await expect(page.locator(".editor-marquee")).toHaveCount(0);
   await expect.poll(() => editor.locator(".block.is-selected").evaluateAll((blocks) => blocks.map((block) => block.dataset.blockId))).toEqual(BLOCK_IDS);
+});
+
+for (const direction of [-1, 1]) {
+  test(`Shift+${direction < 0 ? "ArrowUp" : "ArrowDown"}은 현재 블록부터 선택하고 방향 반전 시 마지막 확장을 줄인다`, async ({ page, request }) => {
+    const blocks = Array.from({ length: 7 }, (_, index) => paragraph(`vertical-selection-${index}`, index === 3
+      ? "현재 문장의 첫 번째 줄\n현재 문장의 두 번째 줄"
+      : `인접 문장 ${index + 1}`));
+    await seedBlocks(request, blocks);
+    const editor = await openResource(page);
+    const current = editor.locator(`[data-block-content="${blocks[3].id}"]`);
+    const forward = direction < 0 ? "Shift+ArrowUp" : "Shift+ArrowDown";
+    const reverse = direction < 0 ? "Shift+ArrowDown" : "Shift+ArrowUp";
+    const selectedIds = () => editor.locator(".block.is-selected").evaluateAll((elements) => elements.map((element) => element.dataset.blockId));
+    const rangeIds = (focus) => blocks.slice(Math.min(3, focus), Math.max(3, focus) + 1).map((block) => block.id);
+    await setCaret(current, 4);
+
+    await page.keyboard.press(forward);
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe(blocks[3].text);
+    await expect.poll(selectedIds).toEqual([]);
+
+    await page.keyboard.press(forward);
+    await expect.poll(selectedIds).toEqual(rangeIds(3 + direction));
+    await page.keyboard.press(forward);
+    await expect.poll(selectedIds).toEqual(rangeIds(3 + 2 * direction));
+    await page.keyboard.press(reverse);
+    await expect.poll(selectedIds).toEqual(rangeIds(3 + direction));
+    await page.keyboard.press(reverse);
+    await expect.poll(selectedIds).toEqual(rangeIds(3));
+    await page.keyboard.press(reverse);
+    await expect.poll(selectedIds).toEqual(rangeIds(3 - direction));
+    await page.keyboard.press(forward);
+    await expect.poll(selectedIds).toEqual(rangeIds(3));
+
+    for (let index = 0; index < 5; index += 1) await page.keyboard.press(forward);
+    await expect.poll(selectedIds).toEqual(rangeIds(direction < 0 ? 0 : 6));
+    await page.keyboard.press(reverse);
+    await expect.poll(selectedIds).toEqual(rangeIds(direction < 0 ? 1 : 5));
+    expect((await fixtureSnapshot(request)).state.resources.find((resource) => resource.id === RESOURCE_ID).blocks).toEqual(blocks);
+  });
+}
+
+test("빈 블록도 첫 수직 선택에 포함되고 접힌 자식은 방향 이동에서 건너뛴다", async ({ page, request }) => {
+  const blocks = [
+    paragraph("vertical-above", "위쪽 문장"),
+    { ...paragraph("vertical-toggle", "접힌 문장"), type: "toggle", collapsed: true },
+    { ...paragraph("vertical-child", "숨겨진 자식"), indent: 1 },
+    paragraph("vertical-empty", ""),
+    paragraph("vertical-below", "아래쪽 문장"),
+  ];
+  await seedBlocks(request, blocks);
+  const editor = await openResource(page);
+  const selected = () => editor.locator(".block.is-selected").evaluateAll((elements) => elements
+    .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true")
+    .map((element) => element.dataset.blockId));
+  await setCaret(editor.locator('[data-block-content="vertical-empty"]'), 0);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(selected).toEqual(["vertical-empty"]);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(selected).toEqual(["vertical-empty", "vertical-below"]);
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(selected).toEqual(["vertical-empty"]);
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect.poll(selected).toEqual(["vertical-toggle", "vertical-empty"]);
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect.poll(selected).toEqual(["vertical-empty"]);
 });
 
 test("오른쪽에서 왼쪽 여백 끝까지 드래그한 텍스트 선택은 mouseup 뒤에도 유지된다", async ({ page, request }) => {

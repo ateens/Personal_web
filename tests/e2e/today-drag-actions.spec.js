@@ -26,7 +26,8 @@ test("Today mouse drag moves a task to the date-free scheduled state", async ({ 
   await expectTaskScheduled(page, request, task.id);
 });
 
-test("Today iPad touch drag does not scroll and uses the shared delete action UI", async ({ browser, request }, testInfo) => {
+test("Today iPad touch drag does not scroll and uses the shared delete action UI", async ({ browser, browserName, request }, testInfo) => {
+  test.skip(browserName !== "chromium", "This touch-drag check uses Chromium's CDP input protocol.");
   const context = await browser.newContext({
     baseURL: String(testInfo.project.use.baseURL),
     locale: "ko-KR",

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 import { createEmptyFinanceState, hashFinancePassword } from "../server/finance.js";
 import { createStorage } from "../server/storage.js";
 
@@ -111,6 +111,10 @@ try {
   assert(versionedAppHead.headers.get("cache-control") === "no-store", "query-versioned source assets must not be cached");
   const compressedApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "Accept-Encoding": "br" } });
   assert(compressedApp.ok && compressedApp.headers.get("content-encoding") === "br", "static JavaScript did not use Brotli compression");
+  const gzipOnlyApp = await fetch(`${baseUrl}/app.js?v=check`, { method: "HEAD", headers: { "Accept-Encoding": "br;q=0, gzip;q=1" } });
+  assert(gzipOnlyApp.ok && gzipOnlyApp.headers.get("content-encoding") === "gzip", "static response ignored a rejected Brotli encoding");
+  const uncompressedApp = await fetch(`${baseUrl}/app.js?v=check`, { method: "HEAD", headers: { "Accept-Encoding": "br;q=0, gzip;q=0" } });
+  assert(uncompressedApp.ok && !uncompressedApp.headers.has("content-encoding"), "static response compressed against client preferences");
   const staticEtag = compressedApp.headers.get("etag");
   assert(staticEtag, "static JavaScript response is missing an ETag");
   const conditionalApp = await fetch(`${baseUrl}/app.js?v=check`, { headers: { "If-None-Match": staticEtag } });
@@ -169,6 +173,7 @@ try {
   assert(firstRead.payload.state?.tasks?.[0]?.status === "scheduled", "legacy someday task status did not migrate to scheduled during PostgreSQL round trip");
   assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
+  await checkHealthyStateRead(firstRead.payload);
   const resourceImage = await checkResourceImageApi();
   await checkFinanceApi();
 
@@ -2069,6 +2074,28 @@ async function nextStateEvent(iterator, timeoutMs = 5_000) {
     return result.value;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function checkHealthyStateRead(expected) {
+  const storage = createStorage({ databaseUrl, appStateId });
+  const originalQuery = Client.prototype.query;
+  const tableReads = new Map();
+  try {
+    await storage.ready();
+    Client.prototype.query = function (query, ...args) {
+      const table = typeof query === "string" && query.match(/^SELECT .+ FROM (\w+) WHERE app_state_id = \$1 ORDER BY /)?.[1];
+      if (table) tableReads.set(table, (tableReads.get(table) || 0) + 1);
+      return originalQuery.call(this, query, ...args);
+    };
+    const result = await storage.readAppState();
+    assert(JSON.stringify(result.state) === JSON.stringify(expected.state), "healthy read snapshot changed");
+    assert(result.revision === expected.revision, "healthy read revision changed");
+    assert(tableReads.size === COLLECTION_KEYS.length + 1, "healthy read skipped a collection or task-resource relation");
+    assert([...tableReads.values()].every((count) => count === 1), "healthy reads must read each relational table only once");
+  } finally {
+    Client.prototype.query = originalQuery;
+    await storage.end();
   }
 }
 

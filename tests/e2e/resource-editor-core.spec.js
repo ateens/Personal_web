@@ -372,6 +372,44 @@ test("기존 문장 앞의 Markdown 단축 입력은 본문과 인라인 서식�
   }
 });
 
+test("조합 확정과 텍스트 대체로 입력한 문장 앞 Markdown도 본문과 서식을 보존한다", async ({ page, request }) => {
+  const resourceId = FIXTURE_IDS.bodySearchResource;
+  const text = "기존 강조 문장";
+  const marks = [{ type: "bold", start: 3, end: 5 }];
+  const cases = ["composition", "replacement", "null-data"].flatMap((mode) => [["#", "heading1"], ["-", "bullet"]].map(([prefix, type]) => ({ mode, prefix, type, id: `${mode}-${type}` })));
+  await seedResourceBlocks(request, resourceId, cases.map(({ id }) => ({ ...paragraph(id, text), marks })));
+  const editor = await openResource(page, resourceId);
+  for (const entry of cases) {
+    const content = editor.locator(`[data-block-content="${entry.id}"]`);
+    await setCaret(content, 0);
+    await content.evaluate((element, { mode, prefix }) => {
+      const data = `${prefix} `;
+      if (mode === "composition") element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      const inputType = mode === "composition" ? "insertFromComposition" : mode === "replacement" ? "insertReplacementText" : "insertText";
+      const eventOptions = { bubbles: true, inputType, data: mode === "null-data" ? null : data, isComposing: mode === "composition" };
+      element.dispatchEvent(new InputEvent("beforeinput", { ...eventOptions, cancelable: true }));
+      const selection = window.getSelection();
+      const range = selection.getRangeAt(0);
+      const inserted = document.createTextNode(data);
+      range.insertNode(inserted);
+      range.setStart(inserted, data.length);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      element.dispatchEvent(new InputEvent("input", eventOptions));
+    }, entry);
+    if (entry.mode === "composition") {
+      await expect(editor.locator(`[data-block-id="${entry.id}"]`)).toHaveAttribute("data-type", "paragraph");
+      await content.evaluate((element, prefix) => element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: `${prefix} ` })), entry.prefix);
+    }
+    await expect(editor.locator(`[data-block-id="${entry.id}"]`)).toHaveAttribute("data-type", entry.type);
+    await expect(content).toHaveText(text);
+    await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("강조");
+    await expect.poll(async () => (await activeCaret(page))?.offset).toBe(0);
+  }
+  await expect.poll(async () => (await persistedResource(request, resourceId)).blocks.map(({ type, text, marks }) => ({ type, text, marks }))).toEqual(cases.map(({ type }) => ({ type, text, marks })));
+});
+
 test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 순서대로 다시 매겨진다", async ({ page, request }) => {
   const firstId = "numbered-enter-first";
   const secondId = "numbered-enter-second";
@@ -1136,30 +1174,37 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
   await expect(displayEquation).toHaveAttribute("role", "math");
   const fullEquation = displayEquation.locator("sygma-display-equation");
   await expect(fullEquation).toHaveAttribute("data-equation-rendered", "true");
-  await expect(fullEquation.locator("munderover")).toHaveCount(1);
-  const fraction = fullEquation.locator("[data-equation-fraction]");
+  await expect(fullEquation).toHaveAttribute("data-display-mode", "display");
+  await expect(fullEquation.locator(".katex-html")).toBeVisible();
+  await expect(fullEquation.locator(".katex-mathml munderover")).toHaveCount(1);
+  await expect(fullEquation.locator(".katex-mathml mfrac")).toHaveCount(1);
+  const fraction = fullEquation.locator(".katex-html .mfrac");
   await expect(fraction).toHaveCount(1);
+  await expect(fraction.locator(".frac-line")).toBeVisible();
   const fractionGeometry = await fraction.evaluate((element) => {
-    const numerator = element.querySelector("[data-equation-numerator]").getBoundingClientRect();
-    const denominator = element.querySelector("[data-equation-denominator]").getBoundingClientRect();
+    const layers = [...element.querySelector(".vlist").children]
+      .map((layer) => layer.lastElementChild)
+      .filter((layer) => layer && !layer.classList.contains("frac-line"));
+    const numerator = layers.at(-1).getBoundingClientRect();
+    const denominator = layers[0].getBoundingClientRect();
     return {
+      layers: layers.length,
       stacked: numerator.bottom < denominator.top,
       centered: Math.abs((numerator.left + numerator.right - denominator.left - denominator.right) / 2) < 2,
     };
   });
-  expect(fractionGeometry).toEqual({ stacked: true, centered: true });
-  await expect(editor.locator('[data-equation-mode="inline"] sygma-display-equation')).toHaveCount(0);
-  const parserGuards = await page.evaluate(() => ({
-    malformed: renderDisplayEquationMathML(String.raw`\frac{a}{`),
-    tooDeep: renderDisplayEquationMathML(`${"{".repeat(65)}x${"}".repeat(65)}`),
-    exclusiveMarks: normalizeInlineMarks("abc", [
+  expect(fractionGeometry).toEqual({ layers: 2, stacked: true, centered: true });
+  const inlineEquations = editor.locator('[data-equation-mode="inline"] sygma-display-equation[data-display-mode="inline"][data-equation-rendered="true"]');
+  await expect(inlineEquations).toHaveCount(3);
+  await expect(inlineEquations.first().locator(".katex-html")).toBeVisible();
+  const exclusiveMarks = await page.evaluate(() => normalizeInlineMarks("abc", [
       { type: "equation", start: 0, end: 3, formula: "abc", displayMode: true },
       { type: "bold", start: 0, end: 3 },
       { type: "equation", start: 1, end: 3, formula: "bc" },
-    ]).map((mark) => mark.type),
-  }));
-  expect(parserGuards).toEqual({ malformed: "", tooDeep: "", exclusiveMarks: ["equation"] });
-  await expect(editor.locator("[data-block-content]").last()).toHaveText(`뒤 y^2\n${String.raw`리터럴 \(not math\)`}`);
+    ]).map((mark) => mark.type));
+  expect(exclusiveMarks).toEqual(["equation"]);
+  await expect.poll(() => editor.locator("[data-block-content]").last().evaluate((element) => element.textContent))
+    .toBe(`뒤 y^2\n${String.raw`리터럴 \(not math\)`}`);
   await expect(editor.locator("[data-block-content]").last().locator('[data-inline-mark="equation"]')).toHaveCount(1);
   const displayGeometry = await displayEquation.evaluate((element) => {
     const parent = element.closest("[data-block-content]");
@@ -1201,7 +1246,8 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
   await expect(reloadedEditor.locator('[data-equation-mode="inline"]')).toHaveCount(3);
   const reloadedDisplayEquation = reloadedEditor.locator('[data-equation-mode="display"]');
   await expect(reloadedDisplayEquation).toHaveAttribute("data-equation-formula", String.raw`\sum_{i=1}^{n}\frac{x_i^2}{1+x_i}`);
-  await expect(reloadedDisplayEquation.locator("[data-equation-fraction]")).toHaveCount(1);
+  await expect(reloadedDisplayEquation.locator(".katex-mathml mfrac")).toHaveCount(1);
+  await expect(reloadedDisplayEquation.locator(".katex-html .mfrac")).toBeVisible();
 });
 
 test("fenced code는 Code Space UI에서 언어 선택과 줄 번호를 제공한다", async ({ page, request }) => {
@@ -1350,13 +1396,16 @@ test("슬래시 수식은 블록과 인라인을 구분하고 닫기와 코드 �
   await page.locator("[data-inline-equation-input]").fill("\\frac{a}{b}");
   await page.locator("[data-inline-equation-input]").press("Enter");
   await expect(editor.locator('[data-equation-mode="inline"]')).toBeVisible();
+  await expect(editor.locator('[data-equation-mode="inline"] sygma-display-equation')).toHaveAttribute("data-equation-rendered", "true");
+  await expect(editor.locator('[data-equation-mode="inline"] .katex-html .mfrac')).toBeVisible();
   await page.keyboard.press("End");
   await page.keyboard.press("Enter");
   await page.keyboard.type("/block equation");
   await page.keyboard.press("Enter");
   await page.locator("[data-inline-equation-input]").fill("\\frac{a}{b}");
   await page.locator("[data-inline-equation-input]").press("Enter");
-  await expect(editor.locator('[data-equation-mode="display"] math')).toBeVisible();
+  await expect(editor.locator('[data-equation-mode="display"] sygma-display-equation')).toHaveAttribute("data-equation-rendered", "true");
+  await expect(editor.locator('[data-equation-mode="display"] .katex-html .mfrac')).toBeVisible();
   await page.keyboard.press("End");
   await page.keyboard.press("Enter");
   await page.keyboard.type("/does-not-exist");
@@ -1740,7 +1789,7 @@ test("Resource Cmd+A는 현재 줄 텍스트, 현재 블록, 전체 블록 순�
   await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds });
 });
 
-test("Resource Shift+ArrowUp은 현재 줄 텍스트, 현재 블록, 위 인접 블록 순서로 선택한다", async ({ page, request }) => {
+test("Resource Shift+ArrowUp은 현재 줄 텍스트부터 위 인접 블록으로 선택을 늘린다", async ({ page, request }) => {
   const blockIds = ["keyboard-up-1", "keyboard-up-2", "keyboard-up-3", "keyboard-up-4"];
   const blockTexts = blockIds.map((_, index) => `위쪽 선택 줄 ${index + 1}`);
   await seedResourceBlocks(
@@ -1769,8 +1818,6 @@ test("Resource Shift+ArrowUp은 현재 줄 텍스트, 현재 블록, 위 인접 
     text: blockTexts[2],
     selectedIds: [],
   });
-  await page.keyboard.press("Shift+ArrowUp");
-  await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: [blockIds[2]] });
   await page.keyboard.press("Shift+ArrowUp");
   await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds.slice(1, 3) });
   await page.keyboard.press("Shift+ArrowUp");
