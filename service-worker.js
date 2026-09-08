@@ -1,10 +1,11 @@
-const CACHE_NAME = "sygma-personal-web-v648-katex-0-18-4";
+const CACHE_NAME = "sygma-personal-web-v649-code-renderers";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
   "/styles.css",
   "/finance-model.js",
   "/app.js",
+  "/assets/highlight/highlight.min.js",
   "/assets/katex/katex.min.js",
   "/assets/katex/katex.min.css",
   "/assets/katex/contrib/mhchem.min.js",
@@ -30,6 +31,7 @@ const REQUIRED_ASSETS = [
   "/assets/katex/fonts/KaTeX_Typewriter-Regular.woff2",
 ];
 const OPTIONAL_ASSETS = ["/manifest.json", "/icons/app-icon.svg", "/assets/sygma-social-preview.png"];
+// The large Mermaid engine is cached by the fetch handler after its first use.
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

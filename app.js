@@ -159,6 +159,7 @@ const CODE_LANGUAGE_OPTIONS = Object.freeze([
   ["yaml", "YAML"],
   ["php", "PHP"],
   ["ruby", "Ruby"],
+  ["mermaid", "Mermaid"],
 ]);
 const CODE_LANGUAGE_VALUES = new Set(CODE_LANGUAGE_OPTIONS.map(([value]) => value));
 const URL_BLOCK_TYPES = Object.freeze({
@@ -652,6 +653,8 @@ let inlineToolbarPositionFrame = 0;
 let inlineToolbarSelectionTimer = 0;
 let financeSelectPositionFrame = 0;
 let codeLanguagePositionFrame = 0;
+let mermaidLibraryPromise = null;
+let mermaidRenderId = 0;
 let preferredVerticalCaretX = null;
 let resourceCaretScrollFrame = 0;
 const toggleBlockAnimationTimers = new Map();
@@ -9472,6 +9475,7 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
   if (block.type === "quote") return `<blockquote class="block-semantic-wrap">${editable}</blockquote>`;
   if (block.type === "code") {
     const language = normalizeCodeLanguage(block.language);
+    if (language === "mermaid") return renderMermaidBlock(block, listMarkerAttr, ownerType, ownerId);
     const lineCount = codeBlockLineCount(block.text);
     const plainText = !language;
     return `
@@ -9480,18 +9484,12 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
           <span class="code-space-window-controls" aria-hidden="true"><i></i><i></i><i></i></span>
           <span class="code-space-title">Code Space</span>
           <div class="code-space-actions">
-            <details class="code-language-picker">
-              <summary class="code-language-trigger" role="button" aria-haspopup="menu" aria-expanded="false" data-code-language-trigger="${esc(block.id)}" aria-label="Code language, current ${esc(codeLanguageLabel(language))}"><span>Language</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
-              <div class="code-language-menu" role="menu" aria-label="Code language" popover="manual" hidden>
-                ${renderCodeLanguageMenuOptions(language, ownerType, ownerId, block.id)}
-              </div>
-            </details>
-            <button class="code-space-copy" type="button" data-code-copy="${esc(block.id)}" data-owner-type="${esc(ownerType)}" data-owner-id="${esc(ownerId)}" aria-label="Copy code"><svg class="code-space-copy-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="9" height="9" rx="1.5"></rect><path d="M4.5 12H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v.5"></path></svg></button>
+            ${renderCodeBlockActions(block, language, ownerType, ownerId)}
           </div>
         </header>
         <div class="code-space-body">
           <span class="code-space-lines" data-code-line-numbers aria-hidden="true">${renderCodeLineNumbers(block.text)}</span>
-          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${codeLanguageLabel(language)} code block` : "Plain text block")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="${contentEditable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `Edit ${codeLanguageLabel(language)} code` : "Edit plain text")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="${plainText ? "Enter text" : "Enter code"}">${esc(block.text || "")}</code></pre>
+          <pre class="block-semantic-wrap code-space-editor" aria-label="${esc(language ? `${codeLanguageLabel(language)} code block` : "Plain text block")}" data-code-language="${esc(language || "plaintext")}"><code class="code-space-source block-content ${block.text ? "" : "is-empty"}" contenteditable="${contentEditable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="${esc(language ? `Edit ${codeLanguageLabel(language)} code` : "Edit plain text")}" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="${plainText ? "Enter text" : "Enter code"}">${renderHighlightedCodeSource(block.text, language)}</code></pre>
         </div>
         <footer class="code-space-footer"><span data-code-line-summary>${codeLineSummary(lineCount)}</span><span>UTF-8</span></footer>
       </section>
@@ -9500,9 +9498,41 @@ function renderEditableBlockContent(block, listMarkerAttr = "", ownerType = "", 
   return editable;
 }
 
+function renderCodeBlockActions(block, language, ownerType, ownerId) {
+  return `<details class="code-language-picker">
+    <summary class="code-language-trigger" role="button" aria-haspopup="menu" aria-expanded="false" data-code-language-trigger="${esc(block.id)}" aria-label="Code language, current ${esc(codeLanguageLabel(language))}"><span>Language</span><strong>${esc(codeLanguageLabel(language))}</strong></summary>
+    <div class="code-language-menu" role="menu" aria-label="Code language" popover="manual" hidden>${renderCodeLanguageMenuOptions(language, ownerType, ownerId, block.id)}</div>
+  </details>
+  <button class="code-space-copy" type="button" data-code-copy="${esc(block.id)}" data-owner-type="${esc(ownerType)}" data-owner-id="${esc(ownerId)}" aria-label="Copy code"><svg class="code-space-copy-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="9" height="9" rx="1.5"></rect><path d="M4.5 12H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v.5"></path></svg></button>`;
+}
+
+function renderMermaidBlock(block, listMarkerAttr, ownerType, ownerId) {
+  const editable = editorOwnerMutationAllowed(ownerType, ownerId);
+  return `<section class="mermaid-block" data-mermaid-block data-code-block-id="${esc(block.id)}">
+    <div class="code-space-actions">${renderCodeBlockActions(block, "mermaid", ownerType, ownerId)}</div>
+    <sygma-mermaid data-mermaid-preview data-source="${esc(block.text || "")}" contenteditable="false" role="group" aria-label="Mermaid 다이어그램"></sygma-mermaid>
+    <details class="mermaid-source" data-mermaid-source>
+      <summary data-mermaid-edit>${editable ? "코드 편집" : "코드 보기"}</summary>
+      <pre class="block-semantic-wrap" data-code-language="mermaid"><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${editable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="Mermaid 코드 편집" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="flowchart TD">${esc(block.text || "")}</code></pre>
+    </details>
+  </section>`;
+}
+
 function normalizeCodeLanguage(value = "") {
   const language = String(value || "").trim().split(/\s+/, 1)[0].slice(0, 64).toLowerCase();
   return ["text", "txt", "plaintext", "plain-text"].includes(language) ? "" : language;
+}
+
+function renderHighlightedCodeSource(value = "", language = "") {
+  const source = String(value || "");
+  const normalized = normalizeCodeLanguage(language);
+  // Highlight only an explicit supported language; large snippets remain editable as plain source.
+  if (!source || source.length > 50_000 || !normalized || !window.hljs?.getLanguage(normalized)) return esc(source);
+  try {
+    return window.hljs.highlight(source, { language: normalized, ignoreIllegals: true }).value;
+  } catch {
+    return esc(source);
+  }
 }
 
 function codeLanguageLabel(value = "") {
@@ -9533,6 +9563,8 @@ function renderCodeLineNumbers(value = "") {
 }
 
 function syncCodeSpaceMetrics(blockContent, value = "") {
+  const preview = blockContent?.closest?.("[data-mermaid-block]")?.querySelector("[data-mermaid-preview]");
+  if (preview) preview.dataset.source = value;
   const codeSpace = blockContent?.closest?.("[data-code-space]");
   if (!codeSpace) return;
   const lineCount = codeBlockLineCount(value);
@@ -10047,6 +10079,104 @@ function inlineMarkPayloadEqual(left, right) {
 
 function normalizeEquationFormula(value = "") {
   return String(value || "").replace(/\r\n?/g, "\n").trim();
+}
+
+function loadMermaidRenderer() {
+  if (!mermaidLibraryPromise) {
+    mermaidLibraryPromise = new Promise((resolve, reject) => {
+      const ready = () => {
+        try {
+          if (!window.mermaid?.render) throw new Error("Mermaid를 불러오지 못했습니다.");
+          window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            suppressErrorRendering: true,
+            htmlLabels: false,
+            maxTextSize: 50_000,
+            maxEdges: 500,
+            theme: "base",
+            themeVariables: {
+              background: "#ffffff", primaryColor: "#eff6ff", primaryTextColor: "#1f2937",
+              primaryBorderColor: "#94a3b8", lineColor: "#64748b", secondaryColor: "#f8fafc",
+              tertiaryColor: "#ffffff", fontFamily: "system-ui, sans-serif",
+            },
+            secure: ["secure", "securityLevel", "startOnLoad", "suppressErrorRendering", "htmlLabels", "maxTextSize", "maxEdges", "theme", "themeVariables", "themeCSS", "fontFamily", "altFontFamily"],
+          });
+          resolve(window.mermaid);
+        } catch (error) { reject(error); }
+      };
+      if (window.mermaid?.render) { ready(); return; }
+      const script = document.createElement("script");
+      script.src = "/assets/mermaid/mermaid.min.js";
+      script.async = true;
+      script.onload = ready;
+      script.onerror = () => {
+        script.remove();
+        reject(new Error("Mermaid를 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요."));
+      };
+      document.head.append(script);
+    }).catch((error) => { mermaidLibraryPromise = null; throw error; });
+  }
+  return mermaidLibraryPromise;
+}
+
+if (window.customElements && !window.customElements.get("sygma-mermaid")) {
+  window.customElements.define("sygma-mermaid", class extends HTMLElement {
+    static get observedAttributes() { return ["data-source"]; }
+    connectedCallback() {
+      if (!this.shadowRoot) {
+        this.attachShadow({ mode: "open" }).innerHTML = `<style>
+          :host{display:block;max-width:100%;min-width:0;overflow-x:auto;background:#fff;color:#1f2937;padding:16px;box-sizing:border-box}
+          svg{display:block;margin:0 auto} .message{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 system-ui,sans-serif}
+          button{margin-top:8px;border:1px solid #d0d5dd;border-radius:5px;background:#fff;color:#344054;padding:5px 10px;cursor:pointer}
+        </style><div aria-live="polite"></div>`;
+      }
+      this.scheduleRender();
+    }
+    disconnectedCallback() { clearTimeout(this.renderTimer); this.renderVersion = (this.renderVersion || 0) + 1; }
+    attributeChangedCallback(_name, previous, next) { if (previous !== next && this.isConnected) this.scheduleRender(); }
+    scheduleRender() {
+      clearTimeout(this.renderTimer);
+      const version = this.renderVersion = (this.renderVersion || 0) + 1;
+      this.renderTimer = setTimeout(() => this.renderDiagram(version), 200);
+    }
+    async renderDiagram(version) {
+      const output = this.shadowRoot.querySelector("div");
+      const source = this.dataset.source || "";
+      const current = () => this.isConnected && version === this.renderVersion;
+      output.className = "message";
+      output.textContent = source.trim() ? "다이어그램을 불러오는 중…" : "코드 편집에서 Mermaid 문법을 입력해 주세요.";
+      this.dataset.mermaidState = source.trim() ? "loading" : "empty";
+      if (!source.trim()) return;
+      let stage;
+      try {
+        if (source.length > 50_000) throw new Error("다이어그램은 50,000자 이내로 나누어 입력해 주세요.");
+        const renderer = await loadMermaidRenderer();
+        if (!current()) return;
+        stage = document.createElement("div");
+        stage.className = "mermaid-render-stage";
+        stage.setAttribute("aria-hidden", "true");
+        document.body.append(stage);
+        const result = await renderer.render(`sygma-mermaid-${++mermaidRenderId}`, source, stage);
+        if (!current()) return;
+        output.className = "";
+        output.innerHTML = result.svg;
+        const svg = output.querySelector("svg");
+        const width = svg?.viewBox.baseVal.width;
+        if (width) { svg.style.width = `${width}px`; svg.style.maxWidth = "none"; svg.style.height = "auto"; }
+        this.dataset.mermaidState = "ready";
+      } catch (error) {
+        if (!current()) return;
+        output.textContent = `다이어그램을 표시할 수 없습니다. 코드 편집에서 문법을 확인해 주세요.\n${String(error.message || error).slice(0, 500)}`;
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "다시 시도";
+        retry.onclick = () => this.scheduleRender();
+        output.append(document.createElement("br"), retry);
+        this.dataset.mermaidState = "error";
+      } finally { stage?.remove(); }
+    }
+  });
 }
 
 if (window.customElements && !window.customElements.get("sygma-display-equation")) {
@@ -14186,6 +14316,11 @@ function activateBlockContent(blockContent) {
     focusSelectedBlockMenuQuery();
     return;
   }
+  const mermaidSource = blockContent.closest("[data-mermaid-source]");
+  if (mermaidSource && !mermaidSource.open) {
+    mermaidSource.open = true;
+    blockContent.focus();
+  }
   if (ui.pendingEmptyContinuationExit?.blockId && ui.pendingEmptyContinuationExit.blockId !== blockContent.dataset.blockContent) {
     ui.pendingEmptyContinuationExit = null;
   }
@@ -14245,7 +14380,7 @@ function editorBottomClickTarget(event) {
 
 function editorWhitespaceBlockClickTarget(event) {
   if (!(event.target instanceof Element)) return null;
-  if (event.target.closest("button, input, select, textarea, summary, a, [contenteditable='true'], .selected-block-menu")) return null;
+  if (event.target.closest("button, input, select, textarea, summary, a, [contenteditable='true'], [data-mermaid-preview], .selected-block-menu")) return null;
   const directBlock = event.target.closest(".block[data-block-id]");
   if (directBlock && !directBlock.hidden && directBlock.getAttribute("aria-hidden") !== "true") {
     return directBlock.querySelector("[data-block-content]");
@@ -14994,7 +15129,7 @@ function expandedBlockSelectionIds(ownerType, ownerId, ids = []) {
 
 function resourceEditorMarqueeTarget(event) {
   if (!(event?.target instanceof Element) || !canStartCustomPointerDrag(event)) return null;
-  if (event.target.closest("button, input, select, textarea, summary, a, .selected-block-menu, .inline-format-toolbar")) return null;
+  if (event.target.closest("button, input, select, textarea, summary, a, [data-mermaid-preview], .selected-block-menu, .inline-format-toolbar")) return null;
   const documentPanel = event.target.closest(".resource-document, .quick-editor-surface");
   const editor = documentPanel?.querySelector('.block-editor[data-owner-type="resources"]');
   if (!documentPanel || !editor) return null;
@@ -22302,7 +22437,7 @@ function normalizeEditorPlainText(value = "") {
 
 function syncBlockContentMarkupFromState(blockContent, block) {
   if (!blockContent || !block || isComposingBlock(blockContent)) return;
-  const expectedHtml = block.type === "code" ? esc(block.text || "") : renderInlineText(block);
+  const expectedHtml = block.type === "code" ? renderHighlightedCodeSource(block.text, block.language) : renderInlineText(block);
   if (blockContent.innerHTML === expectedHtml) {
     restoreInlineTypingMark(blockContent);
     return;
@@ -22943,7 +23078,8 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
   };
   const blockContent = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
   if (blockContent) {
-    blockContent.innerHTML = block.type === "code" ? esc(block.text) : renderInlineText(block);
+    blockContent.innerHTML = block.type === "code" ? renderHighlightedCodeSource(block.text, block.language) : renderInlineText(block);
+    syncCodeSpaceMetrics(blockContent, block.text);
     blockContent.classList.toggle("is-empty", block.text === "");
     activateBlockContent(blockContent);
     placeCaretAtEnd(blockContent);

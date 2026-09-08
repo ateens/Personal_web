@@ -2645,6 +2645,12 @@ function resolveRequestPath(url) {
   }
   const requested = decoded === "/" ? "/index.html" : decoded;
   const normalizedRequest = normalize(requested).replaceAll("\\", "/");
+  if (staticRoot === sourceStaticRoot && normalizedRequest === "/assets/highlight/highlight.min.js") {
+    return resolve(root, "node_modules/@highlightjs/cdn-assets/highlight.min.js");
+  }
+  if (staticRoot === sourceStaticRoot && normalizedRequest === "/assets/mermaid/mermaid.min.js") {
+    return resolve(root, "node_modules/mermaid/dist/mermaid.min.js");
+  }
   if (staticRoot === sourceStaticRoot && /^\/assets\/katex\/(?:katex\.min\.(?:js|css)|contrib\/mhchem\.min\.js|fonts\/KaTeX_[A-Za-z0-9]+-[A-Za-z]+\.(?:woff2|woff|ttf))$/.test(normalizedRequest)) {
     return resolve(root, "node_modules/katex/dist", normalizedRequest.slice("/assets/katex/".length));
   }

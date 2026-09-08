@@ -73,6 +73,12 @@ In the equation editor, Enter applies the formula and Shift+Enter inserts a newl
 
 KaTeX 0.18.4 is pinned to retain Node 20 installation compatibility. The build includes the engine, styles, fonts and license, and the service worker precaches the engine and WOFF2 fonts; no CDN is needed. See the [supported functions](https://katex.org/docs/supported.html) and [version history](https://github.com/KaTeX/KaTeX/blob/main/CHANGELOG.md) when upgrading.
 
+## Resource Code Blocks
+
+Choose a language in a code block or paste a fenced code block to apply syntax highlighting. The 20 listed programming/markup languages use locally served highlight.js; Plain Text and unrecognized languages preserve uncolored source. Highlighting never changes copied or saved code, and sources over 50,000 characters remain editable without highlighting.
+
+Select Mermaid (or use a `mermaid` fence) to show a diagram on a white background. Open **코드 편집** to edit its source; syntax errors keep the original code available for correction. Wide diagrams scroll within the block on mobile. Mermaid loads locally on first use and is cached for subsequent offline use. Rendering uses strict security with a 50,000-character and 500-edge limit.
+
 ## Production Build
 
 Create and verify the optimized production bundle with:

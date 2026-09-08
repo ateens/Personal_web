@@ -11,6 +11,7 @@ function worker(options = {}) {
   const entries = new Map();
   const deleted = [];
   const required = [];
+  const optional = [];
   const network = { offline: false, calls: 0 };
   let cacheName;
   const key = (request) => new URL(typeof request === "string" ? request : request.url, origin).href;
@@ -36,7 +37,7 @@ function worker(options = {}) {
             required.push(...assets);
             if (options.requiredFails) throw new Error("Missing required asset");
           },
-          async add() { throw new Error("Optional asset unavailable"); },
+          async add(asset) { optional.push(asset); throw new Error("Optional asset unavailable"); },
         };
       },
       async keys() { return [cacheName, "sygma-old-version", "another-app-cache"]; },
@@ -50,7 +51,7 @@ function worker(options = {}) {
     },
   });
   return {
-    required, deleted, network, entries,
+    required, optional, deleted, network, entries,
     async lifecycle(name) {
       let pending;
       handlers.get(name)({ waitUntil(value) { pending = value; } });
@@ -73,7 +74,11 @@ const katexCss = await readFile("node_modules/katex/dist/katex.min.css", "utf8")
 const katexFonts = [...katexCss.matchAll(/url\((fonts\/[^)]+\.woff2)\)/g)].map((match) => `/assets/katex/${match[1]}`);
 assert(katexFonts.length > 0, "KaTeX must declare local WOFF2 fonts");
 const katexAssets = ["/assets/katex/katex.min.js", "/assets/katex/katex.min.css", "/assets/katex/contrib/mhchem.min.js", ...katexFonts];
-assert.equal(installed.required.length, 4 + katexAssets.length, "the shell, app, and all equation rendering assets are required");
+const highlightAsset = "/assets/highlight/highlight.min.js";
+const mermaidAsset = "/assets/mermaid/mermaid.min.js";
+assert.equal(installed.required.length, 5 + katexAssets.length, "the shell, app, syntax highlighter, and all equation rendering assets are required");
+assert(installed.required.includes(highlightAsset), "The syntax highlighter must be available offline");
+assert(!installed.required.includes(mermaidAsset) && !installed.optional.includes(mermaidAsset), "The large Mermaid engine must load only when used");
 for (const asset of katexAssets) assert(installed.required.includes(asset), `equation asset missing from offline cache: ${asset}`);
 if (path.startsWith("dist/")) {
   const index = await readFile("dist/client/index.html", "utf8");
@@ -109,5 +114,11 @@ for (const asset of katexAssets) await offlineEquations.request(asset);
 offlineEquations.network.offline = true;
 for (const asset of katexAssets) {
   assert.equal(await (await offlineEquations.request(asset)).text(), "fresh response", `equation asset unavailable offline: ${asset}`);
+}
+const offlineCodeRenderers = worker();
+for (const asset of [highlightAsset, mermaidAsset]) await offlineCodeRenderers.request(asset);
+offlineCodeRenderers.network.offline = true;
+for (const asset of [highlightAsset, mermaidAsset]) {
+  assert.equal(await (await offlineCodeRenderers.request(asset)).text(), "fresh response", `Code renderer unavailable offline after its first use: ${asset}`);
 }
 console.log(`Service-worker install, isolation, offline, and cache-failure checks passed: ${path}.`);

@@ -51,6 +51,8 @@ const sourceFiles = new Map([
   ["/assets/katex/katex.min.js", ["node_modules/katex/dist/katex.min.js", "text/javascript; charset=utf-8"]],
   ["/assets/katex/contrib/mhchem.min.js", ["node_modules/katex/dist/contrib/mhchem.min.js", "text/javascript; charset=utf-8"]],
   ["/assets/katex/katex.min.css", ["node_modules/katex/dist/katex.min.css", "text/css; charset=utf-8"]],
+  ["/assets/highlight/highlight.min.js", ["node_modules/@highlightjs/cdn-assets/highlight.min.js", "text/javascript; charset=utf-8"]],
+  ["/assets/mermaid/mermaid.min.js", ["node_modules/mermaid/dist/mermaid.min.js", "text/javascript; charset=utf-8"]],
 ]);
 for (const font of await readdir(resolve(root, "node_modules/katex/dist/fonts"))) {
   const extension = font.match(/^KaTeX_[A-Za-z0-9]+-[A-Za-z]+\.(woff2|woff|ttf)$/)?.[1];

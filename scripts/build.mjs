@@ -57,18 +57,31 @@ await Promise.all(katexFiles.map((name, index) => writeFile(resolve(assetDir, "k
 await cp(resolve(root, "node_modules/katex/LICENSE"), resolve(assetDir, "katex/LICENSE.txt"));
 const katexAssets = katexFiles.filter((name) => !name.startsWith("fonts/") || name.endsWith(".woff2")).map((name) => `/assets/katex/${name}`);
 
+const codeRendererFiles = [
+  ["highlight/highlight.min.js", "node_modules/@highlightjs/cdn-assets/highlight.min.js", "node_modules/@highlightjs/cdn-assets/LICENSE"],
+  ["mermaid/mermaid.min.js", "node_modules/mermaid/dist/mermaid.min.js", "node_modules/mermaid/LICENSE"],
+];
+const codeRendererContents = await Promise.all(codeRendererFiles.map(([, source]) => readFile(resolve(root, source))));
+await Promise.all(codeRendererFiles.map(async ([file, , license], index) => {
+  const target = resolve(assetDir, file);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, codeRendererContents[index]);
+  await cp(resolve(root, license), resolve(dirname(target), "LICENSE.txt"));
+}));
+
 const builtIndex = indexSource
   .replace('href="/styles.css"', `href="${stylesPath}"`)
   .replace('src="/finance-model.js"', `src="${financeModelPath}"`)
   .replace('src="/app.js"', `src="${appPath}"`)
   .replace("</head>", `    <link rel="preload" href="${financeModelPath}" as="script">\n    <link rel="preload" href="${appPath}" as="script">\n  </head>`);
 const manifest = JSON.parse(manifestSource);
-const cacheId = contentHash(`${builtIndex}\n${manifestSource}\n${serviceWorkerSource}\n${contentHash(Buffer.concat(katexContents))}`);
+const cacheId = contentHash(`${builtIndex}\n${manifestSource}\n${serviceWorkerSource}\n${contentHash(Buffer.concat([...katexContents, ...codeRendererContents]))}`);
 const requiredAssets = [
   "/index.html",
   stylesPath,
   financeModelPath,
   appPath,
+  "/assets/highlight/highlight.min.js",
   ...katexAssets,
 ];
 const optionalAssets = [
@@ -95,3 +108,4 @@ const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(financeMo
 const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(financeModelBuild.code) + Buffer.byteLength(stylesBuild.code);
 console.log(`Built SYGMA assets: ${originalBytes} -> ${builtBytes} bytes (${Math.round((builtBytes / originalBytes) * 100)}%).`);
 console.log(`Bundled local KaTeX assets: ${katexContents.reduce((total, content) => total + content.byteLength, 0)} bytes; ${katexAssets.length} engine, style, and WOFF2 assets precached.`);
+console.log(`Bundled local code renderers: highlight.js ${codeRendererContents[0].byteLength} bytes; Mermaid ${codeRendererContents[1].byteLength} bytes (loaded and cached on first use).`);

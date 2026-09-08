@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import { build } from "esbuild";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const client = resolve(root, "dist/client");
@@ -44,7 +46,7 @@ const katexCssPath = "/assets/katex/katex.min.css";
 const katexScriptPaths = ["/assets/katex/katex.min.js", "/assets/katex/contrib/mhchem.min.js"];
 assert(index.includes(`href="${katexCssPath}"`), "KaTeX fonts need a document-level stylesheet");
 let previousScriptIndex = -1;
-for (const path of [...katexScriptPaths, financeModelPath, appPath]) {
+for (const path of [...katexScriptPaths, financeModelPath, "/assets/highlight/highlight.min.js", appPath]) {
   const scriptIndex = index.indexOf(`<script src="${path}"`);
   assert(scriptIndex > previousScriptIndex, "KaTeX and mhchem must load before the application");
   previousScriptIndex = scriptIndex;
@@ -61,6 +63,26 @@ for (const asset of [katexCssPath, ...katexScriptPaths, ...katexFontPaths]) {
   }
 }
 assert((await stat(resolve(client, "assets/katex/LICENSE.txt"))).size > 0, "KaTeX license is missing from the distribution");
+
+const rendererContext = { console, setTimeout, clearTimeout };
+for (const [asset, dependencyPath] of [
+  ["highlight/highlight.min.js", "@highlightjs/cdn-assets/highlight.min.js"],
+  ["mermaid/mermaid.min.js", "mermaid/dist/mermaid.min.js"],
+]) {
+  const bundled = await readFile(resolve(client, "assets", asset));
+  assert(bundled.equals(await readFile(resolve(root, "node_modules", dependencyPath))), `Code renderer differs from its pinned dependency: ${asset}`);
+  const parsed = await build({ stdin: { contents: bundled.toString(), sourcefile: asset, loader: "js" }, write: false, metafile: true, logLevel: "silent" });
+  assert(Object.values(parsed.metafile.outputs).every((entry) => entry.imports.length === 0), `${asset} must not require unserved chunks`);
+  vm.runInNewContext(bundled.toString(), rendererContext, { timeout: 5_000 });
+  assert((await stat(resolve(client, "assets", asset.split("/")[0], "LICENSE.txt"))).size > 0, `${asset} license is missing`);
+}
+assert.equal(typeof rendererContext.mermaid.render, "function", "Mermaid browser global is unavailable");
+assert(!index.includes('src="/assets/mermaid/mermaid.min.js"'), "Mermaid must remain loaded on demand");
+const languageOptions = (await readFile(resolve(root, "app.js"), "utf8")).match(/const CODE_LANGUAGE_OPTIONS = Object\.freeze\(\[([\s\S]*?)\]\);/)?.[1];
+assert(languageOptions, "Code language options were not found");
+for (const [, language] of languageOptions.matchAll(/\["([^"]+)",/g)) {
+  if (language !== "mermaid") assert(rendererContext.hljs.getLanguage(language), `Missing syntax highlighting language: ${language}`);
+}
 
 const builtBytes = appStat.size + financeModelStat.size + stylesStat.size;
 const sourceBytes = sourceAppStat.size + sourceFinanceModelStat.size + sourceStylesStat.size;

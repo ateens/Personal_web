@@ -39,8 +39,15 @@ const katexFiles = ["katex.min.js", "katex.min.css", "contrib/mhchem.min.js", ..
 for (const file of katexFiles) {
   assert.equal(resolveRequestPath(`/assets/katex/${file}`), resolve(sourceRoot, "node_modules/katex/dist", file));
 }
+for (const [path, file] of [
+  ["/assets/highlight/highlight.min.js", "node_modules/@highlightjs/cdn-assets/highlight.min.js"],
+  ["/assets/mermaid/mermaid.min.js", "node_modules/mermaid/dist/mermaid.min.js"],
+]) assert.equal(resolveRequestPath(path), resolve(sourceRoot, file));
 for (const path of ["/node_modules/katex/package.json", "/assets/katex/package.json", "/assets/katex/katex.js", "/assets/katex/contrib/auto-render.min.js", "/assets/katex/katex.min.js.map", "/assets/katex/fonts/unknown.woff2"]) {
   assert.equal(resolveRequestPath(path), "", `source route must not expose other dependency files: ${path}`);
+}
+for (const path of ["/assets/mermaid/package.json", "/assets/mermaid/mermaid.esm.min.mjs", "/assets/mermaid/mermaid.min.js.map", "/assets/highlight/package.json", "/assets/highlight/languages/javascript.min.js"]) {
+  assert.equal(resolveRequestPath(path), "", `Source route must not expose other renderer files: ${path}`);
 }
 const hasForbiddenRequestPath = serverFunction("hasForbiddenRequestPath", {
   decodedRawRequestPath: serverFunction("decodedRawRequestPath", sourcePaths),

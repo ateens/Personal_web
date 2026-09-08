@@ -225,9 +225,14 @@ function stripQuotedStringsAndComments(source) {
 
 function noUnreferencedCssClassSelectors() {
   const source = `${files.app}\n${files.index}`;
+  // highlight.js generates token spans at runtime. Its shipped reference theme maps the
+  // supported token classes; use those exact names rather than allowing any hljs-* selector.
+  const generatedHighlightClasses = new Set([
+    ...read("node_modules/@highlightjs/cdn-assets/styles/default.css").matchAll(/\.(hljs-[\w-]+)/g),
+  ].map((match) => match[1]));
   const classNames = new Set([...files.styles.matchAll(/\.([A-Za-z_-][\w-]*)/g)].map((match) => match[1]));
   for (const className of classNames) {
-    if (!source.includes(className)) return false;
+    if (!source.includes(className) && !generatedHighlightClasses.has(className)) return false;
   }
   return true;
 }

@@ -7654,34 +7654,34 @@ button:focus-visible {
   margin-left: auto;
 }
 
-.code-space.is-plain-text :is(.code-language-trigger, .code-space-copy) {
+:is(.code-space.is-plain-text, .mermaid-block) :is(.code-language-trigger, .code-space-copy) {
   border-color: rgba(55, 53, 47, 0.14);
   background: rgba(255, 255, 255, 0.72);
   color: #475467;
 }
 
-.code-space.is-plain-text :is(.code-language-picker[open] .code-language-trigger, .code-language-trigger:hover, .code-language-trigger:focus-visible, .code-space-copy:hover, .code-space-copy:focus-visible) {
+:is(.code-space.is-plain-text, .mermaid-block) :is(.code-language-picker[open] .code-language-trigger, .code-language-trigger:hover, .code-language-trigger:focus-visible, .code-space-copy:hover, .code-space-copy:focus-visible) {
   border-color: rgba(37, 99, 235, 0.34);
   background: #fff;
   color: #1d4ed8;
 }
 
-.code-space.is-plain-text .code-language-trigger > span,
-.code-space.is-plain-text .code-language-trigger::after {
+:is(.code-space.is-plain-text, .mermaid-block) .code-language-trigger > span,
+:is(.code-space.is-plain-text, .mermaid-block) .code-language-trigger::after {
   color: #667085;
 }
 
-.code-space.is-plain-text .code-language-menu {
+:is(.code-space.is-plain-text, .mermaid-block) .code-language-menu {
   border-color: rgba(55, 53, 47, 0.14);
   background: #fff;
   box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
 }
 
-.code-space.is-plain-text .code-language-option {
+:is(.code-space.is-plain-text, .mermaid-block) .code-language-option {
   color: #475467;
 }
 
-.code-space.is-plain-text .code-language-option:is(:hover, :focus-visible, .is-active) {
+:is(.code-space.is-plain-text, .mermaid-block) .code-language-option:is(:hover, :focus-visible, .is-active) {
   background: rgba(37, 99, 235, 0.08);
   color: #1d4ed8;
 }
@@ -7751,6 +7751,46 @@ button:focus-visible {
     min-width: 34px;
     padding-right: 8px;
   }
+}
+
+.mermaid-block {
+  min-width: 0;
+  max-width: 100%;
+  margin: 5px 0 9px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.mermaid-block > .code-space-actions {
+  justify-content: flex-end;
+  padding: 7px 8px 0;
+}
+
+.mermaid-source > summary {
+  width: fit-content;
+  margin: 0 12px 10px;
+  color: #667085;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mermaid-source > pre { margin: 0; overflow-x: auto; border-top: 1px solid #eaecf0; }
+
+.block[data-type="code"] .mermaid-block .block-content {
+  color: #1f2937;
+  background: #f8fafc;
+  caret-color: #1d4ed8;
+}
+
+.mermaid-render-stage {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  width: 1200px;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .block[data-type="bookmark"],
@@ -14059,3 +14099,13 @@ html[data-quick-theme="dark"] .quick-editor-picker {
 html[data-quick-theme="dark"] .quick-editor-picker input {
   border-color: rgba(255, 255, 255, .14);
 }
+
+/* Syntax colors only: Code Space keeps its existing font, spacing, and dark surface. */
+.code-space-source :is(.hljs-comment, .hljs-quote, .hljs-meta) { color: #94a3b8; }
+.code-space-source :is(.hljs-keyword, .hljs-doctag, .hljs-type) { color: #c4b5fd; }
+.code-space-source :is(.hljs-string, .hljs-regexp, .hljs-addition) { color: #a7f3d0; }
+.code-space-source :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet) { color: #fdba74; }
+.code-space-source :is(.hljs-title, .hljs-section, .hljs-built_in) { color: #7dd3fc; }
+.code-space-source :is(.hljs-attr, .hljs-attribute, .hljs-property, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id) { color: #fcd34d; }
+.code-space-source :is(.hljs-name, .hljs-selector-tag, .hljs-variable, .hljs-template-variable, .hljs-deletion) { color: #fda4af; }
+.code-space-source .hljs-subst { color: #e2e8f0; }
