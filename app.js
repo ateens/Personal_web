@@ -16131,7 +16131,7 @@ function handleDocumentPaste(event) {
   const rawHtml = customBlocks.length ? "" : String(event.clipboardData.getData("text/html") || "");
   const parsedHtmlBlocks = rawHtml && htmlClipboardHasSafePasteContent(rawHtml) ? readHtmlClipboardBlocks(event.clipboardData) : [];
   const htmlBlocks = clipboardBlocksHaveMeaningfulPasteContent(parsedHtmlBlocks) ? parsedHtmlBlocks : [];
-  const plainText = event.clipboardData.getData("text/plain");
+  const plainText = event.clipboardData.getData("text/plain") || event.clipboardData.getData("text/markdown");
   const parsedPlainBlocks = customBlocks.length ? [] : plainTextToClipboardBlocks(plainText);
   const plainMarkdownBlocks = parsedPlainBlocks.some((block) => (
     block.type === TABLE_BLOCK_TYPE || block.marks?.some((mark) => mark.type === "equation")
@@ -17343,13 +17343,14 @@ function plainTextToClipboardBlocks(text) {
       normalized.push({ type: "paragraph", text: displayEquation.text, marks: displayEquation.marks, checked: false, indent: parts.indent, collapsed: false });
       continue;
     }
-    if (parts.text.trim() === "\\[") {
+    if (["\\[", "$$"].includes(parts.text.trim())) {
+      const closing = parts.text.trim() === "$$" ? "$$" : "\\]";
       const displayLines = [parts.text];
       let closingIndex = index + 1;
       for (; closingIndex < lines.length; closingIndex += 1) {
-        const nextText = clipboardPlainLineParts(lines[closingIndex]).text;
+        const nextText = lines[closingIndex];
         displayLines.push(nextText);
-        if (nextText.trim() === "\\]") break;
+        if (nextText.trim() === closing) break;
       }
       const multilineEquation = closingIndex < lines.length ? parseMarkdownDisplayEquation(displayLines.join("\n")) : null;
       if (multilineEquation) {
@@ -17509,21 +17510,25 @@ function applyMarkdownInlineSyntax(block, references = null) {
   return block;
 }
 
-function parseMarkdownFormattedText(text = "", references = null) {
-  return parseMarkdownDisplayEquation(text) || parseMarkdownInlineText(text, references);
+function parseMarkdownFormattedText(text = "", references = null, protectedMarks = []) {
+  return (!protectedMarks.length && parseMarkdownDisplayEquation(text)) || parseMarkdownInlineText(text, references, false, protectedMarks);
 }
 
 function parseMarkdownDisplayEquation(text = "") {
   const source = String(text || "");
   const start = source.search(/\S/);
-  if (start < 0 || source.slice(start, start + 2) !== "\\[") return null;
-  const equation = markdownEquationAt(source, start, "[", "]");
+  if (start < 0) return null;
+  const dollarBlock = /^\$\$[ \t]*\r?\n/.test(source.slice(start));
+  const equation = dollarBlock
+    ? markdownEquationAt(source, start, "$$", "$$", true)
+    : markdownEquationAt(source, start, "\\[", "\\]");
   if (!equation || source.slice(equation.end).trim()) return null;
+  if (dollarBlock && !/\n[ \t]*$/.test(source.slice(start + 2, equation.end - 2))) return null;
   const sourceToOutput = Array(source.length + 1).fill(0);
   for (let index = equation.contentStart; index <= equation.contentEnd; index += 1) {
     sourceToOutput[index] = Math.min(equation.formula.length, Math.max(0, index - equation.contentStart));
   }
-  for (let index = equation.end; index <= source.length; index += 1) sourceToOutput[index] = equation.formula.length;
+  for (let index = equation.contentEnd; index <= source.length; index += 1) sourceToOutput[index] = equation.formula.length;
   return {
     text: equation.formula,
     marks: [{ type: "equation", start: 0, end: equation.formula.length, formula: equation.formula, displayMode: true }],
@@ -17531,21 +17536,35 @@ function parseMarkdownDisplayEquation(text = "") {
   };
 }
 
-function markdownEquationAt(source, index, opening, closing) {
-  if (source.slice(index, index + 2) !== `\\${opening}`) return null;
-  for (let cursor = index + 2; cursor < source.length - 1; cursor += 1) {
-    if (source[cursor] !== "\\" || source[cursor + 1] !== closing) continue;
-    let slashCount = 1;
-    while (cursor - slashCount >= 0 && source[cursor - slashCount] === "\\") slashCount += 1;
-    if (slashCount % 2 === 0) continue;
-    const formula = normalizeEquationFormula(source.slice(index + 2, cursor));
+function markdownEquationAt(source, index, opening, closing, multiline = false) {
+  if (!source.startsWith(opening, index)) return null;
+  const dollar = opening[0] === "$";
+  const contentStart = index + opening.length;
+  if (dollar && (source[index - 1] === "$" || source[contentStart] === "$")) return null;
+  if (opening === "$" && (!source[contentStart] || /\s/.test(source[contentStart]))) return null;
+  for (let cursor = contentStart; cursor <= source.length - closing.length; cursor += 1) {
+    if (dollar && !multiline && /[\r\n]/.test(source[cursor])) return null;
+    if (!source.startsWith(closing, cursor)) continue;
+    let slashCount = 0;
+    while (cursor - slashCount > 0 && source[cursor - slashCount - 1] === "\\") slashCount += 1;
+    if (slashCount % 2) continue;
+    if (dollar && source[cursor + closing.length] === "$") return null;
+    // Single dollars use tight boundaries so prices such as "$10 and $20" stay text.
+    if (opening === "$" && (/\s/.test(source[cursor - 1]) || /\d/.test(source[cursor + 1] || ""))) return null;
+    const raw = source.slice(contentStart, cursor);
+    const formula = normalizeEquationFormula(raw);
     if (!formula) return null;
-    return { formula, contentStart: index + 2, contentEnd: cursor, end: cursor + 2 };
+    return {
+      formula,
+      contentStart: contentStart + raw.length - raw.trimStart().length,
+      contentEnd: cursor - (raw.length - raw.trimEnd().length),
+      end: cursor + closing.length,
+    };
   }
   return null;
 }
 
-function parseMarkdownInlineText(text = "", references = null, tableCell = false) {
+function parseMarkdownInlineText(text = "", references = null, tableCell = false, protectedMarks = []) {
   const source = String(text || "");
   const marks = [];
   let output = "";
@@ -17560,16 +17579,30 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
     output += source[index];
     sourceToOutput[index + 1] = output.length;
   };
-  const appendNested = (nestedSource, wrapper = null) => {
+  const appendNested = (nestedSource, wrapper, sourceStart) => {
     const start = output.length;
-    const nested = parseMarkdownInlineText(nestedSource, references, tableCell);
+    const nestedProtected = protectedMarks.filter((mark) => mark.start < sourceStart + nestedSource.length && mark.end > sourceStart)
+      .map((mark) => ({ start: Math.max(0, mark.start - sourceStart), end: Math.min(nestedSource.length, mark.end - sourceStart) }));
+    const nested = parseMarkdownInlineText(nestedSource, references, tableCell, nestedProtected);
     output += nested.text;
+    for (let index = 0; index <= nestedSource.length; index += 1) {
+      sourceToOutput[sourceStart + index] = start + nested.sourceToOutput[index];
+    }
     for (const mark of nested.marks) marks.push({ ...mark, start: mark.start + start, end: mark.end + start });
     if (wrapper && output.length > start) marks.push({ ...wrapper, start, end: output.length });
     return { start, end: output.length };
   };
   for (let index = 0; index < source.length;) {
-    const equation = source.slice(index, index + 2) === "\\(" ? markdownEquationAt(source, index, "(", ")") : null;
+    const protectedMark = protectedMarks.find((mark) => mark.start <= index && mark.end > index);
+    if (protectedMark) {
+      while (index < Math.min(source.length, protectedMark.end)) appendPlainCharacter(index++);
+      continue;
+    }
+    const dollar = source[index] === "$" ? (source[index + 1] === "$" ? "$$" : "$") : "";
+    let equation = dollar
+      ? markdownEquationAt(source, index, dollar, dollar)
+      : markdownEquationAt(source, index, "\\(", "\\)");
+    if (equation && protectedMarks.some((mark) => mark.start < equation.end && mark.end > index)) equation = null;
     if (equation) {
       const start = output.length;
       output += equation.formula;
@@ -17583,7 +17616,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
       index += 1;
       continue;
     }
-    if (source[index] === "\\" && index + 1 < source.length && /[\\`*{}\[\]()#+.!_>~-]/.test(source[index + 1])) {
+    if (source[index] === "\\" && index + 1 < source.length && /[\\`*{}\[\]()#+.!_>~$-]/.test(source[index + 1])) {
       sourceToOutput[index] = output.length;
       output += source[index + 1];
       sourceToOutput[index + 1] = output.length - 1;
@@ -17594,7 +17627,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
     const linkMatch = source.slice(index).match(/^\[([^\]\n]+)\]\((?:<([^>\n]+)>|([^\s)]+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/i);
     const linkHref = linkMatch ? normalizeInlineHref(linkMatch[2] || linkMatch[3] || "") : "";
     if (linkMatch && linkHref) {
-      const nested = appendNested(linkMatch[1], { type: "link", href: linkHref });
+      const nested = appendNested(linkMatch[1], { type: "link", href: linkHref }, index + 1);
       markSourceRange(index, index + linkMatch[0].length, nested.start, nested.end);
       index += linkMatch[0].length;
       continue;
@@ -17607,7 +17640,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
       const key = markdownReferenceLabel(referenceMatch[2] || label);
       const href = references.get(key) || "";
       if (href) {
-        const nested = appendNested(label, { type: "link", href });
+        const nested = appendNested(label, { type: "link", href }, index + 1);
         markSourceRange(index, index + referenceMatch[0].length, nested.start, nested.end);
         index += referenceMatch[0].length;
         continue;
@@ -17653,7 +17686,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
     }
     const boldItalicMatch = source.slice(index).match(/^(\*\*\*|___)(\S(?:[\s\S]*?\S)?)\1/);
     if (boldItalicMatch) {
-      const nested = appendNested(boldItalicMatch[2], { type: "bold" });
+      const nested = appendNested(boldItalicMatch[2], { type: "bold" }, index + boldItalicMatch[1].length);
       if (nested.end > nested.start) marks.push({ type: "italic", start: nested.start, end: nested.end });
       markSourceRange(index, index + boldItalicMatch[0].length, nested.start, nested.end);
       index += boldItalicMatch[0].length;
@@ -17661,7 +17694,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
     }
     const boldMatch = source.slice(index).match(/^(\*\*|__)(\S(?:[\s\S]*?\S)?)\1/);
     if (boldMatch) {
-      const nested = appendNested(boldMatch[2], { type: "bold" });
+      const nested = appendNested(boldMatch[2], { type: "bold" }, index + boldMatch[1].length);
       markSourceRange(index, index + boldMatch[0].length, nested.start, nested.end);
       index += boldMatch[0].length;
       continue;
@@ -17673,7 +17706,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
     }
     const strikeMatch = source.slice(index).match(/^~~(\S(?:[\s\S]*?\S)?)~~/);
     if (strikeMatch) {
-      const nested = appendNested(strikeMatch[1], { type: "strike" });
+      const nested = appendNested(strikeMatch[1], { type: "strike" }, index + 2);
       markSourceRange(index, index + strikeMatch[0].length, nested.start, nested.end);
       index += strikeMatch[0].length;
       continue;
@@ -17685,7 +17718,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
       continue;
     }
     if (italicMatch) {
-      const nested = appendNested(italicMatch[2], { type: "italic" });
+      const nested = appendNested(italicMatch[2], { type: "italic" }, index + 1);
       markSourceRange(index, index + italicMatch[0].length, nested.start, nested.end);
       index += italicMatch[0].length;
       continue;
@@ -22863,14 +22896,14 @@ function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, owner
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
-  if (rawText.trimStart().startsWith("\\[") && !parseMarkdownDisplayEquation(rawText)) return false;
-  const inline = parseMarkdownFormattedText(rawText);
+  if ((rawText.trimStart().startsWith("\\[") || /^\s*\$\$[ \t]*\n/.test(rawText)) && !parseMarkdownDisplayEquation(rawText)) return false;
   const currentMarks = normalizeInlineMarks(rawText, inlineMarksForContentUpdate(block, blockContent, rawText));
+  const inline = parseMarkdownFormattedText(rawText, null, currentMarks.filter((mark) => ["code", "equation"].includes(mark.type)));
   if (!inline.marks.length || (inline.text === rawText && inlineMarksEqual(inline.marks, currentMarks))) return false;
   const offsets = selectionOffsetsInside(blockContent) || { start: rawText.length, end: rawText.length };
   const start = markdownInlineMappedOffset(inline, offsets.start);
   const end = markdownInlineMappedOffset(inline, offsets.end);
-  const existingMarks = remapInlineMarksThroughMarkdown(inline, inlineMarksForContentUpdate(block, blockContent, rawText));
+  const existingMarks = remapInlineMarksThroughMarkdown(inline, currentMarks);
   const history = beginEditorHistory(ownerType, ownerId, { blockId: block.id, start: offsets.start, end: offsets.end });
   block.text = inline.text;
   block.marks = normalizeInlineMarks(inline.text, [...existingMarks, ...inline.marks]);
@@ -23095,6 +23128,7 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
     focusBlockContentAfterRender(focusBlock.id, { position: block.type === "divider" ? "start" : "end" });
     return true;
   }
+  if (blockContent && applyLiveMarkdownInlineShortcut(blockContent, block, block.text, ownerType, ownerId)) return true;
   refreshPendingMarkdownTextHistory(ownerType, ownerId, blockId);
   if (ownerType === "resources") markResourceChanged(ownerId);
   saveState();

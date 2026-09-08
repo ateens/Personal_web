@@ -73,6 +73,19 @@ In the equation editor, Enter applies the formula and Shift+Enter inserts a newl
 
 KaTeX 0.18.4 is pinned to retain Node 20 installation compatibility. The build includes the engine, styles, fonts and license, and the service worker precaches the engine and WOFF2 fonts; no CDN is needed. See the [supported functions](https://katex.org/docs/supported.html) and [version history](https://github.com/KaTeX/KaTeX/blob/main/CHANGELOG.md) when upgrading.
 
+Markdown paste accepts `$x$` and same-line `$$ x $$` as inline equations. Put each `$$` delimiter on its own line for a display equation; internal TeX line breaks are preserved:
+
+```latex
+$$
+\begin{gathered}
+a_t \sim \mu_\phi(\cdot \mid o_t,\ell) \\
+\hat{a}_t = \mu_\phi(o_t,\ell)
+\end{gathered}
+$$
+```
+
+The existing `\(...\)` inline and `\[...\]` display delimiters remain supported. Escaped `\$` and dollar signs inside code stay literal.
+
 ## Resource Code Blocks
 
 Choose a language in a code block or paste a fenced code block to apply syntax highlighting. The 20 listed programming/markup languages use locally served highlight.js; Plain Text and unrecognized languages preserve uncolored source. Highlighting never changes copied or saved code, and sources over 50,000 characters remain editable without highlighting.
