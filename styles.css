@@ -8985,16 +8985,52 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
   position: fixed;
   z-index: 91;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 48px 48px;
-  align-items: center;
-  gap: 4px;
-  width: min(424px, calc(100vw - 24px));
-  min-height: 42px;
-  border-radius: 6px;
-  padding: 6px;
-  background: rgb(37, 37, 37);
-  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.24);
+  gap: 12px;
+  width: min(440px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  border: 1px solid rgba(55, 53, 47, 0.14);
+  border-radius: 12px;
+  padding: 14px;
+  background: #fff;
+  color: rgb(55, 53, 47);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.16);
+  transition-property: none;
   animation: float-in 120ms var(--ease);
+}
+
+.inline-equation-heading,
+.inline-equation-footer,
+.inline-equation-actions {
+  display: flex;
+  align-items: center;
+}
+
+.inline-equation-heading,
+.inline-equation-footer {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inline-equation-heading strong {
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.inline-equation-heading span,
+.inline-equation-help {
+  color: rgba(55, 53, 47, 0.6);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.inline-equation-help {
+  margin: 0;
+}
+
+.inline-equation-actions {
+  flex-shrink: 0;
+  gap: 6px;
 }
 
 .inline-link-input {
@@ -9013,17 +9049,24 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
 .inline-equation-input {
   width: 100%;
   min-width: 0;
-  min-height: 30px;
-  max-height: 180px;
+  min-height: 76px;
+  max-height: 220px;
   resize: vertical;
-  border: 0;
-  border-radius: 4px;
-  padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  border: 1px solid rgba(55, 53, 47, 0.18);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fff;
+  color: rgb(55, 53, 47);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.55;
   outline: 0;
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+
+.inline-equation-input:focus {
+  border-color: rgba(35, 131, 226, 0.65);
+  box-shadow: 0 0 0 3px rgba(35, 131, 226, 0.12);
 }
 
 .inline-link-input::placeholder {
@@ -9031,7 +9074,7 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
 }
 
 .inline-equation-input::placeholder {
-  color: rgba(255, 255, 255, 0.42);
+  color: rgba(55, 53, 47, 0.42);
 }
 
 .inline-link-action {
@@ -9050,27 +9093,65 @@ body:has(.editor-marquee) :is(.resource-document, .quick-editor-surface) .block 
 .inline-equation-action {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 30px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
-  font-size: 12px;
+  min-width: 64px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 14px;
+  background: rgba(35, 131, 226, 0.1);
+  color: #236fa1;
+  font-size: 13px;
   font-weight: 720;
   cursor: pointer;
+  transition: background-color 120ms var(--ease), color 120ms var(--ease), box-shadow 120ms var(--ease);
 }
 
 .inline-link-action:hover,
-.inline-link-action:focus-visible,
-.inline-equation-action:hover,
-.inline-equation-action:focus-visible {
+.inline-link-action:focus-visible {
   outline: 0;
   background: rgba(255, 255, 255, 0.24);
 }
 
-.inline-link-action.secondary,
-.inline-equation-action.secondary {
+.inline-link-action.secondary {
   color: rgba(255, 255, 255, 0.72);
+}
+
+.inline-equation-action:hover,
+.inline-equation-action:focus-visible {
+  background: rgba(35, 131, 226, 0.17);
+}
+
+.inline-equation-action:focus-visible {
+  outline: 2px solid rgba(35, 131, 226, 0.7);
+  outline-offset: 2px;
+}
+
+.inline-equation-action.secondary {
+  background: rgba(55, 53, 47, 0.06);
+  color: rgba(55, 53, 47, 0.72);
+}
+
+.inline-equation-action.secondary:hover,
+.inline-equation-action.secondary:focus-visible {
+  background: rgba(55, 53, 47, 0.1);
+  color: rgb(55, 53, 47);
+}
+
+@media (max-width: 640px) {
+  .inline-equation-input {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-equation-popover {
+    animation: none;
+  }
+
+  .inline-equation-input,
+  .inline-equation-action {
+    transition: none;
+  }
 }
 
 .inline-comment-popover {

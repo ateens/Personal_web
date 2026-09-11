@@ -652,6 +652,7 @@ let taskDoneRenderTimer = 0;
 let taskDoneRenderVersion = 0;
 let inlineToolbarPositionFrame = 0;
 let inlineToolbarSelectionTimer = 0;
+let inlineEquationPopoverObserver = null;
 let financeSelectPositionFrame = 0;
 let codeLanguagePositionFrame = 0;
 let mermaidLibraryPromise = null;
@@ -661,6 +662,8 @@ let resourceCaretScrollFrame = 0;
 const toggleBlockAnimationTimers = new Map();
 const toggleBlockAnimationFrames = new Map();
 const inlineBoundaryTyping = new WeakMap();
+let observedCaretEquation = null;
+const equationCaretObserver = window.ResizeObserver ? new ResizeObserver(syncInlineBoundaryCaret) : null;
 let fallbackIdCounter = 0;
 const todayTaskPropertyTransitionTimers = new Map();
 const todayTaskPropertyResizeTimers = new Map();
@@ -900,6 +903,7 @@ function init() {
   window.addEventListener("resize", updateTopbarStickiness);
   window.addEventListener("resize", handleHabitLayoutResize);
   window.addEventListener("resize", clampUrlPasteChoiceToViewport);
+  window.addEventListener("resize", clampEquationPopoverToViewport);
   window.addEventListener("resize", scheduleInlineToolbarPositionSync);
   window.addEventListener("resize", scheduleFinanceSelectPositionSync);
   window.addEventListener("resize", scheduleCodeLanguagePositionSync);
@@ -909,6 +913,8 @@ function init() {
   window.visualViewport?.addEventListener("resize", reflowResourceWindows);
   window.visualViewport?.addEventListener("scroll", reflowResourceWindows);
   window.visualViewport?.addEventListener("resize", scheduleInlineToolbarPositionSync);
+  window.visualViewport?.addEventListener("resize", clampEquationPopoverToViewport);
+  window.visualViewport?.addEventListener("scroll", clampEquationPopoverToViewport);
   window.visualViewport?.addEventListener("resize", scheduleFinanceSelectPositionSync);
   window.visualViewport?.addEventListener("resize", scheduleCodeLanguagePositionSync);
   window.visualViewport?.addEventListener("scroll", scheduleInlineToolbarPositionSync);
@@ -9982,7 +9988,8 @@ function handleMarkdownTableCellEvent(event) {
   if (equationKeyboardShortcut(event)) {
     event.preventDefault();
     const range = { ...selectionOffsetsInside(cell), ...tableCellRange(markdownTableCellFocus(cell)) };
-    openEquationPopover(ownerType, ownerId, block.id, range, null, inlineContentForRange(block, range)?.text.slice(range.start, range.end) || "");
+    if (equationKeyboardShortcut(event) === "inline") applySelectedEquation(ownerType, ownerId, block.id, range);
+    else openEquationPopover(ownerType, ownerId, block.id, range, null, inlineContentForRange(block, range)?.text.slice(range.start, range.end) || "");
     return;
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
@@ -10734,6 +10741,15 @@ function focusPageCommandTargetInView(targetType, targetId) {
   return true;
 }
 
+function expandInlineRangeToEquations(start, end, marks) {
+  for (const mark of marks) {
+    if (mark.type !== "equation" || mark.start >= end || mark.end <= start) continue;
+    start = Math.min(start, mark.start);
+    end = Math.max(end, mark.end);
+  }
+  return { start, end };
+}
+
 function normalizeInlineMarks(text = "", marks = []) {
   if (!Array.isArray(marks)) return [];
   const textLength = String(text).length;
@@ -10782,7 +10798,8 @@ function normalizeInlineMarks(text = "", marks = []) {
     if (!exclusiveEquations.some((equation) => equation.start < mark.end && equation.end > mark.start)) exclusiveEquations.push(mark);
   }
   const resolved = [
-    ...combined.filter((mark) => mark.type !== "equation" && !exclusiveEquations.some((equation) => equation.start < mark.end && equation.end > mark.start)),
+    ...combined.filter((mark) => mark.type !== "equation" && (mark.type === "bold" || !exclusiveEquations.some((equation) => equation.start < mark.end && equation.end > mark.start)))
+      .map((mark) => mark.type === "bold" ? { ...mark, ...expandInlineRangeToEquations(mark.start, mark.end, exclusiveEquations) } : mark),
     ...exclusiveEquations,
   ];
   resolved.sort((a, b) => a.start - b.start || a.end - b.end || INLINE_MARK_TYPES.indexOf(a.type) - INLINE_MARK_TYPES.indexOf(b.type));
@@ -10955,7 +10972,7 @@ if (window.customElements && !window.customElements.get("sygma-display-equation"
   const equationStyles = `
     :host{display:inline-block;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;vertical-align:middle;color:inherit;line-height:normal}
     :host([data-display-mode="display"]){display:block;width:100%}
-    .katex{font-size:1.18em}.katex-display{margin:0;padding:2px 0}
+    .katex{font-size:1.18em;font-weight:inherit}.katex-display{margin:0;padding:2px 0}
     .equation-error{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:0.85em ui-monospace,monospace}
   `;
   let sharedEquationStyleSheet;
@@ -11094,6 +11111,7 @@ function renderOverlays() {
   syncEditorCommandMenuAria();
   syncInlineToolbarPosition();
   scheduleInlineToolbarPositionSync();
+  syncEquationPopoverLayout();
 }
 
 function renderUrlPasteChoice() {
@@ -11943,7 +11961,7 @@ function renderInlineFormatToolbar() {
     <div class="inline-format-toolbar ${toolbar.animate ? "is-entering" : ""}" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       ${resourceCitationControl}
-      <button class="inline-format-button" type="button" data-inline-equation-open data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="수식" aria-keyshortcuts="Meta+Shift+D Control+Shift+D" title="수식"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">수식</span></button>
+      ${["inline", "display"].map((mode) => `<button class="inline-format-button" type="button" data-inline-equation-apply="${mode}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${mode === "inline" ? "인라인 수식" : "블록 수식"}" ${mode === "inline" ? 'aria-keyshortcuts="Meta+Shift+R Control+Shift+R"' : ""} title="${mode === "inline" ? "인라인 수식 (⌘⇧R)" : "블록 수식"}"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">${mode === "inline" ? "인라인 수식" : "블록 수식"}</span></button>`).join("")}
       ${colorControls}
     </div>
   `;
@@ -12130,11 +12148,43 @@ function renderEquationPopover() {
   if (!popover) return "";
   return `
     <form class="inline-equation-popover" style="left:${Math.round(popover.x)}px;top:${Math.round(popover.y)}px" data-inline-equation-popover role="dialog" aria-label="수식 편집">
-      <textarea class="inline-equation-input" data-inline-equation-input rows="${popover.displayMode ? 3 : 1}" placeholder="E = mc^2" aria-label="수식 입력" title="Enter로 적용 · Shift+Enter로 줄바꿈" spellcheck="false">${esc(popover.formula || "")}</textarea>
-      <button class="inline-equation-action" type="submit">적용</button>
-      <button class="inline-equation-action secondary" type="button" data-inline-equation-remove>제거</button>
+      <div class="inline-equation-heading"><strong>수식 편집</strong><span>LaTeX</span></div>
+      <textarea class="inline-equation-input" data-inline-equation-input rows="${popover.displayMode ? 4 : 2}" placeholder="E = mc^2" aria-label="수식 입력" aria-describedby="inline-equation-help" spellcheck="false">${esc(popover.formula || "")}</textarea>
+      <div class="inline-equation-footer">
+        <p class="inline-equation-help" id="inline-equation-help">Enter로 적용<br>Shift+Enter로 줄바꿈</p>
+        <div class="inline-equation-actions">
+          <button class="inline-equation-action secondary" type="button" data-inline-equation-remove>제거</button>
+          <button class="inline-equation-action" type="submit">적용</button>
+        </div>
+      </div>
     </form>
   `;
+}
+
+function clampEquationPopoverToViewport() {
+  const popover = ui.equationPopover;
+  const element = document.querySelector("[data-inline-equation-popover]");
+  if (!popover || !element) return;
+  const viewport = inlineToolbarViewportBounds();
+  const inset = 12;
+  element.style.maxWidth = `${Math.max(1, viewport.right - viewport.left - inset * 2)}px`;
+  element.style.maxHeight = `${Math.max(1, viewport.bottom - viewport.top - inset * 2)}px`;
+  popover.x = Math.max(viewport.left + inset, Math.min(popover.x, viewport.right - element.offsetWidth - inset));
+  popover.y = Math.max(viewport.top + inset, Math.min(popover.y, viewport.bottom - element.offsetHeight - inset));
+  element.style.left = `${Math.round(popover.x)}px`;
+  element.style.top = `${Math.round(popover.y)}px`;
+}
+
+function syncEquationPopoverLayout() {
+  inlineEquationPopoverObserver?.disconnect();
+  inlineEquationPopoverObserver = null;
+  const element = document.querySelector("[data-inline-equation-popover]");
+  if (!element) return;
+  clampEquationPopoverToViewport();
+  if (window.ResizeObserver) {
+    inlineEquationPopoverObserver = new ResizeObserver(clampEquationPopoverToViewport);
+    inlineEquationPopoverObserver.observe(element);
+  }
 }
 
 function renderSelectedBlockMenuItems(blockId, selectedIndex, entries = BLOCK_TYPE_ENTRIES) {
@@ -12688,20 +12738,17 @@ function handleClick(event) {
     return;
   }
 
-  const inlineEquationButton = event.target.closest("[data-inline-equation-open]");
+  const inlineEquationButton = event.target.closest("[data-inline-equation-apply]");
   if (inlineEquationButton) {
     event.preventDefault();
     event.stopPropagation();
     const range = inlineToolbarRangeFromControl(inlineEquationButton);
-    const item = itemById(inlineEquationButton.dataset.ownerType, inlineEquationButton.dataset.ownerId);
-    const block = item?.blocks?.find((entry) => entry.id === inlineEquationButton.dataset.blockId);
-    openEquationPopover(
+    applySelectedEquation(
       inlineEquationButton.dataset.ownerType,
       inlineEquationButton.dataset.ownerId,
       inlineEquationButton.dataset.blockId,
       range,
-      inlineEquationButton.getBoundingClientRect(),
-      inlineContentForRange(block, range)?.text?.slice(range.start, range.end) || "",
+      inlineEquationButton.dataset.inlineEquationApply === "display",
     );
     return;
   }
@@ -19021,7 +19068,7 @@ function handlePointerDown(event) {
     return;
   }
 
-  if (event.target.closest("[data-inline-mark-toggle], [data-inline-resource-citation-open], [data-resource-citation-id], [data-resource-citation-remove], [data-inline-equation-open], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], .inline-link-popover button[type='submit'], .inline-comment-popover button[type='submit'], .inline-equation-popover button[type='submit'], [data-page-command-index], [data-emoji-index]")) {
+  if (event.target.closest("[data-inline-mark-toggle], [data-inline-resource-citation-open], [data-resource-citation-id], [data-resource-citation-remove], [data-inline-equation-apply], [data-inline-color-menu-toggle], [data-inline-color-choice], [data-inline-link-remove], [data-inline-comment-remove], [data-inline-equation-remove], .inline-link-popover button[type='submit'], .inline-comment-popover button[type='submit'], .inline-equation-popover button[type='submit'], [data-page-command-index], [data-emoji-index]")) {
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -20201,6 +20248,10 @@ function handleKeydown(event) {
     event.preventDefault();
     event.stopPropagation();
     const range = currentBlockSelectionRange(ownerType, ownerId, blockId);
+    if (equationKeyboardShortcut(event) === "inline") {
+      applySelectedEquation(ownerType, ownerId, blockId, range);
+      return;
+    }
     openEquationPopover(
       ownerType,
       ownerId,
@@ -20464,7 +20515,9 @@ function inlineMarkKeyboardShortcut(event) {
 }
 
 function equationKeyboardShortcut(event) {
-  return (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "d";
+  if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return "";
+  if (event.key.toLowerCase() === "r" || event.code === "KeyR") return "inline";
+  return event.key.toLowerCase() === "d" || event.code === "KeyD" ? "edit" : "";
 }
 
 function lastBlockColorKeyboardShortcut(event) {
@@ -24007,7 +24060,7 @@ function changedTextRange(previousText, nextText) {
 
 function captureInlineBoundaryTyping(blockContent) {
   clearInlineBoundaryCaret(blockContent);
-  // Only a boundary deliberately selected with an arrow can override native typing affinity.
+  // Only explicit boundary placement can override native typing affinity.
   const pending = inlineBoundaryTyping.get(blockContent);
   const range = selectionRangeInside(blockContent);
   if (!pending || !range?.collapsed || range.startContainer !== pending.node || range.startOffset !== pending.nodeOffset) {
@@ -25607,11 +25660,12 @@ function toggleInlineMark(ownerType, ownerId, blockId, markType, rangeInfo = nul
   if (markType === "link") return openLinkPopover(ownerType, ownerId, blockId, rangeInfo);
   if (markType === "comment") return openCommentPopover(ownerType, ownerId, blockId, rangeInfo);
   if (!block.text) return false;
-  const range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
+  let range = rangeInfo || currentBlockSelectionRange(ownerType, ownerId, blockId);
   if (!range || range.collapsed || range.end <= range.start) return false;
   const content = inlineContentForRange(block, range);
   if (!content) return false;
   const marks = normalizeInlineMarks(content.text, content.marks);
+  if (markType === "bold") range = { ...range, ...expandInlineRangeToEquations(range.start, range.end, marks) };
   const nextMarks = inlineRangeFullyMarked(marks, markType, range.start, range.end)
     ? removeInlineMarkRange(marks, markType, range.start, range.end)
     : normalizeInlineMarks(content.text, [...marks, { type: markType, start: range.start, end: range.end }]);
@@ -25943,9 +25997,10 @@ function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anch
   const marks = normalizeInlineMarks(text, content.marks);
   const existing = marks.find((mark) => mark.type === "equation" && mark.start <= range.start && mark.end >= range.end);
   const rect = anchorRect || selectionRangeRectForBlock(ownerType, ownerId, blockId);
-  const fallbackX = window.innerWidth / 2 - 170;
+  const popoverWidth = Math.min(440, window.innerWidth - 24);
+  const fallbackX = (window.innerWidth - popoverWidth) / 2;
   const fallbackY = Math.min(120, window.innerHeight - 82);
-  const rawX = rect ? rect.left + (rect.width || 0) / 2 - 170 : fallbackX;
+  const rawX = rect ? rect.left + (rect.width || 0) / 2 - popoverWidth / 2 : fallbackX;
   const rawY = rect ? (rect.bottom || rect.top || fallbackY) + 8 : fallbackY;
   ui.equationPopover = {
     ownerType,
@@ -25957,7 +26012,7 @@ function openEquationPopover(ownerType, ownerId, blockId, rangeInfo = null, anch
     formula: formulaValue || existing?.formula || "",
     displayMode: options.displayMode === true || existing?.displayMode === true,
     preserveLeadingSpace: options.preserveLeadingSpace === true,
-    x: Math.max(12, Math.min(rawX, window.innerWidth - 352)),
+    x: Math.max(12, Math.min(rawX, window.innerWidth - popoverWidth - 12)),
     y: Math.max(12, Math.min(rawY, window.innerHeight - 76)),
   };
   ui.inlineToolbar = null;
@@ -26077,8 +26132,18 @@ function applyInlineComment(value) {
   return true;
 }
 
-function applyInlineEquation(value) {
-  const popover = ui.equationPopover;
+function applySelectedEquation(ownerType, ownerId, blockId, rangeInfo, displayMode = false) {
+  const block = itemById(ownerType, ownerId)?.blocks?.find((entry) => entry.id === blockId);
+  if (!block || block.type === "code" || block.type === "divider") return false;
+  const content = inlineContentForRange(block, rangeInfo);
+  if (!content || !rangeInfo) return false;
+  const range = normalizeTextRange(rangeInfo, content.text.length);
+  const formula = content.text.slice(range.start, range.end);
+  if (!normalizeEquationFormula(formula)) return false;
+  return applyInlineEquation(formula, { ownerType, ownerId, blockId, ...range, ...tableCellRange(rangeInfo), displayMode });
+}
+
+function applyInlineEquation(value, popover = ui.equationPopover) {
   if (!popover) return false;
   if (!editorOwnerMutationAllowed(popover.ownerType, popover.ownerId)) return false;
   const formula = normalizeEquationFormula(value);
@@ -26094,12 +26159,14 @@ function applyInlineEquation(value) {
   const inserted = `${insertPrefix}${formula}`;
   const equationStart = range.start + insertPrefix.length;
   const equationEnd = equationStart + formula.length;
+  const preserveBold = range.end > range.start && inlineRangeFullyMarked(normalizeInlineMarks(text, content.marks), "bold", range.start, range.end);
   const splitMarks = splitInlineMarksAtSelection(content.marks, text, range.start, range.end);
   const history = beginEditorHistory(popover.ownerType, popover.ownerId, { blockId: popover.blockId, start: range.start, end: range.end, ...tableCellRange(popover) });
   const nextText = `${text.slice(0, range.start)}${inserted}${text.slice(range.end)}`;
   setInlineContentForRange(block, popover, { text: nextText, marks: normalizeInlineMarks(nextText, [
     ...splitMarks.before,
     { type: "equation", start: equationStart, end: equationEnd, formula, ...(popover.displayMode === true ? { displayMode: true } : {}) },
+    ...(preserveBold ? [{ type: "bold", start: equationStart, end: equationEnd }] : []),
     ...shiftInlineMarks(splitMarks.after, range.start + inserted.length),
   ]) });
   commitEditorHistory(history, { blockId: popover.blockId, start: equationEnd, end: equationEnd, ...tableCellRange(popover) });
@@ -26382,6 +26449,13 @@ function setSelectionOffsets(element, start, end = start) {
   const startPoint = textPointAtOffset(element, anchor);
   const endPoint = textPointAtOffset(element, focus);
   setDirectionalSelection(startPoint.node, startPoint.offset, endPoint.node, endPoint.offset);
+  if (anchor === focus) {
+    const equation = [...element.querySelectorAll('[data-inline-mark="equation"]')].find((mark) => textRangeForInlineElement(element, mark).end === focus);
+    if (equation) {
+      inlineBoundaryTyping.set(element, { node: endPoint.node, nodeOffset: endPoint.offset, caretMark: equation, caretForward: true });
+      positionInlineBoundaryCaret(element, equation, true);
+    }
+  }
 }
 
 function textPointAtOffset(element, targetOffset) {
@@ -26503,11 +26577,21 @@ function extendExistingHorizontalSelectionBetweenBlocks(selection, blockContent,
 
 function clearInlineBoundaryCaret(blockContent) {
   if (!blockContent?.hasAttribute("data-inline-boundary-caret")) return;
+  if (observedCaretEquation && (!observedCaretEquation.isConnected || blockContent.contains(observedCaretEquation))) {
+    equationCaretObserver?.disconnect();
+    observedCaretEquation = null;
+  }
   delete blockContent.dataset.inlineBoundaryCaret;
   for (const name of ["x", "y", "height"]) blockContent.style.removeProperty(`--inline-caret-${name}`);
 }
 
 function positionInlineBoundaryCaret(blockContent, mark, forward) {
+  const equation = mark.querySelector("sygma-display-equation");
+  if (observedCaretEquation !== equation) {
+    equationCaretObserver?.disconnect();
+    observedCaretEquation = equation;
+    if (equation) equationCaretObserver?.observe(equation);
+  }
   const rects = [...mark.getClientRects()];
   const edge = rects[forward ? rects.length - 1 : 0];
   if (!edge) return;
