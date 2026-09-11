@@ -80,6 +80,11 @@ test("property deletion uses an in-app confirmation and clears all saved referen
 
 test("incompatible property type changes cancel or explicitly clear values without native confirms", async ({ page, request }) => {
   await seed(request, { propertyValues: { "prop-number": 0 } });
+  const before = await fixtureSnapshot(request);
+  const state = structuredClone(before.state);
+  state.settings.resourceViews = [{ id: "number-view", name: "점수 그룹", layout: "list", filter: { id: "number-filter", op: "and", rules: [] }, sorts: [], groups: [{ id: "number-group", propertyId: "prop-number", direction: "custom", customOrder: [0, null] }], visibleProperties: [] }];
+  state.settings.activeResourceViewId = "number-view";
+  expect((await request.put("/api/state", { headers: { "If-Match": `"state-${before.serverRevision}"` }, data: { state, baseRevision: before.serverRevision } })).ok()).toBeTruthy();
   await open(page);
   await page.locator('[data-property-id="prop-number"]').click();
   const definition = page.locator('[data-property-definition="prop-number"]');
@@ -90,10 +95,12 @@ test("incompatible property type changes cancel or explicitly clear values witho
   await confirmation.getByRole("button", { name: "취소", exact: true }).click();
   await expect(confirmation).toHaveCount(0);
   expect((await stored(request)).resources.find((resource) => resource.id === rid).propertyValues["prop-number"]).toBe(0);
+  expect((await stored(request)).settings.resourceViews[0].groups[0].customOrder).toEqual([0, null]);
   await type.selectOption("text");
   await confirmation.getByRole("button", { name: "변경", exact: true }).click();
   await expect.poll(async () => (await stored(request)).settings.resourceProperties.find((property) => property.id === "prop-number").type).toBe("text");
   expect(Object.hasOwn((await stored(request)).resources.find((resource) => resource.id === rid).propertyValues, "prop-number")).toBe(false);
+  expect((await stored(request)).settings.resourceViews[0].groups[0]).toEqual({ id: "number-group", propertyId: "prop-number", direction: "asc" });
   expect(await page.evaluate(() => window.nativeConfirmCalls)).toBe(0);
 });
 

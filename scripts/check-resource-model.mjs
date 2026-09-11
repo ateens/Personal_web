@@ -93,6 +93,52 @@ assert.deepEqual(model.groupValueKeys(state.resources[2], "score"), [null]);
 assert.deepEqual(model.groupValueKeys(state.resources[0], "score"), [0]);
 assert.deepEqual(model.groupValueKeys(state.resources[2], "done", state), [false]);
 assert.deepEqual(model.groupValueKeys(state.resources[0], "due"), ["2026-09-11"]);
+const numberKeys = Object.freeze([null, 10, 2, 0, -1]);
+const numberGroup = Object.freeze({ propertyId: "score", direction: "custom", customOrder: Object.freeze([0, null, 2]) });
+assert.deepEqual(model.orderGroupKeys(numberKeys, numberGroup, properties[1]), [0, null, 2, -1, 10], "explicit empty-group rank is preserved; new keys follow in ascending order");
+assert.deepEqual(numberKeys, [null, 10, 2, 0, -1], "group ordering never mutates its input");
+assert.deepEqual(numberGroup.customOrder, [0, null, 2], "group ordering never mutates saved ranks");
+assert.deepEqual(model.orderGroupKeys(numberKeys, { direction: "asc" }, properties[1]), [-1, 0, 2, 10, null]);
+assert.deepEqual(model.orderGroupKeys(numberKeys, { direction: "desc" }, properties[1]), [10, 2, 0, -1, null]);
+assert.deepEqual(model.orderGroupKeys(numberKeys, { direction: "custom", customOrder: [2] }, properties[1]), [2, -1, 0, 10, null]);
+assert.deepEqual(model.orderGroupKeys([false, null, true], { direction: "custom", customOrder: [true] }, properties[2]), [true, false, null]);
+assert.deepEqual(model.orderGroupKeys(["2026-09-11", null, "2026-08-31", "2027-01-01"], { direction: "custom", customOrder: ["2027-01-01"] }, properties[3]), ["2027-01-01", "2026-08-31", "2026-09-11", null]);
+assert.deepEqual(model.orderGroupKeys(["b", "a", null], { direction: "custom", customOrder: [] }, properties[4]), ["a", "b", null], "unranked options follow the configured option order");
+assert.deepEqual(model.orderGroupKeys(["x", "y", null], { direction: "custom", customOrder: ["y"] }, properties[5]), ["y", "x", null]);
+assert.deepEqual(model.orderGroupKeys(["a", "A", "자료 10", "자료 2"], { direction: "custom", customOrder: [] }, properties[0]), ["자료 2", "자료 10", "a", "A"], "equal labels retain their input order while Korean text uses numeric collation");
+assert.deepEqual(model.orderGroupKeys(["b", "a"], { direction: "custom", customOrder: ["retired", "a", "b"] }, properties[4]), ["a", "b"], "saved order never adds missing or filtered-out groups");
+const customGroupsState = structuredClone(state);
+customGroupsState.settings.resourceViews[0].groups = properties.map((property, index) => ({
+  id: `group-${index}`, propertyId: property.id, direction: "custom",
+  customOrder: [["Gamma", "Alpha beta", null], [0, -1, null], [true, false], ["2026-09-11", "2026-08-31", null], ["b", "a", "retired-option"], ["y", "x", null]][index],
+}));
+assert.deepEqual(model.validateState(customGroupsState), [], "each hierarchy level stores its own typed key order, including removed option IDs");
+assert.deepEqual(model.normalizeSettings(customGroupsState.settings), customGroupsState.settings, "normalization preserves custom order at every hierarchy level");
+const temporarilyAscending = structuredClone(customGroupsState);
+temporarilyAscending.settings.resourceViews[0].groups[1].direction = "asc";
+assert.deepEqual(model.validateState(temporarilyAscending), [], "switching to asc/desc may retain the saved custom order");
+const titleGroup = structuredClone(state);
+titleGroup.settings.resourceViews[0].groups = [{ id: "title-group", propertyId: "title", direction: "custom", customOrder: [" ", "Quoted \"title\"\nwith\ttabs", "x".repeat(20000), null] }];
+assert.deepEqual(model.validateState(titleGroup), [], "all valid title/text content remains usable as typed group keys");
+for (const [propertyId, customOrder] of [
+  ["score", undefined], ["score", null], ["score", {}], ["score", "0"], ["score", [[0]]], ["score", [{}]],
+  ["score", [NaN]], ["score", [Infinity]], ["score", [undefined]], ["score", Array(1)], ["score", [0, 0]], ["score", [null, null]],
+  ["score", ["0"]], ["score", [false]], ["done", [0]], ["done", ["false"]],
+  ["summary", [""]], ["summary", [0]], ["summary", ["x".repeat(20001)]],
+  ["due", ["2026-02-30"]], ["due", ["2026-09-11T10:30"]], ["due", [{ start: "2026-09-11" }]],
+  ["status", [""]], ["status", [true]], ["status", ["constructor"]], ["tags", [["x"]]],
+  ["score", Array.from({ length: model.MAX_GROUP_ORDER_KEYS + 1 }, (_, index) => index)],
+]) {
+  const malformedOrder = structuredClone(state);
+  malformedOrder.settings.resourceViews[0].groups = [{ id: "invalid-group", propertyId, direction: "custom", customOrder }];
+  assert(model.validateState(malformedOrder).some((issue) => issue.path.endsWith("groups[0].customOrder")), `custom order must reject invalid ${propertyId} keys: ${JSON.stringify(customOrder)}`);
+}
+const fullGroupOrder = structuredClone(state);
+fullGroupOrder.settings.resourceViews[0].groups = [{ id: "bounded-group", propertyId: "score", direction: "custom", customOrder: Array.from({ length: model.MAX_GROUP_ORDER_KEYS }, (_, index) => index) }];
+assert.deepEqual(model.validateState(fullGroupOrder), [], "the advertised custom group limit is supported");
+const customSort = structuredClone(state);
+customSort.settings.resourceViews[0].sorts = [{ id: "invalid-sort", propertyId: "score", direction: "custom", customOrder: [0] }];
+assert(model.validateState(customSort).some((issue) => issue.path.endsWith("sorts[0]")), "custom direction belongs to groups only");
 assert.equal(model.displayValue("box", model.getProperties(state).find((property) => property.id === "boxId")), "연구");
 assert.equal(model.displayValue(["x", "y"], properties[5]), "X, Y");
 assert.match(model.displayValue(0.25, { type: "number", numberFormat: "percent" }), /25/);
@@ -130,6 +176,8 @@ const normalized = normalizeAppStateForStorage(structuredClone({ ...state, versi
 assert.deepEqual(normalized.settings.resourceProperties, state.settings.resourceProperties, "storage normalization must preserve property definitions");
 assert.deepEqual(normalized.resources[0].propertyValues, state.resources[0].propertyValues, "storage normalization must preserve typed property values");
 assert.deepEqual(normalized.settings.resourceViews, state.settings.resourceViews, "storage normalization must preserve saved views");
+const normalizedCustomGroups = normalizeAppStateForStorage(structuredClone({ ...customGroupsState, version: 4, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })).state;
+assert.deepEqual(normalizedCustomGroups.settings.resourceViews, customGroupsState.settings.resourceViews, "storage normalization must preserve custom group keys and their types");
 const server = await readFile(new URL("../server.js", import.meta.url), "utf8");
 assert.match(server, /import "\.\/resource-model\.js";/);
 assert.match(server, /SYGMAResourceModel\.validateState\(state\)/, "production writes must use the same Resource validation");
@@ -140,6 +188,10 @@ const completeState = createFixtureState();
 completeState.settings = state.settings;
 completeState.resources[0].propertyValues = state.resources[0].propertyValues;
 assert.doesNotThrow(() => validateIncomingState(completeState), "production validator must accept typed property state");
+completeState.settings = structuredClone(customGroupsState.settings);
+assert.doesNotThrow(() => validateIncomingState(completeState), "production validator accepts custom order for each group hierarchy");
+completeState.settings.resourceViews[0].groups[1].customOrder = ["0"];
+assert.throws(() => validateIncomingState(completeState), (error) => error.status === 422 && error.details.issues.some((issue) => issue.path.endsWith("groups[1].customOrder")), "production validator rejects mismatched custom group key types before writes");
 let deepestAllowedFilter = rule("score", "equals", 0);
 for (let depth = 0; depth < model.MAX_FILTER_DEPTH; depth += 1) deepestAllowedFilter = { id: `allowed-${depth}`, op: "and", rules: [deepestAllowedFilter] };
 completeState.settings = structuredClone(state.settings);
@@ -155,4 +207,4 @@ for (const inheritedType of ["__proto__", "constructor"]) {
   maliciousState.settings.resourceViews[0].filter.rules.push(rule("summary", "contains", "x"));
   assert.throws(() => validateIncomingState(maliciousState), (error) => error.status === 422 && error.details.issues.some((issue) => issue.path.endsWith("resourceProperties[0].type")), "inherited object names must return validation issues, not crash the server");
 }
-console.log("Resource model checks passed: typed properties, filter operators, nested groups, relative dates, sorting, validation, and storage preservation.");
+console.log("Resource model checks passed: typed properties, filter operators, nested groups, relative dates, sorting, custom group order, validation, and storage preservation.");

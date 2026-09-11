@@ -7,6 +7,7 @@
   const COLORS = Object.freeze(["default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"]);
   const TYPE_IDS = new Set(PROPERTY_TYPES.map((type) => type.id));
   const MAX_FILTER_DEPTH = 16;
+  const MAX_GROUP_ORDER_KEYS = 1000;
   const BUILTINS = [
     ["title", "이름", "text"], ["boxId", "Box", "select"], ["projectId", "Project", "select"],
     ["type", "종류", "select"], ["importance", "중요도", "select"],
@@ -240,6 +241,17 @@
     return [value];
   }
 
+  function orderGroupKeys(keys, group, property) {
+    const customOrder = group?.direction === "custom" && Array.isArray(group.customOrder) ? group.customOrder : [];
+    const ranks = new Map(customOrder.map((key, index) => [key, index]));
+    return [...keys].sort((left, right) => {
+      const rankDifference = (ranks.get(left) ?? ranks.size) - (ranks.get(right) ?? ranks.size);
+      if (rankDifference) return rankDifference;
+      if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1;
+      return compareValues(left, right, property) * (group?.direction === "desc" ? -1 : 1);
+    });
+  }
+
   function validDate(value, includeTime = true) {
     if (typeof value !== "string" || !(includeTime ? /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?$/ : /^\d{4}-\d{2}-\d{2}$/).test(value)) return false;
     const date = new Date(`${value.slice(0, 10)}T12:00:00Z`);
@@ -280,6 +292,16 @@
       if (property.type === "select") return typeof value === "string" && options.has(value);
       if (property.type === "multi_select") return Array.isArray(value) && value.length <= 1000 && new Set(value).size === value.length && value.every((id) => options.has(id));
       if (property.type === "date") return plain(value) && typeof value.includeTime === "boolean" && validDate(value.start, value.includeTime) && (value.end === "" || (validDate(value.end, value.includeTime) && value.end >= value.start));
+      return false;
+    }
+    function validGroupKey(value, property) {
+      if (value === null) return true;
+      if (property.type === "text") return typeof value === "string" && value.length > 0 && value.length <= 20000;
+      if (property.type === "number") return typeof value === "number" && Number.isFinite(value);
+      if (property.type === "checkbox") return typeof value === "boolean";
+      if (property.type === "date") return validDate(value, false);
+      // Retain saved order when an option or relation target is removed.
+      if (property.type === "select" || property.type === "multi_select") return identifier(value);
       return false;
     }
     for (const [index, resource] of (Array.isArray(state?.resources) ? state.resources : []).entries()) {
@@ -337,7 +359,14 @@
         if (!Array.isArray(view[key]) || view[key].length > 100) { add(`${path}.${key}`, "View ordering must be an array with at most 100 entries."); continue; }
         const ids = new Set();
         for (const [orderIndex, order] of view[key].entries()) {
-          if (!plain(order) || !identifier(order.id) || ids.has(order.id) || !propertyMap.has(order.propertyId) || !["asc", "desc"].includes(order.direction)) add(`${path}.${key}[${orderIndex}]`, "Ordering requires a unique ID, an existing property, and asc/desc direction.");
+          const orderPath = `${path}.${key}[${orderIndex}]`;
+          const property = propertyMap.get(order?.propertyId);
+          const directions = key === "groups" ? ["asc", "desc", "custom"] : ["asc", "desc"];
+          if (!plain(order) || !identifier(order.id) || ids.has(order.id) || !property || !directions.includes(order.direction)) add(orderPath, `Ordering requires a unique ID, an existing property, and ${directions.join("/")} direction.`);
+          if (key === "groups" && (order?.direction === "custom" || own(order, "customOrder"))) {
+            const values = order?.customOrder;
+            if (!Array.isArray(values) || values.length > MAX_GROUP_ORDER_KEYS || new Set(values).size !== values.length || (property && !Array.from(values).every((value) => validGroupKey(value, property)))) add(`${orderPath}.customOrder`, `Custom group order requires at most ${MAX_GROUP_ORDER_KEYS} unique keys matching the property's type.`);
+          }
           ids.add(order?.id);
         }
       }
@@ -348,5 +377,5 @@
     return issues;
   }
 
-  scope.SYGMAResourceModel = Object.freeze({ PROPERTY_TYPES, COLORS, MAX_FILTER_DEPTH, normalizeSettings, getProperties, getValue, filterOperators, matchesFilter, applyView, compareValues, groupValueKeys, displayValue, validateState });
+  scope.SYGMAResourceModel = Object.freeze({ PROPERTY_TYPES, COLORS, MAX_FILTER_DEPTH, MAX_GROUP_ORDER_KEYS, normalizeSettings, getProperties, getValue, filterOperators, matchesFilter, applyView, compareValues, groupValueKeys, orderGroupKeys, displayValue, validateState });
 })(globalThis);

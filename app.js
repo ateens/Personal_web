@@ -2320,9 +2320,23 @@ function renderResourceFilterGroup(group, root = false, depth = 0) {
   </div>`;
 }
 
+function resourceGroupOrderKeys(group) {
+  const property = SYGMAResourceModel.getProperties(state).find((item) => item.id === group.propertyId);
+  if (!property) return [];
+  const keys = [...new Set(state.resources.filter((resource) => !resource.trashedAt).flatMap((resource) => SYGMAResourceModel.groupValueKeys(resource, property.id, state)))];
+  return SYGMAResourceModel.orderGroupKeys(keys, group, property);
+}
+
+function renderResourceCustomOrder(group) {
+  if (group.direction !== "custom") return "";
+  const property = SYGMAResourceModel.getProperties(state).find((item) => item.id === group.propertyId);
+  const keys = resourceGroupOrderKeys(group);
+  return `<div class="resource-custom-order" data-resource-custom-order="${esc(group.id)}" role="group" aria-label="${esc(property.name)} 그룹 순서"><p class="muted">위아래로 이동해 그룹 순서를 정하세요.</p>${keys.map((key, index) => `<div class="resource-custom-order-row" data-resource-custom-key="${esc(JSON.stringify(key))}" data-resource-order-key="${esc(`custom:${group.id}:${JSON.stringify(key)}`)}"><span>${esc(SYGMAResourceModel.displayValue(key, property))}</span>${resourceViewMoveButtons("group-values", JSON.stringify(key), index, keys.length)}</div>`).join("") || '<span class="muted">자료가 추가되면 그룹이 표시됩니다.</span>'}</div>`;
+}
+
 function renderResourceViewOrder(view, kind) {
   const isGroup = kind === "groups";
-  return `<div class="resource-view-order" data-resource-view-order="${kind}">${view[kind].map((rule, index) => `<div class="resource-view-order-row" data-resource-order-key="${esc(rule.id)}"><span class="resource-view-priority">${index + 1}</span><select data-resource-view-field="order-property" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 속성">${resourceViewPropertyOptions(rule.propertyId)}</select><select data-resource-view-field="order-direction" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 방향"><option value="asc"${rule.direction === "asc" ? " selected" : ""}>오름차순</option><option value="desc"${rule.direction === "desc" ? " selected" : ""}>내림차순</option></select>${resourceViewMoveButtons(kind, rule.id, index, view[kind].length)}<button type="button" data-resource-view-action="remove-order" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 삭제">×</button></div>`).join("")}<button type="button" data-resource-view-action="add-order" data-kind="${kind}">+ ${isGroup ? "그룹 계층" : "정렬"} 추가</button></div>`;
+  return `<div class="resource-view-order" data-resource-view-order="${kind}">${view[kind].map((rule, index) => `<div class="resource-view-order-row" data-resource-order-key="${esc(rule.id)}"><span class="resource-view-priority">${index + 1}</span><select data-resource-view-field="order-property" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 속성">${resourceViewPropertyOptions(rule.propertyId)}</select><select data-resource-view-field="order-direction" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 방향"><option value="asc"${rule.direction === "asc" ? " selected" : ""}>오름차순</option><option value="desc"${rule.direction === "desc" ? " selected" : ""}>내림차순</option>${isGroup ? `<option value="custom"${rule.direction === "custom" ? " selected" : ""}>커스텀 순서</option>` : ""}</select>${resourceViewMoveButtons(kind, rule.id, index, view[kind].length)}<button type="button" data-resource-view-action="remove-order" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 삭제">×</button></div>${isGroup ? renderResourceCustomOrder(rule) : ""}`).join("")}<button type="button" data-resource-view-action="add-order" data-kind="${kind}">+ ${isGroup ? "그룹 계층" : "정렬"} 추가</button></div>`;
 }
 
 function renderResourceViewSettings(view) {
@@ -2368,7 +2382,8 @@ function saveResourceViewSettings(previousViews, previousActive) {
     return false;
   }
   const focused = document.activeElement;
-  const selector = focused?.dataset.resourceViewField ? `[data-resource-view-field="${cssEscape(focused.dataset.resourceViewField)}"]${focused.dataset.key ? `[data-key="${cssEscape(focused.dataset.key)}"]` : ""}${focused.dataset.part ? `[data-part="${cssEscape(focused.dataset.part)}"]` : ""}${focused.dataset.optionId ? `[data-option-id="${cssEscape(focused.dataset.optionId)}"]` : ""}` : "";
+  const customOrder = focused?.closest("[data-resource-custom-order]")?.dataset.resourceCustomOrder;
+  const selector = focused?.dataset.resourceViewField ? `[data-resource-view-field="${cssEscape(focused.dataset.resourceViewField)}"]${focused.dataset.key ? `[data-key="${cssEscape(focused.dataset.key)}"]` : ""}${focused.dataset.part ? `[data-part="${cssEscape(focused.dataset.part)}"]` : ""}${focused.dataset.optionId ? `[data-option-id="${cssEscape(focused.dataset.optionId)}"]` : ""}` : customOrder ? `[data-resource-custom-order="${cssEscape(customOrder)}"] [data-resource-view-action="move"][data-key="${cssEscape(focused.dataset.key)}"][data-direction="${cssEscape(focused.dataset.direction)}"]` : "";
   setResourceListSelection([]);
   localWorkspaceOperationRequired = true;
   localWorkspaceOperationScope = "workspace";
@@ -2376,7 +2391,10 @@ function saveResourceViewSettings(previousViews, previousActive) {
   renderView({ soft: true });
   animateResourceSurface(els.viewRoot.querySelector(".resource-groups"));
   animateResourceRows(els.viewRoot.querySelector(".resource-view-settings-body"), previousSettings);
-  if (selector) els.viewRoot.querySelector(selector)?.focus({ preventScroll: true });
+  if (selector) {
+    const target = els.viewRoot.querySelector(selector);
+    (target?.disabled ? target.parentElement.querySelector("button:not(:disabled)") : target)?.focus({ preventScroll: true });
+  }
   return true;
 }
 
@@ -2406,12 +2424,19 @@ function handleResourceViewClick(event) {
     state.settings.activeResourceViewId = state.settings.resourceViews[0].id;
     setResourceListSelection([]);
   } else if (action === "move") {
-    const list = kind === "views" ? state.settings.resourceViews : view[kind];
+    const group = kind === "group-values" ? view.groups.find((rule) => rule.id === button.closest("[data-resource-custom-order]")?.dataset.resourceCustomOrder) : null;
+    if (kind === "group-values" && group?.direction !== "custom") return true;
+    const list = group ? resourceGroupOrderKeys(group) : kind === "views" ? state.settings.resourceViews : view[kind];
     if (!Array.isArray(list)) return true;
-    const index = list.findIndex((item) => (typeof item === "string" ? item : item.id) === key);
+    const index = list.findIndex((item) => (group ? JSON.stringify(item) : typeof item === "string" ? item : item.id) === key);
     const target = index + Number(button.dataset.direction);
     if (index < 0 || target < 0 || target >= list.length) return true;
     [list[index], list[target]] = [list[target], list[index]];
+    if (group) {
+      const retained = (group.customOrder || []).filter((value) => !list.includes(value));
+      if (list.length + retained.length > SYGMAResourceModel.MAX_GROUP_ORDER_KEYS) { showToast(`커스텀 순서는 최대 ${SYGMAResourceModel.MAX_GROUP_ORDER_KEYS.toLocaleString()}개 그룹까지 지정할 수 있습니다.`); return true; }
+      group.customOrder = [...list, ...retained];
+    }
   } else if (action === "add-rule" || action === "add-group") {
     const group = resourceViewFilterNode(view.filter, key);
     if (!Array.isArray(group?.rules)) return true;
@@ -2465,6 +2490,14 @@ function handleResourceViewChange(event) {
   } else if (["order-property", "order-direction"].includes(field) && ["sorts", "groups"].includes(kind)) {
     const rule = view[kind].find((item) => item.id === key);
     if (!rule) return true;
+    if (field === "order-property" && rule.propertyId !== input.value) {
+      delete rule.customOrder;
+      if (rule.direction === "custom") rule.direction = "asc";
+    } else if (field === "order-direction" && input.value === "custom" && kind === "groups" && !rule.customOrder) {
+      const keys = resourceGroupOrderKeys(rule);
+      if (keys.length > SYGMAResourceModel.MAX_GROUP_ORDER_KEYS) { input.value = rule.direction; showToast(`커스텀 순서는 최대 ${SYGMAResourceModel.MAX_GROUP_ORDER_KEYS.toLocaleString()}개 그룹까지 지정할 수 있습니다.`); return true; }
+      rule.customOrder = keys;
+    }
     rule[field === "order-property" ? "propertyId" : "direction"] = input.value;
   } else return true;
   saveResourceViewSettings(previousViews, previousActive);
@@ -2496,15 +2529,12 @@ function renderResourceGroups(resources, view = activeResourceView(), depth = 0,
   }
   if (!buckets.size) return empty("조건에 맞는 자료가 없습니다.");
   const label = (key) => key === null ? "비어 있음" : SYGMAResourceModel.displayValue(key, property, state);
-  const entries = [...buckets].sort(([a], [b]) => {
-    if (a === null || b === null) return a === null ? (b === null ? 0 : 1) : -1;
-    return SYGMAResourceModel.compareValues(a, b, property) * (group.direction === "desc" ? -1 : 1);
-  });
+  const entries = SYGMAResourceModel.orderGroupKeys([...buckets.keys()], group, property).map((key) => [key, buckets.get(key)]);
   return entries.map(([key, items]) => {
     const groupPath = `${path}/${group.id}:${JSON.stringify(key)}`;
     const detailKey = `group-${view.id}-${groupPath}`;
     const dropAttributes = ["boxId", "projectId"].includes(property.id) ? `data-resource-drop-field="${property.id}" data-resource-drop-id="${esc(key ?? "")}"` : "";
-    return `<details class="resource-custom-group" data-resource-view-detail="${esc(detailKey)}"${resourceViewDetailOpen(detailKey, true)} ${dropAttributes}><summary data-resource-group-toggle><span class="resource-group-property">${esc(property.name)}</span><strong>${esc(label(key))}</strong><span class="resource-group-count">${items.length}</span></summary><div class="resource-custom-group-body">${renderResourceGroups(items, view, depth + 1, groupPath)}</div></details>`;
+    return `<details class="${depth === 0 ? "panel resource-list-panel " : ""}resource-custom-group" data-resource-view-detail="${esc(detailKey)}"${resourceViewDetailOpen(detailKey, true)} ${dropAttributes}><summary class="resource-group-header" data-resource-group-toggle><span class="resource-group-property">${esc(property.name)}</span><strong class="resource-group-title">${esc(label(key))}</strong><span class="resource-group-count">${items.length}</span></summary><div class="resource-custom-group-body">${renderResourceGroups(items, view, depth + 1, groupPath)}</div></details>`;
   }).join("");
 }
 
@@ -2745,6 +2775,11 @@ function applyResourcePropertyChange(propertyId, action, value = "") {
       markResourceChanged(resource);
     }
     removeResourcePropertyReferences(propertyId, true);
+    if (!compatible) for (const view of state.settings.resourceViews) for (const group of view.groups) {
+      if (group.propertyId !== propertyId) continue;
+      delete group.customOrder;
+      if (group.direction === "custom") { group.direction = "asc"; }
+    }
     property.type = value;
   } else return;
   saveResourcePropertySchema(action === "delete" ? "" : propertyId);
