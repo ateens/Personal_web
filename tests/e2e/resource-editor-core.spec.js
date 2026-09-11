@@ -425,7 +425,7 @@ test("번호 목록 앞과 중간에서 Enter로 삽입해도 marker가 저장 �
   await setCaret(first, 0);
   await page.keyboard.press("Enter");
   await expect(markers()).toHaveText(["1.", "2.", "3."]);
-  await expect(first).toBeFocused();
+  await expect(editor.locator("[data-block-content]").filter({ hasText: /^첫째 항목$/ })).toBeFocused();
   await expect.poll(async () => (await persistedResource(request, FIXTURE_IDS.bodySearchResource))?.blocks.length).toBe(3);
   await settleAnimationFrames(page);
 
@@ -1487,7 +1487,7 @@ test("붙여넣은 PNG 이미지는 꼭 맞는 영역과 저장되는 캡션을 
   await expect(image).toBeVisible();
   await expect(imageBlock).not.toContainText("clipboard");
   await expect(imageBlock.locator("figcaption")).toHaveCount(0);
-  await expect(caption).toHaveValue("");
+  await expect(caption).toHaveCount(0);
   const src = await image.getAttribute("src");
   expect(src).toMatch(/^\/api\/resource-images\/[a-zA-Z0-9_-]+$/);
   const layout = await imageBlock.evaluate((block) => {
@@ -1513,6 +1513,10 @@ test("붙여넣은 PNG 이미지는 꼭 맞는 영역과 저장되는 캡션을 
     return resource?.blocks.some((block) => block.type === "image" && block.url === src);
   }).toBe(true);
 
+  await image.click();
+  await page.keyboard.press("Meta+/");
+  await page.locator('[data-selected-block-action="image-caption"]').click();
+  await expect(caption).toBeFocused();
   await caption.fill("설명 캡션");
   await expect.poll(async () => {
     const resource = await persistedResource(request, resourceId);

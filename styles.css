@@ -6670,6 +6670,32 @@ button:focus-visible {
   font-size: 0.88em;
 }
 
+[data-inline-boundary-caret] {
+  position: relative;
+  caret-color: transparent;
+}
+
+[data-inline-boundary-caret]::after {
+  content: "";
+  position: absolute;
+  left: var(--inline-caret-x);
+  top: var(--inline-caret-y);
+  width: 1px;
+  height: var(--inline-caret-height);
+  background: var(--ink);
+  pointer-events: none;
+  animation: inline-boundary-caret-blink 1s step-end infinite;
+}
+
+@keyframes inline-boundary-caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-inline-boundary-caret]::after { animation: none; }
+}
+
 .inline-mark-text-color {
   color: var(--inline-palette-text);
 }

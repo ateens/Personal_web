@@ -58,6 +58,27 @@ async function savedBlock(request, id) {
   return { text, marks };
 }
 
+async function expectOutsideCaret(content, type, side) {
+  await expect(content).toHaveAttribute("data-inline-boundary-caret", "true");
+  const geometry = await content.evaluate((element, { type, side }) => {
+    const rect = element.getBoundingClientRect();
+    const mark = element.querySelector(`[data-inline-mark="${type}"]`).getBoundingClientRect();
+    const style = getComputedStyle(element, "::after");
+    const contentStyle = getComputedStyle(element);
+    const scaleX = rect.width / Number.parseFloat(contentStyle.width);
+    const scaleY = rect.height / Number.parseFloat(contentStyle.height);
+    const left = rect.left + (Number.parseFloat(style.left) - element.scrollLeft) * scaleX;
+    return { left, right: left + Number.parseFloat(style.width) * scaleX, height: Number.parseFloat(style.height) * scaleY, top: rect.top + (Number.parseFloat(style.top) - element.scrollTop) * scaleY, mark: { left: mark.left, right: mark.right, top: mark.top, bottom: mark.bottom }, opacity: style.opacity, caret: contentStyle.caretColor };
+  }, { type, side });
+  expect(geometry.height).toBeGreaterThan(10);
+  expect(geometry.opacity).toBe("1");
+  expect(geometry.caret).toBe("rgba(0, 0, 0, 0)");
+  expect(geometry.top).toBeGreaterThanOrEqual(geometry.mark.top - 1);
+  expect(geometry.top + geometry.height).toBeLessThanOrEqual(geometry.mark.bottom + 1);
+  if (side === "left") expect(geometry.right).toBeLessThanOrEqual(geometry.mark.left + 0.1);
+  else expect(geometry.left).toBeGreaterThanOrEqual(geometry.mark.right);
+}
+
 test.use({ reducedMotion: "reduce" });
 
 for (const [name, prefix, extraMarks] of [["block start", "", []], ["middle", "A ", []], ["adjacent formatting", "A", [{ type: "bold", start: 0, end: 1 }]]]) {
@@ -69,7 +90,9 @@ for (const [name, prefix, extraMarks] of [["block start", "", []], ["middle", "A
     expect(await caret(content)).toEqual({ offset: prefix.length, marks: ["code"], collapsed: true });
     await page.keyboard.press("ArrowLeft");
     expect(await caret(content)).toEqual({ offset: prefix.length, marks: [], collapsed: true });
+    await expectOutsideCaret(content, "code", "left");
     await page.keyboard.type("X");
+    await expect(content).not.toHaveAttribute("data-inline-boundary-caret");
     await expect.poll(() => savedBlock(request, "target")).toEqual({
       text: `${prefix}Xabc Z`, marks: [...extraMarks, { type: "code", start: prefix.length + 1, end: prefix.length + 4 }],
     });
@@ -105,6 +128,7 @@ test("Right inline boundary stays distinct and plain arrows still cross adjacent
   await insideMark(content, "code", 3);
   await page.keyboard.press("ArrowRight");
   expect(await caret(content)).toEqual({ offset: 3, marks: [], collapsed: true });
+  await expectOutsideCaret(content, "code", "right");
   await page.keyboard.press("ArrowRight");
   await expect(editor.locator('[data-block-content="next"]')).toBeFocused();
   await insideMark(content, "code");
@@ -167,12 +191,42 @@ test("Table cells share inline boundary typing without absorbing subsequent char
   expect(await caret(cell)).toEqual({ offset: 0, marks: ["code"], collapsed: true });
   await page.keyboard.press("ArrowLeft");
   expect(await caret(cell)).toEqual({ offset: 0, marks: [], collapsed: true });
+  await expectOutsideCaret(cell, "code", "left");
   await page.keyboard.type("XY");
   await expect(cell.locator('[data-inline-mark="code"]')).toHaveText("abc");
   await expect.poll(async () => {
     const resource = (await fixtureSnapshot(request)).state.resources.find((resource) => resource.id === RESOURCE_ID);
     return resource.blocks.find((block) => block.id === "table").tableCellMarks["0:0"];
   }).toEqual([{ type: "code", start: 2, end: 5 }]);
+});
+
+for (const width of [1440, 390]) test(`One arrow leaves an inline edge visibly and the next moves into neighboring text at ${width}px`, async ({ page, request }, info) => {
+  await page.setViewportSize({ width, height: 1000 });
+  const editor = await openBlocks(page, request, [block("target", "A abc Z", [{ type: "code", start: 2, end: 5 }]), block("next", "next")]);
+  const content = editor.locator('[data-block-content="target"]');
+  await insideMark(content, "code", 0);
+  await page.keyboard.press("ArrowLeft");
+  expect(await caret(content)).toEqual({ offset: 2, marks: [], collapsed: true });
+  await expectOutsideCaret(content, "code", "left");
+  await content.screenshot({ path: info.outputPath(`code-outside-left-caret-${width}.png`), caret: "initial" });
+  await page.keyboard.press("ArrowLeft");
+  expect(await caret(content)).toEqual({ offset: 1, marks: [], collapsed: true });
+  await expect(content).not.toHaveAttribute("data-inline-boundary-caret");
+
+  await insideMark(content, "code", 3);
+  await page.keyboard.press("ArrowRight");
+  expect(await caret(content)).toEqual({ offset: 5, marks: [], collapsed: true });
+  await expectOutsideCaret(content, "code", "right");
+  await content.screenshot({ path: info.outputPath(`code-outside-right-caret-${width}.png`), caret: "initial" });
+  await page.keyboard.press("ArrowRight");
+  expect(await caret(content)).toEqual({ offset: 6, marks: [], collapsed: true });
+  await expect(content).not.toHaveAttribute("data-inline-boundary-caret");
+
+  await insideMark(content, "code", 0);
+  await page.keyboard.press("ArrowLeft");
+  await editor.locator('[data-block-content="next"]').click();
+  await expect(content).not.toHaveAttribute("data-inline-boundary-caret");
+  expect(await savedBlock(request, "target")).toEqual({ text: "A abc Z", marks: [{ type: "code", start: 2, end: 5 }] });
 });
 
 test("Table typing reconciles native code expansion before the next Markdown shortcut", async ({ page, request }) => {
@@ -196,4 +250,40 @@ test("Table typing reconciles native code expansion before the next Markdown sho
   await page.keyboard.type("~~strike~~");
   await expect(cell).toHaveText("abc strike");
   await expect(cell.locator('[data-inline-mark="strike"]')).toHaveText("strike");
+});
+
+test("A caret at the first or last document edge stays visibly outside on repeated arrows", async ({ page, request }) => {
+  const editor = await openBlocks(page, request, [block("target", "abc", [{ type: "code", start: 0, end: 3 }])]);
+  const content = editor.locator('[data-block-content="target"]');
+  for (const [offset, key, side] of [[0, "ArrowLeft", "left"], [3, "ArrowRight", "right"]]) {
+    await insideMark(content, "code", offset);
+    await page.keyboard.press(key);
+    await page.keyboard.press(key);
+    expect(await caret(content)).toEqual({ offset, marks: [], collapsed: true });
+    await expectOutsideCaret(content, "code", side);
+  }
+});
+
+test("Table boundary caret clears on focus leaving the cell without changing the selection", async ({ page, request }) => {
+  const table = { ...block("table", "| abc | tail |\n| --- | --- |\n| one | two |"), type: "table", tableCellMarks: { "0:0": [{ type: "code", start: 0, end: 3 }] } };
+  const editor = await openBlocks(page, request, [table]);
+  const cell = editor.locator('[data-resource-table-cell][data-table-row="0"][data-table-column="0"]');
+  await insideMark(cell, "code", 0);
+  await page.keyboard.press("ArrowLeft");
+  await expectOutsideCaret(cell, "code", "left");
+  await page.locator("[data-resource-title]").focus();
+  await expect(cell).not.toHaveAttribute("data-inline-boundary-caret");
+});
+
+test("Boundary caret follows a wrapped mark when the Resource viewport becomes narrow", async ({ page, request }) => {
+  const prefix = "문장 앞의 내용 ".repeat(12);
+  const editor = await openBlocks(page, request, [block("target", `${prefix}abc Z`, [{ type: "code", start: prefix.length, end: prefix.length + 3 }])]);
+  const content = editor.locator('[data-block-content="target"]');
+  await insideMark(content, "code", 0);
+  await page.keyboard.press("ArrowLeft");
+  await expectOutsideCaret(content, "code", "left");
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await expectOutsideCaret(content, "code", "left");
+  await page.keyboard.type("X");
+  await expect.poll(() => savedBlock(request, "target")).toEqual({ text: `${prefix}Xabc Z`, marks: [{ type: "code", start: prefix.length + 1, end: prefix.length + 4 }] });
 });

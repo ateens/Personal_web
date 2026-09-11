@@ -365,7 +365,7 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   await expect(editor).toHaveAttribute("data-owner-id", "quick-note:fixture-local-note");
   const legacyImageBlock = editor.locator('[data-block-id="local-image"]');
   await expect(legacyImageBlock.locator("img")).toHaveAttribute("src", existingAssetDataURL);
-  await expect(legacyImageBlock.locator("[data-resource-image-caption]")).toHaveValue("");
+  await expect(legacyImageBlock.locator("[data-resource-image-caption]")).toHaveCount(0);
   await expect(legacyImageBlock).not.toContainText("기존 이미지");
   const body = editor.locator('[data-block-content="local-body"]');
   await expect(body).toBeFocused();
@@ -434,6 +434,9 @@ test("Quick Editor는 기존 Quick Memo 바깥 UI 없이 공유 본문 편집기
   const localImageBlock = editor.locator('[data-type="image"]').filter({ has: page.locator('img[alt="clipboard"]') });
   await expect(localImageBlock.locator('img[alt="clipboard"]')).toBeVisible();
   await expect(localImageBlock).not.toContainText("clipboard");
+  await localImageBlock.locator("img").click();
+  await page.keyboard.press("Meta+/");
+  await page.locator('[data-selected-block-action="image-caption"]').click();
   await localImageBlock.locator("[data-resource-image-caption]").fill("퀵 캡션");
   await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.filter((message) => message.type === "localChange").at(-1))).toMatchObject({
     type: "localChange",

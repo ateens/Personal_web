@@ -9282,10 +9282,25 @@ function renderResourceImageBlock(block, meta = {}) {
       ${meta.blockTools || ""}
       <figure class="resource-image-figure">
         <span class="resource-image-media block-content" data-block-content="${esc(block.id)}" data-resource-image-select tabindex="0" role="group" aria-label="이미지${alt ? `: ${esc(alt)}` : ""}">${safeUrl ? `<img src="${esc(safeUrl)}" alt="${esc(alt)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : `<span class="resource-image-error" role="status">이미지를 불러올 수 없습니다.</span>`}</span>
-        ${editable || caption ? `<input class="resource-image-caption" data-resource-image-caption="${esc(block.id)}" value="${esc(caption)}" maxlength="${MAX_RESOURCE_IMAGE_CAPTION_LENGTH}" aria-label="이미지 캡션"${editable ? ` placeholder="캡션 추가"` : " readonly"}>` : ""}
+        ${caption ? renderResourceImageCaption(block, editable) : ""}
       </figure>
     </div>
   `;
+}
+
+function renderResourceImageCaption(block, editable) {
+  return `<input class="resource-image-caption" data-resource-image-caption="${esc(block.id)}" value="${esc(normalizeResourceImageCaption(block.caption))}" maxlength="${MAX_RESOURCE_IMAGE_CAPTION_LENGTH}" aria-label="이미지 캡션"${editable ? ` placeholder="캡션 입력"` : " readonly"}>`;
+}
+
+function openResourceImageCaption(ownerType, ownerId, blockId) {
+  const block = itemById(ownerType, ownerId)?.blocks?.find((entry) => entry.id === blockId);
+  if (ownerType !== "resources" || block?.type !== IMAGE_BLOCK_TYPE || !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  const figure = document.querySelector(`.block-editor[data-owner-type="${cssEscape(ownerType)}"][data-owner-id="${cssEscape(ownerId)}"] [data-block-id="${cssEscape(blockId)}"] .resource-image-figure`);
+  if (!figure) return false;
+  clearBlockSelection();
+  if (!figure.querySelector("[data-resource-image-caption]")) figure.insertAdjacentHTML("beforeend", renderResourceImageCaption(block, true));
+  figure.querySelector("[data-resource-image-caption]")?.focus();
+  return true;
 }
 
 function renderMarkdownTableBlock(block, meta = {}) {
@@ -9516,12 +9531,7 @@ function setInlineContentForRange(block, range, content) {
   block.tableCellMarks[`${row}:${column}`] = normalizeInlineMarks(content.text, content.marks);
   const cell = document.activeElement;
   if (cell?.matches?.(`[data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`) && cell.closest(".block")?.dataset.blockId === block.id) {
-    const html = renderInlineText(content);
-    if (cell.innerHTML !== html) {
-      const offsets = selectionOffsetsInside(cell);
-      cell.innerHTML = html;
-      if (offsets) setSelectionOffsets(cell, offsets.start, offsets.end);
-    }
+    syncBlockContentMarkupFromState(cell, content);
   }
 }
 
@@ -9712,11 +9722,11 @@ function applyMarkdownTableInlineShortcut(cell, event) {
   const split = splitInlineMarksAtSelection(content.marks, content.text, match.index, range.end);
   const text = content.text.slice(0, match.index) + inline.text + content.text.slice(range.end);
   const marks = normalizeInlineMarks(text, [...split.before, ...shiftInlineMarks(inline.marks, match.index), ...shiftInlineMarks(split.after, match.index + inline.text.length)]);
-  cell.innerHTML = renderInlineText({ text, marks });
+  replaceInlineContentMarkup(cell, renderInlineText({ text, marks }));
   setSelectionOffsets(cell, match.index + inline.text.length, match.index + inline.text.length);
 }
 
-function updateMarkdownTableCell(cell) {
+function updateMarkdownTableCell(cell, event = null) {
   const context = markdownTableCellContext(cell);
   if (!context || !editorOwnerMutationAllowed(context.ownerType, context.ownerId) || ui.composingBlockId === context.block.id) return false;
   const row = Number(cell.dataset.tableRow);
@@ -9726,11 +9736,13 @@ function updateMarkdownTableCell(cell) {
   const previous = inlineContentForRange(context.block, { tableRow: row, tableColumn: column });
   const rendered = document.createElement("span");
   rendered.innerHTML = renderInlineText(previous);
-  if (cell.innerHTML === rendered.innerHTML) return false;
+  const range = { tableRow: row, tableColumn: column };
+  if (cell.innerHTML === rendered.innerHTML) return applyLiveArrowShortcut(cell, context.block, previous, context.ownerType, context.ownerId, event, range);
   const content = markdownTableCellContent(cell);
   content.marks = inlineMarksForContentUpdate(previous, cell, content.text);
   if (previous.text === content.text && inlineMarksEqual(previous.marks, content.marks)) return false;
   beginEditorTextHistory(context.ownerType, context.ownerId, context.block.id, markdownTableCellFocus(cell));
+  if (applyLiveArrowShortcut(cell, context.block, content, context.ownerType, context.ownerId, event, range)) return true;
   setInlineContentForRange(context.block, { tableRow: row, tableColumn: column }, content);
   if (context.ownerType === "resources") markResourceChanged(context.ownerId);
   saveState();
@@ -9866,10 +9878,11 @@ function handleMarkdownTableCellEvent(event) {
   }
   if (event.type === "compositionend") {
     ui.composingBlockId = "";
-    requestAnimationFrame(() => { if (cell.isConnected) updateMarkdownTableCell(cell); });
+    requestAnimationFrame(() => { if (cell.isConnected) updateMarkdownTableCell(cell, event); });
     return;
   }
   if (event.type === "focusout") {
+    clearInlineBoundaryCaret(cell);
     if (cell.classList.contains("is-cell-selected")) return;
     if (ui.composingBlockId === block.id) ui.composingBlockId = "";
     updateMarkdownTableCell(cell);
@@ -9877,7 +9890,7 @@ function handleMarkdownTableCellEvent(event) {
     const next = markdownTableCellContext(cell);
     const row = Number(cell.dataset.tableRow);
     const value = (row === 0 ? next?.table.headers : next?.table.rows[row - 1])?.[Number(cell.dataset.tableColumn)];
-    if (value !== undefined) cell.innerHTML = renderMarkdownTableCell(value, markdownTableCellMarks(block, row, Number(cell.dataset.tableColumn)));
+    if (value !== undefined) replaceInlineContentMarkup(cell, renderMarkdownTableCell(value, markdownTableCellMarks(block, row, Number(cell.dataset.tableColumn))));
     return;
   }
   if (event.isComposing || event.keyCode === 229 || ui.composingBlockId === block.id) {
@@ -9901,13 +9914,18 @@ function handleMarkdownTableCellEvent(event) {
   }
   if (event.type === "input") {
     applyMarkdownTableInlineShortcut(cell, event);
-    updateMarkdownTableCell(cell);
+    updateMarkdownTableCell(cell, event);
     return;
   }
   if (event.type === "paste") {
     event.preventDefault();
     beginEditorTextHistory(ownerType, ownerId, block.id, markdownTableCellFocus(cell));
-    document.execCommand("insertText", false, event.clipboardData?.getData("text/plain") || "");
+    cell.resourceArrowPaste = true;
+    try {
+      document.execCommand("insertText", false, event.clipboardData?.getData("text/plain") || "");
+    } finally {
+      delete cell.resourceArrowPaste;
+    }
     updateMarkdownTableCell(cell);
     return;
   }
@@ -11818,7 +11836,14 @@ function renderSelectedBlocksMenu() {
 }
 
 function renderSelectedBlocksMenuActions() {
-  const items = SELECTED_BLOCK_MENU_ACTIONS.map(([action, [label, icon, hint]]) => `
+  const selection = selectedBlocksMenuSelection();
+  const image = selection?.ownerType === "resources" && selection.ids.length === 1
+    ? itemById(selection.ownerType, selection.ownerId)?.blocks?.find((block) => block.id === selection.ids[0] && block.type === IMAGE_BLOCK_TYPE)
+    : null;
+  const actions = image
+    ? [["image-caption", [normalizeResourceImageCaption(image.caption) ? "캡션 편집" : "캡션 추가", "≡", "이미지 아래에 설명을 작성합니다."]], ...SELECTED_BLOCK_MENU_ACTIONS]
+    : SELECTED_BLOCK_MENU_ACTIONS;
+  const items = actions.map(([action, [label, icon, hint]]) => `
     <button class="menu-item selected-block-action ${action === "delete" ? "is-danger" : ""}" type="button" role="menuitem" data-selected-block-action="${action}" aria-label="${esc(label)}">
       <span class="menu-icon" aria-hidden="true">${icon}</span>
       <span class="menu-text"><strong>${esc(label)}</strong><span>${esc(hint)}</span></span>
@@ -13565,6 +13590,7 @@ function closeResourceDocument(resourceId = ui.activeResourceId) {
   const wasActive = ui.activeResourceId === resourceId;
   if (ui.resourceWindowDrag?.id === resourceId) cancelResourceWindowPointer();
   flushResourceWindowInputs(resourceId);
+  if (wasActive) clearResourceWindowEditingState();
   if (element && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     const rect = element.getBoundingClientRect();
     element.resourceCommentsObserver?.disconnect();
@@ -13580,10 +13606,7 @@ function closeResourceDocument(resourceId = ui.activeResourceId) {
     animation?.finished.then(() => element.remove(), () => element.remove());
   }
   ui.resourceWindows = ui.resourceWindows.filter((record) => record.id !== resourceId);
-  if (wasActive) {
-    clearResourceWindowEditingState();
-    ui.activeResourceId = "";
-  }
+  if (wasActive) ui.activeResourceId = "";
   renderView({ soft: true });
   renderOverlays();
   if (wasActive) {
@@ -14015,12 +14038,14 @@ function syncResourceWindowGeometry(record, { animate = false } = {}) {
     element.resourceGeometryAnimation = animation;
     animation.onfinish = () => {
       if (element.resourceGeometryAnimation === animation) element.resourceGeometryAnimation = null;
+      syncInlineBoundaryCaret();
     };
   } else if (previous?.playState === "running") {
     const frames = previous.effect.getKeyframes();
     previous.effect.setKeyframes([frames[0], target]);
   }
   syncResourceDockLayout();
+  syncInlineBoundaryCaret();
 }
 
 function beginResourceWindowPointer(event) {
@@ -14173,6 +14198,7 @@ function reflowResourceWindows() {
     }
     syncResourceWindowGeometry(record);
   }
+  syncInlineBoundaryCaret();
 }
 
 function codeLanguagePopoverIsOpen(menu) {
@@ -14327,7 +14353,7 @@ function updateResourceImageCaption(input) {
   const editor = input?.closest(".block-editor[data-owner-type='resources']");
   const resource = itemById("resources", editor?.dataset.ownerId);
   const block = resource?.blocks?.find((entry) => entry.id === input?.dataset.resourceImageCaption && entry.type === IMAGE_BLOCK_TYPE);
-  if (!resourceMutationAllowed(resource) || !block) return;
+  if (!block || !editorOwnerMutationAllowed("resources", resource.id)) return;
   const caption = normalizeResourceImageCaption(input.value);
   if (normalizeResourceImageCaption(block.caption) === caption) return;
   if (caption) block.caption = caption;
@@ -14948,7 +14974,7 @@ function handleCompositionEnd(event) {
   ui.composingBlockId = "";
   requestAnimationFrame(() => {
     if (!blockContent.isConnected || ui.recentCompositionCommit !== commit || isComposingBlock(blockContent)) return;
-    updateBlockText(blockContent);
+    updateBlockText(blockContent, event);
     commit.pending = false;
     commit.time = Date.now();
     if (QUICK_EDITOR_SURFACE && quickEditor.pendingRemoteResourceSync) syncQuickEditorAfterStateReplace();
@@ -15040,6 +15066,8 @@ function handleFocusIn(event) {
 }
 
 function handleFocusOut(event) {
+  const boundaryContent = event.target.closest("[data-inline-boundary-caret]");
+  if (boundaryContent) clearInlineBoundaryCaret(boundaryContent);
   const financeSelect = event.target.closest("[data-finance-select]");
   if (financeSelect && !financeSelect.contains(event.relatedTarget)) closeFinanceSelect(financeSelect);
   const resourceDraft = isResourceDraftingElement(event.target);
@@ -15050,6 +15078,12 @@ function handleFocusOut(event) {
       if (remoteStateRenderDeferred) rerenderAfterStateReplace();
       if (resourceDraft) handleRemoteStateWakeRefresh();
     });
+  }
+  const imageCaption = event.target.closest("[data-resource-image-caption]");
+  if (imageCaption && !imageCaption.value.trim()) {
+    imageCaption.value = "";
+    updateResourceImageCaption(imageCaption);
+    imageCaption.remove();
   }
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
@@ -15759,7 +15793,11 @@ function patchBlockEditorStructure(editor, blocksHtml) {
     if (!currentBlock || currentBlock.dataset.type !== nextBlock.dataset.type) return nextBlock.cloneNode(true);
     const currentContent = currentBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content], :scope > .resource-image-figure > [data-block-content]");
     const nextContent = nextBlock.querySelector(":scope > [data-block-content], :scope > .block-semantic-wrap > [data-block-content], :scope > .resource-table-shell > [data-block-content], :scope > .resource-image-figure > [data-block-content]");
-    if (!currentContent || !nextContent || !currentContent.isEqualNode(nextContent)) return nextBlock.cloneNode(true);
+    if (!currentContent || !nextContent || !inlineContentNodesEqual(currentContent, nextContent)) {
+      const replacement = nextBlock.cloneNode(true);
+      preserveEquationRenderers(currentBlock, replacement);
+      return replacement;
+    }
     syncElementAttributes(currentBlock, nextBlock);
     for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-list-marker", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
       const currentControl = currentBlock.querySelector(selector);
@@ -20945,6 +20983,7 @@ function pendingMarkdownBlockType(pending) {
 }
 
 function handleDocumentSelectionChange() {
+  syncInlineBoundaryCaret();
   if (ui.blockDrag || ui.editorMarquee || ui.deleteDrag || ui.todayTaskDrag) return;
   if (ui.inlineSelectionPointer) return;
   const blockContent = document.activeElement?.closest?.("[data-resource-table-cell], [data-block-content]");
@@ -23211,6 +23250,7 @@ function updateBlockText(blockContent, event = null) {
     });
     return;
   }
+  if (applyLiveArrowShortcut(blockContent, block, { text: rawText }, editor.dataset.ownerType, editor.dataset.ownerId, event)) return;
   if (applyLiveMarkdownInlineShortcut(blockContent, block, rawText, editor.dataset.ownerType, editor.dataset.ownerId)) {
     return;
   }
@@ -23242,8 +23282,50 @@ function normalizeEditorPlainText(value = "") {
   return String(value || "").replace(/\u00a0/g, " ");
 }
 
+function inlineContentNodesEqual(current, next) {
+  if (current.isEqualNode(next)) return true;
+  if (!current.querySelector("sygma-display-equation")) return false;
+  const copy = current.cloneNode(true);
+  for (const equation of copy.querySelectorAll("sygma-display-equation")) {
+    equation.removeAttribute("data-equation-rendered");
+    equation.removeAttribute("data-equation-error");
+    const mark = equation.closest('[data-inline-mark="equation"]');
+    mark?.classList.remove("has-full-equation");
+    if (mark) mark.title = mark.dataset.equationFormula || "";
+  }
+  return copy.isEqualNode(next);
+}
+
+function preserveEquationRenderers(current, next) {
+  const available = [...current.querySelectorAll("sygma-display-equation")];
+  for (const equation of next.querySelectorAll("sygma-display-equation")) {
+    const index = available.findIndex((candidate) => candidate.dataset.formula === equation.dataset.formula && candidate.dataset.displayMode === equation.dataset.displayMode);
+    if (index < 0) continue;
+    const existing = available.splice(index, 1)[0];
+    const errorTitle = existing.parentElement?.title;
+    const mark = equation.closest('[data-inline-mark="equation"]');
+    if (existing.shadowRoot) mark?.classList.add("has-full-equation");
+    if (existing.dataset.equationError && mark) mark.title = errorTitle;
+    equation.replaceWith(existing);
+  }
+}
+
+function replaceInlineContentMarkup(element, html) {
+  if (!element.querySelector("sygma-display-equation")) { element.innerHTML = html; return; }
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  preserveEquationRenderers(element, template.content);
+  element.replaceChildren(template.content);
+}
+
 function syncBlockContentMarkupFromState(blockContent, block) {
   if (!blockContent || !block || isComposingBlock(blockContent)) return;
+  if (block.type !== "code" && blockContent.querySelector("sygma-display-equation")
+    && normalizeEditorPlainText(blockContent.textContent) === block.text
+    && inlineMarksEqual(inlineMarksFromContent(blockContent, block.text), normalizeInlineMarks(block.text, block.marks))) {
+    restoreInlineTypingMark(blockContent);
+    return;
+  }
   const expectedHtml = block.type === "code" ? renderHighlightedCodeSource(block.text, block.language) : renderInlineText(block);
   if (blockContent.innerHTML === expectedHtml) {
     restoreInlineTypingMark(blockContent);
@@ -23251,7 +23333,7 @@ function syncBlockContentMarkupFromState(blockContent, block) {
   }
   const textLength = (block.text || "").length;
   const offsets = selectionOffsetsInside(blockContent) || { start: textLength, end: textLength };
-  blockContent.innerHTML = expectedHtml;
+  replaceInlineContentMarkup(blockContent, expectedHtml);
   blockContent.classList.toggle("is-empty", textLength === 0);
   setSelectionOffsets(
     blockContent,
@@ -23674,6 +23756,81 @@ function applyMarkdownFenceShortcutOnEnter(blockContent, block, ownerType, owner
   return true;
 }
 
+function liveArrowProtectedRange(text, marks, start, end) {
+  const protectedMarks = marks.filter((mark) => ["code", "equation", "link", "resourceLink"].includes(mark.type));
+  if (protectedMarks.some((mark) => mark.start < end && mark.end > start)) return true;
+  let slashes = 0;
+  while (start - slashes > 0 && text[start - slashes - 1] === "\\") slashes += 1;
+  if (slashes % 2) return true;
+  // A delimiter being typed has no mark until it closes. Keep its source literal.
+  let delimiter = "";
+  for (let index = 0; index < start;) {
+    const protectedMark = protectedMarks.find((mark) => mark.start <= index && mark.end > index);
+    if (protectedMark) { index = protectedMark.end; continue; }
+    const char = text[index];
+    if (delimiter) {
+      if (delimiter[0] === "`") {
+        const run = char === "`" ? /^`+/.exec(text.slice(index))[0] : "";
+        if (run === delimiter) delimiter = "";
+        index += run.length || 1;
+      } else if (text.startsWith(delimiter, index)) {
+        index += delimiter.length;
+        delimiter = "";
+      } else index += char === "\\" ? 2 : 1;
+      continue;
+    }
+    if (char === "\\") {
+      if (text[index + 1] === "(" || text[index + 1] === "[") delimiter = text[index + 1] === "(" ? "\\)" : "\\]";
+      index += 2;
+    } else if (char === "`") {
+      delimiter = /^`+/.exec(text.slice(index))[0];
+      index += delimiter.length;
+    } else if (char === "$") {
+      const run = /^\$+/.exec(text.slice(index))[0];
+      if (run.length === 2 || (run.length === 1 && text[index + 1] && !/\s/.test(text[index + 1]))) delimiter = run;
+      index += run.length;
+    } else index += 1;
+  }
+  return Boolean(delimiter);
+}
+
+function applyLiveArrowShortcut(element, block, content, ownerType, ownerId, event, cellRange = {}) {
+  const inserted = typeof event?.data === "string" ? normalizeEditorPlainText(event.data) : "";
+  if (!inserted || event.isComposing || ui.composingBlockId === block.id || element.resourceArrowPaste
+    || (event.type !== "compositionend" && !["insertText", "insertFromComposition", "insertCompositionText"].includes(event.inputType))
+    || ["code", "divider"].includes(block.type) || !editorOwnerMutationAllowed(ownerType, ownerId)) return false;
+  const offsets = selectionOffsetsInside(element);
+  if (!offsets?.collapsed || offsets.end < 2 || content.text.slice(offsets.end - inserted.length, offsets.end) !== inserted) return false;
+  const start = offsets.end - 2;
+  const pair = content.text.slice(start, offsets.end);
+  const arrow = pair === "->" ? "→" : pair === "<-" ? "←" : "";
+  if (!arrow) return false;
+  const marks = normalizeInlineMarks(content.text, content.marks ?? inlineMarksForContentUpdate(block, element, content.text));
+  if (liveArrowProtectedRange(content.text, marks, start, offsets.end)) return false;
+  const beforeFocus = { blockId: block.id, start: offsets.start, end: offsets.end, ...cellRange };
+  const afterFocus = { ...beforeFocus, start: start + 1, end: start + 1 };
+  // Flush ordinary typing with the literal pair present, then give conversion its own undo entry.
+  setInlineContentForRange(block, beforeFocus, { text: content.text, marks });
+  refreshPendingMarkdownTextHistory(ownerType, ownerId, block.id);
+  ui.pendingMarkdownTextTarget = null;
+  const history = beginEditorHistory(ownerType, ownerId, beforeFocus);
+  const split = splitInlineMarksAtSelection(marks, content.text, start, offsets.end);
+  const text = content.text.slice(0, start) + arrow + content.text.slice(offsets.end);
+  const nextMarks = normalizeInlineMarks(text, [
+    ...split.before,
+    ...marks.filter((mark) => mark.start < offsets.end && mark.end > start).map((mark) => ({ ...mark, start, end: start + 1 })),
+    ...shiftInlineMarks(split.after, start + 1),
+  ]);
+  setInlineContentForRange(block, afterFocus, { text, marks: nextMarks });
+  commitEditorHistory(history, afterFocus);
+  saveState();
+  if (cellRange.tableRow === undefined) syncBlockContentMarkupFromState(element, block);
+  setSelectionOffsets(element, afterFocus.start, afterFocus.end);
+  restoreInlineTypingMark(element);
+  scheduleEnsureResourceCaretVisible(element);
+  return true;
+}
+
 function applyLiveMarkdownInlineShortcut(blockContent, block, rawText, ownerType, ownerId) {
   if (!editorOwnerMutationAllowed(ownerType, ownerId)) return false;
   if (!rawText || isComposingBlock(blockContent) || ["code", "divider"].includes(block.type)) return false;
@@ -23781,6 +23938,7 @@ function changedTextRange(previousText, nextText) {
 }
 
 function captureInlineBoundaryTyping(blockContent) {
+  clearInlineBoundaryCaret(blockContent);
   // Only a boundary deliberately selected with an arrow can override native typing affinity.
   const pending = inlineBoundaryTyping.get(blockContent);
   const range = selectionRangeInside(blockContent);
@@ -23892,7 +24050,7 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
   };
   const blockContent = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
   if (blockContent) {
-    blockContent.innerHTML = block.type === "code" ? renderHighlightedCodeSource(block.text, block.language) : renderInlineText(block);
+    replaceInlineContentMarkup(blockContent, block.type === "code" ? renderHighlightedCodeSource(block.text, block.language) : renderInlineText(block));
     syncCodeSpaceMetrics(blockContent, block.text);
     blockContent.classList.toggle("is-empty", block.text === "");
     activateBlockContent(blockContent);
@@ -23909,6 +24067,7 @@ function appendPendingMarkdownText(ownerType, ownerId, blockId, text) {
     focusBlockContentAfterRender(focusBlock.id, { position: block.type === "divider" ? "start" : "end" });
     return true;
   }
+  if (blockContent && applyLiveArrowShortcut(blockContent, block, block, ownerType, ownerId, { inputType: "insertText", data: text })) return true;
   if (blockContent && applyLiveMarkdownInlineShortcut(blockContent, block, block.text, ownerType, ownerId)) return true;
   refreshPendingMarkdownTextHistory(ownerType, ownerId, blockId);
   if (ownerType === "resources") markResourceChanged(ownerId);
@@ -24888,20 +25047,18 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   };
   if (["toggle", "numbered"].includes(newBlock.type) && originalToggleHeading) newBlock.toggleHeading = originalToggleHeading;
   item.blocks.splice(index + 1, 0, newBlock);
-  const focusBlock = splitAtStart ? current : newBlock;
+  const focusBlock = newBlock;
   schedulePendingEmptyContinuationExit(ownerType, ownerId, focusBlock);
   if (focusBlock.type !== "divider" && (!(focusBlock.text || "") || !split.after)) {
     schedulePendingMarkdownTextTarget(ownerType, ownerId, focusBlock);
   } else if (!split.after && newBlock.type !== "divider") {
     schedulePendingMarkdownTextTarget(ownerType, ownerId, newBlock);
   }
-  commitEditorHistory(history, splitAtStart
-    ? { blockId: current.id, start: 0, end: 0 }
-    : { blockId: newBlock.id, start: split.after ? 0 : (newBlock.text || "").length, end: split.after ? 0 : (newBlock.text || "").length });
+  commitEditorHistory(history, { blockId: newBlock.id, start: split.after ? 0 : (newBlock.text || "").length, end: split.after ? 0 : (newBlock.text || "").length });
   saveState();
   renderEditorMutation(ownerType, ownerId);
   focusBlockContentAfterRender(focusBlock.id, {
-    caret: split.after && !splitAtStart ? "start" : "end",
+    caret: split.after ? "start" : "end",
     inlineTypingMark,
     transaction: true,
     reserveLines: RESOURCE_CARET_ENTER_RESERVE_LINES,
@@ -25044,6 +25201,10 @@ function applySelectedBlocksMenuAction(action) {
     ownerId: menuSelection.ownerId,
     ids: menuSelection.ids.slice(),
   };
+  if (action === "image-caption") {
+    renderOverlays();
+    return menuSelection.ids.length === 1 && openResourceImageCaption(menuSelection.ownerType, menuSelection.ownerId, menuSelection.ids[0]);
+  }
   if (isBlockColorAction(action)) return applySelectedBlocksColorAction(action);
   if (action === "comment") {
     ui.selectedBlockMenu = null;
@@ -26287,42 +26448,101 @@ function extendExistingHorizontalSelectionBetweenBlocks(selection, blockContent,
   return true;
 }
 
+function clearInlineBoundaryCaret(blockContent) {
+  if (!blockContent?.hasAttribute("data-inline-boundary-caret")) return;
+  delete blockContent.dataset.inlineBoundaryCaret;
+  for (const name of ["x", "y", "height"]) blockContent.style.removeProperty(`--inline-caret-${name}`);
+}
+
+function positionInlineBoundaryCaret(blockContent, mark, forward) {
+  const rects = [...mark.getClientRects()];
+  const edge = rects[forward ? rects.length - 1 : 0];
+  if (!edge) return;
+  const contentRect = blockContent.getBoundingClientRect();
+  const style = getComputedStyle(blockContent);
+  const scaleX = contentRect.width / (Number.parseFloat(style.width) || contentRect.width || 1);
+  const scaleY = contentRect.height / (Number.parseFloat(style.height) || contentRect.height || 1);
+  const height = Math.min(edge.height / scaleY, (Number.parseFloat(style.fontSize) || 16) * 1.2);
+  blockContent.dataset.inlineBoundaryCaret = "true";
+  blockContent.style.setProperty("--inline-caret-x", `${((forward ? edge.right : edge.left) - contentRect.left) / scaleX + (forward ? 1 : -1) + blockContent.scrollLeft}px`);
+  blockContent.style.setProperty("--inline-caret-y", `${(edge.top - contentRect.top) / scaleY + (edge.height / scaleY - height) / 2 + blockContent.scrollTop}px`);
+  blockContent.style.setProperty("--inline-caret-height", `${height}px`);
+}
+
+function syncInlineBoundaryCaret() {
+  for (const content of document.querySelectorAll("[data-inline-boundary-caret]")) {
+    const pending = inlineBoundaryTyping.get(content);
+    const range = selectionRangeInside(content);
+    if (document.activeElement !== content || !range?.collapsed || range.startContainer !== pending?.node || range.startOffset !== pending?.nodeOffset || !pending.caretMark?.isConnected) {
+      clearInlineBoundaryCaret(content);
+    } else {
+      positionInlineBoundaryCaret(content, pending.caretMark, pending.caretForward);
+    }
+  }
+}
+
 function moveCaretAcrossInlineBoundary(blockContent, key) {
   const range = selectionRangeInside(blockContent);
   if (!range?.collapsed) return false;
-  const selector = '[data-inline-mark]:not([data-inline-mark="equation"]):not([contenteditable="false"])';
+  const selector = '[data-inline-mark]:not([contenteditable="false"])';
   const nodeElement = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
-  const current = nodeElement.closest(selector);
+  const current = nodeElement.closest('[data-inline-mark="equation"]') || nodeElement.closest(selector);
   const offset = selectionOffsetsInside(blockContent)?.start;
   const forward = key === "ArrowRight";
   const next = document.createRange();
+  let caretMark = null;
+  let caretForward = forward;
   const currentRange = current && blockContent.contains(current) ? textRangeForInlineElement(blockContent, current) : null;
   const edgeText = currentRange ? (forward ? current.textContent.slice(offset - currentRange.start) : current.textContent.slice(0, offset - currentRange.start)) : "";
   const oneGrapheme = edgeText && new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(edgeText)[Symbol.iterator]().next().value.segment === edgeText;
-  if (currentRange && currentRange[forward ? "end" : "start"] === offset) {
+  if (currentRange && (current.dataset.inlineMark === "equation" || currentRange[forward ? "end" : "start"] === offset)) {
     if (forward) next.setStartAfter(current);
     else next.setStartBefore(current);
     next.collapse(true);
+    caretMark = current;
     if (inlineTypingMarkForContent(blockContent) === current.dataset.inlineMark) ui.inlineTypingMark = null;
     if (blockContent.dataset.inlineTypingMark === current.dataset.inlineMark) delete blockContent.dataset.inlineTypingMark;
   } else if (currentRange && oneGrapheme) {
     next.selectNodeContents(current);
     next.collapse(!forward);
   } else {
-    const candidate = [...blockContent.querySelectorAll(selector)].find((mark) => {
+    let candidate = [...blockContent.querySelectorAll(selector)].find((mark) => {
       if (mark.contains(range.startContainer)) return false;
       const parent = mark.parentElement.closest(selector);
       return (!parent || parent.contains(range.startContainer))
         && textRangeForInlineElement(blockContent, mark)[forward ? "start" : "end"] === offset;
     });
-    if (!candidate) return false;
-    next.selectNodeContents(candidate);
-    next.collapse(forward);
+    if (!candidate) {
+      const text = blockContent.textContent || "";
+      const equations = [...blockContent.querySelectorAll('[data-inline-mark="equation"]')];
+      if (equations.length) {
+        const graphemes = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)];
+        const character = forward ? graphemes.find((entry) => entry.index >= offset) : graphemes.filter((entry) => entry.index < offset).at(-1);
+        const destination = character ? character.index + (forward ? character.segment.length : 0) : null;
+        candidate = equations.find((mark) => textRangeForInlineElement(blockContent, mark)[forward ? "start" : "end"] === destination);
+      }
+      if (!candidate) {
+        if (blockContent.hasAttribute("data-inline-boundary-caret") && offset === (forward ? text.length : 0) && !adjacentBlockContent(blockContent, forward ? 1 : -1)) return true;
+        return false;
+      }
+      caretForward = !forward;
+    }
+    if (candidate.dataset.inlineMark === "equation") {
+      if (caretForward) next.setStartAfter(candidate);
+      else next.setStartBefore(candidate);
+      next.collapse(true);
+      caretMark = candidate;
+    } else {
+      next.selectNodeContents(candidate);
+      next.collapse(forward);
+    }
   }
+  clearInlineBoundaryCaret(blockContent);
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(next);
-  inlineBoundaryTyping.set(blockContent, { node: next.startContainer, nodeOffset: next.startOffset });
+  inlineBoundaryTyping.set(blockContent, { node: next.startContainer, nodeOffset: next.startOffset, caretMark, caretForward });
+  if (caretMark) positionInlineBoundaryCaret(blockContent, caretMark, caretForward);
   return true;
 }
 
@@ -26375,6 +26595,16 @@ function isCaretOnVerticalEdge(element, direction) {
 function caretRectFor(element) {
   const range = selectionRangeInside(element);
   if (!range) return null;
+  if (element.hasAttribute("data-inline-boundary-caret")) {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const scaleX = rect.width / (Number.parseFloat(style.width) || rect.width || 1);
+    const scaleY = rect.height / (Number.parseFloat(style.height) || rect.height || 1);
+    const left = rect.left + (Number.parseFloat(element.style.getPropertyValue("--inline-caret-x")) - element.scrollLeft) * scaleX;
+    const top = rect.top + (Number.parseFloat(element.style.getPropertyValue("--inline-caret-y")) - element.scrollTop) * scaleY;
+    const height = Number.parseFloat(element.style.getPropertyValue("--inline-caret-height")) * scaleY;
+    return { left, right: left + scaleX, top, bottom: top + height, width: scaleX, height };
+  }
   const rect = firstVisibleClientRect(range.getClientRects()) || range.getBoundingClientRect();
   if (rect && (rect.width || rect.height)) return rect;
   const elementRect = element.getBoundingClientRect();
@@ -26850,7 +27080,7 @@ function openSelectedBlocksMenu(options = {}) {
   requestAnimationFrame(() => {
     if (options.focusAction) {
       document.querySelector(`[data-selected-block-action="${cssEscape(options.focusAction)}"]`)?.focus?.({ preventScroll: true });
-    } else {
+    } else if (!document.activeElement?.closest(".selected-block-menu")) {
       focusSelectedBlockMenuQuery();
     }
   });
@@ -26979,6 +27209,23 @@ function selectedBlocksMenuSelection() {
 function handleSelectedBlockMenuKeydown(event) {
   if (!ui.selectedBlockMenu) return false;
   const targetIsQuery = event.target instanceof Element && event.target.closest("[data-selected-block-query]");
+  const action = event.target.closest?.("[data-selected-block-action]");
+  if (action && ["Enter", " "].includes(event.key)) {
+    event.preventDefault();
+    event.stopPropagation();
+    applySelectedBlocksMenuAction(action.dataset.selectedBlockAction);
+    return true;
+  }
+  if (action && event.key === "Tab") return false;
+  const captionAction = targetIsQuery && !(ui.selectedBlockMenu.query || "").trim() && !event.shiftKey && event.key === "Tab"
+    ? document.querySelector('[data-selected-block-action="image-caption"]')
+    : null;
+  if (captionAction) {
+    event.preventDefault();
+    event.stopPropagation();
+    captionAction.focus();
+    return true;
+  }
   if (!targetIsQuery && isPrintableMenuSearchKey(event)) {
     event.preventDefault();
     event.stopPropagation();

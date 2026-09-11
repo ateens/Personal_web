@@ -432,7 +432,8 @@ test("Resource 코멘트는 문장 옆 사이드바에서 추가·수정·삭제
   await editor.locator("[data-block-content]").first().click();
   await page.locator("[data-resource-back]").click();
   await page.locator(`[data-resource-open="${FIXTURE_IDS.readOnlyResource}"]`).click();
-  await page.locator("[data-resource-comments-toggle]").click();
-  await expect(page.locator(".resource-comment-body")).toHaveText("Read-only page discussion");
-  await expect(page.locator("[data-resource-comment-action]")).toHaveCount(0);
+  await page.locator(`[data-resource-comments-toggle="${FIXTURE_IDS.readOnlyResource}"]`).click();
+  const readOnlySidebar = page.locator(`#resource-comments-${FIXTURE_IDS.readOnlyResource}`);
+  await expect(readOnlySidebar.locator(".resource-comment-body")).toHaveText("Read-only page discussion");
+  await expect(readOnlySidebar.locator("[data-resource-comment-action]")).toHaveCount(0);
 });
