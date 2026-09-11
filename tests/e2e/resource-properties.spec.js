@@ -25,11 +25,77 @@ async function open(page) {
   await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
   await page.locator('[data-action="toggle-nav"]').click();
   await page.locator('[data-nav-key="resources"]').click();
-  await page.locator(`[data-resource-open="${rid}"]`).click();
+  await page.locator(`[data-resource-open="${rid}"]`).first().click();
   return page.locator(`[data-resource-properties="${rid}"]`);
 }
 test.use({ reducedMotion: "reduce" });
-test.beforeEach(async ({ request }) => resetFixture(request));
+test.beforeEach(async ({ page, request }) => {
+  await resetFixture(request);
+  await page.addInitScript(() => {
+    window.nativeConfirmCalls = 0;
+    // WKWebView without a JavaScript confirm-panel delegate declines native confirms.
+    window.confirm = () => { window.nativeConfirmCalls += 1; return false; };
+  });
+});
+
+test("property deletion uses an in-app confirmation and clears all saved references", async ({ page, request }, info) => {
+  await seed(request, { propertyValues: { "prop-multi_select": ["a", "b"] } });
+  const before = await fixtureSnapshot(request);
+  const state = structuredClone(before.state);
+  state.resources.find((resource) => resource.id !== rid).propertyValues = { "prop-multi_select": ["a"] };
+  state.settings.resourceViews = [{ id: "custom", name: "맞춤", filter: { id: "root", op: "and", rules: [{ id: "nested", op: "or", rules: [{ id: "tag-filter", propertyId: "prop-multi_select", operator: "contains", value: "a" }] }] }, sorts: [{ id: "sort", propertyId: "prop-multi_select", direction: "asc" }], groups: [{ id: "group", propertyId: "prop-multi_select", direction: "asc" }], visibleProperties: ["prop-multi_select"], layout: "table" }];
+  state.settings.activeResourceViewId = "custom";
+  expect((await request.put("/api/state", { headers: { "If-Match": `"state-${before.serverRevision}"` }, data: { state, baseRevision: before.serverRevision } })).ok()).toBeTruthy();
+  await open(page);
+  await page.locator(`.block-editor[data-owner-id="${rid}"] [data-block-content]`).first().focus();
+  await page.locator('[data-property-id="prop-multi_select"]').click();
+  const manager = page.locator("[data-resource-property-manager]");
+  const definition = manager.locator('[data-property-definition="prop-multi_select"]');
+  await definition.locator('[data-resource-property-action="delete"]').click();
+  const confirmation = page.locator("[data-resource-property-confirm]");
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByRole("button", { name: "취소", exact: true })).toBeFocused();
+  await page.keyboard.press("Meta+Alt+t");
+  await page.keyboard.press("Tab");
+  await expect(confirmation.getByRole("button", { name: "삭제", exact: true })).toBeFocused();
+  expect(await page.evaluate((id) => state.resources.find((resource) => resource.id === id).blocks, rid)).toEqual(state.resources.find((resource) => resource.id === rid).blocks);
+  await page.keyboard.press("Shift+Tab");
+  await confirmation.screenshot({ path: info.outputPath("resource-property-delete-confirmation.png") });
+  await page.keyboard.press("Escape");
+  await expect(confirmation).toHaveCount(0);
+  await expect(definition).toBeVisible();
+  expect((await stored(request)).settings.resourceProperties.some((property) => property.id === "prop-multi_select")).toBe(true);
+  await definition.locator('[data-resource-property-action="delete"]').click();
+  await confirmation.getByRole("button", { name: "삭제", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect.poll(async () => (await stored(request)).settings.resourceProperties.some((property) => property.id === "prop-multi_select")).toBe(false);
+  const saved = await stored(request);
+  expect(saved.resources.every((resource) => !Object.hasOwn(resource.propertyValues || {}, "prop-multi_select"))).toBe(true);
+  expect(saved.settings.resourceViews[0]).toMatchObject({ filter: { rules: [{ rules: [] }] }, sorts: [], groups: [], visibleProperties: [] });
+  expect(await page.evaluate(() => window.nativeConfirmCalls)).toBe(0);
+  await manager.locator('[data-resource-property-action="close"]').click();
+  await open(page);
+  await expect(page.locator('[data-property-id="prop-multi_select"]')).toHaveCount(0);
+});
+
+test("incompatible property type changes cancel or explicitly clear values without native confirms", async ({ page, request }) => {
+  await seed(request, { propertyValues: { "prop-number": 0 } });
+  await open(page);
+  await page.locator('[data-property-id="prop-number"]').click();
+  const definition = page.locator('[data-property-definition="prop-number"]');
+  const type = definition.locator('[data-resource-property-config="type"]');
+  const confirmation = page.locator("[data-resource-property-confirm]");
+  await type.selectOption("text");
+  await expect(type).toHaveValue("number");
+  await confirmation.getByRole("button", { name: "취소", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  expect((await stored(request)).resources.find((resource) => resource.id === rid).propertyValues["prop-number"]).toBe(0);
+  await type.selectOption("text");
+  await confirmation.getByRole("button", { name: "변경", exact: true }).click();
+  await expect.poll(async () => (await stored(request)).settings.resourceProperties.find((property) => property.id === "prop-number").type).toBe("text");
+  expect(Object.hasOwn((await stored(request)).resources.find((resource) => resource.id === rid).propertyValues, "prop-number")).toBe(false);
+  expect(await page.evaluate(() => window.nativeConfirmCalls)).toBe(0);
+});
 
 test("all six property types can be created through settings and survive reload", async ({ page, request }) => {
   const section = await open(page);
@@ -96,9 +162,10 @@ test("options support names, colors, order, removal and single to multi conversi
   await expect.poll(async () => (await stored(request)).resources.find((r) => r.id === rid).propertyValues["prop-select"]).toEqual(["done"]);
   const property = (await stored(request)).settings.resourceProperties.find((p) => p.id === "prop-select");
   expect(property.options[0]).toEqual({ id: "done", name: "게시 완료", color: "pink" });
-  page.once("dialog", (confirm) => confirm.accept());
   await definition.locator('[data-option-id="done"] [data-resource-property-action="option-delete"]').click();
+  await page.locator('[data-resource-property-confirm] [data-resource-confirm="accept"]').click();
   await expect.poll(async () => (await stored(request)).resources.find((r) => r.id === rid).propertyValues["prop-select"]).toEqual([]);
+  expect(await page.evaluate(() => window.nativeConfirmCalls)).toBe(0);
 });
 
 test("property collapse persists during editor changes, and locked values cannot be edited", async ({ page, request }) => {
@@ -131,18 +198,20 @@ test("duplicate, type changes and delete preserve or explicitly clear values and
   await dialog.locator('[data-resource-property-action="close"]').click();
   await page.locator('[data-property-id="prop-multi_select"]').click();
   definition = dialog.locator('[data-property-definition="prop-multi_select"]');
-  page.once("dialog", (confirm) => confirm.dismiss());
   await definition.locator('[data-resource-property-config="type"]').selectOption("select");
+  await page.locator('[data-resource-property-confirm] [data-resource-confirm="cancel"]').click();
+  await expect(page.locator("[data-resource-property-confirm]")).toHaveCount(0);
   await expect(definition.locator('[data-resource-property-config="type"]')).toHaveValue("multi_select");
-  page.once("dialog", (confirm) => confirm.accept());
   await definition.locator('[data-resource-property-config="type"]').selectOption("select");
+  await page.locator('[data-resource-property-confirm] [data-resource-confirm="accept"]').click();
   await expect.poll(async () => (await stored(request)).resources.find((resource) => resource.id === rid).propertyValues["prop-multi_select"]).toBe("a");
   await definition.locator('[data-resource-property-action="property-up"]').click();
   await dialog.screenshot({ path: info.outputPath("resource-property-settings.png") });
-  page.once("dialog", (confirm) => confirm.accept());
   await definition.locator('[data-resource-property-action="delete"]').click();
+  await page.locator('[data-resource-property-confirm] [data-resource-confirm="accept"]').click();
   await expect.poll(async () => (await stored(request)).settings.resourceProperties.some((property) => property.id === "prop-multi_select")).toBe(false);
   expect((await stored(request)).resources.every((resource) => !Object.hasOwn(resource.propertyValues || {}, "prop-multi_select"))).toBe(true);
+  expect(await page.evaluate(() => window.nativeConfirmCalls)).toBe(0);
 });
 
 test("property keyboard focus isolates pending editor Tab and toggle shortcuts", async ({ page, request }) => {

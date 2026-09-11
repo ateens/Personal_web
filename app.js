@@ -2163,13 +2163,112 @@ function renderBoxes() {
   `;
 }
 
+function animateResourceSurface(element, leaving = false) {
+  if (!element?.isConnected || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
+  const opacity = Number(getComputedStyle(element).opacity);
+  element.resourceSurfaceAnimation?.cancel();
+  const animation = element.animate(
+    leaving
+      ? [{ opacity, translate: "0 0" }, { opacity: 0, translate: "0 10px" }]
+      : [{ opacity: 0, translate: "0 10px" }, { opacity: 1, translate: "0 0" }],
+    { duration: leaving ? 160 : 240, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)", fill: leaving ? "forwards" : "none" },
+  );
+  element.resourceSurfaceAnimation = animation;
+  return animation;
+}
+
+function closeResourceDialog(dialog) {
+  if (!dialog?.open || dialog.dataset.resourceClosing) return;
+  dialog.dataset.resourceClosing = "true";
+  const finish = () => { delete dialog.dataset.resourceClosing; if (dialog.open) dialog.close(); };
+  const animation = animateResourceSurface(dialog, true);
+  if (animation) animation.finished.then(finish, finish);
+  else finish();
+}
+
+function setResourceDetailsOpen(details, open) {
+  if (!details) return;
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const before = details.getBoundingClientRect().height;
+  details.resourceDetailsAnimation?.cancel();
+  for (const child of [...details.children].slice(1)) child.resourceSurfaceAnimation?.cancel();
+  details.resourceMotionTargetOpen = open;
+  const summary = details.querySelector(":scope > summary");
+  summary?.setAttribute("aria-expanded", String(open));
+  if (!open && details.contains(document.activeElement) && document.activeElement !== summary) summary?.focus({ preventScroll: true });
+  if (reduced) { details.open = open; details.style.removeProperty("overflow"); delete details.resourceMotionTargetOpen; delete details.resourceDetailsAnimation; return; }
+  const popup = details.querySelector(":scope > .resource-property-popover");
+  if (popup) {
+    details.open = true;
+    const animation = animateResourceSurface(popup, !open);
+    details.resourceDetailsAnimation = animation;
+    animation?.finished.then(() => {
+      if (details.resourceDetailsAnimation !== animation) return;
+      details.open = open;
+      animation.cancel();
+      delete details.resourceMotionTargetOpen;
+      delete details.resourceDetailsAnimation;
+    }, () => {});
+    return;
+  }
+  details.open = open;
+  const after = details.getBoundingClientRect().height;
+  details.open = true;
+  const animation = details.animate([{ height: `${before}px` }, { height: `${after}px` }], {
+    duration: 260, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+  });
+  details.resourceDetailsAnimation = animation;
+  details.style.overflow = "clip";
+  for (const child of [...details.children].slice(1)) animateResourceSurface(child, !open);
+  animation.finished.then(() => {
+    if (details.resourceDetailsAnimation !== animation) return;
+    details.open = open;
+    for (const child of [...details.children].slice(1)) child.resourceSurfaceAnimation?.cancel();
+    details.style.removeProperty("overflow");
+    delete details.resourceMotionTargetOpen;
+    delete details.resourceDetailsAnimation;
+  }, () => {});
+}
+
+function handleResourceDetailsClick(event) {
+  const summary = event.target.closest("summary");
+  const details = summary?.parentElement;
+  if (!details?.matches("details[data-resource-properties], details[data-resource-property-picker], details[data-property-definition], details[data-resource-view-detail]")) return false;
+  if (event.target.closest("button, input, select, textarea, a")) return false;
+  event.preventDefault();
+  setResourceDetailsOpen(details, !(details.resourceMotionTargetOpen ?? details.open));
+  return true;
+}
+
+function captureResourceRows(root) {
+  if (!root || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return null;
+  const top = root.getBoundingClientRect().top;
+  const rows = new Map([...root.querySelectorAll("[data-property-definition], .resource-property-option-config[data-option-id], [data-resource-filter-rule], [data-resource-order-key]")].map((row) => {
+    const key = row.dataset.propertyDefinition || row.dataset.resourceFilterRule || row.dataset.resourceOrderKey || `${row.closest("[data-property-definition]").dataset.propertyDefinition}:${row.dataset.optionId}`;
+    return [key, row.getBoundingClientRect().top - top];
+  }));
+  return { height: root.getBoundingClientRect().height, rows };
+}
+
+function animateResourceRows(root, previous) {
+  if (!root || !previous || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const current = captureResourceRows(root);
+  if (Math.abs(previous.height - current.height) > 1) root.animate([{ height: `${previous.height}px` }, { height: `${current.height}px` }], { duration: 260, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+  for (const row of root.querySelectorAll("[data-property-definition], .resource-property-option-config[data-option-id], [data-resource-filter-rule], [data-resource-order-key]")) {
+    const key = row.dataset.propertyDefinition || row.dataset.resourceFilterRule || row.dataset.resourceOrderKey || `${row.closest("[data-property-definition]").dataset.propertyDefinition}:${row.dataset.optionId}`;
+    if (!previous.rows.has(key)) { animateResourceSurface(row); continue; }
+    const offset = previous.rows.get(key) - current.rows.get(key);
+    if (Math.abs(offset) > 1) row.animate([{ translate: `0 ${offset}px` }, { translate: "0 0" }], { duration: 260, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+  }
+}
+
 function activeResourceView() {
   return state.settings.resourceViews.find((view) => view.id === state.settings.activeResourceViewId) || state.settings.resourceViews[0];
 }
 
 function resourceViewDetailOpen(key, fallback = false) {
   const previous = els.viewRoot.querySelector(`[data-resource-view-detail="${cssEscape(key)}"]`);
-  return (previous ? previous.open : fallback) ? " open" : "";
+  return (previous ? previous.resourceMotionTargetOpen ?? previous.open : fallback) ? " open" : "";
 }
 
 function resourceViewPropertyOptions(selected) {
@@ -2259,6 +2358,7 @@ function removeResourceViewFilter(group, key) {
 }
 
 function saveResourceViewSettings(previousViews, previousActive) {
+  const previousSettings = captureResourceRows(els.viewRoot.querySelector(".resource-view-settings-body"));
   const invalid = SYGMAResourceModel.validateState(state).some((issue) => issue.path.startsWith("state.settings.resourceViews") || issue.path === "state.settings.activeResourceViewId");
   if (invalid) {
     state.settings.resourceViews = previousViews;
@@ -2274,6 +2374,8 @@ function saveResourceViewSettings(previousViews, previousActive) {
   localWorkspaceOperationScope = "workspace";
   saveState();
   renderView({ soft: true });
+  animateResourceSurface(els.viewRoot.querySelector(".resource-groups"));
+  animateResourceRows(els.viewRoot.querySelector(".resource-view-settings-body"), previousSettings);
   if (selector) els.viewRoot.querySelector(selector)?.focus({ preventScroll: true });
   return true;
 }
@@ -2320,7 +2422,7 @@ function handleResourceViewClick(event) {
   else return true;
   if (!saveResourceViewSettings(previousViews, previousActive)) return true;
   if (action === "add" || action === "duplicate") {
-    els.viewRoot.querySelector('[data-resource-view-detail="settings"]').open = true;
+    setResourceDetailsOpen(els.viewRoot.querySelector('[data-resource-view-detail="settings"]'), true);
     const name = els.viewRoot.querySelector('[data-resource-view-field="name"]');
     name?.focus();
     name?.select();
@@ -2448,7 +2550,7 @@ function renderResourcePropertyValue(resource, property, { editable = false } = 
   }
   const disabled = resourceMutationAllowed(resource) ? "" : " disabled";
   const attributes = `data-resource-property-value="${esc(property.id)}" data-resource-id="${esc(resource.id)}" aria-label="${esc(property.name)}"${disabled}`;
-  if (property.type === "checkbox") return `<input type="checkbox" ${attributes}${value === true ? " checked" : ""}>`;
+  if (property.type === "checkbox") return `<label class="resource-property-check"><input type="checkbox" ${attributes}${value === true ? " checked" : ""}></label>`;
   if (property.type === "text") return `<textarea rows="1" maxlength="10000" placeholder="비어 있음" ${attributes}>${esc(value || "")}</textarea>`;
   if (property.type === "number") return `<input type="number" step="any" placeholder="비어 있음" value="${esc(value ?? "")}" ${attributes}>`;
   const picker = `data-resource-property-picker="${esc(property.id)}" data-resource-id="${esc(resource.id)}"`;
@@ -2492,13 +2594,23 @@ function renderResourceProperties(resource) {
 function syncResourceProperties(element, resource, force = false) {
   const previous = element.querySelector("[data-resource-properties]");
   const markup = renderResourceProperties(resource);
-  if (previous && (force || (element.resourcePropertiesMarkup !== markup && !previous.contains(document.activeElement)) )) {
-    const expanded = previous.open;
-    const opened = [...previous.querySelectorAll("details[open]")].map((details) => details.dataset.resourcePropertyPicker);
+  const activeRelation = document.activeElement?.closest("[data-resource-relations] [data-finance-select]");
+  const completedRelation = previous?.contains(activeRelation) && !activeRelation.classList.contains("is-open");
+  const relationField = completedRelation ? activeRelation.querySelector("[data-field]")?.dataset.field : "";
+  if (previous && (force || (element.resourcePropertiesMarkup !== markup && (!previous.contains(document.activeElement) || completedRelation)) )) {
+    const previousRows = captureResourceRows(previous);
+    const previousPickers = new Map([...previous.querySelectorAll("details[open]")].map((details) => [details.dataset.resourcePropertyPicker, captureResourceRows(details.querySelector(".resource-property-popover"))]));
+    const expanded = previous.resourceMotionTargetOpen ?? previous.open;
+    const opened = [...previous.querySelectorAll("details[open]")].filter((details) => details.resourceMotionTargetOpen !== false).map((details) => details.dataset.resourcePropertyPicker);
     previous.outerHTML = markup;
     const current = element.querySelector("[data-resource-properties]");
     current.open = expanded;
-    for (const details of current.querySelectorAll("details")) details.open = opened.includes(details.dataset.resourcePropertyPicker);
+    for (const details of current.querySelectorAll("details")) {
+      details.open = opened.includes(details.dataset.resourcePropertyPicker);
+      if (details.open) animateResourceRows(details.querySelector(".resource-property-popover"), previousPickers.get(details.dataset.resourcePropertyPicker));
+    }
+    animateResourceRows(current, previousRows);
+    if (relationField) current.querySelector(`[data-resource-relations] [data-field="${cssEscape(relationField)}"]`)?.closest("[data-finance-select]")?.querySelector("[data-finance-select-trigger]")?.focus({ preventScroll: true });
     element.resourcePropertiesMarkup = markup;
   } else if (!previous) element.resourcePropertiesMarkup = markup;
 }
@@ -2514,12 +2626,14 @@ function refreshResourceProperties() {
 function openResourcePropertyManager(propertyId = "") {
   if (app.dataset.workspaceAuthority !== "ready") return;
   let dialog = app.querySelector("[data-resource-property-manager]");
+  const previous = captureResourceRows(dialog);
   if (!dialog) {
     dialog = document.createElement("dialog");
     dialog.className = "resource-property-manager";
     dialog.dataset.resourcePropertyManager = "";
     dialog.setAttribute("aria-label", "Resource 속성 설정");
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); closeResourceDialog(dialog); });
     app.append(dialog);
     dialog.showModal();
   }
@@ -2540,6 +2654,8 @@ function openResourcePropertyManager(propertyId = "") {
       </div></details>`).join("")}</div>
     <button class="button secondary" type="button" data-resource-property-action="add">＋ 새 속성</button>`;
   if (propertyId) dialog.querySelector(`[data-property-definition="${CSS.escape(propertyId)}"] input`)?.focus();
+  if (previous) animateResourceRows(dialog, previous);
+  else animateResourceSurface(dialog);
 }
 
 function saveResourcePropertySchema(propertyId = "", redrawManager = true) {
@@ -2570,12 +2686,77 @@ function removeResourcePropertyReferences(propertyId, filtersOnly = false) {
   }
 }
 
+function confirmResourcePropertyChange(propertyId, action, value, message) {
+  if (app.querySelector("[data-resource-property-confirm]")) return;
+  const previousFocus = document.activeElement;
+  const dialog = document.createElement("dialog");
+  const deleting = action !== "type";
+  dialog.className = "confirm-dialog resource-property-confirm";
+  dialog.dataset.resourcePropertyConfirm = "";
+  dialog.setAttribute("aria-labelledby", "resource-property-confirm-title");
+  dialog.setAttribute("aria-describedby", "resource-property-confirm-copy");
+  dialog.innerHTML = `<div class="confirm-dialog-head"><div><span class="confirm-kicker">Resources</span><h2 id="resource-property-confirm-title">${deleting ? "삭제할까요?" : "유형을 변경할까요?"}</h2></div></div>
+    <p class="confirm-copy" id="resource-property-confirm-copy">${esc(message)}</p>
+    <div class="confirm-actions"><button class="button secondary" type="button" data-resource-confirm="cancel" autofocus>취소</button><button class="button danger" type="button" data-resource-confirm="accept">${deleting ? "삭제" : "변경"}</button></div>`;
+  dialog.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const button = event.target.closest("[data-resource-confirm]");
+    if (!button || dialog.dataset.resourceClosing) return;
+    dialog.dataset.accepted = String(button.dataset.resourceConfirm === "accept");
+    closeResourceDialog(dialog);
+  });
+  dialog.addEventListener("cancel", (event) => { event.preventDefault(); closeResourceDialog(dialog); });
+  dialog.addEventListener("close", () => {
+    const accepted = dialog.dataset.accepted === "true";
+    dialog.remove();
+    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    if (accepted) applyResourcePropertyChange(propertyId, action, value);
+  }, { once: true });
+  app.append(dialog);
+  dialog.showModal();
+  animateResourceSurface(dialog);
+}
+
+function applyResourcePropertyChange(propertyId, action, value = "") {
+  if (app.dataset.workspaceAuthority !== "ready") return;
+  const properties = state.settings.resourceProperties;
+  const property = properties.find((entry) => entry.id === propertyId);
+  if (!property) return;
+  if (action === "delete") {
+    properties.splice(properties.indexOf(property), 1);
+    for (const resource of state.resources) if (Object.hasOwn(resource.propertyValues || {}, propertyId)) { delete resource.propertyValues[propertyId]; markResourceChanged(resource); }
+    removeResourcePropertyReferences(propertyId);
+  } else if (action === "option-delete") {
+    const index = property.options.findIndex((option) => option.id === value);
+    if (index < 0) return;
+    property.options.splice(index, 1);
+    for (const resource of state.resources) {
+      const selected = resource.propertyValues?.[propertyId];
+      if (selected === value || Array.isArray(selected) && selected.includes(value)) { resource.propertyValues[propertyId] = Array.isArray(selected) ? selected.filter((id) => id !== value) : ""; markResourceChanged(resource); }
+    }
+  } else if (action === "type") {
+    if (property.type === value || !resourceModel.PROPERTY_TYPES.some((type) => type.id === value)) return;
+    const compatible = ["select", "multi_select"].includes(property.type) && ["select", "multi_select"].includes(value);
+    for (const resource of state.resources) {
+      if (resource.propertyValues?.[propertyId] === undefined) continue;
+      const old = resource.propertyValues[propertyId];
+      if (compatible) resource.propertyValues[propertyId] = value === "multi_select" ? (old ? [old] : []) : (Array.isArray(old) ? old[0] || "" : "");
+      else delete resource.propertyValues[propertyId];
+      markResourceChanged(resource);
+    }
+    removeResourcePropertyReferences(propertyId, true);
+    property.type = value;
+  } else return;
+  saveResourcePropertySchema(action === "delete" ? "" : propertyId);
+  if (action === "delete") app.querySelector('[data-resource-property-manager] [data-resource-property-action="close"]')?.focus({ preventScroll: true });
+}
+
 function handleResourcePropertyClick(event) {
   const button = event.target.closest("[data-resource-property-action]");
   if (!button) return false;
   event.preventDefault();
   const action = button.dataset.resourcePropertyAction;
-  if (action === "close") { button.closest("dialog").close(); return true; }
+  if (action === "close") { closeResourceDialog(button.closest("dialog")); return true; }
   if (app.dataset.workspaceAuthority !== "ready") return true;
   const picker = button.closest("[data-resource-property-picker]");
   const propertyId = picker?.dataset.resourcePropertyPicker || button.closest("[data-property-definition]")?.dataset.propertyDefinition || button.dataset.propertyId;
@@ -2610,7 +2791,7 @@ function handleResourcePropertyClick(event) {
       const value = resource.propertyValues?.[propertyId];
       setResourcePropertyValue(resource, propertyId, property.type === "select" ? optionId : (Array.isArray(value) && value.includes(optionId) ? value.filter((id) => id !== optionId) : [...(Array.isArray(value) ? value : []), optionId]));
       const current = resourceWindowElement(resource.id)?.querySelector(`[data-resource-property-picker="${CSS.escape(propertyId)}"]`);
-      if (property.type === "select" && current) { current.open = false; current.querySelector("summary").focus({ preventScroll: true }); }
+      if (property.type === "select" && current) { setResourceDetailsOpen(current, false); current.querySelector("summary").focus({ preventScroll: true }); }
       else current?.querySelector("[data-resource-option-search]").focus({ preventScroll: true });
     }
     return true;
@@ -2629,10 +2810,8 @@ function handleResourcePropertyClick(event) {
     return true;
   }
   if (action === "delete") {
-    if (!window.confirm(`“${property.name}” 속성과 모든 자료의 값을 삭제할까요?`)) return true;
-    properties.splice(index, 1);
-    for (const resource of state.resources) if (resource.propertyValues && Object.hasOwn(resource.propertyValues, propertyId)) { delete resource.propertyValues[propertyId]; markResourceChanged(resource); }
-    removeResourcePropertyReferences(propertyId);
+    confirmResourcePropertyChange(propertyId, action, "", `“${property.name}” 속성과 모든 자료의 값이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.`);
+    return true;
   } else if (action === "property-up" || action === "property-down") {
     const next = index + (action === "property-up" ? -1 : 1);
     if (next >= 0 && next < properties.length) [properties[index], properties[next]] = [properties[next], properties[index]];
@@ -2643,14 +2822,10 @@ function handleResourcePropertyClick(event) {
     const next = optionIndex + (action === "option-up" ? -1 : 1);
     if (optionIndex >= 0 && next >= 0 && next < property.options.length) [property.options[optionIndex], property.options[next]] = [property.options[next], property.options[optionIndex]];
   } else if (action === "option-delete" && optionIndex >= 0) {
-    if (!window.confirm(`“${property.options[optionIndex].name}” 옵션을 모든 자료에서 삭제할까요?`)) return true;
-    property.options.splice(optionIndex, 1);
-    for (const resource of state.resources) {
-      const value = resource.propertyValues?.[propertyId];
-      if (value === optionId || Array.isArray(value) && value.includes(optionId)) { resource.propertyValues[propertyId] = Array.isArray(value) ? value.filter((id) => id !== optionId) : ""; markResourceChanged(resource); }
-    }
+    confirmResourcePropertyChange(propertyId, action, optionId, `“${property.options[optionIndex].name}” 옵션을 모든 자료에서 삭제합니다. 이 작업은 되돌릴 수 없습니다.`);
+    return true;
   }
-  saveResourcePropertySchema(action === "delete" ? "" : propertyId);
+  saveResourcePropertySchema(propertyId);
   return true;
 }
 
@@ -2688,15 +2863,14 @@ function handleResourcePropertyChange(event) {
       if (key === "type" && input.value !== property.type) {
         const compatible = ["select", "multi_select"].includes(property.type) && ["select", "multi_select"].includes(input.value);
         const populated = state.resources.filter((resource) => resource.propertyValues?.[property.id] !== undefined);
-        if (property.type === "multi_select" && input.value === "select" && populated.some((resource) => Array.isArray(resource.propertyValues[property.id]) && resource.propertyValues[property.id].length > 1) && !window.confirm("선택 속성은 하나의 옵션만 보관합니다. 각 자료의 첫 번째 옵션만 남길까요?")) { input.value = property.type; return true; }
-        if (populated.length && !compatible && !window.confirm("유형을 변경하면 이 속성의 기존 값이 지워집니다. 변경할까요?")) { input.value = property.type; return true; }
-        for (const resource of populated) {
-          const old = resource.propertyValues[property.id];
-          if (compatible) resource.propertyValues[property.id] = input.value === "multi_select" ? (old ? [old] : []) : (Array.isArray(old) ? old[0] || "" : "");
-          else delete resource.propertyValues[property.id];
-          markResourceChanged(resource);
-        }
-        removeResourcePropertyReferences(property.id, true);
+        const nextType = input.value;
+        const losesOptions = property.type === "multi_select" && nextType === "select" && populated.some((resource) => Array.isArray(resource.propertyValues[property.id]) && resource.propertyValues[property.id].length > 1);
+        input.value = property.type;
+        if (losesOptions || populated.length && !compatible) confirmResourcePropertyChange(property.id, "type", nextType, losesOptions
+          ? "선택 속성은 하나의 옵션만 보관합니다. 각 자료의 첫 번째 옵션만 남고 나머지 선택은 삭제됩니다."
+          : "유형을 변경하면 모든 자료에서 이 속성의 기존 값이 지워집니다.");
+        else applyResourcePropertyChange(property.id, "type", nextType);
+        return true;
       }
       property[key] = input.value.trim();
     }
@@ -2733,8 +2907,17 @@ function handleResourcePropertyChange(event) {
 }
 
 function handleResourcePropertyKeydown(event) {
-  if (!event.target.closest("[data-resource-property-manager], [data-resource-properties]")) return false;
+  if (!event.target.closest("[data-resource-property-manager], [data-resource-property-confirm], [data-resource-properties]")) return false;
   event.stopPropagation();
+  if (event.target.closest("[data-finance-select]") && handleFinancePickerKeydown(event)) return true;
+  const confirmation = event.target.closest("[data-resource-property-confirm]");
+  if (confirmation && event.key === "Tab") {
+    event.preventDefault();
+    const buttons = [...confirmation.querySelectorAll("button:not([disabled])")];
+    const index = buttons.indexOf(document.activeElement);
+    buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length]?.focus();
+    return true;
+  }
   const search = event.target.closest("[data-resource-option-search]");
   if (search && event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
@@ -2742,7 +2925,7 @@ function handleResourcePropertyKeydown(event) {
     return true;
   }
   const picker = event.target.closest("[data-resource-property-picker]");
-  if (picker && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); picker.open = false; picker.querySelector("summary").focus(); return true; }
+  if (picker && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setResourceDetailsOpen(picker, false); picker.querySelector("summary").focus(); return true; }
   return true;
 }
 
@@ -12050,6 +12233,7 @@ function relationField(label, field, value, items, nameField) {
 }
 
 function handleClick(event) {
+  if (handleResourceDetailsClick(event)) return;
   if (handleResourcePropertyClick(event) || handleResourceViewClick(event)) return;
   const quickEditorResource = event.target.closest("[data-quick-editor-resource]");
   if (quickEditorResource) {
@@ -13342,9 +13526,24 @@ function flushResourceWindowInputs(resourceId) {
 
 function closeResourceDocument(resourceId = ui.activeResourceId) {
   if (!resourceWindowById(resourceId)) return;
+  const element = resourceWindowElement(resourceId);
   const wasActive = ui.activeResourceId === resourceId;
   if (ui.resourceWindowDrag?.id === resourceId) cancelResourceWindowPointer();
   flushResourceWindowInputs(resourceId);
+  if (element && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const rect = element.getBoundingClientRect();
+    element.resourceCommentsObserver?.disconnect();
+    element.resourceGeometryAnimation?.cancel();
+    element.inert = true;
+    element.setAttribute("aria-hidden", "true");
+    for (const node of [element, ...element.querySelectorAll("[id], [data-resource-document], [data-resource-title], [data-owner-id], [data-block-id], [data-block-content]")]) {
+      for (const attribute of ["id", "data-resource-window", "data-resource-document", "data-resource-title", "data-owner-type", "data-owner-id", "data-block-id", "data-block-content"]) node.removeAttribute(attribute);
+    }
+    Object.assign(element.style, { position: "fixed", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, pointerEvents: "none", zIndex: "89" });
+    document.body.append(element);
+    const animation = animateResourceSurface(element, true);
+    animation?.finished.then(() => element.remove(), () => element.remove());
+  }
   ui.resourceWindows = ui.resourceWindows.filter((record) => record.id !== resourceId);
   if (wasActive) {
     clearResourceWindowEditingState();
@@ -13663,6 +13862,13 @@ function closeActiveResourceWindowFromShortcut() {
 
 function handleResourceWindowCloseShortcut(event) {
   if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || (event.code !== "KeyW" && event.key.toLowerCase() !== "w")) return;
+  const propertyDialog = app.querySelector("[data-resource-property-confirm][open]") || app.querySelector("[data-resource-property-manager][open]");
+  if (propertyDialog) {
+    if (!event.repeat) closeResourceDialog(propertyDialog);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
   if (!event.repeat && !closeActiveResourceWindowFromShortcut()) return;
   event.preventDefault();
   event.stopImmediatePropagation();

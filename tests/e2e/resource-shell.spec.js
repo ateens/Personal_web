@@ -87,6 +87,12 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   await page.keyboard.press("Enter");
   await expect(relations.locator('[data-finance-select-options]:not([hidden])')).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(relations.locator('[data-finance-select-options]:not([hidden])')).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(relations.locator('[data-finance-select-options]:not([hidden])')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
   const triggerStyle = await trigger.evaluate((element) => {
     const style = getComputedStyle(element);
     return { border: style.borderBottomWidth, shadow: style.boxShadow, decoration: style.textDecorationLine };
@@ -107,9 +113,11 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   await saved("fixture-second-box", "");
   await chooseRelation(project, FIXTURE_IDS.project);
   await expect(box).toHaveValue(FIXTURE_IDS.box);
+  await expect(trigger).toBeFocused();
   await saved(FIXTURE_IDS.box, FIXTURE_IDS.project);
   await chooseRelation(box, "fixture-second-box");
   await expect(project).toHaveValue("");
+  await expect(box.locator("..").locator("[data-finance-select-trigger]")).toBeFocused();
   await saved("fixture-second-box", "");
   await chooseRelation(project, "fixture-no-box-project");
   await saved("", "fixture-no-box-project");
@@ -1018,7 +1026,8 @@ test("자료 목록 위에 문서 dialog를 열고 닫아도 목록과 opener를
   await expect(document).toHaveAttribute("aria-modal", "false");
   await expect(title).toHaveValue("E2E Notion Parity Resource");
   await expect(document).toBeFocused();
-  await expect(document.locator(":scope > .resource-document-title + [data-resource-relations] + .resource-document-divider + .resource-document-layout > .resource-document-body")).toHaveCount(1);
+  await expect(document.locator(":scope > .resource-document-title + [data-resource-properties] + .resource-document-divider + .resource-document-layout > .resource-document-body")).toHaveCount(1);
+  await expect(document.locator(":scope > [data-resource-properties] > [data-resource-relations]")).toHaveCount(1);
   await expect(document.locator(".resource-document-layout > [data-resource-comments]")).toHaveAttribute("aria-hidden", "true");
   await expect(document.locator('.block-editor[data-owner-type="resources"]')).toHaveAttribute("data-owner-id", FIXTURE_IDS.resource);
   await expect(document.locator("[data-block-drag], [data-block-add]")).toHaveCount(0);
