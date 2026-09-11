@@ -25,7 +25,7 @@ git merge-base --is-ancestor refs/remotes/origin/main HEAD \
   || fail "origin/main과 현재 main이 갈라져 있어 자동 push를 중단했습니다."
 
 if git diff --quiet refs/remotes/origin/main HEAD -- \
-  app.js finance-model.js styles.css index.html manifest.json assets icons \
+  app.js finance-model.js resource-model.js styles.css index.html manifest.json assets icons \
   server.js server package.json package-lock.json railway.json scripts
 then
   exit 0

@@ -37,6 +37,18 @@ async function openResourceList(page) {
   await expect(page.locator("[data-resource-view]")).toBeVisible();
 }
 
+async function setResourceGrouping(page, propertyId) {
+  await page.locator('[data-resource-view-detail="settings"]').evaluate((element) => { element.open = true; });
+  const panel = page.locator('[data-resource-view-detail="groups"]');
+  await panel.evaluate((element) => { element.open = true; });
+  for (const button of await panel.locator('[data-resource-view-action="remove-order"]').all()) await button.evaluate((element) => element.click());
+  if (propertyId) {
+    await panel.locator('[data-resource-view-action="add-order"]').evaluate((element) => element.click());
+    await panel.locator('[data-resource-view-field="order-property"]').selectOption(propertyId);
+  }
+  await page.locator('[data-resource-view-detail="settings"]').evaluate((element) => { element.open = false; });
+}
+
 async function chooseRelation(select, value) {
   const control = select.locator("..");
   await control.locator("[data-finance-select-trigger]").click();
@@ -114,7 +126,7 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   await expect.poll(() => reopened.locator("[data-resource-relations]").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
 });
 
-test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시하고 열린 본문과 저장 상태를 유지한다", async ({ page, request }) => {
+test("Resource 사용자 그룹은 미분류를 중복 없이 표시하고 열린 본문과 자료 내용을 유지한다", async ({ page, request }) => {
   await seedResourceRelations(page, request);
   const before = await fixtureSnapshot(request);
   const list = page.locator("[data-resource-view]");
@@ -123,32 +135,21 @@ test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시�
   await expect(list.locator('[data-resource-group="all"]')).toHaveCount(1);
   const floating = await openSettledResource(page, FIXTURE_IDS.resource);
   await floating.locator(".block-editor").evaluate((element) => { globalThis.__groupEditor = element; });
-  await page.locator(".resource-view-toolbar").evaluate((element) => { globalThis.__groupToolbar = element; });
-  for (const mode of ["boxes", "projects", "all"]) {
-    await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).evaluate((button) => button.click());
+  for (const field of ["boxId", "projectId", ""]) {
+    await setResourceGrouping(page, field);
     expect(await listed()).toEqual(allIds);
     expect(new Set(await listed()).size).toBe(allIds.length);
     expect(await floating.locator(".block-editor").evaluate((element) => element === globalThis.__groupEditor)).toBe(true);
-    expect(await page.locator(".resource-view-toolbar").evaluate((element) => element === globalThis.__groupToolbar)).toBe(true);
-    await expect(page.locator(".resource-groups")).toHaveAttribute("data-resource-group-mode", mode);
-    expect(await page.locator(".resource-view-toolbar").evaluate((element) => element.style.getPropertyValue("--resource-mode-index").trim())).toBe(String(["all", "boxes", "projects"].indexOf(mode)));
-    if (mode === "boxes") {
-      await expect(list.locator('[data-resource-group="fixture-empty-box"] h2')).toHaveText("Empty Box");
-      await expect(list.locator('[data-resource-group="fixture-empty-box"] [data-resource-open]')).toHaveCount(0);
-      await expect(list.locator('[data-resource-group="fixture-second-box"] [data-resource-open]')).toHaveCount(1);
-      await expect(list.locator('[data-resource-group=""] [data-resource-open]')).toHaveAttribute("data-resource-open", FIXTURE_IDS.titleSearchResource);
+    await expect(page.locator(".resource-groups")).toHaveAttribute("data-resource-group-mode", "custom");
+    if (field === "boxId") {
+      await expect(list.locator('[data-resource-drop-field="boxId"][data-resource-drop-id="fixture-second-box"] [data-resource-open]')).toHaveCount(1);
+      await expect(list.locator('[data-resource-drop-field="boxId"][data-resource-drop-id=""] [data-resource-open]')).toHaveAttribute("data-resource-open", FIXTURE_IDS.titleSearchResource);
     }
-    if (mode === "projects") {
-      await expect(list.locator('[data-resource-group="fixture-no-box-project"] h2')).toHaveText("No Box Project");
-      await expect(list.locator('[data-resource-group="fixture-no-box-project"] [data-resource-open]')).toHaveCount(0);
-      await expect(list.locator('[data-resource-group=""] [data-resource-open]')).toHaveCount(2);
-    }
+    if (field === "projectId") await expect(list.locator('[data-resource-drop-field="projectId"][data-resource-drop-id=""] [data-resource-open]')).toHaveCount(2);
   }
   await floating.locator(".resource-document-close").click();
-  await page.waitForTimeout(650);
-  const filtered = await fixtureSnapshot(request);
-  expect(filtered.writes).toEqual(before.writes);
-  expect(filtered.state.resources).toEqual(before.state.resources);
+  await expect.poll(async () => (await fixtureSnapshot(request)).state.settings.resourceViews?.[0]?.groups.length).toBe(0);
+  expect((await fixtureSnapshot(request)).state.resources).toEqual(before.state.resources);
   await page.locator('[data-nav-key="projects"]').evaluate((button) => button.click());
   const item = page.locator(`[data-project-item="${FIXTURE_IDS.project}"]`);
   const panel = item.locator(`[data-project-resources="${FIXTURE_IDS.project}"]`);
@@ -162,31 +163,25 @@ test("Resource 그룹 보기는 빈 그룹과 미분류를 중복 없이 표시�
   await expect(page.locator(`[data-resource-document="${FIXTURE_IDS.resource}"]`)).toBeVisible();
 });
 
-test("Resource 그룹은 실제 부모 너비에 맞춰 열을 배치하고 빈 목록 여백과 전환 시간을 유지한다", async ({ page, request }) => {
+test("Resource 사용자 그룹은 실제 부모 너비에 맞춰 중첩 목록을 표시한다", async ({ page, request }) => {
   await seedResourceRelations(page, request);
-  await page.locator('[data-view-control-mode="resources"][data-control-mode="boxes"]').click();
+  await setResourceGrouping(page, "boxId");
   const groups = page.locator(".resource-groups");
-  const toolbar = page.locator(".resource-view-toolbar");
-  expect(await toolbar.locator(".view-mode-group").evaluate((element) => getComputedStyle(element, "::before").transitionDuration.split(",").map((value) => Number.parseFloat(value)))).toContain(0.22);
-  expect(await groups.evaluate((element) => {
-    element.classList.add("is-entering");
-    return getComputedStyle(element).animationDuration;
-  })).toBe("0.18s");
-  for (const [width, columns] of [[1200, 3], [760, 2], [360, 1]]) {
+  for (const width of [1200, 760, 360]) {
     await groups.evaluate((element, size) => {
       element.parentElement.style.width = `${size}px`;
       element.parentElement.style.maxWidth = "none";
     }, width);
-    await expect.poll(() => groups.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(/\s+/).length)).toBe(columns);
     expect(await groups.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    for (const group of await groups.locator(":scope > .resource-custom-group").all()) {
+      expect(await group.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    }
   }
-  await expect(groups.locator('[data-resource-group="fixture-empty-box"] > .panel-title + .empty')).toHaveCSS("margin-top", "24px");
-  await expect(groups.locator(`[data-resource-group="${FIXTURE_IDS.box}"] > ul`)).toHaveCSS("margin-top", "24px");
-  await page.emulateMedia({ reducedMotion: "reduce" });
-  expect(await groups.evaluate((element) => {
-    element.classList.add("is-entering");
-    return Number.parseFloat(getComputedStyle(element).animationDuration);
-  })).toBeLessThanOrEqual(0.001);
+  const first = groups.locator(":scope > .resource-custom-group").first();
+  await first.locator(":scope > summary").click();
+  await expect(first.locator(".resource-custom-group-body")).not.toBeVisible();
+  await first.locator(":scope > summary").click();
+  await expect(first.locator(".resource-custom-group-body")).toBeVisible();
 });
 
 test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리기를 지원하고 본문 포커스를 보호한다", async ({ page, request }) => {
@@ -241,11 +236,12 @@ test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리�
     ["boxes", "boxId", "fixture-second-box", ["fixture-second-box", ""]],
     ["projects", "projectId", FIXTURE_IDS.project, [FIXTURE_IDS.box, FIXTURE_IDS.project]],
   ]) {
-    await page.locator(`[data-view-control-mode="resources"][data-control-mode="${mode}"]`).click();
+    await setResourceGrouping(page, field);
     const source = await groups.locator(`[data-resource-open="${FIXTURE_IDS.resource}"]`).boundingBox();
-    const target = await groups.locator(`[data-resource-drop-field="${field}"][data-resource-drop-id="${targetId}"]`).boundingBox();
     await page.mouse.move(source.x + 20, source.y + source.height / 2);
     await page.mouse.down();
+    await page.mouse.move(source.x + 40, source.y + source.height / 2, { steps: 4 });
+    const target = await page.locator(`.resource-move-stage [data-resource-drop-field="${field}"][data-resource-drop-id="${targetId}"]`).boundingBox();
     await page.mouse.move(target.x + target.width / 2, target.y + 24, { steps: 16 });
     await expect(page.locator(".resource-move-ghost")).toHaveCount(1);
     await page.mouse.up();

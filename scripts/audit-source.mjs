@@ -85,7 +85,7 @@ const checks = [
     files.app.includes('role="dialog" aria-label="할 일 이동"')
     && files.app.includes('data-today-task-action="delete" aria-label="할 일 삭제"')
   )],
-  ["native select, date, and month fields are hidden backing controls", () => nativePickerControlsAreHidden()],
+  ["native pickers are scoped to Resource settings or hidden backing controls", () => nativePickerControlsAreHidden()],
   ["no apparently unused named function or arrow declarations", () => noApparentlyUnusedFunctions()],
   ["no unreferenced CSS class selectors", () => noUnreferencedCssClassSelectors()],
 ];
@@ -103,14 +103,18 @@ function read(path) {
 }
 
 function cachedAssetUrlsMatchIndex() {
-  return ["/styles.css", "/finance-model.js", "/app.js"].every((asset) => (
+  return ["/styles.css", "/finance-model.js", "/resource-model.js", "/app.js"].every((asset) => (
     files.index.includes(`"${asset}"`) && files.serviceWorker.includes(`"${asset}"`)
   ));
 }
 
 function nativePickerControlsAreHidden() {
-  const selects = files.app.match(/<select\b[^>]*>/g) || [];
-  const dates = files.app.match(/<input\b[^>]*\btype="(?:date|month)"[^>]*>/g) || [];
+  // Resource forms intentionally use native keyboard and mobile pickers.
+  // Expand this one local attribute template before checking the scoped allowlist.
+  const source = files.app.replace(/function renderResourceFilterValue\([^]*?^}/m, (body) => body.replaceAll("${attributes}", 'data-resource-view-field="filter-value"'));
+  const isResourcePicker = (markup) => /\bdata-resource-(?:view-field|property-config|option-config|date-part)=/.test(markup);
+  const selects = (source.match(/<select\b[^>]*>/g) || []).filter((markup) => !isResourcePicker(markup));
+  const dates = (source.match(/<input\b[^>]*\btype="(?:date|month)"[^>]*>/g) || []).filter((markup) => !isResourcePicker(markup));
   const controls = [...selects, ...dates];
   if (!controls.length) return false;
   if (!selects.every((markup) => markup.includes('class="finance-select-native"'))) return false;

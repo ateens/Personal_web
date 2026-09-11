@@ -12,21 +12,26 @@ const serviceWorker = await readFile(resolve(client, "service-worker.js"), "utf8
 assert.doesNotThrow(() => new Function(serviceWorker), "built service worker is not valid JavaScript");
 const appPath = index.match(/src="(\/assets\/app\.[a-f0-9]{12}\.js)"/)?.[1];
 const financeModelPath = index.match(/src="(\/assets\/finance-model\.[a-f0-9]{12}\.js)"/)?.[1];
+const resourceModelPath = index.match(/src="(\/assets\/resource-model\.[a-f0-9]{12}\.js)"/)?.[1];
 const stylesPath = index.match(/href="(\/assets\/styles\.[a-f0-9]{12}\.css)"/)?.[1];
 assert(appPath, "built index is missing a content-hashed app asset");
 assert(financeModelPath, "built index is missing a content-hashed finance calculation asset");
+assert(resourceModelPath, "built index is missing a content-hashed Resource model asset");
 assert(stylesPath, "built index is missing a content-hashed stylesheet");
 
 const appFile = resolve(client, "assets", basename(appPath));
 const financeModelFile = resolve(client, "assets", basename(financeModelPath));
+const resourceModelFile = resolve(client, "assets", basename(resourceModelPath));
 const stylesFile = resolve(client, "assets", basename(stylesPath));
-const [appStat, financeModelStat, stylesStat, socialPreviewStat, sourceAppStat, sourceFinanceModelStat, sourceStylesStat] = await Promise.all([
+const [appStat, financeModelStat, resourceModelStat, stylesStat, socialPreviewStat, sourceAppStat, sourceFinanceModelStat, sourceResourceModelStat, sourceStylesStat] = await Promise.all([
   stat(appFile),
   stat(financeModelFile),
+  stat(resourceModelFile),
   stat(stylesFile),
   stat(resolve(client, "assets/sygma-social-preview.png")),
   stat(resolve(root, "app.js")),
   stat(resolve(root, "finance-model.js")),
+  stat(resolve(root, "resource-model.js")),
   stat(resolve(root, "styles.css")),
 ]);
 
@@ -34,7 +39,7 @@ assert(socialPreviewStat.size > 0, "social preview asset is missing from the cli
 assert(index.includes('property="og:image" content="/assets/sygma-social-preview.png"'), "built index is missing its Open Graph preview");
 assert(serviceWorker.includes("/assets/sygma-social-preview.png"), "service worker does not precache the social preview");
 assert(
-  serviceWorker.includes(appPath) && serviceWorker.includes(financeModelPath) && serviceWorker.includes(stylesPath),
+  serviceWorker.includes(appPath) && serviceWorker.includes(financeModelPath) && serviceWorker.includes(resourceModelPath) && serviceWorker.includes(stylesPath),
   "service worker does not precache built assets",
 );
 assert(serviceWorker.includes('/^\\/assets\\/[^/]+\\.[a-f0-9]{10,}\\./'), "service worker is missing hashed-asset cache-first delivery");
@@ -46,7 +51,7 @@ const katexCssPath = "/assets/katex/katex.min.css";
 const katexScriptPaths = ["/assets/katex/katex.min.js", "/assets/katex/contrib/mhchem.min.js"];
 assert(index.includes(`href="${katexCssPath}"`), "KaTeX fonts need a document-level stylesheet");
 let previousScriptIndex = -1;
-for (const path of [...katexScriptPaths, financeModelPath, "/assets/highlight/highlight.min.js", appPath]) {
+for (const path of [...katexScriptPaths, financeModelPath, resourceModelPath, "/assets/highlight/highlight.min.js", appPath]) {
   const scriptIndex = index.indexOf(`<script src="${path}"`);
   assert(scriptIndex > previousScriptIndex, "KaTeX and mhchem must load before the application");
   previousScriptIndex = scriptIndex;
@@ -84,8 +89,11 @@ for (const [, language] of languageOptions.matchAll(/\["([^"]+)",/g)) {
   if (language !== "mermaid") assert(rendererContext.hljs.getLanguage(language), `Missing syntax highlighting language: ${language}`);
 }
 
-const builtBytes = appStat.size + financeModelStat.size + stylesStat.size;
-const sourceBytes = sourceAppStat.size + sourceFinanceModelStat.size + sourceStylesStat.size;
+const modelContext = {};
+vm.runInNewContext(await readFile(resourceModelFile, "utf8"), modelContext);
+assert.equal(typeof modelContext.SYGMAResourceModel.applyView, "function", "Built Resource model must load before the application");
+const builtBytes = appStat.size + financeModelStat.size + resourceModelStat.size + stylesStat.size;
+const sourceBytes = sourceAppStat.size + sourceFinanceModelStat.size + sourceResourceModelStat.size + sourceStylesStat.size;
 assert(builtBytes / sourceBytes <= 0.75, "built JS/CSS did not meet the size reduction target");
 
 async function pathExists(path) {

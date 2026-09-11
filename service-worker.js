@@ -1,9 +1,10 @@
-const CACHE_NAME = "sygma-personal-web-v649-code-renderers";
+const CACHE_NAME = "sygma-personal-web-v650-resource-properties";
 const APP_SHELL_URL = "/index.html";
 const REQUIRED_ASSETS = [
   APP_SHELL_URL,
   "/styles.css",
   "/finance-model.js",
+  "/resource-model.js",
   "/app.js",
   "/assets/highlight/highlight.min.js",
   "/assets/katex/katex.min.js",

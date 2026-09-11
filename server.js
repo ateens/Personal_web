@@ -18,12 +18,14 @@ import {
 } from "./server/finance.js";
 import { mutationOriginAllowed } from "./server/request-security.js";
 import { createStorage, SUPPORTED_MARK_TYPES } from "./server/storage.js";
+import "./resource-model.js";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const sourceStaticRoot = resolve(root);
 const sourceStaticFiles = new Set([
   "/app.js",
   "/finance-model.js",
+  "/resource-model.js",
   "/index.html",
   "/manifest.json",
   "/service-worker.js",
@@ -37,7 +39,7 @@ const FINANCE_BODY_LIMIT = 2_000_000;
 const FINANCE_LOGIN_BODY_LIMIT = 4_096;
 const STATE_EVENT_POLL_INTERVAL_MS = 1_000;
 const STATE_EVENT_HEARTBEAT_MS = 15_000;
-const MAX_STATE_DEPTH = 32;
+const MAX_STATE_DEPTH = 40;
 const MAX_STATE_NODES = 200_000;
 const MAX_ARRAY_ITEMS = 20_000;
 const MAX_COLLECTION_ITEMS = 50_000;
@@ -1671,6 +1673,7 @@ function validateIncomingState(state) {
   if (!Number.isFinite(Date.parse(state.createdAt || ""))) addValidationIssue(issues, "state.createdAt", "invalid_timestamp", "createdAt must be an ISO-compatible timestamp.");
   if (!Number.isFinite(Date.parse(state.updatedAt || ""))) addValidationIssue(issues, "state.updatedAt", "invalid_timestamp", "updatedAt must be an ISO-compatible timestamp.");
   if (!isPlainObject(state.settings)) addValidationIssue(issues, "state.settings", "invalid_settings", "settings must be an object.");
+  for (const issue of globalThis.SYGMAResourceModel.validateState(state)) addValidationIssue(issues, issue.path, issue.code, issue.message);
 
   let totalItems = 0;
   for (const key of REQUIRED_COLLECTION_KEYS) {

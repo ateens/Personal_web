@@ -60,6 +60,8 @@ test.beforeEach(async ({ request }) => {
 });
 
 test("Markdown paste distinguishes standalone dollar fences from same-line inline equations and reloads", async ({ page, request }) => {
+  const startupErrors = [];
+  page.on("pageerror", (error) => startupErrors.push(error.message));
   let editor = await openResource(page);
   const inline = String.raw`벡터 $x_t$ 와 $$ \mathbb{R}^{n} $$ 위에서`;
   await paste(editor, { "text/plain": `정책 수식\n\n$$\n${GATHERED}\n$$\n\n${inline}\n\n$$ z=E(\\ell) $$` });
@@ -75,6 +77,7 @@ test("Markdown paste distinguishes standalone dollar fences from same-line inlin
     }
   }
   editor = await openResource(page);
+  expect(startupErrors, "Returning to Resources must finish startup and register renderers").toEqual([]);
   await expectEquations(editor, expected);
   expect((await storedBlocks(request)).map(({ text, marks }) => ({ text, marks }))).toEqual(saved.map(({ text, marks }) => ({ text, marks })));
 });

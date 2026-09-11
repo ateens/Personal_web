@@ -76,7 +76,7 @@ assert(katexFonts.length > 0, "KaTeX must declare local WOFF2 fonts");
 const katexAssets = ["/assets/katex/katex.min.js", "/assets/katex/katex.min.css", "/assets/katex/contrib/mhchem.min.js", ...katexFonts];
 const highlightAsset = "/assets/highlight/highlight.min.js";
 const mermaidAsset = "/assets/mermaid/mermaid.min.js";
-assert.equal(installed.required.length, 5 + katexAssets.length, "the shell, app, syntax highlighter, and all equation rendering assets are required");
+assert.equal(installed.required.length, 6 + katexAssets.length, "the shell, app, shared models, syntax highlighter, and all equation rendering assets are required");
 assert(installed.required.includes(highlightAsset), "The syntax highlighter must be available offline");
 assert(!installed.required.includes(mermaidAsset) && !installed.optional.includes(mermaidAsset), "The large Mermaid engine must load only when used");
 for (const asset of katexAssets) assert(installed.required.includes(asset), `equation asset missing from offline cache: ${asset}`);

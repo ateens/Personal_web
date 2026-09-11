@@ -17,30 +17,35 @@ function contentHash(content) {
 await rm(dist, { recursive: true, force: true });
 await mkdir(assetDir, { recursive: true });
 
-const [appSource, financeModelSource, stylesSource, indexSource, manifestSource, serviceWorkerSource] = await Promise.all([
+const [appSource, financeModelSource, resourceModelSource, stylesSource, indexSource, manifestSource, serviceWorkerSource] = await Promise.all([
   readFile(resolve(root, "app.js"), "utf8"),
   readFile(resolve(root, "finance-model.js"), "utf8"),
+  readFile(resolve(root, "resource-model.js"), "utf8"),
   readFile(resolve(root, "styles.css"), "utf8"),
   readFile(resolve(root, "index.html"), "utf8"),
   readFile(resolve(root, "manifest.json"), "utf8"),
   readFile(resolve(root, "service-worker.js"), "utf8"),
 ]);
 
-const [appBuild, financeModelBuild, stylesBuild] = await Promise.all([
+const [appBuild, financeModelBuild, resourceModelBuild, stylesBuild] = await Promise.all([
   transform(appSource, { loader: "js", minify: true, target: "es2022", charset: "utf8" }),
   transform(financeModelSource, { loader: "js", minify: true, target: "es2022", charset: "utf8" }),
+  transform(resourceModelSource, { loader: "js", minify: true, target: "es2022", charset: "utf8" }),
   transform(stylesSource, { loader: "css", minify: true, target: "es2022", charset: "utf8" }),
 ]);
 
 const appFile = `app.${contentHash(appBuild.code)}.js`;
 const financeModelFile = `finance-model.${contentHash(financeModelBuild.code)}.js`;
+const resourceModelFile = `resource-model.${contentHash(resourceModelBuild.code)}.js`;
 const stylesFile = `styles.${contentHash(stylesBuild.code)}.css`;
 const appPath = `/assets/${appFile}`;
 const financeModelPath = `/assets/${financeModelFile}`;
+const resourceModelPath = `/assets/${resourceModelFile}`;
 const stylesPath = `/assets/${stylesFile}`;
 await Promise.all([
   writeFile(resolve(assetDir, appFile), appBuild.code),
   writeFile(resolve(assetDir, financeModelFile), financeModelBuild.code),
+  writeFile(resolve(assetDir, resourceModelFile), resourceModelBuild.code),
   writeFile(resolve(assetDir, stylesFile), stylesBuild.code),
 ]);
 
@@ -72,6 +77,7 @@ await Promise.all(codeRendererFiles.map(async ([file, , license], index) => {
 const builtIndex = indexSource
   .replace('href="/styles.css"', `href="${stylesPath}"`)
   .replace('src="/finance-model.js"', `src="${financeModelPath}"`)
+  .replace('src="/resource-model.js"', `src="${resourceModelPath}"`)
   .replace('src="/app.js"', `src="${appPath}"`)
   .replace("</head>", `    <link rel="preload" href="${financeModelPath}" as="script">\n    <link rel="preload" href="${appPath}" as="script">\n  </head>`);
 const manifest = JSON.parse(manifestSource);
@@ -80,6 +86,7 @@ const requiredAssets = [
   "/index.html",
   stylesPath,
   financeModelPath,
+  resourceModelPath,
   appPath,
   "/assets/highlight/highlight.min.js",
   ...katexAssets,
@@ -104,8 +111,8 @@ await Promise.all([
   cp(resolve(root, "assets/sygma-social-preview.png"), resolve(clientDir, "assets/sygma-social-preview.png")),
 ]);
 
-const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(financeModelSource) + Buffer.byteLength(stylesSource);
-const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(financeModelBuild.code) + Buffer.byteLength(stylesBuild.code);
+const originalBytes = Buffer.byteLength(appSource) + Buffer.byteLength(financeModelSource) + Buffer.byteLength(resourceModelSource) + Buffer.byteLength(stylesSource);
+const builtBytes = Buffer.byteLength(appBuild.code) + Buffer.byteLength(financeModelBuild.code) + Buffer.byteLength(resourceModelBuild.code) + Buffer.byteLength(stylesBuild.code);
 console.log(`Built SYGMA assets: ${originalBytes} -> ${builtBytes} bytes (${Math.round((builtBytes / originalBytes) * 100)}%).`);
 console.log(`Bundled local KaTeX assets: ${katexContents.reduce((total, content) => total + content.byteLength, 0)} bytes; ${katexAssets.length} engine, style, and WOFF2 assets precached.`);
 console.log(`Bundled local code renderers: highlight.js ${codeRendererContents[0].byteLength} bytes; Mermaid ${codeRendererContents[1].byteLength} bytes (loaded and cached on first use).`);

@@ -54,6 +54,7 @@ const MAX_CALENDAR_COLOR_ASSIGNMENTS = 512;
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 const financeModel = globalThis.SYGMAFinanceModel;
+const resourceModel = globalThis.SYGMAResourceModel;
 const financeSessionChannel = typeof BroadcastChannel === "function"
   ? new BroadcastChannel("sygma-finance-session-v1")
   : null;
@@ -735,7 +736,6 @@ let ui = {
   editingHabitId: "",
   habitDeleteConfirmId: "",
   activeResourceId: "",
-  resourceGroupBy: "all",
   resourceSelection: [],
   resourceListDrag: null,
   suppressResourceClickUntil: 0,
@@ -2163,40 +2163,257 @@ function renderBoxes() {
   `;
 }
 
-function renderResources() {
-  const resources = state.resources.filter((resource) => !resource.trashedAt);
-  return `
-    <section class="view" data-resource-view>
-      ${renderViewHeader("Resources", "자료", `${resources.length}개`, `
-        <button class="button secondary" type="button" data-action="new-resource">새 자료</button>
-      `)}
-      <div class="resource-view-toolbar" style="--resource-mode-index: ${["all", "boxes", "projects"].indexOf(ui.resourceGroupBy)}">
-        ${renderViewModeButtons("resources", [["all", "전체"], ["boxes", "Box별 보기"], ["projects", "Project별 보기"]], ui.resourceGroupBy)}
-      </div>
-      <div class="resource-groups" data-resource-group-mode="${ui.resourceGroupBy}" tabindex="0" role="group" aria-label="자료 목록, 항목을 끌어 이동, 빈 공간 드래그 또는 Space로 선택 후 Delete로 삭제">${renderResourceGroups(resources)}</div>
-    </section>
-  `;
+function activeResourceView() {
+  return state.settings.resourceViews.find((view) => view.id === state.settings.activeResourceViewId) || state.settings.resourceViews[0];
 }
 
-function renderResourceGroups(resources) {
-  if (ui.resourceGroupBy === "all") return renderResourceList(resources);
-  const field = ui.resourceGroupBy === "boxes" ? "boxId" : "projectId";
-  const groups = new Map(state[ui.resourceGroupBy].map((item) => [item.id, { title: item.name, resources: [] }]));
-  const unclassified = [];
-  for (const resource of resources) {
-    (groups.get(resource[field])?.resources || unclassified).push(resource);
+function resourceViewDetailOpen(key, fallback = false) {
+  const previous = els.viewRoot.querySelector(`[data-resource-view-detail="${cssEscape(key)}"]`);
+  return (previous ? previous.open : fallback) ? " open" : "";
+}
+
+function resourceViewPropertyOptions(selected) {
+  return SYGMAResourceModel.getProperties(state)
+    .map((property) => `<option value="${esc(property.id)}"${property.id === selected ? " selected" : ""}>${esc(property.name)}</option>`).join("");
+}
+
+function resourceViewMoveButtons(kind, key, index, length) {
+  return `<span class="resource-view-row-actions">
+    <button type="button" data-resource-view-action="move" data-kind="${kind}" data-key="${esc(key)}" data-direction="-1" aria-label="위로 이동"${index ? "" : " disabled"}>↑</button>
+    <button type="button" data-resource-view-action="move" data-kind="${kind}" data-key="${esc(key)}" data-direction="1" aria-label="아래로 이동"${index < length - 1 ? "" : " disabled"}>↓</button>
+  </span>`;
+}
+
+function renderResourceFilterValue(rule, property) {
+  if (["is_empty", "is_not_empty"].includes(rule.operator)) return "";
+  const attributes = `data-resource-view-field="filter-value" data-key="${esc(rule.id)}"`;
+  const value = rule.value;
+  if (property.type === "checkbox") return `<select ${attributes} aria-label="체크박스 조건 값"><option value="true"${value === false ? "" : " selected"}>체크됨</option><option value="false"${value === false ? " selected" : ""}>체크 안 됨</option></select>`;
+  if (rule.operator === "relative") {
+    const periods = [["today", "오늘"], ["yesterday", "어제"], ["tomorrow", "내일"], ["this_week", "이번 주"], ["last_week", "지난 주"], ["next_week", "다음 주"], ["this_month", "이번 달"], ["last_month", "지난 달"], ["next_month", "다음 달"], ["past_days", "지난 N일"], ["next_days", "앞으로 N일"]];
+    const period = value?.period || "today";
+    return `<span class="resource-filter-range"><select ${attributes} data-part="period" aria-label="상대 날짜">${periods.map(([id, label]) => `<option value="${id}"${id === period ? " selected" : ""}>${label}</option>`).join("")}</select>${["past_days", "next_days"].includes(period) ? `<input type="number" min="1" step="1" value="${esc(value?.days || 7)}" ${attributes} data-part="days" aria-label="일수">` : ""}</span>`;
   }
-  return [...groups].map(([groupId, group]) => renderResourceList(group.resources, group.title, groupId)).join("")
-    + renderResourceList(unclassified, "미분류", "");
+  const inputType = property.type === "number" ? "number" : property.type === "date" ? "date" : "text";
+  if (rule.operator === "between") return `<span class="resource-filter-range"><input type="${inputType}" ${inputType === "number" ? 'step="any"' : ""} value="${esc(value?.start ?? "")}" ${attributes} data-part="start" aria-label="시작 값"><span>–</span><input type="${inputType}" ${inputType === "number" ? 'step="any"' : ""} value="${esc(value?.end ?? "")}" ${attributes} data-part="end" aria-label="끝 값"></span>`;
+  if (["select", "multi_select"].includes(property.type)) {
+    const multiple = ["is_any_of", "is_none_of", "contains_all", "contains_any", "contains_none"].includes(rule.operator);
+    if (multiple) {
+      const selected = Array.isArray(value) ? value : value ? [value] : [];
+      const detailKey = `values-${rule.id}`;
+      return `<details class="resource-filter-options" data-resource-view-detail="${detailKey}"${resourceViewDetailOpen(detailKey)}><summary>${selected.length ? `${selected.length}개 선택` : "값 선택"}</summary><div>${(property.options || []).map((option) => `<label><input type="checkbox" ${attributes} data-option-id="${esc(option.id)}"${selected.includes(option.id) ? " checked" : ""}>${esc(option.name)}</label>`).join("") || '<span class="muted">선택 항목이 없습니다.</span>'}</div></details>`;
+    }
+    return `<select ${attributes} aria-label="필터 값"><option value="">값 선택</option>${(property.options || []).map((option) => `<option value="${esc(option.id)}"${String(value) === String(option.id) ? " selected" : ""}>${esc(option.name)}</option>`).join("")}</select>`;
+  }
+  return `<input type="${inputType}" ${inputType === "number" ? 'step="any"' : ""} ${attributes} value="${esc(value ?? "")}" aria-label="필터 값" placeholder="값 입력">`;
 }
 
-function renderResourceList(resources, title = "자료 목록", groupId = "all") {
-  return `
-    <section class="panel resource-list-panel" data-resource-group="${esc(groupId)}" ${ui.resourceGroupBy === "all" ? "" : `data-resource-drop-field="${ui.resourceGroupBy === "boxes" ? "boxId" : "projectId"}" data-resource-drop-id="${esc(groupId)}"`} aria-label="${esc(title)}">
-      <h2 class="panel-title">${esc(title)}</h2>
-      ${resources.length ? renderResourceLinks(resources, true) : empty("자료가 없습니다.")}
-    </section>
-  `;
+function renderResourceFilterGroup(group, root = false, depth = 0) {
+  const properties = SYGMAResourceModel.getProperties(state);
+  return `<div class="resource-filter-group" data-resource-filter-group="${esc(group.id)}">
+    <div class="resource-filter-group-header"><select data-resource-view-field="filter-op" data-key="${esc(group.id)}" aria-label="조건 결합"><option value="and"${group.op === "and" ? " selected" : ""}>모든 조건 (AND)</option><option value="or"${group.op === "or" ? " selected" : ""}>하나 이상의 조건 (OR)</option></select>${root ? "" : `<button type="button" data-resource-view-action="remove-filter" data-key="${esc(group.id)}" aria-label="조건 그룹 삭제">×</button>`}</div>
+    ${group.rules.map((rule) => {
+      if (Array.isArray(rule.rules)) return renderResourceFilterGroup(rule, false, depth + 1);
+      const property = properties.find((item) => item.id === rule.propertyId) || properties[0];
+      return `<div class="resource-filter-rule" data-resource-filter-rule="${esc(rule.id)}"><select data-resource-view-field="filter-property" data-key="${esc(rule.id)}" aria-label="필터 속성">${resourceViewPropertyOptions(rule.propertyId)}</select><select data-resource-view-field="filter-operator" data-key="${esc(rule.id)}" aria-label="필터 연산자">${SYGMAResourceModel.filterOperators(property.type).map((operator) => `<option value="${operator.id}"${operator.id === rule.operator ? " selected" : ""}>${esc(operator.label)}</option>`).join("")}</select>${renderResourceFilterValue(rule, property)}<button type="button" data-resource-view-action="remove-filter" data-key="${esc(rule.id)}" aria-label="조건 삭제">×</button></div>`;
+    }).join("")}
+    <div class="resource-filter-add"><button type="button" data-resource-view-action="add-rule" data-key="${esc(group.id)}">+ 조건 추가</button><button type="button" data-resource-view-action="add-group" data-key="${esc(group.id)}"${depth >= SYGMAResourceModel.MAX_FILTER_DEPTH - 1 ? " disabled" : ""}>+ 조건 그룹 추가</button></div>
+  </div>`;
+}
+
+function renderResourceViewOrder(view, kind) {
+  const isGroup = kind === "groups";
+  return `<div class="resource-view-order" data-resource-view-order="${kind}">${view[kind].map((rule, index) => `<div class="resource-view-order-row" data-resource-order-key="${esc(rule.id)}"><span class="resource-view-priority">${index + 1}</span><select data-resource-view-field="order-property" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 속성">${resourceViewPropertyOptions(rule.propertyId)}</select><select data-resource-view-field="order-direction" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 방향"><option value="asc"${rule.direction === "asc" ? " selected" : ""}>오름차순</option><option value="desc"${rule.direction === "desc" ? " selected" : ""}>내림차순</option></select>${resourceViewMoveButtons(kind, rule.id, index, view[kind].length)}<button type="button" data-resource-view-action="remove-order" data-kind="${kind}" data-key="${esc(rule.id)}" aria-label="${isGroup ? "그룹" : "정렬"} 삭제">×</button></div>`).join("")}<button type="button" data-resource-view-action="add-order" data-kind="${kind}">+ ${isGroup ? "그룹 계층" : "정렬"} 추가</button></div>`;
+}
+
+function renderResourceViewSettings(view) {
+  const properties = SYGMAResourceModel.getProperties(state).filter((property) => property.id !== "title");
+  const ordered = [...view.visibleProperties.map((key) => properties.find((property) => property.id === key)).filter(Boolean), ...properties.filter((property) => !view.visibleProperties.includes(property.id))];
+  return `<details class="resource-view-settings" data-resource-view-detail="settings"${resourceViewDetailOpen("settings")}><summary>보기 설정</summary><div class="resource-view-settings-body">
+    <div class="resource-view-basics"><label>보기 이름<input data-resource-view-field="name" value="${esc(view.name)}" maxlength="100" aria-label="보기 이름"></label><label>레이아웃<select data-resource-view-field="layout" aria-label="레이아웃"><option value="list"${view.layout === "list" ? " selected" : ""}>목록</option><option value="table"${view.layout === "table" ? " selected" : ""}>표</option></select></label></div>
+    <details data-resource-view-detail="filters"${resourceViewDetailOpen("filters")}><summary>필터 <span>${resourceViewFilterCount(view.filter)}</span></summary>${renderResourceFilterGroup(view.filter, true)}</details>
+    <details data-resource-view-detail="sorts"${resourceViewDetailOpen("sorts")}><summary>정렬 <span>${view.sorts.length}</span></summary>${renderResourceViewOrder(view, "sorts")}</details>
+    <details data-resource-view-detail="groups"${resourceViewDetailOpen("groups")}><summary>그룹 <span>${view.groups.length}</span></summary>${renderResourceViewOrder(view, "groups")}</details>
+    <details data-resource-view-detail="properties"${resourceViewDetailOpen("properties")}><summary>표시 속성 <span>${view.visibleProperties.length}</span></summary><div class="resource-view-properties"><div class="muted">제목은 항상 표시됩니다.</div><button type="button" data-resource-property-action="manage" data-resource-id="">속성 관리</button>${ordered.map((property) => { const index = view.visibleProperties.indexOf(property.id); return `<div class="resource-view-property-row"><label><input type="checkbox" data-resource-view-field="visible-property" data-key="${esc(property.id)}"${index >= 0 ? " checked" : ""}>${esc(property.name)}</label>${index >= 0 ? resourceViewMoveButtons("visibleProperties", property.id, index, view.visibleProperties.length) : ""}</div>`; }).join("")}</div></details>
+    <div class="resource-view-manage"><span>보기 순서</span>${resourceViewMoveButtons("views", view.id, state.settings.resourceViews.indexOf(view), state.settings.resourceViews.length)}<button type="button" data-resource-view-action="duplicate">보기 복제</button><button type="button" data-resource-view-action="delete"${state.settings.resourceViews.length === 1 ? " disabled" : ""}>보기 삭제</button></div>
+  </div></details>`;
+}
+
+function resourceViewFilterCount(group) {
+  return group.rules.reduce((count, rule) => count + (Array.isArray(rule.rules) ? resourceViewFilterCount(rule) : 1), 0);
+}
+
+function resourceViewFilterNode(group, key) {
+  if (group.id === key) return group;
+  for (const rule of group.rules || []) {
+    const found = Array.isArray(rule.rules) ? resourceViewFilterNode(rule, key) : rule.id === key ? rule : null;
+    if (found) return found;
+  }
+  return null;
+}
+
+function removeResourceViewFilter(group, key) {
+  const index = group.rules.findIndex((rule) => rule.id === key);
+  if (index >= 0) group.rules.splice(index, 1);
+  else group.rules.filter((rule) => Array.isArray(rule.rules)).forEach((rule) => removeResourceViewFilter(rule, key));
+}
+
+function saveResourceViewSettings(previousViews, previousActive) {
+  const invalid = SYGMAResourceModel.validateState(state).some((issue) => issue.path.startsWith("state.settings.resourceViews") || issue.path === "state.settings.activeResourceViewId");
+  if (invalid) {
+    state.settings.resourceViews = previousViews;
+    state.settings.activeResourceViewId = previousActive;
+    showToast("필터 값과 범위를 확인해 주세요. 범위의 끝은 시작보다 작을 수 없습니다.");
+    renderView({ soft: true });
+    return false;
+  }
+  const focused = document.activeElement;
+  const selector = focused?.dataset.resourceViewField ? `[data-resource-view-field="${cssEscape(focused.dataset.resourceViewField)}"]${focused.dataset.key ? `[data-key="${cssEscape(focused.dataset.key)}"]` : ""}${focused.dataset.part ? `[data-part="${cssEscape(focused.dataset.part)}"]` : ""}${focused.dataset.optionId ? `[data-option-id="${cssEscape(focused.dataset.optionId)}"]` : ""}` : "";
+  setResourceListSelection([]);
+  localWorkspaceOperationRequired = true;
+  localWorkspaceOperationScope = "workspace";
+  saveState();
+  renderView({ soft: true });
+  if (selector) els.viewRoot.querySelector(selector)?.focus({ preventScroll: true });
+  return true;
+}
+
+function handleResourceViewClick(event) {
+  const button = event.target.closest("[data-resource-view-action]");
+  if (!button) return false;
+  event.preventDefault();
+  if (app.dataset.workspaceAuthority !== "ready") return true;
+  const { resourceViewAction: action, key, kind } = button.dataset;
+  const previousViews = structuredClone(state.settings.resourceViews);
+  const previousActive = state.settings.activeResourceViewId;
+  const view = activeResourceView();
+  if (action === "select") {
+    if (!state.settings.resourceViews.some((item) => item.id === key)) return true;
+    state.settings.activeResourceViewId = key;
+    setResourceListSelection([]);
+  } else if (action === "add" || action === "duplicate") {
+    const next = action === "duplicate" ? JSON.parse(JSON.stringify(view)) : { filter: { id: id(), op: "and", rules: [] }, sorts: [], groups: [], visibleProperties: [], layout: "list" };
+    next.id = id();
+    next.name = action === "duplicate" ? `${view.name} 복사본`.slice(0, 100) : "새 보기";
+    state.settings.resourceViews.push(next);
+    state.settings.activeResourceViewId = next.id;
+    setResourceListSelection([]);
+  } else if (action === "delete") {
+    if (state.settings.resourceViews.length === 1) return true;
+    state.settings.resourceViews.splice(state.settings.resourceViews.indexOf(view), 1);
+    state.settings.activeResourceViewId = state.settings.resourceViews[0].id;
+    setResourceListSelection([]);
+  } else if (action === "move") {
+    const list = kind === "views" ? state.settings.resourceViews : view[kind];
+    if (!Array.isArray(list)) return true;
+    const index = list.findIndex((item) => (typeof item === "string" ? item : item.id) === key);
+    const target = index + Number(button.dataset.direction);
+    if (index < 0 || target < 0 || target >= list.length) return true;
+    [list[index], list[target]] = [list[target], list[index]];
+  } else if (action === "add-rule" || action === "add-group") {
+    const group = resourceViewFilterNode(view.filter, key);
+    if (!Array.isArray(group?.rules)) return true;
+    group.rules.push(action === "add-group" ? { id: id(), op: "or", rules: [] } : { id: id(), propertyId: "title", operator: "contains", value: "" });
+  } else if (action === "remove-filter") removeResourceViewFilter(view.filter, key);
+  else if (action === "add-order" && ["sorts", "groups"].includes(kind)) view[kind].push({ id: id(), propertyId: kind === "groups" ? "boxId" : "title", direction: "asc" });
+  else if (action === "remove-order" && ["sorts", "groups"].includes(kind)) view[kind] = view[kind].filter((rule) => rule.id !== key);
+  else return true;
+  if (!saveResourceViewSettings(previousViews, previousActive)) return true;
+  if (action === "add" || action === "duplicate") {
+    els.viewRoot.querySelector('[data-resource-view-detail="settings"]').open = true;
+    const name = els.viewRoot.querySelector('[data-resource-view-field="name"]');
+    name?.focus();
+    name?.select();
+  }
+  return true;
+}
+
+function handleResourceViewChange(event) {
+  const input = event.target.closest("[data-resource-view-field]");
+  if (!input) return false;
+  if (app.dataset.workspaceAuthority !== "ready") return true;
+  if (!input.validity.valid) return true;
+  const { resourceViewField: field, key, kind, part, optionId } = input.dataset;
+  const previousViews = structuredClone(state.settings.resourceViews);
+  const previousActive = state.settings.activeResourceViewId;
+  const view = activeResourceView();
+  const node = key ? resourceViewFilterNode(view.filter, key) : null;
+  if (field === "name") view.name = input.value.trim() || "이름 없는 보기";
+  else if (field === "layout") view.layout = input.value === "table" ? "table" : "list";
+  else if (field === "visible-property") view.visibleProperties = input.checked ? [...new Set([...view.visibleProperties, key])] : view.visibleProperties.filter((id) => id !== key);
+  else if (field === "filter-op" && Array.isArray(node?.rules)) node.op = input.value === "or" ? "or" : "and";
+  else if (field === "filter-property" && node) {
+    const property = SYGMAResourceModel.getProperties(state).find((item) => item.id === input.value);
+    if (!property) return true;
+    node.propertyId = property.id;
+    node.operator = SYGMAResourceModel.filterOperators(property.type)[0].id;
+    node.value = property.type === "checkbox" ? true : "";
+  } else if (field === "filter-operator" && node) {
+    node.operator = input.value;
+    node.value = input.value === "relative" ? { period: "today", days: 7 } : input.value === "between" ? { start: "", end: "" } : "";
+    if (SYGMAResourceModel.getProperties(state).find((item) => item.id === node.propertyId)?.type === "checkbox") node.value = true;
+  } else if (field === "filter-value" && node) {
+    const property = SYGMAResourceModel.getProperties(state).find((item) => item.id === node.propertyId);
+    if (optionId) {
+      const selected = Array.isArray(node.value) ? node.value : [];
+      node.value = input.checked ? [...new Set([...selected, optionId])] : selected.filter((id) => id !== optionId);
+    } else if (part) {
+      node.value = { ...(typeof node.value === "object" ? node.value : {}), [part]: part === "days" ? Math.max(1, Number(input.value) || 7) : property?.type === "number" && input.value !== "" ? Number(input.value) : input.value };
+    } else node.value = property?.type === "checkbox" ? input.value === "true" : property?.type === "number" && input.value !== "" ? Number(input.value) : input.value;
+  } else if (["order-property", "order-direction"].includes(field) && ["sorts", "groups"].includes(kind)) {
+    const rule = view[kind].find((item) => item.id === key);
+    if (!rule) return true;
+    rule[field === "order-property" ? "propertyId" : "direction"] = input.value;
+  } else return true;
+  saveResourceViewSettings(previousViews, previousActive);
+  return true;
+}
+
+function renderResources() {
+  const all = state.resources.filter((resource) => !resource.trashedAt);
+  const view = activeResourceView();
+  const resources = SYGMAResourceModel.applyView(all, view, state);
+  return `<section class="view" data-resource-view>
+    ${renderViewHeader("Resources", "자료", resources.length === all.length ? `${all.length}개` : `${resources.length} / ${all.length}개`, '<button class="button secondary" type="button" data-action="new-resource">새 자료</button>')}
+    <div class="resource-custom-toolbar"><div class="resource-saved-views" role="group" aria-label="저장된 자료 보기">${state.settings.resourceViews.map((item) => `<button type="button" data-resource-view-action="select" data-key="${esc(item.id)}" class="${item.id === view.id ? "is-active" : ""}" aria-pressed="${item.id === view.id}">${esc(item.name)}</button>`).join("")}<button type="button" data-resource-view-action="add" aria-label="보기 추가">+ 보기 추가</button></div>${renderResourceViewSettings(view)}</div>
+    <div class="resource-groups" data-resource-group-mode="custom" tabindex="0" role="group" aria-label="자료 목록, 항목을 끌어 이동, 빈 공간 드래그 또는 Space로 선택 후 Delete로 삭제">${renderResourceGroups(resources, view)}</div>
+  </section>`;
+}
+
+function renderResourceGroups(resources, view = activeResourceView(), depth = 0, path = "") {
+  const group = view.groups[depth];
+  if (!group) return renderResourceList(resources, depth ? "" : "자료 목록", path || "all", view);
+  const property = SYGMAResourceModel.getProperties(state).find((item) => item.id === group.propertyId);
+  if (!property) return renderResourceGroups(resources, view, depth + 1, path);
+  const buckets = new Map();
+  for (const resource of resources) {
+    for (const key of SYGMAResourceModel.groupValueKeys(resource, property.id, state)) {
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(resource);
+    }
+  }
+  if (!buckets.size) return empty("조건에 맞는 자료가 없습니다.");
+  const label = (key) => key === null ? "비어 있음" : SYGMAResourceModel.displayValue(key, property, state);
+  const entries = [...buckets].sort(([a], [b]) => {
+    if (a === null || b === null) return a === null ? (b === null ? 0 : 1) : -1;
+    return SYGMAResourceModel.compareValues(a, b, property) * (group.direction === "desc" ? -1 : 1);
+  });
+  return entries.map(([key, items]) => {
+    const groupPath = `${path}/${group.id}:${JSON.stringify(key)}`;
+    const detailKey = `group-${view.id}-${groupPath}`;
+    const dropAttributes = ["boxId", "projectId"].includes(property.id) ? `data-resource-drop-field="${property.id}" data-resource-drop-id="${esc(key ?? "")}"` : "";
+    return `<details class="resource-custom-group" data-resource-view-detail="${esc(detailKey)}"${resourceViewDetailOpen(detailKey, true)} ${dropAttributes}><summary data-resource-group-toggle><span class="resource-group-property">${esc(property.name)}</span><strong>${esc(label(key))}</strong><span class="resource-group-count">${items.length}</span></summary><div class="resource-custom-group-body">${renderResourceGroups(items, view, depth + 1, groupPath)}</div></details>`;
+  }).join("");
+}
+
+function renderResourceList(resources, title = "자료 목록", groupId = "all", view = activeResourceView()) {
+  const properties = view.visibleProperties.map((key) => SYGMAResourceModel.getProperties(state).find((property) => property.id === key)).filter((property) => property && property.id !== "title");
+  const titleButton = (resource) => `<button class="resource-list-item ${ui.resourceSelection.includes(resource.id) ? "is-selected" : ""}" type="button" data-resource-open="${esc(resource.id)}" aria-pressed="${ui.resourceSelection.includes(resource.id)}" aria-keyshortcuts="Space">${esc(resource.title || "제목 없음")}</button>`;
+  const value = (resource, property) => renderResourcePropertyValue(resource, property, { editable: false });
+  let contents = empty("조건에 맞는 자료가 없습니다.");
+  if (resources.length && view.layout === "table") contents = `<div class="resource-view-table-scroll" tabindex="0" role="region" aria-label="자료 표, 좌우로 스크롤"><table class="resource-view-table"><thead><tr><th scope="col">제목</th>${properties.map((property) => `<th scope="col">${esc(property.name)}</th>`).join("")}</tr></thead><tbody>${resources.map((resource) => `<tr><td>${titleButton(resource)}</td>${properties.map((property) => `<td data-resource-cell="${esc(property.id)}">${value(resource, property)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  else if (resources.length) contents = `<ul class="resource-list resource-view-list">${resources.map((resource) => `<li>${titleButton(resource)}${properties.length ? `<div class="resource-view-list-properties">${properties.map((property) => `<span class="resource-view-list-property" title="${esc(property.name)}"><span class="resource-view-property-name">${esc(property.name)}</span>${value(resource, property)}</span>`).join("")}</div>` : ""}</li>`).join("")}</ul>`;
+  return `<section class="panel resource-list-panel" data-resource-group="${esc(groupId)}" aria-label="${esc(title || "자료 목록")}">${title ? `<h2 class="panel-title">${esc(title)}</h2>` : ""}${contents}</section>`;
 }
 
 function renderResourceLinks(resources, selectable = false) {
@@ -2214,6 +2431,319 @@ function renderResourceRelations(resource) {
     ${relationField("Box", "boxId", resource.boxId, state.boxes, "name")}
     ${relationField("Project", "projectId", resource.projectId, state.projects, "name")}
   </fieldset>`;
+}
+
+function resourcePropertyTag(option) {
+  return `<span class="resource-property-tag" data-property-color="${esc(option.color || "default")}">${esc(option.name)}</span>`;
+}
+
+function renderResourcePropertyValue(resource, property, { editable = false } = {}) {
+  const value = resourceModel.getValue(resource, property.id, state);
+  const selected = new Set(Array.isArray(value) ? value : [value]);
+  const tags = (property.options || []).filter((option) => selected.has(option.id)).map(resourcePropertyTag).join("");
+  const label = resourceModel.displayValue(value, property, state);
+  if (!editable) {
+    if (property.type === "checkbox") return `<span aria-label="${value ? "체크됨" : "체크 안 됨"}">${value ? "☑" : "☐"}</span>`;
+    return tags || `<span class="resource-property-display">${esc(label || "—")}</span>`;
+  }
+  const disabled = resourceMutationAllowed(resource) ? "" : " disabled";
+  const attributes = `data-resource-property-value="${esc(property.id)}" data-resource-id="${esc(resource.id)}" aria-label="${esc(property.name)}"${disabled}`;
+  if (property.type === "checkbox") return `<input type="checkbox" ${attributes}${value === true ? " checked" : ""}>`;
+  if (property.type === "text") return `<textarea rows="1" maxlength="10000" placeholder="비어 있음" ${attributes}>${esc(value || "")}</textarea>`;
+  if (property.type === "number") return `<input type="number" step="any" placeholder="비어 있음" value="${esc(value ?? "")}" ${attributes}>`;
+  const picker = `data-resource-property-picker="${esc(property.id)}" data-resource-id="${esc(resource.id)}"`;
+  if (property.type === "select" || property.type === "multi_select") {
+    return `<details class="resource-property-picker" ${picker}>
+      <summary aria-label="${esc(property.name)} 선택"${disabled ? ' aria-disabled="true"' : ""}>${tags || '<span class="muted">비어 있음</span>'}</summary>
+      <div class="resource-property-popover">
+        <input type="search" data-resource-option-search placeholder="검색 또는 새 옵션 입력" aria-label="${esc(property.name)} 옵션 검색"${disabled}>
+        <div class="resource-property-options">${(property.options || []).map((option) => `<button type="button" data-resource-property-action="choose" data-option-id="${esc(option.id)}" aria-pressed="${selected.has(option.id)}"${disabled}>${resourcePropertyTag(option)}<span aria-hidden="true">${selected.has(option.id) ? "✓" : ""}</span></button>`).join("")}</div>
+        <button type="button" data-resource-property-action="create-option"${disabled}>새 옵션 추가</button>
+        <button type="button" data-resource-property-action="clear"${disabled}>값 지우기</button>
+      </div>
+    </details>`;
+  }
+  if (property.type === "date") {
+    const date = value && typeof value === "object" ? value : { start: value || "", end: "", includeTime: false };
+    return `<details class="resource-property-picker" ${picker}><summary aria-label="${esc(property.name)} 날짜"${disabled ? ' aria-disabled="true"' : ""}>${esc(label || "비어 있음")}</summary>
+      <div class="resource-property-popover resource-property-date">
+        <label>시작일<input type="${date.includeTime ? "datetime-local" : "date"}" data-resource-date-part="start" value="${esc(date.start || "")}"${disabled}></label>
+        <label><input type="checkbox" data-resource-date-part="range"${date.end ? " checked" : ""}${disabled}> 종료일</label>
+        ${date.end ? `<label>종료일<input type="${date.includeTime ? "datetime-local" : "date"}" data-resource-date-part="end" value="${esc(date.end)}" min="${esc(date.start || "")}"${disabled}></label>` : ""}
+        <label><input type="checkbox" data-resource-date-part="includeTime"${date.includeTime ? " checked" : ""}${disabled}> 시간 포함</label>
+        <button type="button" data-resource-property-action="clear"${disabled}>값 지우기</button>
+      </div></details>`;
+  }
+  return esc(label || "—");
+}
+
+function renderResourceProperties(resource) {
+  return `<details class="resource-properties" data-resource-properties="${esc(resource.id)}" open>
+    <summary>속성 <span class="muted">${state.settings.resourceProperties.length + 2}</span></summary>
+    ${renderResourceRelations(resource)}
+    <div class="resource-property-rows">${state.settings.resourceProperties.map((property) => `<div class="resource-property-row">
+      <button class="resource-property-name" type="button" data-resource-property-action="manage" data-property-id="${esc(property.id)}" data-resource-id="${esc(resource.id)}">${esc(property.name)}</button>
+      <div class="resource-property-value">${renderResourcePropertyValue(resource, property, { editable: true })}</div>
+    </div>`).join("")}</div>
+    <button class="resource-property-add" type="button" data-resource-property-action="manage" data-resource-id="${esc(resource.id)}">＋ 속성 추가·설정</button>
+  </details>`;
+}
+
+function syncResourceProperties(element, resource, force = false) {
+  const previous = element.querySelector("[data-resource-properties]");
+  const markup = renderResourceProperties(resource);
+  if (previous && (force || (element.resourcePropertiesMarkup !== markup && !previous.contains(document.activeElement)) )) {
+    const expanded = previous.open;
+    const opened = [...previous.querySelectorAll("details[open]")].map((details) => details.dataset.resourcePropertyPicker);
+    previous.outerHTML = markup;
+    const current = element.querySelector("[data-resource-properties]");
+    current.open = expanded;
+    for (const details of current.querySelectorAll("details")) details.open = opened.includes(details.dataset.resourcePropertyPicker);
+    element.resourcePropertiesMarkup = markup;
+  } else if (!previous) element.resourcePropertiesMarkup = markup;
+}
+
+function refreshResourceProperties() {
+  for (const element of els.detailRoot.querySelectorAll("[data-resource-window]")) {
+    const resource = itemById("resources", element.dataset.resourceWindow);
+    if (resource) syncResourceProperties(element, resource, true);
+  }
+  if (ui.view === "resources") renderView({ soft: true });
+}
+
+function openResourcePropertyManager(propertyId = "") {
+  if (app.dataset.workspaceAuthority !== "ready") return;
+  let dialog = app.querySelector("[data-resource-property-manager]");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.className = "resource-property-manager";
+    dialog.dataset.resourcePropertyManager = "";
+    dialog.setAttribute("aria-label", "Resource 속성 설정");
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    app.append(dialog);
+    dialog.showModal();
+  }
+  dialog.innerHTML = `<div class="resource-property-manager-header"><h2>속성 설정</h2><button type="button" data-resource-property-action="close" aria-label="속성 설정 닫기">×</button></div>
+    <p class="muted">모든 자료에서 사용하는 속성입니다. 보기마다 표시할 속성을 선택할 수 있습니다.</p>
+    <div class="resource-property-definitions">${state.settings.resourceProperties.map((property, index) => `<details data-property-definition="${esc(property.id)}"${property.id === propertyId ? " open" : ""}>
+      <summary>${esc(property.name)} <span class="muted">${esc(resourceModel.PROPERTY_TYPES.find((entry) => entry.id === property.type)?.label || property.type)}</span></summary>
+      <div class="resource-property-config">
+        <label>속성 이름<input data-resource-property-config="name" value="${esc(property.name)}" maxlength="100"></label>
+        <label>유형<select data-resource-property-config="type">${resourceModel.PROPERTY_TYPES.map((type) => `<option value="${type.id}"${type.id === property.type ? " selected" : ""}>${esc(type.label)}</option>`).join("")}</select></label>
+        ${property.type === "number" ? `<label>숫자 형식<select data-resource-property-config="numberFormat">${[["number", "숫자"], ["percent", "퍼센트"], ["won", "원"], ["dollar", "달러"]].map(([id, name]) => `<option value="${id}"${(property.numberFormat || "number") === id ? " selected" : ""}>${name}</option>`).join("")}</select></label>` : ""}
+        ${["select", "multi_select"].includes(property.type) ? `<div class="resource-property-option-configs">${(property.options || []).map((option, optionIndex) => `<div class="resource-property-option-config" data-option-id="${esc(option.id)}">
+          <input data-resource-option-config="name" aria-label="옵션 이름" value="${esc(option.name)}" maxlength="100">
+          <select data-resource-option-config="color" aria-label="옵션 색상" data-property-color="${esc(option.color)}">${resourceModel.COLORS.map((color) => `<option value="${color}"${color === option.color ? " selected" : ""}>${esc(({ default: "기본", gray: "회색", brown: "갈색", orange: "주황", yellow: "노랑", green: "초록", blue: "파랑", purple: "보라", pink: "분홍", red: "빨강" })[color])}</option>`).join("")}</select>
+          <button type="button" data-resource-property-action="option-up" aria-label="옵션 위로"${optionIndex === 0 ? " disabled" : ""}>↑</button><button type="button" data-resource-property-action="option-down" aria-label="옵션 아래로"${optionIndex === property.options.length - 1 ? " disabled" : ""}>↓</button><button type="button" data-resource-property-action="option-delete" aria-label="옵션 삭제">×</button>
+        </div>`).join("")}<button type="button" data-resource-property-action="add-option">＋ 옵션 추가</button></div>` : ""}
+        <div class="resource-property-config-actions"><button type="button" data-resource-property-action="property-up"${index === 0 ? " disabled" : ""}>↑ 위로</button><button type="button" data-resource-property-action="property-down"${index === state.settings.resourceProperties.length - 1 ? " disabled" : ""}>↓ 아래로</button><button type="button" data-resource-property-action="duplicate">복제</button><button type="button" data-resource-property-action="delete">속성 삭제</button></div>
+      </div></details>`).join("")}</div>
+    <button class="button secondary" type="button" data-resource-property-action="add">＋ 새 속성</button>`;
+  if (propertyId) dialog.querySelector(`[data-property-definition="${CSS.escape(propertyId)}"] input`)?.focus();
+}
+
+function saveResourcePropertySchema(propertyId = "", redrawManager = true) {
+  localWorkspaceOperationRequired = true;
+  localWorkspaceOperationScope = "workspace";
+  saveState();
+  refreshResourceProperties();
+  if (redrawManager && app.querySelector("[data-resource-property-manager]")) openResourcePropertyManager(propertyId);
+}
+
+function setResourcePropertyValue(resource, propertyId, value, refresh = true) {
+  if (app.dataset.workspaceAuthority !== "ready" || !resourceMutationAllowed(resource)) return;
+  resource.propertyValues ||= {};
+  if (value === undefined || value === "" || value === null) delete resource.propertyValues[propertyId];
+  else resource.propertyValues[propertyId] = value;
+  markResourceChanged(resource);
+  saveState();
+  if (refresh) refreshResourceProperties();
+}
+
+function removeResourcePropertyReferences(propertyId, filtersOnly = false) {
+  const clean = (group) => { group.rules = group.rules.filter((rule) => rule.rules || rule.propertyId !== propertyId); group.rules.filter((rule) => rule.rules).forEach(clean); };
+  for (const view of state.settings.resourceViews) {
+    clean(view.filter);
+    if (filtersOnly) continue;
+    for (const key of ["sorts", "groups"]) view[key] = view[key].filter((entry) => entry.propertyId !== propertyId);
+    view.visibleProperties = view.visibleProperties.filter((id) => id !== propertyId);
+  }
+}
+
+function handleResourcePropertyClick(event) {
+  const button = event.target.closest("[data-resource-property-action]");
+  if (!button) return false;
+  event.preventDefault();
+  const action = button.dataset.resourcePropertyAction;
+  if (action === "close") { button.closest("dialog").close(); return true; }
+  if (app.dataset.workspaceAuthority !== "ready") return true;
+  const picker = button.closest("[data-resource-property-picker]");
+  const propertyId = picker?.dataset.resourcePropertyPicker || button.closest("[data-property-definition]")?.dataset.propertyDefinition || button.dataset.propertyId;
+  const property = state.settings.resourceProperties.find((entry) => entry.id === propertyId);
+  if (action === "manage") { openResourcePropertyManager(propertyId); return true; }
+  if (action === "add") {
+    if (state.settings.resourceProperties.length >= 500) { showToast("속성은 최대 500개까지 추가할 수 있습니다."); return true; }
+    const next = { id: id(), name: "새 속성", type: "text", options: [] };
+    state.settings.resourceProperties.push(next);
+    saveResourcePropertySchema(next.id);
+    return true;
+  }
+  if (!property) return true;
+  if (picker) {
+    const resource = itemById("resources", picker.dataset.resourceId);
+    if (!resourceMutationAllowed(resource)) return true;
+    if (action === "clear") setResourcePropertyValue(resource, propertyId, undefined);
+    if (action === "choose" || action === "create-option") {
+      let optionId = button.dataset.optionId;
+      if (action === "create-option") {
+        const name = picker.querySelector("[data-resource-option-search]").value.trim().slice(0, 100);
+        if (!name) return true;
+        let option = property.options.find((entry) => entry.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+        if (!option) {
+          if (property.options.length >= 1000) { showToast("옵션은 최대 1000개까지 추가할 수 있습니다."); return true; }
+          option = { id: id(), name, color: "default" }; property.options.push(option);
+          localWorkspaceOperationRequired = true;
+          localWorkspaceOperationScope = "workspace";
+        }
+        optionId = option.id;
+      }
+      const value = resource.propertyValues?.[propertyId];
+      setResourcePropertyValue(resource, propertyId, property.type === "select" ? optionId : (Array.isArray(value) && value.includes(optionId) ? value.filter((id) => id !== optionId) : [...(Array.isArray(value) ? value : []), optionId]));
+      const current = resourceWindowElement(resource.id)?.querySelector(`[data-resource-property-picker="${CSS.escape(propertyId)}"]`);
+      if (property.type === "select" && current) { current.open = false; current.querySelector("summary").focus({ preventScroll: true }); }
+      else current?.querySelector("[data-resource-option-search]").focus({ preventScroll: true });
+    }
+    return true;
+  }
+  const properties = state.settings.resourceProperties;
+  const index = properties.indexOf(property);
+  const optionId = button.closest("[data-option-id]")?.dataset.optionId;
+  const optionIndex = property.options.findIndex((option) => option.id === optionId);
+  if (action === "duplicate") {
+    const duplicate = structuredClone(property);
+    if (properties.length >= 500) { showToast("속성은 최대 500개까지 추가할 수 있습니다."); return true; }
+    duplicate.id = id(); duplicate.name = `${property.name} 복사`.slice(0, 100);
+    properties.splice(index + 1, 0, duplicate);
+    for (const resource of state.resources) if (resource.propertyValues?.[propertyId] !== undefined) { resource.propertyValues[duplicate.id] = structuredClone(resource.propertyValues[propertyId]); markResourceChanged(resource); }
+    saveResourcePropertySchema(duplicate.id);
+    return true;
+  }
+  if (action === "delete") {
+    if (!window.confirm(`“${property.name}” 속성과 모든 자료의 값을 삭제할까요?`)) return true;
+    properties.splice(index, 1);
+    for (const resource of state.resources) if (resource.propertyValues && Object.hasOwn(resource.propertyValues, propertyId)) { delete resource.propertyValues[propertyId]; markResourceChanged(resource); }
+    removeResourcePropertyReferences(propertyId);
+  } else if (action === "property-up" || action === "property-down") {
+    const next = index + (action === "property-up" ? -1 : 1);
+    if (next >= 0 && next < properties.length) [properties[index], properties[next]] = [properties[next], properties[index]];
+  } else if (action === "add-option") {
+    if (property.options.length >= 1000) { showToast("옵션은 최대 1000개까지 추가할 수 있습니다."); return true; }
+    property.options.push({ id: id(), name: `옵션 ${property.options.length + 1}`, color: "default" });
+  } else if (action === "option-up" || action === "option-down") {
+    const next = optionIndex + (action === "option-up" ? -1 : 1);
+    if (optionIndex >= 0 && next >= 0 && next < property.options.length) [property.options[optionIndex], property.options[next]] = [property.options[next], property.options[optionIndex]];
+  } else if (action === "option-delete" && optionIndex >= 0) {
+    if (!window.confirm(`“${property.options[optionIndex].name}” 옵션을 모든 자료에서 삭제할까요?`)) return true;
+    property.options.splice(optionIndex, 1);
+    for (const resource of state.resources) {
+      const value = resource.propertyValues?.[propertyId];
+      if (value === optionId || Array.isArray(value) && value.includes(optionId)) { resource.propertyValues[propertyId] = Array.isArray(value) ? value.filter((id) => id !== optionId) : ""; markResourceChanged(resource); }
+    }
+  }
+  saveResourcePropertySchema(action === "delete" ? "" : propertyId);
+  return true;
+}
+
+function handleResourcePropertyInput(event) {
+  const search = event.target.closest("[data-resource-option-search]");
+  if (search) {
+    const picker = search.closest("[data-resource-property-picker]");
+    const query = search.value.trim().toLocaleLowerCase();
+    for (const option of picker.querySelectorAll('[data-resource-property-action="choose"]')) option.hidden = !option.textContent.toLocaleLowerCase().includes(query);
+    picker.querySelector('[data-resource-property-action="create-option"]').textContent = query ? `＋ “${search.value.trim()}” 추가` : "새 옵션 추가";
+    return true;
+  }
+  const input = event.target.closest('textarea[data-resource-property-value]');
+  if (!input) return false;
+  setResourcePropertyValue(itemById("resources", input.dataset.resourceId), input.dataset.resourcePropertyValue, input.value, false);
+  return true;
+}
+
+function handleResourcePropertyChange(event) {
+  const input = event.target;
+  if (!input.matches("[data-resource-property-value], [data-resource-date-part], [data-resource-property-config], [data-resource-option-config]")) return false;
+  if (app.dataset.workspaceAuthority !== "ready") return true;
+  const definition = input.closest("[data-property-definition]");
+  if (definition) {
+    const property = state.settings.resourceProperties.find((entry) => entry.id === definition.dataset.propertyDefinition);
+    if (!property) return true;
+    if (input.dataset.resourceOptionConfig) {
+      const option = property.options.find((entry) => entry.id === input.closest("[data-option-id]").dataset.optionId);
+      const value = input.value.trim();
+      if (!value || input.dataset.resourceOptionConfig === "name" && property.options.some((entry) => entry !== option && entry.name === value)) { input.value = option[input.dataset.resourceOptionConfig]; showToast("옵션 이름을 중복 없이 입력해 주세요."); return true; }
+      option[input.dataset.resourceOptionConfig] = value;
+    } else {
+      const key = input.dataset.resourcePropertyConfig;
+      if (key === "name" && !input.value.trim()) { input.value = property.name; return true; }
+      if (key === "type" && input.value !== property.type) {
+        const compatible = ["select", "multi_select"].includes(property.type) && ["select", "multi_select"].includes(input.value);
+        const populated = state.resources.filter((resource) => resource.propertyValues?.[property.id] !== undefined);
+        if (property.type === "multi_select" && input.value === "select" && populated.some((resource) => Array.isArray(resource.propertyValues[property.id]) && resource.propertyValues[property.id].length > 1) && !window.confirm("선택 속성은 하나의 옵션만 보관합니다. 각 자료의 첫 번째 옵션만 남길까요?")) { input.value = property.type; return true; }
+        if (populated.length && !compatible && !window.confirm("유형을 변경하면 이 속성의 기존 값이 지워집니다. 변경할까요?")) { input.value = property.type; return true; }
+        for (const resource of populated) {
+          const old = resource.propertyValues[property.id];
+          if (compatible) resource.propertyValues[property.id] = input.value === "multi_select" ? (old ? [old] : []) : (Array.isArray(old) ? old[0] || "" : "");
+          else delete resource.propertyValues[property.id];
+          markResourceChanged(resource);
+        }
+        removeResourcePropertyReferences(property.id, true);
+      }
+      property[key] = input.value.trim();
+    }
+    saveResourcePropertySchema(property.id, input.dataset.resourcePropertyConfig === "type" || input.dataset.resourcePropertyConfig === "numberFormat");
+    return true;
+  }
+  const picker = input.closest("[data-resource-property-picker]");
+  const propertyId = picker?.dataset.resourcePropertyPicker || input.dataset.resourcePropertyValue;
+  const resource = itemById("resources", picker?.dataset.resourceId || input.dataset.resourceId);
+  if (!resourceMutationAllowed(resource)) return true;
+  if (picker) {
+    const date = { start: "", end: "", includeTime: false, ...(resource.propertyValues?.[propertyId] || {}) };
+    const part = input.dataset.resourceDatePart;
+    if (["range", "includeTime"].includes(part) && !date.start) date.start = dateKey(new Date());
+    if (part === "range") date.end = input.checked ? date.start : "";
+    else if (part === "includeTime") {
+      date.includeTime = input.checked;
+      for (const key of ["start", "end"]) if (date[key]) date[key] = date.includeTime ? `${date[key].slice(0, 10)}T${date[key].slice(11, 16) || "00:00"}` : date[key].slice(0, 10);
+    } else date[part] = input.value;
+    if (!date.start && date.end) date.start = date.end;
+    for (const key of ["start", "end"]) if (date[key]) date[key] = date.includeTime ? `${date[key].slice(0, 10)}T${date[key].slice(11, 16) || "00:00"}` : date[key].slice(0, 10);
+    if (date.end && date.end < date.start) date.end = date.start;
+    setResourcePropertyValue(resource, propertyId, date.start ? date : undefined);
+  } else if (input.type === "checkbox") setResourcePropertyValue(resource, propertyId, input.checked, false);
+  else if (input.type === "number") {
+    if (!input.validity.valid) return true;
+    setResourcePropertyValue(resource, propertyId, input.value === "" ? undefined : Number(input.value), false);
+  }
+  // Let focus reach the next property before syncing the background view.
+  if (!picker && ui.view === "resources") requestAnimationFrame(() => {
+    if (ui.view === "resources") renderView({ soft: true });
+  });
+  return true;
+}
+
+function handleResourcePropertyKeydown(event) {
+  if (!event.target.closest("[data-resource-property-manager], [data-resource-properties]")) return false;
+  event.stopPropagation();
+  const search = event.target.closest("[data-resource-option-search]");
+  if (search && event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    search.closest("[data-resource-property-picker]").querySelector('[data-resource-property-action="create-option"]').click();
+    return true;
+  }
+  const picker = event.target.closest("[data-resource-property-picker]");
+  if (picker && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); picker.open = false; picker.querySelector("summary").focus(); return true; }
+  return true;
 }
 
 function renderResourceDocument(resource) {
@@ -2245,7 +2775,7 @@ function renderResourceDocument(resource) {
         placeholder="제목 없음"
         ${readOnly ? "readonly aria-readonly=\"true\"" : ""}
       >${esc(resource.title || "")}</textarea>
-      ${renderResourceRelations(resource)}
+      ${renderResourceProperties(resource)}
       <hr class="resource-document-divider">
       <div class="resource-document-layout">
       <section class="resource-document-body" aria-label="자료 내용">
@@ -2489,11 +3019,7 @@ function syncResourceDocumentDialog(options = {}) {
       if (title && title.value !== resource.title) title.value = resource.title;
       refreshBlockEditorsAfterMutation("resources", resource.id);
     }
-    const relationsMarkup = renderResourceRelations(resource);
-    if (!isNew && element.resourceRelationsMarkup !== relationsMarkup) {
-      element.querySelector("[data-resource-relations]").outerHTML = relationsMarkup;
-    }
-    element.resourceRelationsMarkup = relationsMarkup;
+    syncResourceProperties(element, resource);
     element.dataset.active = String(record.id === ui.activeResourceId);
     syncResourceWindowGeometry(record);
     syncResourceComments(record.id);
@@ -9085,10 +9611,8 @@ function handleMarkdownTableCellEvent(event) {
   if (!context) return;
   if (
     event.type === "keydown"
-    && event.metaKey
-    && !event.ctrlKey
+    && (event.metaKey || (event.ctrlKey && event.shiftKey))
     && !event.altKey
-    && !event.shiftKey
     && !event.isComposing
     && event.keyCode !== 229
     && ui.composingBlockId !== context.block.id
@@ -9104,6 +9628,10 @@ function handleMarkdownTableCellEvent(event) {
   }
   if (["pointerdown", "mousedown"].includes(event.type) && cell.classList.contains("is-cell-selected")) clearMarkdownTableCellSelection();
   if (event.type === "focusin") {
+    if (shouldPreserveBlockSelectionFocus(cell)) {
+      cell.blur();
+      return;
+    }
     if (ownerType === "resources") activateResourceWindow(ownerId);
     activateBlockContent(blockElement.querySelector("[data-resource-table-select]"));
     clearInlineTypingMarkForFocusChange(cell);
@@ -10427,7 +10955,7 @@ function hasUnsavedResourceWork() {
 function isResourceDraftingElement(element) {
   return element instanceof Element
     && Boolean(element.closest("[data-resource-window]"))
-    && element.matches("[data-resource-title], [data-resource-comment-input], [data-resource-image-caption], [contenteditable='true']");
+    && element.matches("[data-resource-title], [data-resource-comment-input], [data-resource-image-caption], [data-resource-property-value], [data-resource-date-part], [data-resource-option-search], [contenteditable='true']");
 }
 
 function focusedResourceDraftId() {
@@ -10441,6 +10969,7 @@ function resourceEditorHasDraftingFocus() {
 
 function hasPendingLocalWorkspaceWork() {
   return Boolean(
+    document.activeElement?.matches("[data-resource-view-field], [data-resource-property-config], [data-resource-option-config]") ||
     dirtyResourceIds.size ||
     pendingResourceOperationGroups.length ||
     localWorkspaceOperationRequired ||
@@ -10456,6 +10985,9 @@ function hasPendingLocalWorkspaceWork() {
     ui.composingBlockId ||
     ui.resourceWindowDrag ||
     ui.blockDrag ||
+    ui.pendingEditorMarquee ||
+    ui.editorMarquee ||
+    ui.inlineSelectionPointer ||
     ui.todayTaskDrag ||
     ui.deleteDrag ||
     ui.scheduler?.dragging ||
@@ -11518,6 +12050,7 @@ function relationField(label, field, value, items, nameField) {
 }
 
 function handleClick(event) {
+  if (handleResourcePropertyClick(event) || handleResourceViewClick(event)) return;
   const quickEditorResource = event.target.closest("[data-quick-editor-resource]");
   if (quickEditorResource) {
     event.preventDefault();
@@ -11991,27 +12524,6 @@ function handleClick(event) {
   const viewMode = event.target.closest("[data-view-control-mode]");
   if (viewMode) {
     event.preventDefault();
-    if (viewMode.dataset.viewControlMode === "resources") {
-      const mode = viewMode.dataset.controlMode;
-      if (!["all", "boxes", "projects"].includes(mode) || mode === ui.resourceGroupBy) return;
-      cancelResourceListDrag();
-      setResourceListSelection([]);
-      ui.resourceGroupBy = mode;
-      const toolbar = viewMode.closest(".resource-view-toolbar");
-      toolbar.style.setProperty("--resource-mode-index", ["all", "boxes", "projects"].indexOf(mode));
-      toolbar.querySelectorAll("[data-control-mode]").forEach((button) => {
-        const active = button.dataset.controlMode === mode;
-        button.classList.toggle("is-active", active);
-        button.setAttribute("aria-pressed", String(active));
-      });
-      const groups = els.viewRoot.querySelector(".resource-groups");
-      groups.classList.remove("is-entering");
-      groups.dataset.resourceGroupMode = mode;
-      groups.innerHTML = renderResourceGroups(state.resources.filter((resource) => !resource.trashedAt));
-      void groups.offsetWidth;
-      groups.classList.add("is-entering");
-      return;
-    }
     updateViewControl(viewMode.dataset.viewControlMode, "mode", viewMode.dataset.controlMode || "");
     return;
   }
@@ -12877,6 +13389,7 @@ function toggleResourceListSelection(id) {
 }
 
 function beginResourceListDrag(event) {
+  if (event.target.closest("[data-resource-group-toggle], input, select, textarea, [data-resource-view-action]")) return false;
   const root = event.target.closest("[data-resource-view] .resource-groups");
   if (!root || !canStartCustomPointerDrag(event) || event.pointerType === "touch") return false;
   cancelResourceListDrag();
@@ -13035,21 +13548,19 @@ function startResourceListMove(drag) {
   drag.ghostElement.style.width = `${width}px`;
   drag.ghostElement.innerHTML = `<strong>${esc(resource?.title || "제목 없음")}</strong>${drag.resourceIds.length > 1 ? `<span>${drag.resourceIds.length}개 자료</span>` : ""}`;
   document.body.append(drag.ghostElement);
-  if (ui.resourceGroupBy === "all") {
-    drag.stageElement = document.createElement("div");
-    drag.stageElement.className = "resource-move-stage";
-    drag.stageElement.setAttribute("role", "group");
-    drag.stageElement.setAttribute("aria-label", "자료 이동");
-    drag.stageElement.innerHTML = [["boxes", "boxId", "Box"], ["projects", "projectId", "Project"]].map(([collection, field, label]) => `
-      <section class="today-batch-column">
-        <header><h3>${label}</h3></header>
-        <div class="today-batch-list">${[...state[collection], { id: "", name: "미분류" }].map((item) => `
-          <div class="today-batch-target" data-resource-drop-field="${field}" data-resource-drop-id="${esc(item.id)}" aria-label="${esc(item.name)} ${label}로 이동"><strong>${esc(item.name)}</strong></div>
-        `).join("")}</div>
-      </section>
-    `).join("");
-    document.body.append(drag.stageElement);
-  }
+  drag.stageElement = document.createElement("div");
+  drag.stageElement.className = "resource-move-stage";
+  drag.stageElement.setAttribute("role", "group");
+  drag.stageElement.setAttribute("aria-label", "자료 이동");
+  drag.stageElement.innerHTML = [["boxes", "boxId", "Box"], ["projects", "projectId", "Project"]].map(([collection, field, label]) => `
+    <section class="today-batch-column">
+      <header><h3>${label}</h3></header>
+      <div class="today-batch-list">${[...state[collection], { id: "", name: "미분류" }].map((item) => `
+        <div class="today-batch-target" data-resource-drop-field="${field}" data-resource-drop-id="${esc(item.id)}" aria-label="${esc(item.name)} ${label}로 이동"><strong>${esc(item.name)}</strong></div>
+      `).join("")}</div>
+    </section>
+  `).join("");
+  document.body.append(drag.stageElement);
   announceAppStatus(`${drag.resourceIds.length}개 자료 이동 중. Box 또는 Project 영역에 놓으세요. Escape로 취소합니다.`);
 }
 
@@ -13854,6 +14365,7 @@ function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  if (handleResourcePropertyInput(event)) return;
   for (const [attribute, popover, field] of [
     ["data-inline-link-input", ui.linkPopover, "href"],
     ["data-inline-comment-input", ui.commentPopover, "body"],
@@ -13975,6 +14487,7 @@ if (financeInstallmentPayment && !event.isComposing) {
 }
 
 function handleChange(event) {
+  if (handleResourcePropertyChange(event) || handleResourceViewChange(event)) return;
   const financeExpensePayment = event.target.closest("[data-finance-expense-payment-method], [data-finance-expense-card-payment-type]");
 
 if (financeExpensePayment) {
@@ -14292,7 +14805,7 @@ function handleFocusOut(event) {
   const workspaceDraft = !QUICK_EDITOR_SURFACE && ui.view !== "finance" && isEditableShortcutTarget(event.target);
   if ((resourceDraft || workspaceDraft) && !isEditableShortcutTarget(event.relatedTarget) && !event.target.closest("form")?.contains(event.relatedTarget)) {
     requestAnimationFrame(() => {
-      if (hasActiveEditableShortcutTarget()) return;
+      if (hasActiveEditableShortcutTarget() || ui.pendingEditorMarquee || ui.editorMarquee || ui.inlineSelectionPointer) return;
       if (remoteStateRenderDeferred) rerenderAfterStateReplace();
       if (resourceDraft) handleRemoteStateWakeRefresh();
     });
@@ -14311,6 +14824,10 @@ function handleFocusOut(event) {
 }
 
 function activateBlockContent(blockContent) {
+  if (shouldPreserveBlockSelectionFocus(blockContent)) {
+    blockContent.blur();
+    return;
+  }
   if (isSelectedBlocksMenuOpen()) {
     blockContent.blur();
     focusSelectedBlockMenuQuery();
@@ -14341,9 +14858,10 @@ function activateBlockContent(blockContent) {
 }
 
 function shouldPreserveBlockSelectionFocus(blockContent) {
+  const editor = blockContent.closest(".block-editor");
+  if (ui.editorMarquee?.editor === editor) return true;
   if (!ui.blockSelection.ids.length) return false;
   const block = blockContent.closest(".block");
-  const editor = blockContent.closest(".block-editor");
   if (!block || !editor) return false;
   const selected =
     ui.blockSelection.ownerType === editor.dataset.ownerType &&
@@ -19113,6 +19631,7 @@ function trapTodayBatchFocus(event) {
 }
 
 function handleKeydown(event) {
+  if (handleResourcePropertyKeydown(event)) return;
   if (handleQuickEditorPickerKeydown(event)) return;
   if (handleResourceListKeydown(event)) return;
   if (handleResourceWindowKeydown(event)) return;
@@ -19306,6 +19825,20 @@ function handleKeydown(event) {
     if (toggleAllTogglesInEditor(ownerType, ownerId, blockId)) {
       event.preventDefault();
       event.stopPropagation();
+      return;
+    }
+  }
+
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+    const blocks = itemById(ownerType, ownerId)?.blocks || [];
+    const toggle = currentBlock?.type === "toggle" ? currentBlock
+      : event.key === "ArrowUp" ? containingToggleBlock(blocks, blocks.indexOf(currentBlock)) : null;
+    if (toggle) {
+      event.preventDefault();
+      event.stopPropagation();
+      if ((toggle.collapsed === true) !== (event.key === "ArrowUp")) {
+        toggleBlockCollapsed(ownerType, ownerId, toggle.id, editor.querySelector(`[data-block-toggle="${cssEscape(toggle.id)}"]`));
+      }
       return;
     }
   }
@@ -20055,7 +20588,7 @@ function pendingEmptyContinuationMatchesEvent(event, pending) {
 function pendingEmptyContinuationIsStillValid(pending) {
   const item = itemById(pending.ownerType, pending.ownerId);
   const block = item?.blocks?.find((entry) => entry.id === pending.blockId);
-  if (block && !(block.text || "") && emptyBlockCanExitOnSecondEnter(block)) return true;
+  if (block && !(block.text || "") && emptyBlockCanExitOnSecondEnter(block, item.blocks)) return true;
   ui.pendingEmptyContinuationExit = null;
   return false;
 }
@@ -22826,16 +23359,23 @@ function toggleAllFocusTargetBlockId(blocksList, focusBlockId, collapsing) {
   if (index < 0) return focusBlockId;
   const block = blocksList[index];
   if (block?.type === "toggle") return block.id;
+  return containingToggleBlock(blocksList, index)?.id || focusBlockId;
+}
+
+function containingToggleBlock(blocksList, index) {
+  if (index < 0) return null;
+  const block = blocksList[index];
   let childIndent = blockIndent(block);
+  if (childIndent <= 0) return null;
   for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
     const previous = blocksList[previousIndex];
     const previousIndent = blockIndent(previous);
     if (previousIndent >= childIndent) continue;
-    if (previous.type === "toggle") return previous.id;
+    if (previous.type === "toggle") return previous;
     childIndent = previousIndent;
-    if (childIndent <= 0) return "";
+    if (childIndent <= 0) return null;
   }
-  return focusBlockId;
+  return null;
 }
 
 function modifyCurrentBlockFromKeyboard(ownerType, ownerId, blockId) {
@@ -23852,6 +24392,9 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
   if (index < 0) return false;
   const block = item.blocks[index];
   const rawText = blockContent.textContent || "";
+  if (!rawText && CONTINUED_BLOCK_TYPES.has(block.type) && containingToggleBlock(item.blocks, index)) {
+    return exitEmptyContinuationBlock(ownerType, ownerId, blockId);
+  }
   const history = beginEditorHistory(ownerType, ownerId, { blockId, start: 0, end: 0 });
 
   if (blockIndent(block) > 0) {
@@ -23970,7 +24513,7 @@ function handleDeleteAtBlockEnd(ownerType, ownerId, blockId, blockContent) {
 }
 
 function schedulePendingEmptyContinuationExit(ownerType, ownerId, block) {
-  if (block && emptyBlockCanExitOnSecondEnter(block) && !(block.text || "")) {
+  if (block && emptyBlockCanExitOnSecondEnter(block, itemById(ownerType, ownerId)?.blocks || []) && !(block.text || "")) {
     ui.pendingEmptyContinuationExit = {
       ownerType,
       ownerId,
@@ -23990,8 +24533,9 @@ function clearPendingEmptyContinuationExitForText(ownerType, ownerId, blockId, t
   }
 }
 
-function emptyBlockCanExitOnSecondEnter(block) {
-  return Boolean(block) && (CONTINUED_BLOCK_TYPES.has(block.type) || blockIndent(block) > 0);
+function emptyBlockCanExitOnSecondEnter(block, blocksList) {
+  return Boolean(block) && (CONTINUED_BLOCK_TYPES.has(block.type)
+    || (blockIndent(block) > 0 && !containingToggleBlock(blocksList, blocksList.indexOf(block))));
 }
 
 function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
@@ -24002,20 +24546,14 @@ function exitEmptyContinuationBlock(ownerType, ownerId, blockId) {
   if (index < 0) return false;
   const block = item.blocks[index];
   const currentIndent = blockIndent(block);
-  if (!block || (block.text || "") || !emptyBlockCanExitOnSecondEnter(block)) return false;
+  if (!block || (block.text || "") || !emptyBlockCanExitOnSecondEnter(block, item.blocks)) return false;
   const history = beginEditorHistory(ownerType, ownerId, { blockId, start: 0, end: 0 });
-  if (currentIndent > 0) {
+  if (currentIndent > 0 && !(CONTINUED_BLOCK_TYPES.has(block.type) && containingToggleBlock(item.blocks, index))) {
     index = moveExitingBlockAfterContainingParentSubtree(item.blocks, index, Math.max(0, currentIndent - 1));
-    if (!CONTINUED_BLOCK_TYPES.has(block.type)) {
-      applyBlockType(block, "paragraph");
-      block.marks = [];
-      block.checked = false;
-      block.collapsed = false;
-    } else {
-      block.marks = [];
-      block.checked = false;
-      block.collapsed = false;
-    }
+    if (!CONTINUED_BLOCK_TYPES.has(block.type)) applyBlockType(block, "paragraph");
+    block.marks = [];
+    block.checked = false;
+    block.collapsed = false;
     applyIndentDeltaToSubtree(item.blocks, index, currentIndent, -1);
     ui.pendingEmptyContinuationExit = null;
     schedulePendingEmptyContinuationExit(ownerType, ownerId, block);
@@ -24054,23 +24592,11 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const split = splitTextForBlockBreak(originalText, splitOffsets);
   const splitMarks = splitInlineMarksAtSelection(current.marks, originalText, split.start, split.end);
   const currentIndent = blockIndent(current);
-  const history = beginEditorHistory(ownerType, ownerId, { blockId, start: splitOffsets.start, end: splitOffsets.end });
-  if (!split.before && !split.after && currentIndent > 0) {
-    const nextIndex = moveExitingBlockAfterContainingParentSubtree(item.blocks, index, Math.max(0, currentIndent - 1));
-    if (!CONTINUED_BLOCK_TYPES.has(current.type)) applyBlockType(current, "paragraph");
-    current.marks = [];
-    current.checked = false;
-    current.collapsed = false;
-    applyIndentDeltaToSubtree(item.blocks, nextIndex, currentIndent, -1);
-    ui.pendingEmptyContinuationExit = null;
-    schedulePendingEmptyContinuationExit(ownerType, ownerId, current);
-    schedulePendingMarkdownTextTarget(ownerType, ownerId, current);
-    commitEditorHistory(history, { blockId: current.id, position: "end" });
-    saveState();
-    renderEditorMutation(ownerType, ownerId);
-    focusBlockContentAfterRender(current.id, { inlineTypingMark });
+  if (!split.before && !split.after && emptyBlockCanExitOnSecondEnter(current, item.blocks)) {
+    exitEmptyContinuationBlock(ownerType, ownerId, blockId);
     return;
   }
+  const history = beginEditorHistory(ownerType, ownerId, { blockId, start: splitOffsets.start, end: splitOffsets.end });
   if (!split.before && !split.after && current.type !== "paragraph" && !blockHasIndentedDescendants(item.blocks, index)) {
     applyBlockType(current, "paragraph");
     current.marks = [];
@@ -27717,7 +28243,7 @@ function sendRemoteStateBeacon() {
 async function saveStateRemoteNow(options = {}) {
   if (!databaseBackendStatus.connected) return null;
   const queuedOperations = localResourcePersistence.operations.filter((operation) => operation.workspaceId === localResourcePersistence.workspaceId);
-  if (queuedOperations.length && queuedOperations.every((operation) => operation.entityType === "resource")) {
+  if (!localWorkspaceOperationRequired && queuedOperations.length && queuedOperations.every((operation) => operation.entityType === "resource")) {
     return saveQueuedResourceOperations(options);
   }
   const renderStatus = !options.keepalive;
@@ -28205,7 +28731,7 @@ function normalizeState(next) {
   const tasks = normalizeTaskRecords(objectArrayWithoutGoalId(objectArrayWithoutLegacyKind(next.tasks, []), []));
   const journals = objectArrayWithoutLegacyKind(next.journals, []);
   const shouldSeedStatsDemo = !nextSettings.statsDemoDataSeeded;
-  const settings = { ...createDefaultSettings(), ...nextSettings };
+  const settings = resourceModel.normalizeSettings({ ...createDefaultSettings(), ...nextSettings });
   delete settings.appMode;
   delete settings.notionSyncMode;
   delete settings.notionParityMode;
@@ -28252,7 +28778,7 @@ function normalizeState(next) {
 }
 
 function createDefaultSettings() {
-  return {
+  return resourceModel.normalizeSettings({
     navOrder: defaultNavOrder(),
     googleCalendarId: "primary",
     googleConnectedAt: "",
@@ -28264,7 +28790,7 @@ function createDefaultSettings() {
     calendarColorAssignments: {},
     viewControls: defaultViewControls(),
     statsDemoDataSeeded: false,
-  };
+  });
 }
 
 function defaultViewControls() {

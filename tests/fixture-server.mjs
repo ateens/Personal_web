@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateFinanceState } from "../server/finance.js";
+import "../resource-model.js";
 import { createFixtureState, FIXTURE_IDS } from "./fixtures/state.mjs";
 
 if (process.env.E2E_FIXTURE_SERVER !== "1") {
@@ -44,6 +45,7 @@ const sourceFiles = new Map([
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/finance-model.js", ["finance-model.js", "text/javascript; charset=utf-8"]],
+  ["/resource-model.js", ["resource-model.js", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/manifest.json", ["manifest.json", "application/manifest+json; charset=utf-8"]],
   ["/service-worker.js", ["service-worker.js", "text/javascript; charset=utf-8"]],
@@ -156,6 +158,7 @@ const server = createServer(async (request, response) => {
         return;
       }
       const validationIssues = [
+        ...globalThis.SYGMAResourceModel.validateState(body.state),
         ...fixtureGlobalDuplicateIdIssues(body.state),
         ...fixtureResourceHierarchyIssues(body.state),
         ...fixtureResourceLinkIssues(body.state),
@@ -332,6 +335,7 @@ const server = createServer(async (request, response) => {
       if (resourceIndex >= 0) nextState.resources[resourceIndex] = structuredClone(body.resource);
       else nextState.resources.push(structuredClone(body.resource));
       const validationIssues = [
+        ...globalThis.SYGMAResourceModel.validateState(nextState),
         ...fixtureGlobalDuplicateIdIssues(nextState),
         ...fixtureResourceHierarchyIssues(nextState),
         ...fixtureResourceLinkIssues(nextState),
