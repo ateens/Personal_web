@@ -69,7 +69,7 @@ for (const width of [1440, 390]) {
     for (const [id, formula, displayMode = true] of GALLERY) {
       const host = equationHost(editor, id);
       await expect(host).toHaveAttribute("data-equation-rendered", "true");
-      await expect.poll(() => host.evaluate((element) => Boolean(element.shadowRoot.querySelector('link[rel="stylesheet"]').sheet))).toBe(true);
+      await expect.poll(() => host.evaluate((element) => Boolean(element.shadowRoot.adoptedStyleSheets[0] || element.shadowRoot.querySelector('link[rel="stylesheet"]')?.sheet))).toBe(true);
       await expect(host.locator(".katex-html")).toBeVisible();
       await expect(host.locator('annotation[encoding="application/x-tex"]')).toHaveText(formula);
       expect(await host.evaluate((element) => element.textContent)).toBe("");

@@ -9901,6 +9901,10 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (event.type === "beforeinput") {
+    if (event.inputType === "deleteContentBackward" && deleteEquationBeforeCaret(cell)) {
+      event.preventDefault();
+      return;
+    }
     captureInlineBoundaryTyping(cell);
     if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
       event.preventDefault();
@@ -9954,6 +9958,10 @@ function handleMarkdownTableCellEvent(event) {
     return;
   }
   if (["ArrowLeft", "ArrowRight"].includes(event.key) && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && moveCaretAcrossInlineBoundary(cell, event.key)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey && deleteEquationBeforeCaret(cell)) {
     event.preventDefault();
     return;
   }
@@ -10944,17 +10952,43 @@ if (window.customElements && !window.customElements.get("sygma-mermaid")) {
 }
 
 if (window.customElements && !window.customElements.get("sygma-display-equation")) {
+  const equationStyles = `
+    :host{display:inline-block;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;vertical-align:middle;color:inherit;line-height:normal}
+    :host([data-display-mode="display"]){display:block;width:100%}
+    .katex{font-size:1.18em}.katex-display{margin:0;padding:2px 0}
+    .equation-error{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:0.85em ui-monospace,monospace}
+  `;
+  let sharedEquationStyleSheet;
   window.customElements.define("sygma-display-equation", class extends HTMLElement {
     connectedCallback() {
-      if (this.shadowRoot) return;
+      const rendered = Boolean(this.shadowRoot);
+      const root = this.shadowRoot || this.attachShadow({ mode: "open" });
+      let sharedStylesApplied = false;
+      if (typeof CSSStyleSheet === "function" && typeof CSSStyleSheet.prototype.replaceSync === "function" && "adoptedStyleSheets" in root) {
+        try {
+          if (!sharedEquationStyleSheet) {
+            const source = [...document.styleSheets].find((sheet) => sheet.href && new URL(sheet.href).pathname === "/assets/katex/katex.min.css");
+            if (source?.cssRules.length) {
+              const sheet = new CSSStyleSheet();
+              // Fonts already belong to the document; their relative URLs must keep the original stylesheet base.
+              const rules = [...source.cssRules].filter((rule) => rule.type !== CSSRule.FONT_FACE_RULE).map((rule) => rule.cssText).join("\n");
+              sheet.replaceSync(`${rules}\n${equationStyles}`);
+              sharedEquationStyleSheet = sheet;
+            }
+          }
+          if (sharedEquationStyleSheet) {
+            // Keep styles ready synchronously when an existing formula reconnects after an editor split.
+            if (!root.adoptedStyleSheets.includes(sharedEquationStyleSheet)) root.adoptedStyleSheets = [sharedEquationStyleSheet];
+            sharedStylesApplied = true;
+          }
+        } catch { /* Keep the stylesheet link fallback on engines without usable constructed stylesheets. */ }
+      }
+      if (rendered) {
+        if (sharedStylesApplied) root.querySelector("link")?.remove();
+        return;
+      }
       const formula = this.dataset.formula || "";
-      const root = this.attachShadow({ mode: "open" });
-      root.innerHTML = `<link rel="stylesheet" href="/assets/katex/katex.min.css"><style>
-        :host{display:inline-block;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;vertical-align:middle;color:inherit;line-height:normal}
-        :host([data-display-mode="display"]){display:block;width:100%}
-        .katex{font-size:1.18em}.katex-display{margin:0;padding:2px 0}
-        .equation-error{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:0.85em ui-monospace,monospace}
-      </style>`;
+      if (!sharedStylesApplied) root.innerHTML = `<link rel="stylesheet" href="/assets/katex/katex.min.css"><style>${equationStyles}</style>`;
       const output = document.createElement("span");
       root.append(output);
       try {
@@ -14904,6 +14938,11 @@ function handleBeforeInput(event) {
     return;
   }
   if (isComposingInput(event, blockContent)) return;
+  if (event.inputType === "deleteContentBackward" && deleteEquationBeforeCaret(blockContent)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!event.inputType?.includes("Composition")) captureInlineBoundaryTyping(blockContent);
   if (handlePendingSoftLineBreakBeforeInput(event, blockContent)) return;
   if (handlePendingMarkdownTextBeforeInput(event, blockContent)) return;
@@ -15799,6 +15838,7 @@ function patchBlockEditorStructure(editor, blocksHtml) {
       return replacement;
     }
     syncElementAttributes(currentBlock, nextBlock);
+    syncElementAttributes(currentContent, nextContent);
     for (const selector of [":scope > .block-check", ":scope > .block-toggle", ":scope > .block-list-marker", ":scope > .block-tool", ":scope > .block-drag-handle"]) {
       const currentControl = currentBlock.querySelector(selector);
       const nextControl = nextBlock.querySelector(selector);
@@ -15810,21 +15850,40 @@ function patchBlockEditorStructure(editor, blocksHtml) {
     return currentBlock;
   };
 
-  const anchor = document.createComment("block-patch-anchor");
-  editor.insertBefore(anchor, editor.firstChild);
+  const nextBlocks = new Map([...template.content.querySelectorAll(".block[data-block-id]")]
+    .map((block) => [block.dataset.blockId, reusableBlock(block)]));
+  // A split can move an unchanged formula to a new block ID. Reserve same-block
+  // renderers first, then let remaining renderers follow that moved content.
+  const reservedEquations = new Set([...nextBlocks.values()].flatMap((block) => [...block.querySelectorAll("sygma-display-equation")]));
+  const remainingEquations = [...existingBlocks.values()].flatMap((block) => [...block.querySelectorAll("sygma-display-equation")])
+    .filter((equation) => !reservedEquations.has(equation));
+  for (const block of nextBlocks.values()) preserveEquationRenderers(editor, block, remainingEquations);
+
+  const syncChildren = (parent, children) => {
+    const keep = new Set(children);
+    for (const child of [...parent.childNodes]) if (!keep.has(child)) child.remove();
+    let cursor = parent.firstChild;
+    for (const child of children) {
+      if (child !== cursor) parent.insertBefore(child, cursor);
+      cursor = child.nextSibling;
+    }
+  };
+  const topLevel = [];
+  const lists = new Map();
   for (const nextTopLevel of [...template.content.children]) {
     if (nextTopLevel.matches(".block-list")) {
-      const list = nextTopLevel.cloneNode(false);
-      editor.insertBefore(list, anchor);
-      for (const nextBlock of [...nextTopLevel.children]) {
-        if (nextBlock.matches(".block[data-block-id]")) list.appendChild(reusableBlock(nextBlock));
-      }
+      const children = [...nextTopLevel.children].map((block) => nextBlocks.get(block.dataset.blockId)).filter(Boolean);
+      const list = [...nextTopLevel.children].map((block) => existingBlocks.get(block.dataset.blockId)?.parentElement)
+        .find((parent) => parent?.matches(".block-list") && !lists.has(parent)) || nextTopLevel.cloneNode(false);
+      syncElementAttributes(list, nextTopLevel);
+      lists.set(list, children);
+      topLevel.push(list);
       continue;
     }
-    if (nextTopLevel.matches(".block[data-block-id]")) editor.insertBefore(reusableBlock(nextTopLevel), anchor);
+    if (nextTopLevel.matches(".block[data-block-id]")) topLevel.push(nextBlocks.get(nextTopLevel.dataset.blockId));
   }
-  while (anchor.nextSibling) anchor.nextSibling.remove();
-  anchor.remove();
+  syncChildren(editor, topLevel);
+  for (const [list, children] of lists) syncChildren(list, children);
 }
 
 
@@ -15945,6 +16004,8 @@ function resourceEditorMarqueeTarget(event) {
 function beginPendingEditorMarquee(event) {
   const target = resourceEditorMarqueeTarget(event);
   if (!target) return false;
+  // A selected row already has a drag/click-to-edit path; do not start a new selection over it.
+  if (selectedBlockDragTarget(event)) return false;
   cancelEditorMarqueeDrag();
   const captureTarget = event.target instanceof Element ? event.target : target.documentPanel;
   ui.pendingEditorMarquee = {
@@ -20315,6 +20376,12 @@ function handleKeydown(event) {
     return;
   }
 
+  if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey && deleteEquationBeforeCaret(blockContent)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
   if (event.key === "Backspace" && isCaretAtStart(blockContent)) {
     if (handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent)) {
       event.preventDefault();
@@ -23286,6 +23353,7 @@ function inlineContentNodesEqual(current, next) {
   if (current.isEqualNode(next)) return true;
   if (!current.querySelector("sygma-display-equation")) return false;
   const copy = current.cloneNode(true);
+  syncElementAttributes(copy, next);
   for (const equation of copy.querySelectorAll("sygma-display-equation")) {
     equation.removeAttribute("data-equation-rendered");
     equation.removeAttribute("data-equation-error");
@@ -23296,9 +23364,9 @@ function inlineContentNodesEqual(current, next) {
   return copy.isEqualNode(next);
 }
 
-function preserveEquationRenderers(current, next) {
-  const available = [...current.querySelectorAll("sygma-display-equation")];
+function preserveEquationRenderers(current, next, available = [...current.querySelectorAll("sygma-display-equation")]) {
   for (const equation of next.querySelectorAll("sygma-display-equation")) {
+    if (equation.shadowRoot) continue;
     const index = available.findIndex((candidate) => candidate.dataset.formula === equation.dataset.formula && candidate.dataset.displayMode === equation.dataset.displayMode);
     if (index < 0) continue;
     const existing = available.splice(index, 1)[0];
@@ -24125,29 +24193,7 @@ function placeCaretAtStart(element) {
 
 function placeCaretAtTextOffset(element, offset) {
   element.focus();
-  const targetOffset = Math.max(0, offset);
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-  let remaining = targetOffset;
-  let node = walker.nextNode();
-  while (node) {
-    const length = node.textContent.length;
-    if (remaining <= length) {
-      const range = document.createRange();
-      range.setStart(node, remaining);
-      range.collapse(true);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      return true;
-    }
-    remaining -= length;
-    node = walker.nextNode();
-  }
-  if (targetOffset === 0) {
-    placeCaretAtStart(element);
-    return true;
-  }
-  placeCaretAtEnd(element);
+  setSelectionOffsets(element, Math.max(0, offset));
   return true;
 }
 
@@ -26347,6 +26393,13 @@ function textPointAtOffset(element, targetOffset) {
     lastNode = node;
     const length = node.textContent.length;
     if (remaining <= length) {
+      const equation = node.parentElement?.closest('[data-inline-mark="equation"]');
+      if (equation && element.contains(equation)) {
+        const bounds = textRangeForInlineElement(element, equation);
+        if (targetOffset === bounds.start || targetOffset === bounds.end) {
+          return { node: equation.parentNode, offset: [...equation.parentNode.childNodes].indexOf(equation) + (targetOffset === bounds.end ? 1 : 0) };
+        }
+      }
       const atomic = node.parentElement?.closest('a[contenteditable="false"]');
       if (atomic && element.contains(atomic)) {
         return { node: atomic.parentNode, offset: [...atomic.parentNode.childNodes].indexOf(atomic) + (remaining > 0 ? 1 : 0) };
@@ -26481,14 +26534,58 @@ function syncInlineBoundaryCaret() {
   }
 }
 
+function deleteEquationBeforeCaret(blockContent, reconcilePendingText = true) {
+  if (!blockContent.querySelector('[data-inline-mark="equation"]')) return false;
+  const range = selectionRangeInside(blockContent);
+  const offsets = selectionOffsetsInside(blockContent);
+  if (!range?.collapsed || !offsets?.start) return false;
+  const node = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
+  const insideEquation = node.closest('[data-inline-mark="equation"]');
+  const equationElement = insideEquation || [...blockContent.querySelectorAll('[data-inline-mark="equation"]')].find((mark) => textRangeForInlineElement(blockContent, mark).end === offsets.start);
+  if (!equationElement || offsets.start <= textRangeForInlineElement(blockContent, equationElement).start) return false;
+  const editor = blockContent.closest(".block-editor");
+  if (!editor || !editorOwnerMutationAllowed(editor.dataset.ownerType, editor.dataset.ownerId)) return false;
+  const { ownerType, ownerId } = editor.dataset;
+  const blockId = blockContent.dataset.blockContent || blockContent.closest(".block")?.dataset.blockId;
+  const block = itemById(ownerType, ownerId)?.blocks?.find((entry) => entry.id === blockId);
+  const cellRange = blockContent.matches("[data-resource-table-cell]") ? tableCellRange(markdownTableCellFocus(blockContent)) : {};
+  const content = inlineContentForRange(block, cellRange);
+  if (!content) return false;
+  if (normalizeEditorPlainText(blockContent.textContent || "") !== content.text) {
+    if (!reconcilePendingText) return false;
+    if (cellRange.tableRow === undefined) updateBlockText(blockContent);
+    else updateMarkdownTableCell(blockContent);
+    return blockContent.isConnected && deleteEquationBeforeCaret(blockContent, false);
+  }
+  const marks = normalizeInlineMarks(content.text, content.marks);
+  const equation = marks.find((mark) => mark.type === "equation" && mark.start < offsets.start && mark.end >= offsets.start && (mark.end === offsets.start || insideEquation));
+  if (!equation) return false;
+  const beforeFocus = { blockId, start: equation.end, end: equation.end, ...cellRange };
+  const afterFocus = { ...beforeFocus, start: equation.start, end: equation.start };
+  const history = beginEditorHistory(ownerType, ownerId, beforeFocus);
+  const split = splitInlineMarksAtSelection(marks, content.text, equation.start, equation.end);
+  const text = content.text.slice(0, equation.start) + content.text.slice(equation.end);
+  const next = { text, marks: normalizeInlineMarks(text, [...split.before, ...shiftInlineMarks(split.after, equation.start)]) };
+  clearInlineBoundaryCaret(blockContent);
+  inlineBoundaryTyping.delete(blockContent);
+  setInlineContentForRange(block, cellRange, next);
+  commitEditorHistory(history, afterFocus);
+  saveState();
+  if (cellRange.tableRow === undefined) syncBlockContentMarkupFromState(blockContent, block);
+  setSelectionOffsets(blockContent, afterFocus.start);
+  scheduleEnsureResourceCaretVisible(blockContent);
+  return true;
+}
+
 function moveCaretAcrossInlineBoundary(blockContent, key) {
   const range = selectionRangeInside(blockContent);
   if (!range?.collapsed) return false;
   const selector = '[data-inline-mark]:not([contenteditable="false"])';
   const nodeElement = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
-  const current = nodeElement.closest('[data-inline-mark="equation"]') || nodeElement.closest(selector);
   const offset = selectionOffsetsInside(blockContent)?.start;
   const forward = key === "ArrowRight";
+  const boundaryEquation = [...blockContent.querySelectorAll('[data-inline-mark="equation"]')].find((mark) => textRangeForInlineElement(blockContent, mark)[forward ? "start" : "end"] === offset);
+  const current = nodeElement.closest('[data-inline-mark="equation"]') || boundaryEquation || nodeElement.closest(selector);
   const next = document.createRange();
   let caretMark = null;
   let caretForward = forward;
