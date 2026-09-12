@@ -95,7 +95,7 @@ test("Resource 본문에서는 수평 드래그가 텍스트를 선택하고 세
 });
 
 for (const direction of [-1, 1]) {
-  test(`Shift+${direction < 0 ? "ArrowUp" : "ArrowDown"}은 현재 블록부터 선택하고 방향 반전 시 마지막 확장을 줄인다`, async ({ page, request }) => {
+  test(`Shift+${direction < 0 ? "ArrowUp" : "ArrowDown"}은 현재 줄과 문단부터 선택하고 방향 반전 시 마지막 확장을 줄인다`, async ({ page, request }) => {
     const blocks = Array.from({ length: 7 }, (_, index) => paragraph(`vertical-selection-${index}`, index === 3
       ? "현재 문장의 첫 번째 줄\n현재 문장의 두 번째 줄"
       : `인접 문장 ${index + 1}`));
@@ -108,6 +108,9 @@ for (const direction of [-1, 1]) {
     const rangeIds = (focus) => blocks.slice(Math.min(3, focus), Math.max(3, focus) + 1).map((block) => block.id);
     await setCaret(current, 4);
 
+    await page.keyboard.press(forward);
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe(direction < 0 ? blocks[3].text.slice(0, 4) : blocks[3].text.slice(4, blocks[3].text.indexOf("\n")));
+    await expect.poll(selectedIds).toEqual([]);
     await page.keyboard.press(forward);
     await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe(blocks[3].text);
     await expect.poll(selectedIds).toEqual([]);

@@ -108,7 +108,7 @@ test("이미 굵게 표시된 문장을 수식으로 바꾸어도 수식과 주�
   const editor = await open(page);
   const content = editor.locator('[data-block-content="target"]');
   await selectRange(content, PREFIX.length, PREFIX.length + FORMULA.length);
-  await page.keyboard.press("ControlOrMeta+Shift+r");
+  await page.keyboard.press("ControlOrMeta+Shift+a");
   await expectFormula(content, true);
   await expect.poll(() => savedMarks(request)).toEqual(expect.arrayContaining([
     equation(), { type: "bold", start: 0, end: TEXT.length },
@@ -132,4 +132,33 @@ test("여러 블록 선택에 굵게를 적용해도 각 수식과 문장 서식
     await expectFormula(editor.locator(`[data-block-content="${id}"]`), true);
     await expect.poll(() => savedMarks(request, false, id)).toEqual(expect.arrayContaining([{ type: "bold", start: 0, end: TEXT.length }]));
   }
+});
+
+for (const prefix of ["앞 문장 ", ""]) test(`마우스로 ${prefix ? "문장과" : "단독"} 수식을 선택하고 굵게 처리한다`, async ({ page, request }) => {
+  const text = prefix + FORMULA;
+  const mark = { type: "equation", start: prefix.length, end: text.length, formula: FORMULA };
+  await seed(request, [{ ...paragraph("target"), text: prefix ? "" : text, marks: prefix ? [] : [mark] }]);
+  const editor = await open(page);
+  const content = editor.locator('[data-block-content="target"]');
+  if (prefix) {
+    await content.click();
+    await page.keyboard.type(`${prefix}$$${FORMULA}$$`);
+  }
+  const equation = content.locator('[data-inline-mark="equation"]');
+  await expect(equation.locator("sygma-display-equation")).toHaveAttribute("data-equation-rendered", "true");
+  await content.evaluate(() => document.fonts.ready);
+  await editor.evaluate((element) => Promise.all(element.closest(".resource-window").getAnimations({ subtree: true }).filter((animation) => animation.effect.getTiming().iterations !== Infinity).map((animation) => animation.finished)));
+  await content.focus();
+  const formulaRect = await equation.boundingBox();
+  const contentRect = await content.boundingBox();
+  const y = formulaRect.y + formulaRect.height / 2;
+  await page.mouse.move(formulaRect.x + formulaRect.width - 1, y);
+  await page.mouse.down();
+  await page.mouse.move(contentRect.x + 1, y, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(() => page.evaluate(() => getSelection().isCollapsed)).toBe(false);
+  await expect(page.locator('[data-inline-equation-popover]')).toHaveCount(0);
+  await page.keyboard.press("ControlOrMeta+b");
+  await expect.poll(() => equation.locator(".katex").evaluate((node) => getComputedStyle(node).fontWeight)).toBe("700");
+  await expect.poll(() => savedMarks(request)).toEqual(expect.arrayContaining([mark, { type: "bold", start: 0, end: text.length }]));
 });

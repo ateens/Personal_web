@@ -77,7 +77,7 @@ async function expectRightCaret(content) {
 }
 
 const cases = [
-  { name: "selected LaTeX Cmd+Shift+R", method: "shortcut", mode: "inline" },
+  { name: "selected LaTeX Cmd+Shift+A", method: "shortcut", mode: "inline" },
   { name: "inline toolbar", method: "toolbar", mode: "inline" },
   { name: "display toolbar", method: "toolbar", mode: "display" },
 ];
@@ -86,7 +86,11 @@ for (const table of [false, true]) for (const entry of cases) test(`${entry.name
   let editor = await setup(page, request, table);
   let content = contentFor(editor, table);
   await selectFormula(page, content);
-  if (entry.method === "shortcut") await page.keyboard.press("Meta+Shift+R");
+  if (entry.method === "shortcut") {
+    expect(await content.evaluate((element) => element.dispatchEvent(new KeyboardEvent("keydown", { key: "R", code: "KeyR", metaKey: true, shiftKey: true, bubbles: true, cancelable: true })))).toBe(true);
+    await expect(content.locator('[data-inline-mark="equation"]')).toHaveCount(0);
+    await page.keyboard.press("Meta+Shift+A");
+  }
   else {
     const toolbar = page.locator(".inline-format-toolbar");
     await expect(toolbar.getByRole("button", { name: "인라인 수식", exact: true })).toBeVisible();
@@ -97,6 +101,7 @@ for (const table of [false, true]) for (const entry of cases) test(`${entry.name
   const mark = content.locator('[data-inline-mark="equation"]');
   await expect(mark).toHaveAttribute("data-equation-formula", formula);
   await expect(mark).toHaveAttribute("data-equation-mode", entry.mode);
+  await expect(mark).toHaveCSS("background-color", entry.mode === "inline" ? "rgba(0, 0, 0, 0)" : "rgba(55, 53, 47, 0.08)");
   await expect(mark.locator("sygma-display-equation")).toHaveAttribute("data-equation-rendered", "true");
   await expectRightCaret(content);
   await content.screenshot({ path: info.outputPath(`immediate-${entry.mode}-${table ? "table" : "paragraph"}.png`), caret: "initial" });
@@ -126,7 +131,7 @@ for (const mode of ["inline", "display"]) test(`mobile ${mode} toolbar applies i
   const toolbar = page.locator(".inline-format-toolbar");
   const button = toolbar.getByRole("button", { name: mode === "inline" ? "인라인 수식" : "블록 수식", exact: true });
   await expect(button).toBeVisible();
-  await button.scrollIntoViewIfNeeded();
+  await button.click({ trial: true });
   const rect = await button.boundingBox();
   expect(rect.x).toBeGreaterThanOrEqual(0);
   expect(rect.x + rect.width).toBeLessThanOrEqual(390);

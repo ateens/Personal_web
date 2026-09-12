@@ -377,7 +377,7 @@ const POINTER_DRAG_ACTIVATION_DISTANCE = 12;
 const EDITOR_MARQUEE_ACTIVATION_DISTANCE = 5;
 const EDITOR_MARQUEE_GUTTER_WIDTH = 42;
 const EDITOR_MARQUEE_AUTOSCROLL_EDGE = 52;
-const RESOURCE_CARET_RESERVE_LINES = 1;
+const RESOURCE_CARET_RESERVE_LINES = 3;
 const RESOURCE_CARET_ENTER_RESERVE_LINES = QUICK_EDITOR_SURFACE ? 3 : 1;
 const BLOCK_TYPE_KEYBOARD_SHORTCUTS = {
   "0": "paragraph",
@@ -658,6 +658,7 @@ let codeLanguagePositionFrame = 0;
 let mermaidLibraryPromise = null;
 let mermaidRenderId = 0;
 let preferredVerticalCaretX = null;
+let resourceVerticalSelection = null;
 let resourceCaretScrollFrame = 0;
 const toggleBlockAnimationTimers = new Map();
 const toggleBlockAnimationFrames = new Map();
@@ -9992,7 +9993,7 @@ function handleMarkdownTableCellEvent(event) {
     else openEquationPopover(ownerType, ownerId, block.id, range, null, inlineContentForRange(block, range)?.text.slice(range.start, range.end) || "");
     return;
   }
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
     const offsets = selectionOffsetsInside(cell);
     if (offsets && offsets.start === 0 && offsets.end === cell.textContent.length && !offsets.collapsed) {
@@ -11961,7 +11962,7 @@ function renderInlineFormatToolbar() {
     <div class="inline-format-toolbar ${toolbar.animate ? "is-entering" : ""}" data-inline-toolbar data-placement="${toolbar.placement || "above"}" style="left:${Math.floor(toolbar.x)}px;top:${Math.floor(toolbar.y)}px" role="toolbar" aria-label="텍스트 서식">
       ${buttons}
       ${resourceCitationControl}
-      ${["inline", "display"].map((mode) => `<button class="inline-format-button" type="button" data-inline-equation-apply="${mode}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${mode === "inline" ? "인라인 수식" : "블록 수식"}" ${mode === "inline" ? 'aria-keyshortcuts="Meta+Shift+R Control+Shift+R"' : ""} title="${mode === "inline" ? "인라인 수식 (⌘⇧R)" : "블록 수식"}"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">${mode === "inline" ? "인라인 수식" : "블록 수식"}</span></button>`).join("")}
+      ${["inline", "display"].map((mode) => `<button class="inline-format-button" type="button" data-inline-equation-apply="${mode}" data-owner-type="${toolbar.ownerType}" data-owner-id="${toolbar.ownerId}" data-block-id="${toolbar.blockId}" data-selection-start="${toolbar.start}" data-selection-end="${toolbar.end}" aria-label="${mode === "inline" ? "인라인 수식" : "블록 수식"}" ${mode === "inline" ? 'aria-keyshortcuts="Meta+Shift+A Control+Shift+A"' : ""} title="${mode === "inline" ? "인라인 수식 (⌘⇧A)" : "블록 수식"}"><span class="inline-format-symbol" aria-hidden="true">∑</span><span class="inline-format-label">${mode === "inline" ? "인라인 수식" : "블록 수식"}</span></button>`).join("")}
       ${colorControls}
     </div>
   `;
@@ -15013,6 +15014,7 @@ function handleBeforeInput(event) {
 }
 
 function handleCompositionStart(event) {
+  resourceVerticalSelection = null;
   const blockContent = event.target.closest("[data-block-content]");
   if (!blockContent) return;
   const editor = blockContent.closest(".block-editor");
@@ -16335,15 +16337,56 @@ function handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, b
 }
 
 function handleResourceVerticalSelection(blockContent, ownerType, ownerId, direction) {
-  const textLength = (blockContent.textContent || "").length;
+  const text = blockContent.textContent || "";
+  const textLength = text.length;
+  const selection = window.getSelection();
   const offsets = selectionOffsetsInside(blockContent);
+  const anchor = selectionEndpointOffsetInside(blockContent, selection?.anchorNode, selection?.anchorOffset);
+  const focus = selectionEndpointOffsetInside(blockContent, selection?.focusNode, selection?.focusOffset);
+  let staged = resourceVerticalSelection;
+  if (staged?.content !== blockContent || staged.text !== text || staged.expectedAnchor !== anchor || staged.expectedFocus !== focus) {
+    staged = null;
+    resourceVerticalSelection = null;
+  }
+  const rememberSelection = () => {
+    staged.expectedAnchor = selectionEndpointOffsetInside(blockContent, selection.anchorNode, selection.anchorOffset);
+    staged.expectedFocus = selectionEndpointOffsetInside(blockContent, selection.focusNode, selection.focusOffset);
+    resourceVerticalSelection = staged;
+  };
+  if (staged && direction !== staged.direction) {
+    if (staged.stage === 2) {
+      setSelectionOffsets(blockContent, staged.anchor, staged.lineEnd);
+      staged.stage = 1;
+      rememberSelection();
+    } else {
+      setSelectionOffsets(blockContent, staged.anchor, staged.anchor);
+      resourceVerticalSelection = null;
+    }
+    return;
+  }
+  if (textLength && offsets?.collapsed && !staged) {
+    clearBlockSelection();
+    // Let the browser resolve wrapping, inline formatting, and the current visual line.
+    selection.modify?.("extend", direction < 0 ? "backward" : "forward", "lineboundary");
+    const lineEnd = selectionEndpointOffsetInside(blockContent, selection.focusNode, selection.focusOffset);
+    staged = { content: blockContent, text, direction, stage: 1, anchor, lineEnd: lineEnd ?? (direction < 0 ? 0 : textLength) };
+    setSelectionOffsets(blockContent, staged.anchor, staged.lineEnd);
+    rememberSelection();
+    return;
+  }
+  if (staged?.stage === 1) {
+    setSelectionOffsets(blockContent, direction < 0 ? textLength : 0, direction < 0 ? 0 : textLength);
+    staged.stage = 2;
+    rememberSelection();
+    return;
+  }
+  resourceVerticalSelection = null;
   const extend = textLength > 0 && offsets && !offsets.collapsed && offsets.start === 0 && offsets.end === textLength;
   handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId, direction < 0);
-  if (ui.blockSelection.ids.length) {
-    ui.blockSelection.anchorId = blockContent.dataset.blockContent;
-    ui.blockSelection.focusId = blockContent.dataset.blockContent;
-    if (extend) moveSelectedBlockSelection(direction, true);
-  }
+  if (!ui.blockSelection.ids.length) return;
+  ui.blockSelection.anchorId = blockContent.dataset.blockContent;
+  ui.blockSelection.focusId = blockContent.dataset.blockContent;
+  if (extend) moveSelectedBlockSelection(direction, true);
 }
 
 function selectSingleBlock(ownerType, ownerId, blockId) {
@@ -18589,7 +18632,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
       index = codeEnd + codeFence.length;
       continue;
     }
-    const boldItalicMatch = source.slice(index).match(/^(\*\*\*|___)(\S(?:[\s\S]*?\S)?)\1/);
+    const boldItalicMatch = source.slice(index).match(/^(\*\*\*)(\S(?:[\s\S]*?\S)?)\1/);
     if (boldItalicMatch) {
       const nested = appendNested(boldItalicMatch[2], { type: "bold" }, index + boldItalicMatch[1].length);
       if (nested.end > nested.start) marks.push({ type: "italic", start: nested.start, end: nested.end });
@@ -18616,7 +18659,7 @@ function parseMarkdownInlineText(text = "", references = null, tableCell = false
       index += strikeMatch[0].length;
       continue;
     }
-    const italicMatch = source.slice(index).match(/^(\*|_)(\S(?:[^*_]*?\S)?)\1/);
+    const italicMatch = source.slice(index).match(/^(\*)(\S(?:[^*]*?\S)?)\1/);
     if ((source[index] === "*" || source[index] === "_") && source[index - 1] === source[index]) {
       appendPlainCharacter(index);
       index += 1;
@@ -19042,6 +19085,7 @@ function canBypassBlockClickSuppressionForDrag(event) {
 
 function handlePointerDown(event) {
   preferredVerticalCaretX = null;
+  resourceVerticalSelection = null;
   if (!event.target.closest("[data-resource-view] .resource-groups")) {
     cancelResourceListDrag();
     setResourceListSelection([]);
@@ -20030,6 +20074,7 @@ function handleKeydown(event) {
     return;
   }
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && !event.isComposing) preferredVerticalCaretX = null;
+  if (event.key !== "Shift" && !(event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key))) resourceVerticalSelection = null;
   if (handleFinancePickerKeydown(event)) return;
   if (handleTodayBatchKeydown(event)) return;
   if (handleTaskPlacementKeydown(event)) return;
@@ -20193,7 +20238,7 @@ function handleKeydown(event) {
   if (handlePendingEmptyContinuationEnter(event)) return;
   if (handlePendingEmptyContinuationTab(event)) return;
 
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
     event.stopPropagation();
     handleBlockContentSelectAllShortcut(blockContent, ownerType, ownerId);
@@ -20516,7 +20561,7 @@ function inlineMarkKeyboardShortcut(event) {
 
 function equationKeyboardShortcut(event) {
   if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return "";
-  if (event.key.toLowerCase() === "r" || event.code === "KeyR") return "inline";
+  if (event.key.toLowerCase() === "a" || event.code === "KeyA") return "inline";
   return event.key.toLowerCase() === "d" || event.code === "KeyD" ? "edit" : "";
 }
 
@@ -20753,6 +20798,7 @@ function handleDocumentKeydown(event) {
     !ui.blockSelection.ids.length
     && (event.metaKey || event.ctrlKey)
     && !event.altKey
+    && !event.shiftKey
     && event.key.toLowerCase() === "a"
     && !isEditableShortcutTarget(event.target)
   ) {
@@ -20783,7 +20829,7 @@ function handleDocumentKeydown(event) {
     clearBlockSelection();
     return;
   }
-  if (ui.blockSelection.ids.length && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+  if (ui.blockSelection.ids.length && (event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
     selectAllBlocks(ui.blockSelection.ownerType, ui.blockSelection.ownerId);
     return;
@@ -24219,7 +24265,7 @@ function textMatchesMarkdownShortcut(rawText) {
 }
 
 function placeCaretAtEnd(element) {
-  element.focus();
+  element.focus({ preventScroll: Boolean(element.closest(".resource-document, .quick-editor-surface")) });
   const range = document.createRange();
   const textLength = (element.textContent || "").length;
   if (textLength > 0) {
@@ -24232,21 +24278,24 @@ function placeCaretAtEnd(element) {
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+  scheduleEnsureResourceCaretVisible(element);
 }
 
 function placeCaretAtStart(element) {
-  element.focus();
+  element.focus({ preventScroll: Boolean(element.closest(".resource-document, .quick-editor-surface")) });
   const range = document.createRange();
   range.selectNodeContents(element);
   range.collapse(true);
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+  scheduleEnsureResourceCaretVisible(element);
 }
 
 function placeCaretAtTextOffset(element, offset) {
-  element.focus();
+  element.focus({ preventScroll: Boolean(element.closest(".resource-document, .quick-editor-surface")) });
   setSelectionOffsets(element, Math.max(0, offset));
+  scheduleEnsureResourceCaretVisible(element);
   return true;
 }
 
@@ -24894,9 +24943,20 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
   if (!rawText && CONTINUED_BLOCK_TYPES.has(block.type) && containingToggleBlock(item.blocks, index)) {
     return exitEmptyContinuationBlock(ownerType, ownerId, blockId);
   }
+  const previousIndex = previousVisibleBlockIndex(item.blocks, index);
+  const previous = previousIndex >= 0 ? item.blocks[previousIndex] : null;
+  const nestedText = Boolean(rawText) && blockIndent(block) > 0;
+  if (nestedText && (
+    !previous
+    || blockIndent(previous) !== blockIndent(block)
+    || containingToggleBlock(item.blocks, previousIndex)?.id !== containingToggleBlock(item.blocks, index)?.id
+    || [previous, block].some((entry) => ["code", "divider", TABLE_BLOCK_TYPE, IMAGE_BLOCK_TYPE].includes(entry.type) || isUrlPreviewBlockType(entry.type))
+    || blockHasIndentedDescendants(item.blocks, previousIndex)
+    || blockHasIndentedDescendants(item.blocks, index)
+  )) return true;
   const history = beginEditorHistory(ownerType, ownerId, { blockId, start: 0, end: 0 });
 
-  if (blockIndent(block) > 0) {
+  if (!rawText && blockIndent(block) > 0) {
     const currentIndent = blockIndent(block);
     const nextIndent = Math.max(0, currentIndent - 1);
     const targetIndex = moveExitingBlockAfterContainingParentSubtree(item.blocks, index, nextIndent);
@@ -24908,7 +24968,7 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
     return true;
   }
 
-  if (rawText && block.type !== "paragraph") {
+  if (rawText && !nestedText && block.type !== "paragraph") {
     applyBlockType(block, "paragraph");
     block.checked = false;
     block.collapsed = false;
@@ -24930,8 +24990,6 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
     return true;
   }
 
-  const previousIndex = previousVisibleBlockIndex(item.blocks, index);
-  const previous = previousIndex >= 0 ? item.blocks[previousIndex] : null;
   if (previous?.type === "divider") {
     item.blocks.splice(previousIndex, 1);
     commitEditorHistory(history, { blockId: block.id, start: 0, end: 0 });
@@ -26309,7 +26367,7 @@ function currentBlockSelectionRange(ownerType, ownerId, blockId) {
 function focusBlockContent(blockId) {
   const target = document.querySelector(`[data-block-content="${blockId}"]`);
   if (!target) return null;
-  target.focus();
+  target.focus({ preventScroll: Boolean(target.closest(".resource-document, .quick-editor-surface")) });
   activateBlockContent(target);
   placeCaretAtEnd(target);
   return target;
@@ -26318,7 +26376,7 @@ function focusBlockContent(blockId) {
 function focusBlockContentAtPosition(blockId, position = "end") {
   const target = document.querySelector(`[data-block-content="${blockId}"]`);
   if (!target) return null;
-  target.focus();
+  target.focus({ preventScroll: Boolean(target.closest(".resource-document, .quick-editor-surface")) });
   activateBlockContent(target);
   if (position === "start") {
     placeCaretAtTextOffset(target, 0);
@@ -26331,9 +26389,10 @@ function focusBlockContentAtPosition(blockId, position = "end") {
 function focusBlockContentAtRange(blockId, start, end = start) {
   const target = document.querySelector(`[data-block-content="${blockId}"]`);
   if (!target) return null;
-  target.focus();
+  target.focus({ preventScroll: Boolean(target.closest(".resource-document, .quick-editor-surface")) });
   activateBlockContent(target);
   setSelectionOffsets(target, start, end);
+  scheduleEnsureResourceCaretVisible(target);
   return target;
 }
 
@@ -26344,14 +26403,15 @@ function ensureResourceCaretVisible(blockContent, options = {}) {
   if (!scrollElement || !range?.collapsed) return false;
   const caretRect = caretRectFor(blockContent);
   if (!caretRect || (!caretRect.width && !caretRect.height)) return false;
-  const documentRect = resourceDocument?.getBoundingClientRect() || visualViewportBounds();
+  const viewport = visualViewportBounds();
+  const documentRect = resourceDocument?.getBoundingClientRect() || viewport;
   const style = getComputedStyle(blockContent);
   const fontSize = Number.parseFloat(style.fontSize) || 16;
   const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.55;
   const reserveLines = Math.max(RESOURCE_CARET_RESERVE_LINES, Number(options.reserveLines) || 0);
   const titlebarBottom = resourceDocument?.querySelector("[data-resource-window-drag]")?.getBoundingClientRect().bottom || documentRect.top;
-  const safeTop = Math.max(documentRect.top, titlebarBottom) + Math.max(18, lineHeight * 0.75);
-  const safeBottom = documentRect.bottom - Math.max(22, lineHeight * reserveLines);
+  const safeTop = Math.max(documentRect.top, viewport.top, titlebarBottom) + Math.max(18, lineHeight * 0.75);
+  const safeBottom = Math.min(documentRect.bottom, viewport.bottom) - Math.max(22, lineHeight * reserveLines);
   let delta = 0;
   if (caretRect.bottom > safeBottom) delta = caretRect.bottom - safeBottom;
   else if (caretRect.top < safeTop) delta = caretRect.top - safeTop;
@@ -26361,7 +26421,10 @@ function ensureResourceCaretVisible(blockContent, options = {}) {
     scrollElement.scrollTop + delta,
   ));
   if (Math.abs(nextScrollTop - scrollElement.scrollTop) < 0.5) return false;
-  scrollElement.scrollTop = nextScrollTop;
+  scrollElement.scrollTo({
+    top: nextScrollTop,
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+  });
   return true;
 }
 
@@ -26370,12 +26433,22 @@ function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
   if (resourceCaretScrollFrame) cancelAnimationFrame(resourceCaretScrollFrame);
   resourceCaretScrollFrame = requestAnimationFrame(() => {
     resourceCaretScrollFrame = 0;
-    if (blockContent.isConnected) ensureResourceCaretVisible(blockContent, options);
+    if (!blockContent.isConnected || !blockContent.contains(document.activeElement)) return;
+    if (options.restoreScrollElement?.isConnected && Number.isFinite(options.restoreScrollTop)) {
+      // WebKit can defer a native selection scroll until after focus({ preventScroll: true }).
+      // Restore that one focus frame before measuring the visible caret.
+      options.restoreScrollElement.scrollTo({ top: options.restoreScrollTop, behavior: "instant" });
+    }
+    ensureResourceCaretVisible(blockContent, options);
   });
 }
 
 function focusBlockContentAfterRender(blockId, options = {}) {
   const focusTarget = () => {
+    const content = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
+    const restoreScrollElement = content?.closest(".resource-document")
+      || (content?.closest(".quick-editor-surface") ? document.scrollingElement : null);
+    const restoreScrollTop = restoreScrollElement?.scrollTop;
     let target;
     if (options.range) target = focusBlockContentAtRange(blockId, options.range.start, options.range.end ?? options.range.start);
     else if (options.position) target = focusBlockContentAtPosition(blockId, options.position);
@@ -26390,18 +26463,18 @@ function focusBlockContentAfterRender(blockId, options = {}) {
       if (!document.queryCommandState("bold")) document.execCommand("bold");
       target.dataset.inlineTypingMark = "bold";
     }
+    if (target) scheduleEnsureResourceCaretVisible(target, { ...options, restoreScrollElement, restoreScrollTop });
     return target;
   };
   const focusIsSettled = (candidate) => Boolean(candidate && document.activeElement === candidate);
   const target = focusTarget();
   const resourceFocusVersion = ui.resourceWindowFocusVersion;
-  if (target) scheduleEnsureResourceCaretVisible(target, options);
   let remainingChecks = options.transaction === true ? 4 : 1;
   const verifyFocus = () => {
     if (ui.resourceWindowFocusVersion !== resourceFocusVersion) return;
     let candidate = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
     if (!focusIsSettled(candidate)) candidate = focusTarget();
-    if (candidate) scheduleEnsureResourceCaretVisible(candidate, options);
+    else if (candidate) scheduleEnsureResourceCaretVisible(candidate, options);
     remainingChecks -= 1;
     if (remainingChecks > 0) requestAnimationFrame(verifyFocus);
   };

@@ -6174,15 +6174,16 @@ button:focus-visible {
 
 .resource-window > .resource-document {
   --resource-document-padding-x: 52px;
+  --resource-document-bottom-space: 162px;
   width: 100%;
   height: 100%;
   max-height: none;
   margin: 0;
   overflow: auto;
-  scroll-padding-block: 68px 54px;
+  scroll-padding-block: 68px var(--resource-document-bottom-space);
   border: 0;
   border-radius: inherit;
-  padding: 0 var(--resource-document-padding-x) 54px;
+  padding: 0 var(--resource-document-padding-x) var(--resource-document-bottom-space);
   background: #fff;
   box-shadow: none;
   overscroll-behavior: contain;
@@ -6774,7 +6775,7 @@ button:focus-visible {
   min-height: 1.35em;
   border-radius: 4px;
   padding: 0 5px;
-  background: rgba(55, 53, 47, 0.08);
+  background: transparent;
   color: #37352f;
   font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
   font-size: 0.96em;
@@ -6796,6 +6797,7 @@ button:focus-visible {
   place-items: center;
   margin: 8px 0;
   padding: 12px 16px;
+  background: rgba(55, 53, 47, 0.08);
   font-size: 1.08em;
   text-align: center;
   white-space: normal;
@@ -13533,8 +13535,7 @@ body.is-task-placement-open {
 
   .resource-window > .resource-document {
     --resource-document-padding-x: 18px;
-    padding-bottom: 34px;
-    scroll-padding-bottom: 34px;
+    --resource-document-bottom-space: 102px;
   }
 
   :is(.resource-document, .quick-editor-surface) .block-editor {

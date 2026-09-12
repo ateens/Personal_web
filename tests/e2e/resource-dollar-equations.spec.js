@@ -182,3 +182,25 @@ $$
   await expect.poll(async () => (await storedBlocks(request)).map((block) => block.text).join("\n\n")).toBe(source);
   expect((await storedBlocks(request)).every((block) => !block.marks.length)).toBe(true);
 });
+
+test("underscores remain literal while explicit italic and math formatting still work", async ({ page, request }) => {
+  const editor = await openResource(page);
+  const content = editor.locator('[data-block-content="dollar-paste"]');
+  await content.click();
+  await content.pressSequentially("_keep_ user_id *italic* __bold__ $x_i$");
+  await expect(content.locator('[data-inline-mark="italic"]')).toHaveText("italic");
+  await expect(content.locator('[data-inline-mark="bold"]')).toHaveText("bold");
+  await expect(content.locator('[data-inline-mark="equation"]')).toHaveAttribute("data-equation-formula", "x_i");
+  await expect.poll(() => content.evaluate((node) => node.textContent)).toBe("_keep_ user_id italic bold x_i");
+  await expect.poll(async () => (await storedBlocks(request))[0].text).toBe("_keep_ user_id italic bold x_i");
+  await content.press("Meta+ArrowRight");
+  await content.press("Enter");
+  await editor.locator('[data-block-content]:focus').evaluate((element) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/markdown", "_plain_ and \\_escaped\\_\n\n| Text |\n| --- |\n| _table_ |\n");
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+  });
+  await expect(editor.locator('[data-resource-table-cell][data-table-row="1"]').first()).toHaveText("_table_");
+  await expect(editor.locator('[data-inline-mark="italic"]')).toHaveText("italic");
+  await expect.poll(async () => (await storedBlocks(request)).some((block) => block.text === "_plain_ and _escaped_")).toBe(true);
+});
