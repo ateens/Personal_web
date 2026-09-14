@@ -31,7 +31,7 @@ async function savedBlocks(request) {
   return (await fixtureSnapshot(request)).state.resources.find((resource) => resource.id === RESOURCE_ID).blocks;
 }
 
-test("토글의 빈 줄은 반복 Enter에도 내부에 남고 Backspace에서 한 단계 빠져나온다", async ({ page, request }) => {
+test("토글의 빈 줄은 반복 Enter에도 내부에 남고 Backspace는 한 줄씩 삭제한다", async ({ page, request }) => {
   const editor = await openResource(page, request, [
     toggle("outer"), { ...toggle("nested", 1), toggleHeading: "heading2" },
     paragraph("empty", "", 2), paragraph("following-child", "원래 다음 자식", 2), paragraph("outside", "바깥 문장"),
@@ -42,14 +42,20 @@ test("토글의 빈 줄은 반복 Enter에도 내부에 남고 Backspace에서 �
     await expect(editor.locator(".block:has([data-block-content]:focus)")).toHaveAttribute("data-indent", "2");
   }
   await expect.poll(async () => (await savedBlocks(request)).filter((block) => block.indent === 2 && !block.text).length).toBe(4);
-  const exitingId = await editor.locator("[data-block-content]:focus").getAttribute("data-block-content");
-  await page.keyboard.press("Backspace");
-  await expect(editor.locator(`[data-block-id="${exitingId}"]`)).toHaveAttribute("data-indent", "1");
-  await expect.poll(async () => (await savedBlocks(request)).map((block) => block.id).slice(-3)).toEqual(["following-child", exitingId, "outside"]);
-  await page.keyboard.press("Backspace");
-  await expect(editor.locator(`[data-block-id="${exitingId}"]`)).toHaveAttribute("data-indent", "0");
+  for (let remaining = 3; remaining >= 0; remaining -= 1) {
+    const before = await savedBlocks(request);
+    const removingId = await editor.locator("[data-block-content]:focus").getAttribute("data-block-content");
+    const index = before.findIndex((block) => block.id === removingId);
+    await page.keyboard.press("Backspace");
+    await expect(editor.locator(`[data-block-id="${removingId}"]`)).toHaveCount(0);
+    await expect(editor.locator(`[data-block-content="${before[index - 1].id}"]`)).toBeFocused();
+    await expect.poll(async () => (await savedBlocks(request)).filter((block) => block.indent === 2 && !block.text).length).toBe(remaining);
+  }
+  await expect.poll(async () => (await savedBlocks(request)).map((block) => block.id)).toEqual(["outer", "nested", "following-child", "outside"]);
+  await expect(editor.locator('[data-block-id="following-child"]')).toHaveAttribute("data-indent", "2");
   await page.keyboard.press("Meta+z");
-  await expect(editor.locator(`[data-block-id="${exitingId}"]`)).toHaveAttribute("data-indent", "1");
+  await expect(editor.locator('[data-block-content="empty"]')).toBeFocused();
+  await expect(editor.locator('[data-block-id="empty"]')).toHaveAttribute("data-indent", "2");
 });
 
 for (const type of ["bullet", "numbered", "todo"]) {
@@ -67,8 +73,11 @@ for (const type of ["bullet", "numbered", "todo"]) {
       await expect(editor.locator(".block:has([data-block-content]:focus)")).toHaveAttribute("data-indent", id === "list" ? "0" : "1");
       await expect(editor.locator(".block:has([data-block-content]:focus)")).toHaveAttribute("data-type", "paragraph");
       if (id === "nested-list") {
+        const blank = await editor.locator("[data-block-content]:focus").getAttribute("data-block-content");
         await page.keyboard.press("Backspace");
-        await expect(editor.locator(".block:has([data-block-content]:focus)")).toHaveAttribute("data-indent", "0");
+        await expect(editor.locator(`[data-block-content="${blank}"]`)).toHaveCount(0);
+        await expect(editor.locator('[data-block-content="nested-list"]')).toBeFocused();
+        await expect(editor.locator('[data-block-id="nested-list"]')).toHaveAttribute("data-indent", "1");
       }
     }
   });

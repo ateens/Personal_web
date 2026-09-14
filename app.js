@@ -14991,6 +14991,16 @@ function handleBeforeInput(event) {
     event.stopPropagation();
     return;
   }
+  if (event.inputType === "deleteContentBackward"
+    && ownerEditor
+    && !blockContent.textContent
+    && blockContent.closest('.block[data-type="paragraph"][data-indent]:not([data-indent="0"])')
+    && isCaretAtStart(blockContent)
+    && handleBackspaceAtBlockStart(ownerEditor.dataset.ownerType, ownerEditor.dataset.ownerId, blockContent.dataset.blockContent, blockContent)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!event.inputType?.includes("Composition")) captureInlineBoundaryTyping(blockContent);
   if (handlePendingSoftLineBreakBeforeInput(event, blockContent)) return;
   if (handlePendingMarkdownTextBeforeInput(event, blockContent)) return;
@@ -24942,6 +24952,10 @@ function handleBackspaceAtBlockStart(ownerType, ownerId, blockId, blockContent) 
   const rawText = blockContent.textContent || "";
   if (!rawText && CONTINUED_BLOCK_TYPES.has(block.type) && containingToggleBlock(item.blocks, index)) {
     return exitEmptyContinuationBlock(ownerType, ownerId, blockId);
+  }
+  if (!rawText && item.blocks.length > 1 && block.type === "paragraph" && blockIndent(block) > 0 && !blockHasIndentedDescendants(item.blocks, index)) {
+    removeBlock(ownerType, ownerId, blockId);
+    return true;
   }
   const previousIndex = previousVisibleBlockIndex(item.blocks, index);
   const previous = previousIndex >= 0 ? item.blocks[previousIndex] : null;

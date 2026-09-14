@@ -131,3 +131,49 @@ test("접힌 형제 토글의 숨은 내용에는 합치지 않고 중첩 목록
   await expect(editor.locator('[data-block-id="hidden"]')).toBeHidden();
   await expect.poll(() => caret(previous)).toEqual({ focused: true, offset: 4, collapsed: true });
 });
+
+for (const context of ["indent", "toggle", "nested-toggle"]) {
+  test(`${context}: 중간의 빈 줄 Backspace는 그 줄만 삭제하고 바로 윗줄 끝에 커서를 둔다`, async ({ page, request }, testInfo) => {
+    if (context === "nested-toggle") await page.setViewportSize({ width: 390, height: 900 });
+    const indent = context === "nested-toggle" ? 2 : 1;
+    const parents = context === "indent" ? [paragraph("parent", "부모")]
+      : [toggle("outer"), ...(context === "nested-toggle" ? [toggle("inner", 1)] : [])];
+    const blocks = [...parents, paragraph("previous", "윗줄 끝", indent, [{ type: "bold", start: 0, end: 4 }]),
+      paragraph("blank", "", indent), paragraph("following", "아랫줄", indent),
+      paragraph("last", "마지막 내용", indent), paragraph("outside", "토글 밖")];
+    await seed(request, blocks);
+    const editor = await open(page);
+    const blank = editor.locator('[data-block-content="blank"]');
+    const previous = editor.locator('[data-block-content="previous"]');
+    await setCaret(editor.locator('[data-block-content="following"]'), 0);
+    await page.keyboard.press("ArrowUp");
+    await expect(blank).toBeFocused();
+    await editor.screenshot({ path: testInfo.outputPath("before-backspace.png"), caret: "initial" });
+    await page.keyboard.press("Backspace");
+    await expect(blank).toHaveCount(0);
+    await expect.poll(() => caret(previous)).toEqual({ focused: true, offset: 4, collapsed: true });
+    const expected = blocks.filter((block) => block.id !== "blank");
+    await expect.poll(() => savedBlocks(request)).toEqual(expected);
+    await editor.screenshot({ path: testInfo.outputPath("after-backspace.png"), caret: "initial" });
+    await page.keyboard.insertText("!");
+    await expect(previous).toHaveText("윗줄 끝!");
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect(previous).toHaveText("윗줄 끝");
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect(blank).toBeFocused();
+    await expect.poll(() => savedBlocks(request)).toEqual(blocks);
+    expect(await blank.evaluate((element) => element.dispatchEvent(new InputEvent("beforeinput", {
+      inputType: "deleteContentBackward", bubbles: true, cancelable: true,
+    })))).toBe(false);
+    await expect.poll(() => savedBlocks(request)).toEqual(expected);
+    await expect.poll(() => caret(previous)).toEqual({ focused: true, offset: 4, collapsed: true });
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect(blank).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+Shift+z");
+    await expect.poll(() => savedBlocks(request)).toEqual(expected);
+    await expect.poll(() => caret(previous)).toEqual({ focused: true, offset: 4, collapsed: true });
+    await open(page);
+    await expect(blank).toHaveCount(0);
+    await expect.poll(() => savedBlocks(request)).toEqual(expected);
+  });
+}
