@@ -76,7 +76,7 @@ async function seedResourceRelations(page, request) {
   await openResourceList(page);
 }
 
-test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장 내용을 유지한다", async ({ page, request }) => {
+test("Resource 연결 변경은 Project의 Box를 기본값으로 쓰고 직접 바꾼 Box와 Project를 함께 유지한다", async ({ page, request }) => {
   await seedResourceRelations(page, request);
   const window = await openSettledResource(page, FIXTURE_IDS.resource);
   const relations = window.locator("[data-resource-relations]");
@@ -116,8 +116,16 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   await expect(trigger).toBeFocused();
   await saved(FIXTURE_IDS.box, FIXTURE_IDS.project);
   await chooseRelation(box, "fixture-second-box");
-  await expect(project).toHaveValue("");
+  await expect(project).toHaveValue(FIXTURE_IDS.project);
   await expect(box.locator("..").locator("[data-finance-select-trigger]")).toBeFocused();
+  await saved("fixture-second-box", FIXTURE_IDS.project);
+  await chooseRelation(box, "");
+  await saved("", FIXTURE_IDS.project);
+  await chooseRelation(project, "fixture-no-box-project");
+  await saved("", "fixture-no-box-project");
+  await chooseRelation(box, "fixture-second-box");
+  await saved("fixture-second-box", "fixture-no-box-project");
+  await chooseRelation(project, "");
   await saved("fixture-second-box", "");
   await chooseRelation(project, "fixture-no-box-project");
   await saved("", "fixture-no-box-project");
@@ -132,6 +140,36 @@ test("Resource 연결 변경은 Project의 Box를 맞추고 본문 DOM과 저장
   await expect(reopened.locator('[data-resource-relations] [data-field="projectId"]')).toHaveValue("fixture-no-box-project");
   await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => reopened.locator("[data-resource-relations]").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+});
+
+for (const boxId of ["fixture-second-box", ""]) test(`새 Resource는 Project와 다른 ${boxId ? "Box" : "빈 Box"}를 저장하고 다시 열어도 유지한다`, async ({ page, request }) => {
+  await seedResourceRelations(page, request);
+  const before = await fixtureSnapshot(request);
+  await page.locator('[data-action="new-resource"]').first().click();
+  const window = page.locator("[data-resource-window]");
+  await expect(window).toHaveCount(1);
+  const id = await window.getAttribute("data-resource-window");
+  const box = window.locator('[data-resource-relations] [data-field="boxId"]');
+  const project = window.locator('[data-resource-relations] [data-field="projectId"]');
+  await chooseRelation(box, "fixture-second-box");
+  const projectOptions = project.locator("..").locator("[data-finance-select-option]");
+  expect(await projectOptions.evaluateAll((options) => options.map((option) => option.dataset.financeSelectOption))).toEqual(expect.arrayContaining([FIXTURE_IDS.project, "fixture-no-box-project"]));
+  await chooseRelation(project, FIXTURE_IDS.project);
+  await expect(box).toHaveValue(FIXTURE_IDS.box);
+  await chooseRelation(box, boxId);
+  await expect(project).toHaveValue(FIXTURE_IDS.project);
+  await expect.poll(async () => {
+    const resource = (await fixtureSnapshot(request)).state.resources.find((entry) => entry.id === id);
+    return [resource?.boxId, resource?.projectId];
+  }).toEqual([boxId, FIXTURE_IDS.project]);
+  await page.reload();
+  await openResourceList(page);
+  const reopened = await openSettledResource(page, id);
+  await expect(reopened.locator('[data-resource-relations] [data-field="boxId"]')).toHaveValue(boxId);
+  await expect(reopened.locator('[data-resource-relations] [data-field="projectId"]')).toHaveValue(FIXTURE_IDS.project);
+  const after = await fixtureSnapshot(request);
+  expect(after.state.tasks).toEqual(before.state.tasks);
+  expect(after.state.habits).toEqual(before.state.habits);
 });
 
 test("Resource 사용자 그룹은 미분류를 중복 없이 표시하고 열린 본문과 자료 내용을 유지한다", async ({ page, request }) => {
@@ -241,7 +279,7 @@ test("Resource 목록 드래그와 키보드 선택은 soft trash와 되돌리�
   await opened.locator(".resource-document-close").click();
   const beforeMove = (await fixtureSnapshot(request)).state.resources.find((item) => item.id === FIXTURE_IDS.resource);
   for (const [mode, field, targetId, expected] of [
-    ["boxes", "boxId", "fixture-second-box", ["fixture-second-box", ""]],
+    ["boxes", "boxId", "fixture-second-box", ["fixture-second-box", beforeMove.projectId]],
     ["projects", "projectId", FIXTURE_IDS.project, [FIXTURE_IDS.box, FIXTURE_IDS.project]],
   ]) {
     await setResourceGrouping(page, field);
@@ -866,8 +904,9 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableRow === "2"))).toBe(true);
   const rowSelection = await selected.evaluateAll((cells) => cells.map((cell) => {
     const style = getComputedStyle(cell.parentElement);
+    const outline = getComputedStyle(cell.parentElement, "::after");
     return {
-      borderRightColor: style.borderRightColor,
+      borderWidths: [outline.borderTopWidth, outline.borderRightWidth, outline.borderBottomWidth, outline.borderLeftWidth],
       topLeft: parseFloat(style.borderTopLeftRadius),
       bottomLeft: parseFloat(style.borderBottomLeftRadius),
       topRight: parseFloat(style.borderTopRightRadius),
@@ -877,7 +916,9 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   const tableRadius = await block.locator(".resource-markdown-table").evaluate((table) => parseFloat(getComputedStyle(table).borderTopLeftRadius));
   expect(rowSelection[0].topLeft).toBe(tableRadius);
   expect(rowSelection[0].bottomLeft).toBe(tableRadius);
-  expect(rowSelection[1]).toMatchObject({ borderRightColor: "rgba(0, 0, 0, 0)", topLeft: 0, bottomLeft: 0, topRight: 0, bottomRight: 0 });
+  expect(rowSelection[0].borderWidths).toEqual(["2px", "0px", "2px", "2px"]);
+  expect(rowSelection[1]).toMatchObject({ borderWidths: ["2px", "0px", "2px", "0px"], topLeft: 0, bottomLeft: 0, topRight: 0, bottomRight: 0 });
+  expect(rowSelection[2].borderWidths).toEqual(["2px", "2px", "2px", "0px"]);
   expect(rowSelection[2].topRight).toBe(tableRadius);
   expect(rowSelection[2].bottomRight).toBe(tableRadius);
   await expect(block.locator(".resource-table-format")).toBeVisible();
@@ -893,8 +934,9 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   expect(await selected.evaluateAll((cells) => cells.every((cell) => cell.dataset.tableColumn === "1"))).toBe(true);
   const columnSelection = await selected.evaluateAll((cells) => cells.map((cell) => {
     const style = getComputedStyle(cell.parentElement);
+    const outline = getComputedStyle(cell.parentElement, "::after");
     return {
-      borderBottomColor: style.borderBottomColor,
+      borderWidths: [outline.borderTopWidth, outline.borderRightWidth, outline.borderBottomWidth, outline.borderLeftWidth],
       topLeft: parseFloat(style.borderTopLeftRadius),
       topRight: parseFloat(style.borderTopRightRadius),
       bottomLeft: parseFloat(style.borderBottomLeftRadius),
@@ -903,7 +945,9 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   }));
   expect(columnSelection[0].topLeft).toBe(tableRadius);
   expect(columnSelection[0].topRight).toBe(tableRadius);
-  expect(columnSelection[1]).toMatchObject({ borderBottomColor: "rgba(0, 0, 0, 0)", topLeft: 0, topRight: 0, bottomLeft: 0, bottomRight: 0 });
+  expect(columnSelection[0].borderWidths).toEqual(["2px", "2px", "0px", "2px"]);
+  expect(columnSelection[1]).toMatchObject({ borderWidths: ["0px", "2px", "0px", "2px"], topLeft: 0, topRight: 0, bottomLeft: 0, bottomRight: 0 });
+  expect(columnSelection.at(-1).borderWidths).toEqual(["0px", "2px", "2px", "2px"]);
   expect(columnSelection.at(-1).bottomLeft).toBe(tableRadius);
   expect(columnSelection.at(-1).bottomRight).toBe(tableRadius);
   await expect(block.locator('[data-resource-table-scope][aria-pressed="true"]')).toHaveCount(1);
@@ -926,25 +970,25 @@ test("표 행·열 선택 손잡이는 가로 스크롤과 열 너비 변경 후
   const singleSelection = await selected.evaluate((content) => {
     const cellElement = content.parentElement;
     const table = content.closest(".resource-markdown-table");
-    const probe = document.createElement("span");
-    probe.style.boxShadow = "0 0 0 1px #2383e2";
-    document.body.append(probe);
-    const expectedShadow = getComputedStyle(probe).boxShadow;
-    probe.remove();
     const style = getComputedStyle(cellElement);
+    const outline = getComputedStyle(cellElement, "::after");
     const tableStyle = getComputedStyle(table);
+    const bounds = cellElement.getBoundingClientRect();
     return {
       shadow: style.boxShadow,
-      expectedShadow,
-      borderRightColor: style.borderRightColor,
-      borderBottomColor: style.borderBottomColor,
+      borderWidths: [outline.borderTopWidth, outline.borderRightWidth, outline.borderBottomWidth, outline.borderLeftWidth],
+      borderColors: [outline.borderTopColor, outline.borderRightColor, outline.borderBottomColor, outline.borderLeftColor],
+      widthDelta: Math.abs(parseFloat(outline.width) - bounds.width),
+      heightDelta: Math.abs(parseFloat(outline.height) - bounds.height),
       radii: [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomRightRadius, style.borderBottomLeftRadius],
       tableRadii: [tableStyle.borderTopLeftRadius, tableStyle.borderTopRightRadius, tableStyle.borderBottomRightRadius, tableStyle.borderBottomLeftRadius],
     };
   });
-  expect(singleSelection.shadow).toBe(singleSelection.expectedShadow);
-  expect(singleSelection.borderRightColor).toBe("rgba(0, 0, 0, 0)");
-  expect(singleSelection.borderBottomColor).toBe("rgba(0, 0, 0, 0)");
+  expect(singleSelection.shadow).toBe("none");
+  expect(singleSelection.borderWidths).toEqual(["2px", "2px", "2px", "2px"]);
+  expect(singleSelection.borderColors).toEqual(Array(4).fill("rgb(35, 131, 226)"));
+  expect(singleSelection.widthDelta).toBeLessThan(1);
+  expect(singleSelection.heightDelta).toBeLessThan(1);
   expect(singleSelection.radii).toEqual(singleSelection.tableRadii);
   await cell.press("ArrowRight");
   await expect(selected).toHaveAttribute("data-table-column", "2");

@@ -7144,6 +7144,8 @@ button:focus-visible {
 }
 
 .resource-markdown-table :is(th, td) {
+  --table-cell-grid-right: 1px;
+  --table-cell-grid-bottom: 1px;
   position: relative;
   border-right: 1px solid rgba(55, 53, 47, 0.1);
   border-bottom: 1px solid rgba(55, 53, 47, 0.1);
@@ -7166,19 +7168,44 @@ button:focus-visible {
   cursor: text;
 }
 
-.resource-table-cell:focus {
-  background: rgba(37, 99, 235, 0.035);
-  box-shadow: inset 0 0 0 1.5px rgba(37, 99, 235, 0.45);
+.resource-markdown-table :is(th, td):where(:has(> .resource-table-cell:focus), .has-cell-selection) {
+  z-index: 1;
 }
 
-.resource-markdown-table :is(th, td).has-cell-selection {
-  z-index: 1;
-  border-right-color: transparent;
-  border-bottom-color: transparent;
-  border-radius: 10px;
-  background: rgba(35, 131, 226, 0.12);
-  box-shadow: 0 0 0 1px #2383e2;
+/* The editable span can be shorter than its row. Paint the actual cell without resizing it. */
+.resource-markdown-table :is(th, td):where(:has(> .resource-table-cell:focus), .has-cell-selection)::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: calc(-1 * var(--table-cell-grid-right));
+  bottom: calc(-1 * var(--table-cell-grid-bottom));
+  left: 0;
+  box-sizing: border-box;
+  border: 2px solid rgba(37, 99, 235, 0.65);
+  border-radius: inherit;
+  background: rgba(37, 99, 235, 0.035);
+  pointer-events: none;
 }
+
+.resource-table-block .resource-markdown-table :is(th, td).has-cell-selection {
+  border-radius: 0;
+}
+
+.resource-markdown-table :is(th, td).has-cell-selection::after {
+  border-width: 0;
+  border-color: #2383e2;
+  background: rgba(35, 131, 226, 0.12);
+}
+
+.resource-markdown-table .has-cell-selection[data-table-selection-edges~="top"]::after { border-top-width: 2px; }
+.resource-markdown-table .has-cell-selection[data-table-selection-edges~="right"]::after { border-right-width: 2px; }
+.resource-markdown-table .has-cell-selection[data-table-selection-edges~="bottom"]::after { border-bottom-width: 2px; }
+.resource-markdown-table .has-cell-selection[data-table-selection-edges~="left"]::after { border-left-width: 2px; }
+.resource-table-block .resource-markdown-table .has-cell-selection[data-table-selection-edges~="top"][data-table-selection-edges~="left"] { border-top-left-radius: 10px; }
+.resource-table-block .resource-markdown-table .has-cell-selection[data-table-selection-edges~="top"][data-table-selection-edges~="right"] { border-top-right-radius: 10px; }
+.resource-table-block .resource-markdown-table .has-cell-selection[data-table-selection-edges~="bottom"][data-table-selection-edges~="left"] { border-bottom-left-radius: 10px; }
+.resource-table-block .resource-markdown-table .has-cell-selection[data-table-selection-edges~="bottom"][data-table-selection-edges~="right"] { border-bottom-right-radius: 10px; }
 
 .resource-table-cell.is-cell-selected {
   background: transparent;
@@ -7217,15 +7244,6 @@ button:focus-visible {
 .resource-table-scope:focus-visible { outline: 2px solid #2383e2; outline-offset: 1px; }
 .resource-table-block.has-table-range-selection .resource-table-format { display: flex; }
 .resource-table-block.has-table-range-selection > .resource-table-shell > .resource-table-cell-actions { display: none; }
-.resource-table-block.has-table-range-selection :is(th, td).has-cell-selection { z-index: 1; border-radius: 0; background: rgba(35, 131, 226, 0.12); box-shadow: none; }
-.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection { border-right-color: transparent; box-shadow: inset 0 1px #2383e2, inset 0 -1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:first-child { border-radius: 10px 0 0 10px; box-shadow: inset 1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:last-child { border-radius: 0 10px 10px 0; box-shadow: inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-row[aria-pressed="true"]) :is(th, td).has-cell-selection:only-child { border-radius: 10px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) :is(th, td).has-cell-selection { border-bottom-color: transparent; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) thead > tr:first-child > .has-cell-selection { border-radius: 10px 10px 0 0; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) tbody > tr:last-child > .has-cell-selection { border-radius: 0 0 10px 10px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 -1px #2383e2; }
-.resource-table-block:has(.resource-table-scope.is-column[aria-pressed="true"]) table:not(:has(tbody tr)) thead > tr:first-child > .has-cell-selection { border-radius: 10px; box-shadow: inset 1px 0 #2383e2, inset -1px 0 #2383e2, inset 0 1px #2383e2, inset 0 -1px #2383e2; }
 
 .resource-table-edge {
   position: absolute;
@@ -7311,11 +7329,13 @@ button:focus-visible {
   font-weight: 750;
 }
 
-.resource-markdown-table tbody tr:last-child td {
+.resource-markdown-table tbody tr:last-child :is(th, td) {
+  --table-cell-grid-bottom: 0px;
   border-bottom: 0;
 }
 
 .resource-markdown-table :is(th, td):last-child {
+  --table-cell-grid-right: 0px;
   border-right: 0;
 }
 

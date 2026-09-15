@@ -9403,7 +9403,10 @@ function markdownTableCellStyle(format) {
 function markdownTableSelectedCoordinates(table, selection) {
   return [table.headers, ...table.rows].flatMap((cells, row) => cells.flatMap((_, column) => {
     const selected = !selection || (selection.mode === "row" ? row === selection.row
-      : selection.mode === "column" ? column === selection.column : row === selection.row && column === selection.column);
+      : selection.mode === "column" ? column === selection.column
+      : selection.mode === "range" ? row >= Math.min(selection.row, selection.endRow) && row <= Math.max(selection.row, selection.endRow)
+        && column >= Math.min(selection.column, selection.endColumn) && column <= Math.max(selection.column, selection.endColumn)
+      : row === selection.row && column === selection.column);
     return selected ? [{ row, column }] : [];
   }));
 }
@@ -9461,7 +9464,7 @@ function applyMarkdownTableFormat(control) {
   commitEditorHistory(history, { blockId: block.id });
   saveState();
   renderEditorMutation(ownerType, ownerId);
-  if (selection) selectMarkdownTableScope(block.id, selection.mode, selection.row, selection.column);
+  if (selection) selectMarkdownTableScope(block.id, selection.mode, selection.row, selection.column, selection.endRow, selection.endColumn);
   else restoreBlockSelection(ownerType, ownerId, [block.id]);
   const replacement = document.querySelector(`[data-block-id="${cssEscape(block.id)}"] [data-resource-table-format="${field}"]`);
   (replacement?.closest("[data-finance-select]")?.querySelector("[data-finance-select-trigger]") || replacement)?.focus({ preventScroll: true });
@@ -9599,6 +9602,7 @@ function clearMarkdownTableCellSelection() {
   document.querySelectorAll("[data-resource-table-cell].is-cell-selected").forEach((cell) => {
     cell.classList.remove("is-cell-selected");
     cell.parentElement.classList.remove("has-cell-selection");
+    delete cell.parentElement.dataset.tableSelectionEdges;
     cell.closest(".resource-table-block")?.classList.remove("has-cell-selection");
     cell.contentEditable = "true";
     cell.removeAttribute("tabindex");
@@ -9617,8 +9621,8 @@ function selectMarkdownTableCell(blockId, row, column) {
   return selectMarkdownTableScope(blockId, "cell", row, column);
 }
 
-function selectMarkdownTableScope(blockId, mode, row = 0, column = 0) {
-  if (!["cell", "row", "column"].includes(mode)) return false;
+function selectMarkdownTableScope(blockId, mode, row = 0, column = 0, endRow = row, endColumn = column) {
+  if (!["cell", "row", "column", "range"].includes(mode)) return false;
   const cell = document.querySelector(`[data-block-id="${cssEscape(blockId)}"] [data-resource-table-cell][data-table-row="${row}"][data-table-column="${column}"]`);
   const context = markdownTableCellContext(cell);
   if (!context || !editorOwnerMutationAllowed(context.ownerType, context.ownerId)) return false;
@@ -9627,15 +9631,17 @@ function selectMarkdownTableScope(blockId, mode, row = 0, column = 0) {
   clearMarkdownTableCellSelection();
   clearBlockSelection();
   clearInlineEditingOverlaysForBlockSelection();
-  ui.markdownTableSelection = { blockId, ownerType: context.ownerType, ownerId: context.ownerId, mode, row, column };
+  ui.markdownTableSelection = { blockId, ownerType: context.ownerType, ownerId: context.ownerId, mode, row, column, endRow, endColumn };
+  const selected = new Set(markdownTableSelectedCoordinates(context.table, ui.markdownTableSelection).map(({ row, column }) => `${row}:${column}`));
   context.blockElement.querySelectorAll("[data-resource-table-cell]").forEach((entry) => {
-    const sameRow = Number(entry.dataset.tableRow) === row;
-    const sameColumn = Number(entry.dataset.tableColumn) === column;
-    if (!(mode === "row" ? sameRow : mode === "column" ? sameColumn : sameRow && sameColumn)) return;
+    const entryRow = Number(entry.dataset.tableRow), entryColumn = Number(entry.dataset.tableColumn);
+    if (!selected.has(`${entryRow}:${entryColumn}`)) return;
     entry.contentEditable = "false";
     entry.setAttribute("aria-readonly", "true");
     entry.classList.add("is-cell-selected");
     entry.parentElement.classList.add("has-cell-selection");
+    entry.parentElement.dataset.tableSelectionEdges = [["top", -1, 0], ["right", 0, 1], ["bottom", 1, 0], ["left", 0, -1]]
+      .filter(([, dy, dx]) => !selected.has(`${entryRow + dy}:${entryColumn + dx}`)).map(([edge]) => edge).join(" ");
   });
   cell.tabIndex = 0;
   context.blockElement.classList.add("has-cell-selection");
@@ -9647,7 +9653,7 @@ function selectMarkdownTableScope(blockId, mode, row = 0, column = 0) {
   cell.focus({ preventScroll: true });
   const scroller = context.blockElement.querySelector(".resource-table-scroll");
   const scrollLeft = scroller.scrollLeft;
-  (mode === "row" ? cell.closest("tr") : cell).scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (mode !== "range") (mode === "row" ? cell.closest("tr") : cell).scrollIntoView({ block: "nearest", inline: "nearest" });
   if (mode === "row") scroller.scrollLeft = scrollLeft;
   const actions = context.blockElement.querySelector(".resource-table-cell-actions");
   actions.querySelector('[data-resource-table-delete="row"]').disabled = context.table.rows.length === 0;
@@ -9842,7 +9848,9 @@ function handleMarkdownTableCellEvent(event) {
     syncMarkdownTableSize(blockElement, table);
     return;
   }
-  const cell = event.target.closest?.("[data-resource-table-cell]");
+  const cell = event.target.closest?.("[data-resource-table-cell]")
+    || (["pointerdown", "mousedown", "click"].includes(event.type) && !event.target.closest?.("button, [data-resource-table-width]")
+      ? event.target.closest?.(".resource-markdown-table :is(td, th)")?.querySelector("[data-resource-table-cell]") : null);
   if (!cell) return;
   const context = markdownTableCellContext(cell);
   if (!context) return;
@@ -9876,7 +9884,18 @@ function handleMarkdownTableCellEvent(event) {
     clearInlineEditingOverlaysForBlockSelection();
     return;
   }
-  if (event.type === "pointerdown" && event.button === 0 && !cell.classList.contains("is-cell-selected")) beginInlineToolbarPointerSelection(event);
+  if (["pointerdown", "mousedown"].includes(event.type) && canStartCustomPointerDrag(event)) {
+    if (!cell.contains(event.target) && event.pointerType !== "touch") {
+      event.preventDefault();
+      placeCaretAtEnd(cell);
+    }
+    beginInlineToolbarPointerSelection(event);
+    if (!ui.composingBlockId && event.pointerType !== "touch") {
+      ui.markdownTableDrag = { ...context, axis: "cells", handle: cell, pointerId: eventPointerId(event),
+        row: Number(cell.dataset.tableRow), column: Number(cell.dataset.tableColumn), moved: false };
+    }
+  }
+  if (event.type === "click" && !cell.contains(event.target) && cell.contentEditable === "true") placeCaretAtEnd(cell);
   if (event.type === "compositionstart") {
     captureInlineBoundaryTyping(cell);
     beginEditorTextHistory(ownerType, ownerId, block.id, markdownTableCellFocus(cell), { forceNew: true });
@@ -9953,7 +9972,7 @@ function handleMarkdownTableCellEvent(event) {
       event.preventDefault();
       const row = Math.max(0, Math.min(context.table.rows.length, Number(cell.dataset.tableRow) + (event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0)));
       const column = Math.max(0, Math.min(context.table.headers.length - 1, Number(cell.dataset.tableColumn) + (event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0)));
-      selectMarkdownTableScope(block.id, ui.markdownTableSelection?.mode || "cell", row, column);
+      selectMarkdownTableScope(block.id, ui.markdownTableSelection?.mode === "range" ? "cell" : ui.markdownTableSelection?.mode || "cell", row, column);
     } else if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       focusMarkdownTableCell(block.id, Number(cell.dataset.tableRow), Number(cell.dataset.tableColumn));
@@ -10143,6 +10162,25 @@ function moveMarkdownTableEdgeDrag(event) {
   const drag = ui.markdownTableDrag;
   if (!drag || !sameMouseLikePointer(drag.pointerId, event)) return;
   if (event.buttons === 0) return finishMarkdownTableEdgeDrag(event, true);
+  if (drag.axis === "cells") {
+    const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest(".resource-markdown-table :is(td, th)")?.querySelector("[data-resource-table-cell]");
+    if (!cell || !drag.blockElement.contains(cell)) {
+      if (drag.moved) event.preventDefault();
+      return;
+    }
+    const row = Number(cell.dataset.tableRow), column = Number(cell.dataset.tableColumn);
+    if (!drag.moved && row === drag.row && column === drag.column) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (drag.moved && row === drag.endRow && column === drag.endColumn) return;
+    drag.moved = true;
+    drag.endRow = row;
+    drag.endColumn = column;
+    cancelInlineToolbarSelectionDelay();
+    selectMarkdownTableScope(drag.block.id, "range", drag.row, drag.column, row, column);
+    try { if (event.pointerId !== undefined) drag.handle.setPointerCapture(event.pointerId); } catch (_) {}
+    return;
+  }
   event.preventDefault();
   drag.moved ||= Math.abs((drag.axis === "rows" ? event.clientY : event.clientX) - drag.start) > 4;
   if (drag.axis === "width") {
@@ -10175,6 +10213,16 @@ function finishMarkdownTableEdgeDrag(event, cancelled = false) {
   const drag = ui.markdownTableDrag;
   if (!drag || (event?.pointerId !== undefined && !sameMouseLikePointer(drag.pointerId, event))) return;
   ui.markdownTableDrag = null;
+  if (drag.axis === "cells") {
+    if (cancelled) cancelInlineToolbarSelectionDelay();
+    if (drag.moved) {
+      event?.preventDefault?.();
+      ui.suppressBlockClickUntil = Date.now() + 260;
+      if (cancelled) clearMarkdownTableCellSelection();
+    }
+    try { if (typeof drag.pointerId === "number" && drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); } catch (_) {}
+    return;
+  }
   drag.handle.classList.remove("is-dragging");
   drag.handle.dataset.tableSkipClick = String(cancelled || drag.moved);
   try { if (typeof drag.pointerId === "number" && drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId); } catch (_) {}
@@ -14917,7 +14965,6 @@ function applyFieldValue(ownerType, item, fieldName, value) {
     const previousProjectId = item.projectId;
     item[fieldName] = value;
     if (fieldName === "projectId" && value) item.boxId = itemById("projects", value).boxId || "";
-    if (fieldName === "boxId" && item.projectId && (itemById("projects", item.projectId)?.boxId || "") !== value) item.projectId = "";
     if (item.boxId === previousBoxId && item.projectId === previousProjectId) return false;
     markResourceChanged(item);
     return true;
@@ -15500,7 +15547,7 @@ function canStartCustomPointerDrag(event) {
 
 function customPointerDragPendingOrActive() {
   return Boolean(
-    ui.markdownTableDrag ||
+    (ui.markdownTableDrag && (ui.markdownTableDrag.axis !== "cells" || ui.markdownTableDrag.moved)) ||
     ui.resourceListDrag ||
     ui.resourceWindowDrag ||
     ui.pendingNavDrag ||
