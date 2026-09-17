@@ -26493,14 +26493,17 @@ function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
   if (!blockContent?.isConnected || !blockContent.closest(".resource-document, .quick-editor-surface")) return;
   if (resourceCaretScrollFrame) cancelAnimationFrame(resourceCaretScrollFrame);
   resourceCaretScrollFrame = requestAnimationFrame(() => {
-    resourceCaretScrollFrame = 0;
-    if (!blockContent.isConnected || !blockContent.contains(document.activeElement)) return;
-    if (options.restoreScrollElement?.isConnected && Number.isFinite(options.restoreScrollTop)) {
-      // WebKit can defer a native selection scroll until after focus({ preventScroll: true }).
-      // Restore that one focus frame before measuring the visible caret.
-      options.restoreScrollElement.scrollTo({ top: options.restoreScrollTop, behavior: "instant" });
-    }
-    ensureResourceCaretVisible(blockContent, options);
+    // Let WebKit finish its native typing/selection scroll before starting smooth scrolling.
+    resourceCaretScrollFrame = requestAnimationFrame(() => {
+      resourceCaretScrollFrame = 0;
+      if (!blockContent.isConnected || !blockContent.contains(document.activeElement)) return;
+      if (options.restoreScrollElement?.isConnected && Number.isFinite(options.restoreScrollTop)
+        && Math.abs(options.restoreScrollElement.scrollTop - options.restoreScrollTop) > 0.5) {
+        // WebKit can defer a native selection scroll until after focus({ preventScroll: true }).
+        options.restoreScrollElement.scrollTo({ top: options.restoreScrollTop, behavior: "instant" });
+      }
+      ensureResourceCaretVisible(blockContent, options);
+    });
   });
 }
 

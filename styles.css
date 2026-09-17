@@ -6180,7 +6180,8 @@ button:focus-visible {
   max-height: none;
   margin: 0;
   overflow: auto;
-  scroll-padding-block: 68px var(--resource-document-bottom-space);
+  /* Caret scrolling reserves the bottom space; native typing must not reserve it again. */
+  scroll-padding-block: 68px 0;
   border: 0;
   border-radius: inherit;
   padding: 0 var(--resource-document-padding-x) var(--resource-document-bottom-space);
