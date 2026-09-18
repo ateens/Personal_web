@@ -6,14 +6,15 @@ const resourceId = FIXTURE_IDS.bodySearchResource;
 const paragraph = (id, text = "") => ({ id, type: "paragraph", text, marks: [], indent: 0, checked: false, collapsed: false });
 const targetText = `${Array.from({ length: 18 }, (_, index) => `같은 문단 ${index}의 설명입니다.`).join("\n")}\n수식: `;
 
-async function openLongDocument(page, request, width) {
+async function openLongDocument(page, request, width, nested = false) {
   await page.setViewportSize({ width, height: 900 });
   await resetFixture(request);
   const snapshot = await fixtureSnapshot(request);
   const resource = snapshot.state.resources.find((entry) => entry.id === resourceId);
   resource.blocks = [
     ...Array.from({ length: 35 }, (_, index) => paragraph(`preceding-${index}`, `앞 문서 ${index}의 설명입니다.`)),
-    paragraph("target", targetText),
+    ...(nested ? [{ ...paragraph("target-toggle", "펼친 토글"), type: "toggle" }] : []),
+    { ...paragraph("target", targetText), indent: nested ? 1 : 0 },
   ];
   const response = await request.put("/api/state", {
     headers: { "If-Match": `"state-${snapshot.serverRevision}"` },
@@ -56,6 +57,74 @@ async function geometry(content) {
 }
 
 for (const width of [1440, 390]) {
+  for (const nested of [false, true]) test(`each bottom Enter preserves visible blank space${nested ? " inside a toggle" : ""} at ${width}px`, async ({ page, request }, testInfo) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await openLongDocument(page, request, width, nested);
+    await page.evaluate(() => {
+      const surface = document.querySelector(".resource-document");
+      window.__singleEnterFrames = [];
+      window.__singleEnterSampling = true;
+      window.__singleEnterStep = -1;
+      window.__singleEnterSample = (event) => {
+        const blocks = [...surface.querySelectorAll(".block-editor > [data-block-id]")];
+        const active = document.activeElement?.closest("[data-block-content]");
+        const caret = active && caretRectFor(active);
+        const bottom = Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+        window.__singleEnterFrames.push({ time: performance.now(), step: window.__singleEnterStep, event,
+          scroll: surface.scrollTop, scrollHeight: surface.scrollHeight,
+          lastBottom: blocks.at(-1)?.getBoundingClientRect().bottom,
+          blank: bottom - blocks.at(-1)?.getBoundingClientRect().bottom,
+          gap: caret ? bottom - caret.bottom : null, blockId: active?.dataset.blockContent,
+          count: blocks.length,
+        });
+      };
+      const sample = () => {
+        window.__singleEnterSample("frame");
+        if (window.__singleEnterSampling) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    for (let step = 0; step < 6; step += 1) {
+      if (step === 2) await page.keyboard.insertText("한글 입력");
+      if (step === 3) await page.keyboard.type("following text");
+      await page.evaluate((step) => {
+        window.__singleEnterStep = step;
+        if (step === 4) {
+          const surface = document.querySelector(".resource-document");
+          const last = [...surface.querySelectorAll(".block-editor > [data-block-id]")].at(-1);
+          surface.scrollTop -= surface.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom;
+        }
+        window.__singleEnterSample("before Enter");
+      }, step);
+      await page.keyboard.press("Enter");
+      if (step === 4) {
+        const moved = await page.evaluate(() => new Promise((resolve) => {
+          const surface = document.querySelector(".resource-document");
+          const initial = surface.scrollTop;
+          const deadline = performance.now() + 500;
+          const moving = () => surface.scrollTop > initial + 1 ? resolve(true) : performance.now() > deadline ? resolve(false) : requestAnimationFrame(moving);
+          requestAnimationFrame(moving);
+        }));
+        expect(moved, "The second Enter must overlap the first Enter's smooth scroll.").toBe(true);
+        await page.keyboard.press("Enter");
+      }
+      await page.evaluate(() => new Promise((resolve) => {
+        const start = performance.now();
+        const settle = (time) => time - start >= 400 ? resolve() : requestAnimationFrame(settle);
+        requestAnimationFrame(settle);
+      }));
+    }
+    await page.evaluate(() => { window.__singleEnterSampling = false; });
+    const frames = await page.evaluate(() => window.__singleEnterFrames);
+    await writeFile(testInfo.outputPath(`single-enter-blank-space-${width}.json`), JSON.stringify(frames, null, 2));
+    const paintedFrames = frames.filter(({ event }) => event === "frame" || event === "before Enter");
+    const reversals = paintedFrames.filter((frame, index) => {
+      const previous = paintedFrames[index - 1];
+      return previous && frame.step === previous.step && frame.blank < previous.blank - 1;
+    });
+    expect(reversals, JSON.stringify(reversals)).toHaveLength(0);
+  });
+
   test(`live dollar equation and following text retain the scroll position at ${width}px`, async ({ page, request }, testInfo) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     const content = await openLongDocument(page, request, width);
@@ -134,7 +203,7 @@ for (const width of [1440, 390]) {
       window.__caretScrollFrames = [];
       window.__caretScrollSampling = true;
       const sample = (time) => {
-        window.__caretScrollFrames.push({ time, scroll: document.scrollTop });
+        window.__caretScrollFrames.push({ time, scroll: document.scrollTop, blockId: globalThis.document.activeElement?.dataset.blockContent });
         if (window.__caretScrollSampling) requestAnimationFrame(sample);
       };
       requestAnimationFrame(sample);
@@ -152,11 +221,14 @@ for (const width of [1440, 390]) {
     await nextPaint(page);
     const after = await geometry(next);
     const frames = await page.evaluate(() => window.__caretScrollFrames);
-    const intermediate = frames.filter(({ scroll }) => scroll > before.scroll + 1 && scroll < after.scroll - 1);
+    const blockId = await next.getAttribute("data-block-content");
+    const smoothFrames = frames.filter((frame) => frame.blockId === blockId);
+    const compensated = smoothFrames[0];
+    const intermediate = smoothFrames.filter(({ scroll }) => scroll > compensated.scroll + 1 && scroll < after.scroll - 1);
     expect(after.scroll).toBeGreaterThan(before.scroll + 20);
     expect(new Set(intermediate.map(({ scroll }) => Math.round(scroll))).size, JSON.stringify({ before, after, frames })).toBeGreaterThanOrEqual(2);
-    const start = frames[Math.max(0, frames.findIndex(({ scroll }) => scroll > before.scroll + 0.5) - 1)];
-    const finish = frames.find(({ scroll }) => scroll >= after.scroll - 0.5);
+    const start = smoothFrames[Math.max(0, smoothFrames.findIndex(({ scroll }) => scroll > compensated.scroll + 0.5) - 1)];
+    const finish = smoothFrames.find(({ scroll }) => scroll >= after.scroll - 0.5);
     const curve = intermediate.map((frame) => Math.abs(
       (frame.scroll - start.scroll) / (finish.scroll - start.scroll)
       - (frame.time - start.time) / (finish.time - start.time),

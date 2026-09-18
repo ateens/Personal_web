@@ -25210,6 +25210,13 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const split = splitTextForBlockBreak(originalText, splitOffsets);
   const splitMarks = splitInlineMarksAtSelection(current.marks, originalText, split.start, split.end);
   const currentIndent = blockIndent(current);
+  const resourceDocument = blockContent.closest(".resource-document");
+  const bottomGap = resourceDocument && !split.after && !adjacentBlockContent(blockContent, 1)
+    ? resourceDocument.getBoundingClientRect().bottom - blockContent.closest(".block").getBoundingClientRect().bottom
+    : null;
+  const preserveBottomGap = bottomGap !== null
+    && bottomGap <= Number.parseFloat(getComputedStyle(resourceDocument).paddingBottom) + 1
+    ? bottomGap : null;
   if (!split.before && !split.after && emptyBlockCanExitOnSecondEnter(current, item.blocks)) {
     exitEmptyContinuationBlock(ownerType, ownerId, blockId);
     return;
@@ -25280,6 +25287,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     inlineTypingMark,
     transaction: true,
     reserveLines: RESOURCE_CARET_ENTER_RESERVE_LINES,
+    preserveBottomGap,
   });
 }
 
@@ -26512,7 +26520,7 @@ function focusBlockContentAfterRender(blockId, options = {}) {
     const content = document.querySelector(`[data-block-content="${cssEscape(blockId)}"]`);
     const restoreScrollElement = content?.closest(".resource-document")
       || (content?.closest(".quick-editor-surface") ? document.scrollingElement : null);
-    const restoreScrollTop = restoreScrollElement?.scrollTop;
+    let restoreScrollTop = restoreScrollElement?.scrollTop;
     let target;
     if (options.range) target = focusBlockContentAtRange(blockId, options.range.start, options.range.end ?? options.range.start);
     else if (options.position) target = focusBlockContentAtPosition(blockId, options.position);
@@ -26526,6 +26534,14 @@ function focusBlockContentAfterRender(blockId, options = {}) {
     } else if (target && options.inlineTypingMark === "bold") {
       if (!document.queryCommandState("bold")) document.execCommand("bold");
       target.dataset.inlineTypingMark = "bold";
+    }
+    if (target && Number.isFinite(options.preserveBottomGap) && restoreScrollElement) {
+      // Account for the new row before paint so it cannot consume the existing bottom reserve.
+      const gap = restoreScrollElement.getBoundingClientRect().bottom - target.closest(".block").getBoundingClientRect().bottom;
+      if (gap < options.preserveBottomGap) {
+        restoreScrollElement.scrollTo({ top: restoreScrollElement.scrollTop + options.preserveBottomGap - gap, behavior: "instant" });
+      }
+      restoreScrollTop = restoreScrollElement.scrollTop;
     }
     if (target) scheduleEnsureResourceCaretVisible(target, { ...options, restoreScrollElement, restoreScrollTop });
     return target;
