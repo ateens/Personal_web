@@ -6,7 +6,7 @@ const resourceId = FIXTURE_IDS.bodySearchResource;
 const paragraph = (id, text = "") => ({ id, type: "paragraph", text, marks: [], indent: 0, checked: false, collapsed: false });
 const targetText = `${Array.from({ length: 18 }, (_, index) => `같은 문단 ${index}의 설명입니다.`).join("\n")}\n수식: `;
 
-async function openLongDocument(page, request, width, { nested = false, following = false, targetBlock = {} } = {}) {
+async function openLongDocument(page, request, width, { nested = false, following = false, tailBlank = false, targetBlock = {} } = {}) {
   await page.setViewportSize({ width, height: 900 });
   await resetFixture(request);
   const snapshot = await fixtureSnapshot(request);
@@ -15,6 +15,7 @@ async function openLongDocument(page, request, width, { nested = false, followin
     ...Array.from({ length: 35 }, (_, index) => paragraph(`preceding-${index}`, `앞 문서 ${index}의 설명입니다.`)),
     ...(nested ? [{ ...paragraph("target-toggle", "펼친 토글"), type: "toggle" }] : []),
     { ...paragraph("target", targetText), indent: nested ? 1 : 0, ...targetBlock },
+    ...(tailBlank ? [{ ...paragraph("blank-tail"), indent: nested ? 1 : 0 }] : []),
     ...(following ? Array.from({ length: 12 }, (_, index) => ({ ...paragraph(`following-${index}`, `아래에 남아 있는 문장 ${index}`), indent: 1 })) : []),
   ];
   const response = await request.put("/api/state", {
@@ -26,7 +27,7 @@ async function openLongDocument(page, request, width, { nested = false, followin
   await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
   await page.locator('[data-nav-key="resources"]').evaluate((button) => button.click());
   await page.locator(`[data-resource-open="${resourceId}"]`).click();
-  const target = page.locator('[data-block-content="target"]');
+  const target = page.locator(`[data-block-content="${tailBlank ? "blank-tail" : "target"}"]`);
   await expect.poll(() => target.evaluate((element) => element.closest(".resource-window").getAnimations().every((animation) => animation.playState !== "running"))).toBe(true);
   await target.evaluate((element) => {
     element.focus({ preventScroll: true });
@@ -58,6 +59,65 @@ async function geometry(content) {
 }
 
 for (const width of [1440, 390]) {
+  for (const nested of [false, true]) test(`bottom Backspace preserves five-line clearance${nested ? " inside a toggle" : ""} at ${width}px`, async ({ page, request }, testInfo) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const runs = [];
+    for (const scenario of ["immediate", "settled", "scrolling", "saved empty tail"]) {
+      const content = await openLongDocument(page, request, width, { nested, tailBlank: scenario === "saved empty tail" });
+      await content.evaluate((element, scrolling) => {
+        const surface = element.closest(".resource-document");
+        const bottom = Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+        surface.scrollTop -= bottom - caretRectFor(element).bottom - (scrolling ? 0 : Number.parseFloat(getComputedStyle(element).lineHeight) * 5);
+      }, scenario === "scrolling");
+      if (scenario !== "saved empty tail") {
+        await page.keyboard.press("Enter");
+        if (scenario === "settled") await page.waitForTimeout(400);
+        if (scenario === "scrolling") {
+          const moved = await page.evaluate(() => new Promise((resolve) => {
+            const surface = document.querySelector(".resource-document");
+            const initial = surface.scrollTop;
+            const deadline = performance.now() + 500;
+            const sample = () => surface.scrollTop > initial + 1 ? resolve(true) : performance.now() > deadline ? resolve(false) : requestAnimationFrame(sample);
+            requestAnimationFrame(sample);
+          }));
+          expect(moved, "Backspace must arrive while the Enter reserve is still expanding.").toBe(true);
+        }
+      }
+      await page.evaluate(() => {
+        const surface = document.querySelector(".resource-document");
+        window.__backspaceFrames = [];
+        window.__backspaceSampling = true;
+        const sample = () => {
+          const active = document.activeElement?.closest("[data-block-content]");
+          const caret = active && caretRectFor(active);
+          const bottom = Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+          const last = [...surface.querySelectorAll(".block-editor > [data-block-id]")].at(-1);
+          window.__backspaceFrames.push({ time: performance.now(), scroll: surface.scrollTop, scrollHeight: surface.scrollHeight,
+            gap: caret ? bottom - caret.bottom : null, blank: bottom - last.getBoundingClientRect().bottom,
+            blockId: active?.dataset.blockContent, indent: active?.closest(".block").dataset.indent,
+            offset: active && selectionOffsetsInside(active)?.start,
+          });
+          if (window.__backspaceSampling) requestAnimationFrame(sample);
+        };
+        sample();
+      });
+      await page.keyboard.press("Backspace");
+      await page.waitForTimeout(500);
+      await page.evaluate(() => { window.__backspaceSampling = false; });
+      runs.push({ scenario, frames: await page.evaluate(() => window.__backspaceFrames) });
+      const target = page.locator('[data-block-content="target"]');
+      await expect(target).toBeFocused();
+      await expect(target).toHaveText(targetText);
+      expect(await target.evaluate((element) => selectionOffsetsInside(element))).toEqual({ start: targetText.length, end: targetText.length, collapsed: true });
+      await expect(target.locator("xpath=ancestor::*[contains(concat(' ',normalize-space(@class),' '),' block ')][1]")).toHaveAttribute("data-indent", String(nested ? 1 : 0));
+    }
+    await writeFile(testInfo.outputPath(`bottom-backspace-${width}.json`), JSON.stringify(runs, null, 2));
+    for (const { scenario, frames } of runs) {
+      expect(frames.filter((_, index) => scenario !== "scrolling" || index === frames.length - 1).every((frame) => frame.gap >= 24 * 5 - 1.5), JSON.stringify({ scenario, frames })).toBe(true);
+      expect(frames.every((frame, index) => !index || frame.blank >= frames[index - 1].blank - 1), JSON.stringify({ scenario, frames })).toBe(true);
+    }
+  });
+
   for (const type of ["paragraph", "code"]) for (const position of ["middle", "end"]) test(`blank ${position} ${type} line keeps five-line clearance after Enter and typing at ${width}px`, async ({ page, request }, testInfo) => {
     await page.emulateMedia({ reducedMotion: "no-preference" });
     const lines = Array.from({ length: 18 }, (_, index) => `line ${index} test text`);

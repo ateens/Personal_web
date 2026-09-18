@@ -26515,8 +26515,8 @@ function scheduleEnsureResourceCaretVisible(blockContent, options = {}) {
       resourceCaretScrollFrame = 0;
       if (!blockContent.isConnected || !blockContent.contains(document.activeElement)) return;
       if (options.restoreScrollElement?.isConnected && Number.isFinite(options.restoreScrollTop)
-        && Math.abs(options.restoreScrollElement.scrollTop - options.restoreScrollTop) > 0.5) {
-        // WebKit can defer a native selection scroll until after focus({ preventScroll: true }).
+        && options.restoreScrollElement.scrollTop < options.restoreScrollTop - 0.5) {
+        // Recover WebKit's deferred upward selection jump without rewinding an advancing caret scroll.
         options.restoreScrollElement.scrollTo({ top: options.restoreScrollTop, behavior: "instant" });
       }
       ensureResourceCaretVisible(blockContent, options);
