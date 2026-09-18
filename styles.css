@@ -13556,7 +13556,6 @@ body.is-task-placement-open {
 
   .resource-window > .resource-document {
     --resource-document-padding-x: 18px;
-    --resource-document-bottom-space: 102px;
   }
 
   :is(.resource-document, .quick-editor-surface) .block-editor {

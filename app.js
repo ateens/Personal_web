@@ -377,8 +377,7 @@ const POINTER_DRAG_ACTIVATION_DISTANCE = 12;
 const EDITOR_MARQUEE_ACTIVATION_DISTANCE = 5;
 const EDITOR_MARQUEE_GUTTER_WIDTH = 42;
 const EDITOR_MARQUEE_AUTOSCROLL_EDGE = 52;
-const RESOURCE_CARET_RESERVE_LINES = 3;
-const RESOURCE_CARET_ENTER_RESERVE_LINES = QUICK_EDITOR_SURFACE ? 3 : 1;
+const RESOURCE_CARET_RESERVE_LINES = QUICK_EDITOR_SURFACE ? 3 : 5;
 const BLOCK_TYPE_KEYBOARD_SHORTCUTS = {
   "0": "paragraph",
   "1": "heading1",
@@ -10341,7 +10340,7 @@ function renderMermaidBlock(block, listMarkerAttr, ownerType, ownerId) {
     <sygma-mermaid data-mermaid-preview data-source="${esc(block.text || "")}" contenteditable="false" role="group" aria-label="Mermaid 다이어그램"></sygma-mermaid>
     <details class="mermaid-source" data-mermaid-source>
       <summary data-mermaid-edit>${editable ? "코드 편집" : "코드 보기"}</summary>
-      <pre class="block-semantic-wrap" data-code-language="mermaid"><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${editable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="Mermaid 코드 편집" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="flowchart TD">${esc(block.text || "")}</code></pre>
+      <pre class="block-semantic-wrap" data-code-language="mermaid"><code class="block-content ${block.text ? "" : "is-empty"}" contenteditable="${editable}" spellcheck="false" role="textbox" aria-multiline="true" aria-label="Mermaid 코드 편집" data-block-content="${esc(block.id)}"${listMarkerAttr} data-placeholder="flowchart TD">${renderHighlightedCodeSource(block.text)}</code></pre>
     </details>
   </section>`;
 }
@@ -10353,13 +10352,14 @@ function normalizeCodeLanguage(value = "") {
 
 function renderHighlightedCodeSource(value = "", language = "") {
   const source = String(value || "");
+  const trailingLine = source.endsWith("\n") ? "<br>" : "";
   const normalized = normalizeCodeLanguage(language);
   // Highlight only an explicit supported language; large snippets remain editable as plain source.
-  if (!source || source.length > 50_000 || !normalized || !window.hljs?.getLanguage(normalized)) return esc(source);
+  if (!source || source.length > 50_000 || !normalized || !window.hljs?.getLanguage(normalized)) return esc(source) + trailingLine;
   try {
-    return window.hljs.highlight(source, { language: normalized, ignoreIllegals: true }).value;
+    return window.hljs.highlight(source, { language: normalized, ignoreIllegals: true }).value + trailingLine;
   } catch {
-    return esc(source);
+    return esc(source) + trailingLine;
   }
 }
 
@@ -10660,8 +10660,10 @@ function blockHasToggleChildren(blocksList, index) {
 function renderInlineText(block) {
   const text = block.text || "";
   if (!text) return "";
+  // A final newline needs a line box before the next character is typed.
+  const trailingLine = text.endsWith("\n") ? "<br>" : "";
   const marks = normalizeInlineMarks(text, block.marks);
-  if (!marks.length) return esc(text);
+  if (!marks.length) return esc(text) + trailingLine;
   const points = new Set([0, text.length]);
   for (const mark of marks) {
     points.add(mark.start);
@@ -10676,7 +10678,7 @@ function renderInlineText(block) {
     const active = marks.filter((mark) => mark.start <= start && mark.end >= end);
     html += renderInlineSegment(text.slice(start, end), active);
   }
-  return html;
+  return html + trailingLine;
 }
 
 function renderInlineSegment(text, activeMarks) {
@@ -24512,6 +24514,7 @@ function insertCodeBlockLineBreak(ownerType, ownerId, blockId, blockContent) {
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type !== "code") return false;
+  const preserveBottomGap = resourceCaretBottomGap(blockContent);
   ui.pendingSoftLineBreakTarget = null;
   const originalText = block.text || blockContent.textContent || "";
   const offsets = selectionOffsetsInside(blockContent) || { start: originalText.length, end: originalText.length };
@@ -24529,7 +24532,7 @@ function insertCodeBlockLineBreak(ownerType, ownerId, blockId, blockContent) {
   if (end >= originalText.length) {
     schedulePendingSoftLineBreakTarget(ownerType, ownerId, block.id, start + 1);
   }
-  focusBlockContentAfterRender(block.id, focusOptions);
+  focusBlockContentAfterRender(block.id, { ...focusOptions, preserveBottomGap });
   return true;
 }
 
@@ -24539,6 +24542,7 @@ function insertSoftLineBreak(ownerType, ownerId, blockId, blockContent) {
   const item = itemById(ownerType, ownerId);
   const block = item?.blocks?.find((entry) => entry.id === blockId);
   if (!block || block.type === "divider") return false;
+  const preserveBottomGap = resourceCaretBottomGap(blockContent);
   ui.pendingSoftLineBreakTarget = null;
   const originalText = typeof block.text === "string" ? block.text : blockContent.textContent || "";
   const offsets = selectionOffsetsInside(blockContent) || { start: originalText.length, end: originalText.length };
@@ -24557,9 +24561,9 @@ function insertSoftLineBreak(ownerType, ownerId, blockId, blockContent) {
   renderEditorMutation(ownerType, ownerId);
   if (end >= originalText.length) {
     schedulePendingSoftLineBreakTarget(ownerType, ownerId, block.id, start + 1);
-    focusBlockContentAfterRender(block.id, { position: "end" });
+    focusBlockContentAfterRender(block.id, { position: "end", preserveBottomGap });
   } else {
-    focusBlockContentAfterRender(block.id, { range: { start: start + 1, end: start + 1 } });
+    focusBlockContentAfterRender(block.id, { range: { start: start + 1, end: start + 1 }, preserveBottomGap });
   }
   return true;
 }
@@ -25210,13 +25214,7 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
   const split = splitTextForBlockBreak(originalText, splitOffsets);
   const splitMarks = splitInlineMarksAtSelection(current.marks, originalText, split.start, split.end);
   const currentIndent = blockIndent(current);
-  const resourceDocument = blockContent.closest(".resource-document");
-  const bottomGap = resourceDocument && !split.after && !adjacentBlockContent(blockContent, 1)
-    ? resourceDocument.getBoundingClientRect().bottom - blockContent.closest(".block").getBoundingClientRect().bottom
-    : null;
-  const preserveBottomGap = bottomGap !== null
-    && bottomGap <= Number.parseFloat(getComputedStyle(resourceDocument).paddingBottom) + 1
-    ? bottomGap : null;
+  const preserveBottomGap = resourceCaretBottomGap(blockContent);
   if (!split.before && !split.after && emptyBlockCanExitOnSecondEnter(current, item.blocks)) {
     exitEmptyContinuationBlock(ownerType, ownerId, blockId);
     return;
@@ -25286,7 +25284,6 @@ function insertBlockFromCaret(ownerType, ownerId, blockId, blockContent) {
     caret: split.after ? "start" : "end",
     inlineTypingMark,
     transaction: true,
-    reserveLines: RESOURCE_CARET_ENTER_RESERVE_LINES,
     preserveBottomGap,
   });
 }
@@ -26465,6 +26462,18 @@ function focusBlockContentAtRange(blockId, start, end = start) {
   return target;
 }
 
+function resourceCaretBottomGap(blockContent) {
+  const resourceDocument = blockContent?.closest?.(".resource-document");
+  const caretRect = blockContent && caretRectFor(blockContent);
+  if (!resourceDocument || !caretRect) return null;
+  // Empty and typed carets have different glyph heights. Anchor the row at its end.
+  const atEnd = isCaretAtEnd(blockContent);
+  const bottom = atEnd ? blockContent.closest(".block").getBoundingClientRect().bottom : caretRect.bottom;
+  const gap = Math.min(resourceDocument.getBoundingClientRect().bottom, visualViewportBounds().bottom) - bottom;
+  const lineHeight = Number.parseFloat(getComputedStyle(blockContent).lineHeight) || 24;
+  return gap <= Number.parseFloat(getComputedStyle(resourceDocument).paddingBottom) + lineHeight ? { gap, atEnd } : null;
+}
+
 function ensureResourceCaretVisible(blockContent, options = {}) {
   const resourceDocument = blockContent?.closest?.(".resource-document");
   const scrollElement = resourceDocument || (blockContent?.closest?.(".quick-editor-surface") ? document.scrollingElement : null);
@@ -26535,11 +26544,12 @@ function focusBlockContentAfterRender(blockId, options = {}) {
       if (!document.queryCommandState("bold")) document.execCommand("bold");
       target.dataset.inlineTypingMark = "bold";
     }
-    if (target && Number.isFinite(options.preserveBottomGap) && restoreScrollElement) {
+    if (target && options.preserveBottomGap && restoreScrollElement) {
       // Account for the new row before paint so it cannot consume the existing bottom reserve.
-      const gap = restoreScrollElement.getBoundingClientRect().bottom - target.closest(".block").getBoundingClientRect().bottom;
-      if (gap < options.preserveBottomGap) {
-        restoreScrollElement.scrollTo({ top: restoreScrollElement.scrollTop + options.preserveBottomGap - gap, behavior: "instant" });
+      const bottom = options.preserveBottomGap.atEnd ? target.closest(".block").getBoundingClientRect().bottom : caretRectFor(target).bottom;
+      const gap = Math.min(restoreScrollElement.getBoundingClientRect().bottom, visualViewportBounds().bottom) - bottom;
+      if (gap < options.preserveBottomGap.gap) {
+        restoreScrollElement.scrollTo({ top: restoreScrollElement.scrollTop + options.preserveBottomGap.gap - gap, behavior: "instant" });
       }
       restoreScrollTop = restoreScrollElement.scrollTop;
     }
@@ -26612,6 +26622,10 @@ function setSelectionOffsets(element, start, end = start) {
 }
 
 function textPointAtOffset(element, targetOffset) {
+  const text = element.textContent || "";
+  if (targetOffset === text.length && text.endsWith("\n") && element.lastChild?.nodeName === "BR") {
+    return { node: element, offset: element.childNodes.length - 1 };
+  }
   const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
   let remaining = targetOffset;
   let lastNode = null;
@@ -26941,6 +26955,25 @@ function caretRectFor(element) {
   }
   const rect = firstVisibleClientRect(range.getClientRects()) || range.getBoundingClientRect();
   if (rect && (rect.width || rect.height)) return rect;
+  const text = element.textContent || "";
+  if (range.collapsed && text) {
+    // Chromium omits collapsed rects on blank lines; adjacent characters retain their line geometry.
+    const offset = selectionOffsetsInside(element).start;
+    const forward = offset < text.length;
+    const point = textPointAtOffset(element, offset + (forward ? 1 : -1));
+    const probe = range.cloneRange();
+    if (forward) probe.setEnd(point.node, point.offset);
+    else probe.setStart(point.node, point.offset);
+    const neighbor = firstVisibleClientRect(probe.getClientRects());
+    if (neighbor) {
+      const newLine = !forward && text[offset - 1] === "\n";
+      const style = getComputedStyle(element);
+      const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.5;
+      const shift = newLine ? lineHeight : 0;
+      const left = forward ? neighbor.left : newLine ? element.getBoundingClientRect().left + Number.parseFloat(style.paddingLeft) : neighbor.right;
+      return { left, right: left, top: neighbor.top + shift, bottom: neighbor.bottom + shift, width: 0, height: neighbor.height };
+    }
+  }
   const elementRect = element.getBoundingClientRect();
   return {
     left: elementRect.left + 4,

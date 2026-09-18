@@ -6,7 +6,7 @@ const resourceId = FIXTURE_IDS.bodySearchResource;
 const paragraph = (id, text = "") => ({ id, type: "paragraph", text, marks: [], indent: 0, checked: false, collapsed: false });
 const targetText = `${Array.from({ length: 18 }, (_, index) => `같은 문단 ${index}의 설명입니다.`).join("\n")}\n수식: `;
 
-async function openLongDocument(page, request, width, nested = false) {
+async function openLongDocument(page, request, width, { nested = false, following = false, targetBlock = {} } = {}) {
   await page.setViewportSize({ width, height: 900 });
   await resetFixture(request);
   const snapshot = await fixtureSnapshot(request);
@@ -14,7 +14,8 @@ async function openLongDocument(page, request, width, nested = false) {
   resource.blocks = [
     ...Array.from({ length: 35 }, (_, index) => paragraph(`preceding-${index}`, `앞 문서 ${index}의 설명입니다.`)),
     ...(nested ? [{ ...paragraph("target-toggle", "펼친 토글"), type: "toggle" }] : []),
-    { ...paragraph("target", targetText), indent: nested ? 1 : 0 },
+    { ...paragraph("target", targetText), indent: nested ? 1 : 0, ...targetBlock },
+    ...(following ? Array.from({ length: 12 }, (_, index) => ({ ...paragraph(`following-${index}`, `아래에 남아 있는 문장 ${index}`), indent: 1 })) : []),
   ];
   const response = await request.put("/api/state", {
     headers: { "If-Match": `"state-${snapshot.serverRevision}"` },
@@ -57,9 +58,106 @@ async function geometry(content) {
 }
 
 for (const width of [1440, 390]) {
+  for (const type of ["paragraph", "code"]) for (const position of ["middle", "end"]) test(`blank ${position} ${type} line keeps five-line clearance after Enter and typing at ${width}px`, async ({ page, request }, testInfo) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const lines = Array.from({ length: 18 }, (_, index) => `line ${index} test text`);
+    const source = lines.join("\n");
+    const offset = position === "end" ? source.length : lines.slice(0, 9).join("\n").length;
+    const target = await openLongDocument(page, request, width, { following: true, targetBlock: { type, text: source, language: "javascript" } });
+    await target.evaluate((element, offset) => {
+      setSelectionOffsets(element, offset);
+      const surface = element.closest(".resource-document");
+      const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+      const bottom = () => Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+      surface.scrollTop -= bottom() - caretRectFor(element).bottom - lineHeight * 5;
+      window.__blankLineFrames = [];
+      window.__blankLineSampling = true;
+      const sample = () => {
+        const current = document.querySelector('[data-block-content="target"]');
+        if (current && selectionOffsetsInside(current)?.start > offset) {
+          // The new logical line is one line below the original preceding glyph.
+          const start = textPointAtOffset(current, offset - 1);
+          const end = textPointAtOffset(current, offset);
+          const range = document.createRange();
+          range.setStart(start.node, start.offset);
+          range.setEnd(end.node, end.offset);
+          window.__blankLineFrames.push({ scroll: surface.scrollTop, lineHeight,
+            gap: bottom() - range.getBoundingClientRect().bottom - lineHeight,
+            reportedGap: bottom() - caretRectFor(current).bottom,
+          });
+        }
+        if (window.__blankLineSampling) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }, offset);
+    await page.keyboard.press(type === "code" ? "Enter" : "Shift+Enter");
+    await nextPaint(page);
+    await nextPaint(page);
+    await page.keyboard.type("x");
+    await page.evaluate(() => new Promise((resolve) => {
+      const start = performance.now();
+      const settle = (time) => time - start >= 300 ? resolve() : requestAnimationFrame(settle);
+      requestAnimationFrame(settle);
+    }));
+    await page.evaluate(() => { window.__blankLineSampling = false; });
+    const frames = await page.evaluate(() => window.__blankLineFrames);
+    await writeFile(testInfo.outputPath(`blank-${position}-${type}-five-lines-${width}.json`), JSON.stringify(frames, null, 2));
+    expect(frames.length).toBeGreaterThan(2);
+    expect(frames.every((frame) => frame.gap >= frame.lineHeight * 5 - 1.5), JSON.stringify(frames)).toBe(true);
+    expect(frames.every((frame, index) => !index || frame.gap >= frames[index - 1].gap - 1), JSON.stringify(frames)).toBe(true);
+    expect(frames.every((frame) => Math.abs(frame.gap - frame.reportedGap) <= 1.5), JSON.stringify(frames)).toBe(true);
+    expect(await target.textContent()).toBe(`${source.slice(0, offset)}\nx${source.slice(offset)}`);
+  });
+
+  test(`viewport-bottom Enter inside a toggle retains five-line clearance before following rows at ${width}px`, async ({ page, request }, testInfo) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const target = await openLongDocument(page, request, width, { nested: true, following: true });
+    await target.evaluate((element) => {
+      const surface = element.closest(".resource-document");
+      const bottom = Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+      const gap = bottom - caretRectFor(element).bottom;
+      surface.scrollTop -= gap - Number.parseFloat(getComputedStyle(element).lineHeight) * 5;
+    });
+    const reserve = (await geometry(target)).lineHeight * 5;
+    const runs = [];
+    for (let index = 0; index < 4; index += 1) {
+      await page.keyboard.type(` more text ${index}`);
+      await page.evaluate(() => {
+        const surface = document.querySelector(".resource-document");
+        window.__nonTailEnterFrames = [];
+        window.__nonTailEnterSampling = true;
+        const sample = () => {
+          const active = document.activeElement?.closest("[data-block-content]");
+          const caret = active && caretRectFor(active);
+          const bottom = Math.min(surface.getBoundingClientRect().bottom, window.visualViewport?.height || innerHeight);
+          window.__nonTailEnterFrames.push({ time: performance.now(), scroll: surface.scrollTop, scrollHeight: surface.scrollHeight,
+            gap: caret ? bottom - caret.bottom : null, blockGap: active ? bottom - active.closest(".block").getBoundingClientRect().bottom : null,
+            blockId: active?.dataset.blockContent, indent: active?.closest(".block").dataset.indent,
+          });
+          if (window.__nonTailEnterSampling) requestAnimationFrame(sample);
+        };
+        sample();
+      });
+      await page.keyboard.press("Enter");
+      await page.evaluate(() => new Promise((resolve) => {
+        const start = performance.now();
+        const settle = (time) => time - start >= 400 ? resolve() : requestAnimationFrame(settle);
+        requestAnimationFrame(settle);
+      }));
+      await page.evaluate(() => { window.__nonTailEnterSampling = false; });
+      runs.push(await page.evaluate(() => window.__nonTailEnterFrames));
+    }
+    await writeFile(testInfo.outputPath(`non-tail-enter-five-lines-${width}.json`), JSON.stringify(runs, null, 2));
+    for (const frames of runs) {
+      expect(frames.every((frame) => frame.gap >= reserve - 1.5 && frame.indent === "1"), JSON.stringify(frames)).toBe(true);
+      expect(frames.every((frame, index) => !index || frame.blockGap >= frames[index - 1].blockGap - 1), JSON.stringify(frames)).toBe(true);
+    }
+    await expect(page.locator('[data-block-content="following-0"]')).toHaveText("아래에 남아 있는 문장 0");
+  });
+
   for (const nested of [false, true]) test(`each bottom Enter preserves visible blank space${nested ? " inside a toggle" : ""} at ${width}px`, async ({ page, request }, testInfo) => {
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await openLongDocument(page, request, width, nested);
+    await openLongDocument(page, request, width, { nested });
     await page.evaluate(() => {
       const surface = document.querySelector(".resource-document");
       window.__singleEnterFrames = [];
@@ -162,7 +260,7 @@ for (const width of [1440, 390]) {
     expect(await content.evaluate((element) => element.textContent)).toBe(`${targetText}x+y next z^2 next`);
   });
 
-  test(`repeated bottom Enter leaves three lines below the caret at ${width}px`, async ({ page, request }, testInfo) => {
+  test(`repeated bottom Enter leaves five lines below the caret at ${width}px`, async ({ page, request }, testInfo) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await openLongDocument(page, request, width);
     const samples = [];
@@ -173,17 +271,18 @@ for (const width of [1440, 390]) {
       await expect(content).toBeVisible();
       await expect.poll(async () => {
         const sample = await geometry(content);
-        return sample.gap - sample.lineHeight * 3;
+        return sample.gap - sample.lineHeight * 5;
       }).toBeGreaterThanOrEqual(-1.5);
       const sample = await geometry(content);
       samples.push(sample);
-      expect(sample.gap, JSON.stringify(samples)).toBeGreaterThanOrEqual(sample.lineHeight * 3 - 1.5);
-      expect(sample.padding).toBe(width === 390 ? 102 : 162);
+      expect(sample.gap, JSON.stringify(samples)).toBeGreaterThanOrEqual(sample.lineHeight * 5 - 1.5);
+      expect(sample.padding).toBeGreaterThanOrEqual(sample.lineHeight * 5);
       if (index) expect(sample.scroll).toBeGreaterThanOrEqual(samples[index - 1].scroll);
       // Native key events reproduce WebKit's first-character scroll; insertText does not.
       await page.keyboard.type(`following text ${index}`);
       await nextPaint(page);
       const typed = await geometry(content);
+      expect(typed.padding).toBe(sample.padding);
       await writeFile(testInfo.outputPath(`bottom-enter-typing-${width}.json`), JSON.stringify({ samples, typed }, null, 2));
       expect(Math.abs(typed.scroll - sample.scroll), JSON.stringify({ sample, typed })).toBeLessThanOrEqual(2);
       expect(typed.gap, JSON.stringify({ sample, typed })).toBeGreaterThanOrEqual(sample.gap - 2);
@@ -193,7 +292,7 @@ for (const width of [1440, 390]) {
     await page.screenshot({ path: testInfo.outputPath(`bottom-enter-${width}.png`) });
   });
 
-  test(`bottom caret scrolling animates and settles with three lines at ${width}px`, async ({ page, request }, testInfo) => {
+  test(`bottom caret scrolling animates and settles with five lines at ${width}px`, async ({ page, request }, testInfo) => {
     await page.emulateMedia({ reducedMotion: "no-preference" });
     const content = await openLongDocument(page, request, width);
     await content.evaluate((element) => {
@@ -211,7 +310,7 @@ for (const width of [1440, 390]) {
     const before = await geometry(content);
     await page.keyboard.press("Enter");
     const next = page.locator('[data-block-content]:focus');
-    await expect.poll(async () => (await geometry(next)).gap).toBeGreaterThanOrEqual(before.lineHeight * 3 - 1.5);
+    await expect.poll(async () => (await geometry(next)).gap).toBeGreaterThanOrEqual(before.lineHeight * 5 - 1.5);
     await page.evaluate(() => new Promise((resolve) => {
       const start = performance.now();
       const settle = (time) => time - start >= 500 ? resolve() : requestAnimationFrame(settle);
@@ -250,7 +349,7 @@ for (const width of [1440, 390]) {
     await content.evaluate((element) => {
       const document = element.closest(".resource-document");
       const gap = document.getBoundingClientRect().bottom - caretRectFor(element).bottom;
-      document.scrollTop -= gap - Number.parseFloat(getComputedStyle(element).lineHeight) * 3;
+      document.scrollTop -= gap - Number.parseFloat(getComputedStyle(element).lineHeight) * 5;
       window.__caretScrollFrames = [];
       window.__caretScrollSampling = true;
       const sample = (time) => {
@@ -277,7 +376,7 @@ for (const width of [1440, 390]) {
     await nextPaint(page);
     const frames = await page.evaluate(() => window.__caretScrollFrames);
     await writeFile(testInfo.outputPath(`rapid-enter-typing-${width}.json`), JSON.stringify({ before, samples, frames }, null, 2));
-    expect(samples.every((sample) => sample.gap >= sample.lineHeight * 3 - 1.5), JSON.stringify(samples)).toBe(true);
+    expect(samples.every((sample) => sample.gap >= sample.lineHeight * 5 - 1.5), JSON.stringify(samples)).toBe(true);
     expect(samples.every((sample) => sample.gap <= before.gap + 2), JSON.stringify(samples)).toBe(true);
     expect(frames.every((frame, index) => !index || frame.scroll >= frames[index - 1].scroll - 1), JSON.stringify(frames)).toBe(true);
   });

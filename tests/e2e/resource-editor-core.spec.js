@@ -1828,7 +1828,7 @@ test("Resource Shift+ArrowUp은 현재 줄 텍스트부터 위 인접 블록으�
   await expect.poll(() => resourceSelectionState(page)).toMatchObject({ text: "", selectedIds: blockIds.slice(0, 3) });
 });
 
-test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 세 줄 여유가 남는다", async ({ page, request }) => {
+test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 다섯 줄 여유가 남는다", async ({ page, request }) => {
   const blocks = Array.from({ length: 34 }, (_, index) => paragraph(`caret-scroll-${index + 1}`, `스크롤 확인 줄 ${index + 1}`));
   await seedResourceBlocks(request, FIXTURE_IDS.bodySearchResource, blocks);
   const editor = await openResource(page, FIXTURE_IDS.bodySearchResource);
@@ -1837,7 +1837,7 @@ test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 세
   await lastContent.evaluate((content) => {
     const document = content.closest(".resource-document");
     const gap = document.getBoundingClientRect().bottom - caretRectFor(content).bottom;
-    document.scrollTop -= gap - Number.parseFloat(getComputedStyle(content).lineHeight) * 3;
+    document.scrollTop -= gap - Number.parseFloat(getComputedStyle(content).lineHeight) * 5;
   });
   const beforeScrollTop = await page.locator(`[data-resource-document="${FIXTURE_IDS.bodySearchResource}"]`).evaluate((element) => element.scrollTop);
   await page.keyboard.press("Enter");
@@ -1861,7 +1861,7 @@ test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 세
     const panel = resourceDocument.getBoundingClientRect();
     const style = getComputedStyle(content);
     const lineHeight = Number.parseFloat(style.lineHeight) || (Number.parseFloat(style.fontSize) || 16) * 1.55;
-    return resourceDocument.scrollTop > 0 && panel.bottom - caretBottom >= lineHeight * 3 - 2;
+    return resourceDocument.scrollTop > 0 && panel.bottom - caretBottom >= lineHeight * 5 - 2;
   })).toBe(true);
 
   const geometry = await page.evaluate(() => {
@@ -1879,7 +1879,7 @@ test("Resource 마지막 줄에서 Enter를 눌러도 caret 아래에 최소 세
     return { scrollTop: resourceDocument.scrollTop, bottomGap: panel.bottom - caretBottom, lineHeight };
   });
   expect(geometry.scrollTop).toBeGreaterThan(beforeScrollTop);
-  expect(geometry.bottomGap).toBeGreaterThanOrEqual(geometry.lineHeight * 3 - 2);
+  expect(geometry.bottomGap).toBeGreaterThanOrEqual(geometry.lineHeight * 5 - 2);
 });
 
 test("Resource 토글은 화살표가 첫 줄 중앙에 맞고 제목과 본문의 왼쪽 여백이 같다", async ({ page, request }) => {
