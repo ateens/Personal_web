@@ -182,6 +182,80 @@ final class QuickNotesTests: XCTestCase {
     }
 
     @MainActor
+    func testQueuedLocalReloadCannotInterruptNewerBridgeEdit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-stale-local-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let session = QuickMemoEditorSession(store: store)
+        let queuedRevision = store.contentRevision
+        session.loadLocal(noteID, revision: queuedRevision)
+        session.handleBridgeMessage(["type": "ready"])
+        session.handleBridgeMessage([
+            "type": "localChange", "id": noteID.uuidString,
+            "markdown": "편집한 현재 내용", "characterCount": 9,
+        ])
+        XCTAssertGreaterThan(store.contentRevision, queuedRevision)
+        session.handleBridgeMessage(["type": "resourceSelected", "id": "resource-current", "title": "현재 자료"])
+        var changes = 0
+        let observation = session.objectWillChange.sink { changes += 1 }
+
+        session.loadLocal(noteID, revision: queuedRevision)
+        session.loadLocal(noteID, revision: store.contentRevision)
+
+        XCTAssertEqual(session.resourceID, "resource-current")
+        XCTAssertEqual(changes, 0)
+        XCTAssertEqual(store.body(for: noteID), "편집한 현재 내용")
+        // An explicit selection creates a fresh revision and must still open the local note.
+        store.select(noteID)
+        session.loadLocal(noteID, revision: store.contentRevision)
+        XCTAssertFalse(session.isResourceOpen)
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
+    func testQueuedPreviousNoteCannotReplaceCurrentSelection() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-stale-selection-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let firstID = try XCTUnwrap(store.selectedID)
+        let session = QuickMemoEditorSession(store: store)
+        session.loadLocal(firstID, revision: store.contentRevision)
+        session.handleBridgeMessage(["type": "ready"])
+        let currentID = store.createNote()
+        session.loadLocal(currentID, revision: store.contentRevision)
+        session.handleBridgeMessage(["type": "resourceSelected", "id": "resource-current"])
+
+        session.loadLocal(firstID, revision: store.contentRevision)
+
+        XCTAssertEqual(store.selectedID, currentID)
+        XCTAssertEqual(session.resourceID, "resource-current")
+    }
+
+    @MainActor
+    func testReadyUsesCurrentContentAndSelectionInsteadOfPendingSnapshot() throws {
+        for switchNote in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-stale-pending-\(UUID())", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = QuickNotesStore(rootURL: root)
+            let initialID = try XCTUnwrap(store.selectedID)
+            store.updateBody("old", for: initialID)
+            let session = QuickMemoEditorSession(store: store)
+            session.loadLocal(initialID, revision: store.contentRevision)
+            let currentID = switchNote ? store.createNote() : initialID
+            let currentBody = "새로 선택하거나 편집한 내용"
+            store.updateBody(currentBody, for: currentID)
+
+            session.handleBridgeMessage(["type": "ready"])
+
+            XCTAssertEqual(session.characterCount, currentBody.count)
+            session.handleBridgeMessage(["type": "resourceSelected", "id": "resource-current"])
+            session.loadLocal(currentID, revision: store.contentRevision)
+            XCTAssertEqual(session.resourceID, "resource-current", "The current local revision must already be loaded")
+        }
+    }
+
+    @MainActor
     func testLocalImageBridgeValidatesAndLoadsOnlyReferencedPNGAssets() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-local-image-bridge-\(UUID())", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

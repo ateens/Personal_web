@@ -597,6 +597,7 @@ const quickEditor = {
   localAssets: {},
   localImageRequests: new Map(),
   pendingRemoteResourceSync: false,
+  pendingLocalSync: null,
   activeResourceId: "",
   pickerOpen: false,
   pickerQuery: "",
@@ -1115,7 +1116,7 @@ function loadQuickEditorLocal(payload = {}) {
   if (!QUICK_EDITOR_SURFACE || !isPlainObject(payload)) return false;
   const now = new Date().toISOString();
   const nativeId = String(payload.id || "local").trim() || "local";
-  quickEditor.localAssets = normalizeQuickEditorLocalAssets(payload.assets);
+  const localAssets = normalizeQuickEditorLocalAssets(payload.assets);
   const resource = {
     id: quickEditorLocalResourceId(nativeId),
     quickEditorNativeId: nativeId,
@@ -1139,8 +1140,40 @@ function loadQuickEditorLocal(payload = {}) {
     locked: false,
   };
   ensureEditableBlocks(resource, { save: false });
+  const previous = quickEditor.localResource;
+  const editor = document.querySelector(`.quick-editor-surface .block-editor[data-owner-id="${cssEscape(resource.id)}"]`);
+  if (previous?.id === resource.id && quickEditorLocalIsActive() && editor) {
+    // Native save acknowledgements can echo the same note with reordered JSON keys.
+    const sortedFields = (_key, value) => isPlainObject(value)
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value;
+    const unchanged = JSON.stringify(previous.blocks, sortedFields) === JSON.stringify(resource.blocks, sortedFields)
+      && JSON.stringify(quickEditor.localAssets, sortedFields) === JSON.stringify(localAssets, sortedFields);
+    previous.title = resource.title;
+    if (unchanged) return true;
+    const active = document.activeElement;
+    const content = active?.closest?.("[data-block-content]");
+    const blockId = content && editor.contains(content) ? content.dataset.blockContent : "";
+    const range = blockId ? currentBlockSelectionRange("resources", resource.id, blockId) : null;
+    const previousIndex = previous.blocks.findIndex((block) => block.id === blockId);
+    if (content && isComposingBlock(content)) {
+      quickEditor.pendingLocalSync = { id: nativeId, blocks: resource.blocks, assets: localAssets, title: resource.title, blockId };
+      return true;
+    }
+    flushPendingEditorTextHistory();
+    previous.blocks = resource.blocks;
+    quickEditor.localAssets = localAssets;
+    refreshBlockEditorsAfterMutation("resources", resource.id);
+    if (range && (!active.isConnected || document.activeElement !== active)) {
+      const target = previous.blocks.find((block) => block.id === blockId)
+        || previous.blocks[Math.min(Math.max(0, previousIndex), previous.blocks.length - 1)];
+      if (target) focusInlineContentRange(target.id, target.id === blockId ? range : { start: 0, end: 0 });
+    }
+    return true;
+  }
   flushPendingEditorTextHistory();
   clearResourceWindowEditingState();
+  quickEditor.pendingLocalSync = null;
+  quickEditor.localAssets = localAssets;
   quickEditor.localResource = resource;
   quickEditor.activeResourceId = resource.id;
   quickEditor.pickerOpen = false;
@@ -1152,7 +1185,10 @@ function loadQuickEditorLocal(payload = {}) {
 }
 
 function focusQuickEditorBodyEnd() {
+  const resourceId = quickEditor.activeResourceId;
   requestAnimationFrame(() => {
+    if (quickEditor.activeResourceId !== resourceId
+      || document.activeElement?.closest?.('.quick-editor-surface [data-block-content]')) return;
     const editable = [...document.querySelectorAll('.quick-editor-surface [data-block-content][contenteditable="true"]')].at(-1);
     if (editable) focusBlockContentAfterRender(editable.dataset.blockContent, { position: "end" });
   });
@@ -1164,6 +1200,7 @@ function openQuickEditorResource(resourceId) {
   if (!resource || resource.trashedAt) return false;
   flushPendingEditorTextHistory();
   clearResourceWindowEditingState();
+  quickEditor.pendingLocalSync = null;
   quickEditor.activeResourceId = resource.id;
   quickEditor.pickerOpen = false;
   quickEditor.pickerQuery = "";
@@ -1179,6 +1216,7 @@ function openQuickEditorLocal() {
   if (!QUICK_EDITOR_SURFACE || !quickEditor.localResource) return false;
   flushPendingEditorTextHistory();
   clearResourceWindowEditingState();
+  quickEditor.pendingLocalSync = null;
   quickEditor.activeResourceId = quickEditor.localResource.id;
   quickEditor.pickerOpen = false;
   quickEditor.pickerQuery = "";
@@ -15126,6 +15164,22 @@ function handleCompositionEnd(event) {
     updateBlockText(blockContent, event);
     commit.pending = false;
     commit.time = Date.now();
+    const localSync = quickEditor.pendingLocalSync;
+    if (localSync?.blockId === blockId) {
+      quickEditor.pendingLocalSync = null;
+      const local = quickEditor.localResource;
+      if (quickEditorLocalIsActive() && local.quickEditorNativeId === localSync.id) {
+        const currentIndex = local.blocks.findIndex((block) => block.id === blockId);
+        const incomingIndex = localSync.blocks.findIndex((block) => block.id === blockId);
+        // Keep the just-committed composition when applying a refresh queued during IME input.
+        if (currentIndex >= 0) localSync.blocks.splice(
+          incomingIndex >= 0 ? incomingIndex : Math.min(currentIndex, localSync.blocks.length),
+          incomingIndex >= 0 ? 1 : 0, cloneEditorBlocks([local.blocks[currentIndex]])[0],
+        );
+        loadQuickEditorLocal(localSync);
+        notifyQuickEditorChange();
+      }
+    }
     if (QUICK_EDITOR_SURFACE && quickEditor.pendingRemoteResourceSync) syncQuickEditorAfterStateReplace();
   });
 }

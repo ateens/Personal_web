@@ -694,6 +694,8 @@ final class QuickMemoEditorSession: ObservableObject {
     }
 
     func loadLocal(_ id: UUID, revision: Int) {
+        // SwiftUI updates queued before a bridge edit or note switch must not reload stale state.
+        guard id == store.selectedID, revision == store.contentRevision else { return }
         if loadedLocalID == id, loadedRevision == revision { return }
         if pendingLocal?.id == id, pendingLocal?.revision == revision { return }
         var payload: [String: Any] = [
@@ -757,6 +759,10 @@ final class QuickMemoEditorSession: ObservableObject {
         switch message["type"] as? String {
         case "ready":
             ready = true
+            if let pendingLocal,
+               pendingLocal.id != store.selectedID || pendingLocal.revision != store.contentRevision {
+                self.pendingLocal = nil
+            }
             setTheme(theme)
             call("return window.sygmaQuickEditor?.setReadOnly?.(readOnly) ?? false;", arguments: ["readOnly": readOnly])
             if let resourceID {
