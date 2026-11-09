@@ -475,7 +475,8 @@ export function createStorage({
     if (!hasRelationalRows) {
       return { state: cloneJsonValue(storedState), hasRelationalRows: false };
     }
-    const baseState = isPlainObject(storedState) ? cloneJsonValue(storedState) : {};
+    // Collection reads replace the old arrays; callers clone before mutable normalization.
+    const baseState = isPlainObject(storedState) ? storedState : {};
     return {
       state: await readRelationalAppState(client, baseState, { normalize: false }),
       hasRelationalRows: true,
@@ -720,8 +721,10 @@ export function createStorage({
       // The public full-state API opts into this guard. Trusted operator
       // restore/reset paths intentionally omit the option and retain their
       // ability to replace a workspace from a confirmed snapshot.
+      let previousState = null;
       if (!isBootstrap && options.rejectResourcePermanentDelete === true) {
         const authoritative = await authoritativeStateSnapshot(client, currentRow?.state);
+        if (authoritative.hasRelationalRows) previousState = authoritative.state;
         const missingResourceIds = omittedResourceIds(authoritative.state, normalized.state);
         if (missingResourceIds.length) {
           const visibleResourceIds = missingResourceIds.slice(0, 20);
@@ -746,20 +749,13 @@ export function createStorage({
       const revision = currentRevision + 1;
       normalized.state.revision = revision;
       normalized.state.updatedAt = new Date().toISOString();
-      const result = await client.query(
-        `
-          INSERT INTO app_state (id, state, revision, updated_at)
-          VALUES ($1, $2::jsonb, $3, now())
-          ON CONFLICT (id)
-          DO UPDATE SET state = EXCLUDED.state, revision = EXCLUDED.revision, updated_at = now()
-          RETURNING revision, updated_at
-        `,
-        [appStateId, JSON.stringify(normalized.state), revision]
-      );
-      await syncRelationalState(client, normalized.state);
+      await syncRelationalState(client, normalized.state, previousState);
       const relationalState = await readRelationalAppState(client, normalized.state);
       relationalState.revision = revision;
-      await client.query("UPDATE app_state SET state = $2::jsonb, revision = $3 WHERE id = $1", [appStateId, JSON.stringify(relationalState), revision]);
+      const result = await client.query(
+        "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
+        [appStateId, JSON.stringify(relationalState), revision]
+      );
       await client.query("COMMIT");
       return {
         state: relationalState,
@@ -904,7 +900,9 @@ export function createStorage({
       if (!authoritative.hasRelationalRows) {
         await syncRelationalState(client, normalized.state);
       }
-      const currentState = await readRelationalAppState(client, normalized.state);
+      const currentState = authoritative.hasRelationalRows && !normalized.changed
+        ? normalized.state
+        : await readRelationalAppState(client, normalized.state);
       currentState.revision = currentRevision;
 
       const resources = Array.isArray(currentState.resources) ? currentState.resources.slice() : [];
@@ -928,9 +926,8 @@ export function createStorage({
       // block/comment constraints that cannot be checked on an isolated item.
       await options.validateState(nextState);
 
-      await upsertResource(client, resource, resourceIndex, relationalIdSets(nextState));
-      nextState.resources = await readResources(client);
-      const savedResource = nextState.resources.find((item) => item.id === resource.id);
+      const savedResource = await upsertResource(client, resource, resourceIndex, relationalIdSets(nextState));
+      nextState.resources[resourceIndex] = savedResource;
       const result = await client.query(
         "UPDATE app_state SET state = $2::jsonb, revision = $3, updated_at = now() WHERE id = $1 RETURNING updated_at",
         [appStateId, JSON.stringify(nextState), revision]
@@ -1361,21 +1358,21 @@ export function createStorage({
 
   async function readResources(client) {
     const rows = await readRows(client, "resources", "id, box_id, project_id, title, type, importance, pinned, read_later, url, data");
-    const items = [];
-    for (const row of rows) {
-      const item = dataObject(row.data);
-      item.id = row.id;
-      item.boxId = row.box_id || "";
-      item.projectId = row.project_id || "";
-      item.title = textValue(row.title);
-      item.type = textValue(row.type);
-      item.importance = textValue(row.importance);
-      item.pinned = row.pinned === true;
-      item.readLater = row.read_later === true;
-      item.url = textValue(row.url);
-      items.push(item);
-    }
-    return items;
+    return rows.map(resourceFromRow);
+  }
+
+  function resourceFromRow(row) {
+    const item = dataObject(row.data);
+    item.id = row.id;
+    item.boxId = row.box_id || "";
+    item.projectId = row.project_id || "";
+    item.title = textValue(row.title);
+    item.type = textValue(row.type);
+    item.importance = textValue(row.importance);
+    item.pinned = row.pinned === true;
+    item.readLater = row.read_later === true;
+    item.url = textValue(row.url);
+    return item;
   }
 
   async function readHabits(client) {
@@ -1502,23 +1499,40 @@ export function createStorage({
     return taskResources;
   }
 
-  async function syncRelationalState(client, state) {
+  async function syncRelationalState(client, state, previousState = null) {
     const ids = relationalIdSets(state);
+    const previousIds = previousState ? relationalIdSets(previousState) : {};
+    const unchangedIds = new Set(Object.keys(ids).filter((key) => (
+      previousIds[key]?.size === ids[key].size && [...ids[key]].every((id) => previousIds[key].has(id))
+    )));
+    const collections = [
+      ["boxes", "boxes", insertBoxes, []],
+      ["projects", "projects", insertProjects, ["boxes"]],
+      ["captures", "captures", insertCaptures, []],
+      ["resources", "resources", insertResources, ["boxes", "projects"]],
+      ["tasks", "tasks", insertTasks, ["boxes", "projects"]],
+      ["habits", "habits", insertHabits, ["boxes", "projects"]],
+      ["habitInstances", "habit_instances", insertHabitInstances, ["habits"]],
+      ["journals", "journals", insertJournals, []],
+      ["googleCalendars", "google_calendars", insertGoogleCalendars, []],
+      ["googleEvents", "google_events", insertGoogleEvents, ["googleCalendars"]],
+      ["links", "collection_links", insertCollectionLinks, []],
+    ];
+    // Compare authoritative rows; a stale app_state JSON snapshot cannot prove a table is unchanged.
+    const replacements = collections.filter(([key, , , references]) => (
+      !previousState
+      || !jsonValuesEqual(previousState[key] || [], state[key] || [])
+      || references.some((key) => !unchangedIds.has(key))
+    ));
+    // Rebuild derived relations even when collection values match: reads expose only the first relation per task.
+    const changedTables = new Set(["task_resources", ...replacements.map(([, table]) => table)]);
     for (const table of RELATIONAL_DELETE_ORDER) {
-      await client.query(`DELETE FROM ${table} WHERE app_state_id = $1`, [appStateId]);
+      if (changedTables.has(table)) await client.query(`DELETE FROM ${table} WHERE app_state_id = $1`, [appStateId]);
     }
-    await insertBoxes(client, state.boxes || []);
-    await insertProjects(client, state.projects || [], ids);
-    await insertCaptures(client, state.captures || []);
-    await insertResources(client, state.resources || [], ids);
-    await insertTasks(client, state.tasks || [], ids);
+    for (const [key, , insert] of replacements) {
+      await insert(client, state[key] || [], ids);
+    }
     await insertTaskResources(client, taskResourceRelations(state, ids));
-    await insertHabits(client, state.habits || [], ids);
-    await insertHabitInstances(client, state.habitInstances || [], ids);
-    await insertJournals(client, state.journals || []);
-    await insertGoogleCalendars(client, state.googleCalendars || []);
-    await insertGoogleEvents(client, state.googleEvents || [], ids);
-    await insertCollectionLinks(client, state.links || []);
   }
 
   async function insertBoxes(client, boxes) {
@@ -1597,7 +1611,7 @@ export function createStorage({
   }
 
   async function upsertResource(client, resource, position, ids) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO resources (
         app_state_id, id, box_id, project_id, title, type, importance, pinned,
         read_later, url, position, data
@@ -1613,7 +1627,8 @@ export function createStorage({
         url = EXCLUDED.url,
         position = EXCLUDED.position,
         data = EXCLUDED.data,
-        updated_at = now()`,
+        updated_at = now()
+      RETURNING id, box_id, project_id, title, type, importance, pinned, read_later, url, data`,
       [
         appStateId,
         resource.id,
@@ -1629,6 +1644,7 @@ export function createStorage({
         jsonValue(resource),
       ]
     );
+    return resourceFromRow(result.rows[0]);
   }
 
   async function insertTaskResources(client, relations) {

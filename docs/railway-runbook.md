@@ -6,6 +6,23 @@ SYGMA is hosted and executed only on Railway. The Node server serves the optimiz
 https://personalweb-production-81a6.up.railway.app
 ```
 
+Railway starts the server directly with `NODE_ENV=production STATIC_ROOT=dist/client node server.js`. This preserves production settings and the built client while avoiding an idle npm parent process in the running container. `npm run start:production` remains available for local use.
+
+## Usage and cost checks
+
+- JSON responses negotiate Brotli/gzip above 1 KiB and fall back to the original body if compression fails or grows it. State responses remain `no-store`; revision preconditions and authoritative PostgreSQL reads are unchanged.
+- Healthy browser SSE connections use a 60-second safety poll, with immediate events and wake checks. Disconnected clients retain the 10-second polling fallback. Bundled equation/code renderers use the service worker's release-scoped cache.
+- Resource saves reconstruct relational collections once. Public full-state saves preserve unchanged collections and write the canonical JSON snapshot once; changed reference IDs still refresh dependent rows. Migration and restore paths retain their complete reconstruction.
+- Compare memory and public network egress over equivalent usage periods after deployment; local process measurements are not a production savings guarantee.
+- Keep application-to-database traffic on Railway's private network. Reference the PostgreSQL service's private `DATABASE_URL`, not `DATABASE_PUBLIC_URL`; inspect only the hostname when verifying configuration. [Railway cost control](https://docs.railway.com/pricing/cost-control)
+- Keep backups, durability settings, and production security enabled. Lower memory limits can cause crashes without reducing steady memory consumption.
+- Serverless is optional: it sleeps after roughly 5–10 minutes without outbound packets, requires a deployment to take effect, and may delay or fail the first request while waking. Background connections and polling can prevent sleeping. Evaluate these behaviors before changing the setting. [Railway Serverless](https://docs.railway.com/deployments/serverless)
+- On Railway CLI versions that support it, `railway metrics --json --memory --network --since 1d` provides a comparable snapshot. Older versions without `metrics` need the dashboard or API instead. [Railway metrics](https://docs.railway.com/cli/metrics)
+
+The November 2026 local checks measured a read-only production state response at 773,376 bytes, or 218,645 bytes with Brotli quality 4 (71.7% smaller). A synthetic 1.66 MB PostgreSQL workspace reduced Resource-save queries from 31 to 18 and settings-save queries from 265 to 51. These are response/workload measurements, not forecasts of total bill reductions. Local benchmark artifacts are under `output/railway-optimization-20261109/` and `output/railway-storage-20261109/`.
+
+The current iOS widget source still fetches full workspace state, requesting Today refreshes every minute and calendar refreshes every 15 minutes; WidgetKit controls actual execution. HTTP compression benefits existing compatible clients. A narrower widget API or a different refresh schedule requires a separate native app build and installation; neither is included in this deployment.
+
 ## Public access boundary
 
 - The ordinary workspace has no application-level password, session gate, Sites Worker, proxy bearer, or OAuth handoff ticket.

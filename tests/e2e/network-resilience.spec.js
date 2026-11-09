@@ -141,3 +141,94 @@ test("finance can be locked during a pending save without its late response reop
   await expect(page.getByLabel("가계부 비밀번호")).toBeVisible();
   await expect(page.locator('[data-finance-screen="dashboard"]')).toHaveCount(0);
 });
+
+
+test("healthy state events reduce idle polls while remote edits still arrive immediately", async ({ page, request }) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  let statusReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/state/status") statusReads += 1;
+  });
+  await page.goto("/");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await expect.poll(() => page.evaluate(() => remoteStateEventsConnected)).toBe(true);
+  const initialReads = statusReads;
+  await page.clock.fastForward(59_000);
+  expect(statusReads).toBe(initialReads);
+  await page.clock.fastForward(1_000);
+  await expect.poll(() => statusReads).toBe(initialReads + 1);
+  await expect.poll(() => page.evaluate(() => remoteStateRefreshInFlight)).toBe(false);
+
+  const before = await fixtureSnapshot(request);
+  const resource = before.state.resources.find((item) => item.id === FIXTURE_IDS.resource);
+  resource.title = "Immediate event update";
+  resource.revision = Number(resource.revision || 0) + 1;
+  resource.updatedAt = new Date().toISOString();
+  const response = await request.put(`/api/resources/${resource.id}`, {
+    headers: { "If-Match": `"state-${before.serverRevision}"` },
+    data: { resource, baseRevision: before.serverRevision },
+  });
+  expect(response.ok()).toBeTruthy();
+  // The clock remains paused: this update must come from SSE, not the safety timer.
+  await expect.poll(() => page.evaluate((id) => state.resources.find((item) => item.id === id)?.title, resource.id)).toBe(resource.title);
+});
+
+test("state event failures retain ten-second fallback polling across repeated reconnect errors", async ({ page }) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  let statusReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/state/status") statusReads += 1;
+  });
+  await page.goto("/");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await expect.poll(() => page.evaluate(() => remoteStateEventsConnected)).toBe(true);
+  const initialReads = statusReads;
+  await page.evaluate(() => {
+    remoteStateEventSource.close();
+    remoteStateEventSource.dispatchEvent(new Event("error"));
+  });
+  await page.clock.fastForward(5_000);
+  await page.evaluate(() => remoteStateEventSource.dispatchEvent(new Event("error")));
+  expect(statusReads).toBe(initialReads);
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => statusReads).toBe(initialReads + 1);
+  await expect.poll(() => page.evaluate(() => remoteStateRefreshInFlight)).toBe(false);
+  await page.clock.fastForward(10_000);
+  await expect.poll(() => statusReads).toBe(initialReads + 2);
+
+  await page.evaluate(() => {
+    stopRemoteStateEvents();
+    connectRemoteStateEvents();
+  });
+  await expect.poll(() => page.evaluate(() => remoteStateEventsConnected)).toBe(true);
+  await page.clock.fastForward(59_000);
+  expect(statusReads).toBe(initialReads + 2);
+});
+
+test("hidden workspaces suspend state connections and check immediately on wake", async ({ page }) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  let statusReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/state/status") statusReads += 1;
+  });
+  await page.goto("/");
+  await expect(page.locator("#app")).toHaveAttribute("data-workspace-authority", "ready");
+  await expect.poll(() => page.evaluate(() => remoteStateEventsConnected)).toBe(true);
+  const initialReads = statusReads;
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(await page.evaluate(() => remoteStateEventSource)).toBeNull();
+  await page.clock.fastForward(120_000);
+  expect(statusReads).toBe(initialReads);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect.poll(() => statusReads).toBe(initialReads + 1);
+  await expect.poll(() => page.evaluate(() => remoteStateEventsConnected)).toBe(true);
+});

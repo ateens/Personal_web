@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createServer, get } from "node:http";
 import { join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { brotliCompress, brotliDecompressSync, constants as zlibConstants, gzip, gunzipSync } from "node:zlib";
 
 const source = await readFile(new URL("../server.js", import.meta.url), "utf8");
 function serverFunction(name, globals = {}) {
@@ -11,7 +13,7 @@ function serverFunction(name, globals = {}) {
   return vm.runInNewContext(`(${match[0]})`, { URLSearchParams, ...globals });
 }
 
-const responseEncoding = serverFunction("responseEncoding", { compressibleExtensions: new Set([".js"]) });
+const responseEncoding = serverFunction("responseEncoding", { compressibleExtensions: new Set([".js", ".json"]) });
 for (const [accepted, expected] of [
   ["br, gzip", "br"],
   ["br;q=0, gzip;q=1", "gzip"],
@@ -26,6 +28,61 @@ for (const [accepted, expected] of [
   assert.equal(responseEncoding({ headers: { "accept-encoding": accepted } }, ".js", 2048), expected, accepted);
 }
 assert.equal(responseEncoding({ headers: { "accept-encoding": "br" } }, ".js", 20), "");
+
+const jsonGlobals = { Buffer, responseEncoding, brotliCompress, gzip, zlibConstants };
+const sendJson = serverFunction("sendJson", jsonGlobals);
+const payload = { resources: [{ id: "sample", content: "수식과 본문 데이터 \\mathbb{R} ".repeat(200) }] };
+const jsonServer = createServer((request, response) => {
+  sendJson(response, 200, request.url === "/small" ? { ok: true } : payload, { ETag: '"state-7"', "X-State-Revision": "7" });
+});
+await new Promise((resolve) => jsonServer.listen(0, "127.0.0.1", resolve));
+try {
+  for (const [accepted, expected, path] of [
+    ["br, gzip", "br", "/"], ["gzip", "gzip", "/"],
+    ["br;q=0, gzip;q=0", undefined, "/"], ["identity", undefined, "/"],
+    ["br, gzip", undefined, "/small"],
+  ]) {
+    const result = await new Promise((resolve, reject) => {
+      get({ hostname: "127.0.0.1", port: jsonServer.address().port, path, headers: { "Accept-Encoding": accepted } }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("error", reject);
+        response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
+      }).on("error", reject);
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.headers["content-encoding"], expected);
+    assert.equal(result.headers["content-length"], String(result.body.length));
+    assert.equal(result.headers.vary, "Accept-Encoding");
+    assert.equal(result.headers["cache-control"], "no-store");
+    assert.equal(result.headers.etag, '"state-7"');
+    assert.equal(result.headers["x-state-revision"], "7");
+    const decoded = expected === "br" ? brotliDecompressSync(result.body) : expected === "gzip" ? gunzipSync(result.body) : result.body;
+    assert.deepEqual(JSON.parse(decoded.toString()), path === "/small" ? { ok: true } : payload);
+    if (expected) assert(result.body.length < decoded.length, "Compression must reduce wire bytes");
+  }
+} finally {
+  await new Promise((resolve, reject) => jsonServer.close((error) => error ? reject(error) : resolve()));
+}
+
+// Compression errors and disconnected clients must not lose a valid response or write twice.
+for (const fail of [true, false]) {
+  let written = 0;
+  const fallbackSend = serverFunction("sendJson", {
+    ...jsonGlobals,
+    gzip: (body, options, callback) => callback(fail ? new Error("compression failed") : null, Buffer.alloc(body.length + 1)),
+  });
+  const response = {
+    req: { headers: { "accept-encoding": "gzip" } },
+    writeHead: (status, headers) => { written++; assert.equal(status, 409); assert.equal(headers["Content-Encoding"], undefined); },
+    end: (body) => assert.deepEqual(JSON.parse(body.toString()), payload),
+  };
+  fallbackSend(response, 409, payload);
+  assert.equal(written, 1);
+  fallbackSend({ ...response, destroyed: true }, 409, payload);
+  fallbackSend({ ...response, writableEnded: true }, 409, payload);
+  assert.equal(written, 1);
+}
 
 const sourceRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourcePaths = {

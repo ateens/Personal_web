@@ -91,9 +91,12 @@ test("열린 Resource 본문은 일반 화면과 Quick Editor 사이에서 즉�
     expect(await quickFocusedBody.evaluate((element) => {
       const selection = getSelection();
       const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-      return Boolean(range?.collapsed
-        && element.contains(range.startContainer)
-        && range.startOffset === (range.startContainer.textContent || "").length);
+      if (!range?.collapsed || !element.contains(range.startContainer)) return false;
+      // Element offsets count child nodes, while text-node offsets count characters.
+      const trailing = document.createRange();
+      trailing.selectNodeContents(element);
+      trailing.setStart(range.startContainer, range.startOffset);
+      return trailing.toString() === "";
     })).toBe(true);
     await quickEditor.evaluate((element) => { window.__quickEditorIdentity = element; });
     await quickBody.evaluate((element) => {

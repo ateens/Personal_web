@@ -1197,12 +1197,12 @@ test("Resource 수식 단축키와 Markdown 수식 구분자가 저장 후에도
   const inlineEquations = editor.locator('[data-equation-mode="inline"] sygma-display-equation[data-display-mode="inline"][data-equation-rendered="true"]');
   await expect(inlineEquations).toHaveCount(3);
   await expect(inlineEquations.first().locator(".katex-html")).toBeVisible();
-  const exclusiveMarks = await page.evaluate(() => normalizeInlineMarks("abc", [
+  const compatibleMarks = await page.evaluate(() => normalizeInlineMarks("abc", [
       { type: "equation", start: 0, end: 3, formula: "abc", displayMode: true },
       { type: "bold", start: 0, end: 3 },
       { type: "equation", start: 1, end: 3, formula: "bc" },
     ]).map((mark) => mark.type));
-  expect(exclusiveMarks).toEqual(["equation"]);
+  expect(compatibleMarks).toEqual(["bold", "equation"]);
   await expect.poll(() => editor.locator("[data-block-content]").last().evaluate((element) => element.textContent))
     .toBe(`뒤 y^2\n${String.raw`리터럴 \(not math\)`}`);
   await expect(editor.locator("[data-block-content]").last().locator('[data-inline-mark="equation"]')).toHaveCount(1);

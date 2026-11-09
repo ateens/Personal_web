@@ -577,6 +577,7 @@ let databaseInitializationRequested = false;
 let remoteStateRefreshTimer = 0;
 let remoteStateRefreshInFlight = false;
 let remoteStateEventSource = null;
+let remoteStateEventsConnected = false;
 let remoteStateRenderDeferred = false;
 let localStateChangedBeforeDatabaseReady = false;
 let lastRemoteSaveFailureKind = "";
@@ -585,6 +586,7 @@ const REMOTE_STATE_SAVE_DELAY_MS = 450;
 const REMOTE_STATE_RETRY_DELAY_MS = 3000;
 const REMOTE_STATE_RETRY_MAX_DELAY_MS = 30_000;
 const REMOTE_STATE_REFRESH_INTERVAL_MS = 10_000;
+const REMOTE_STATE_EVENT_REFRESH_INTERVAL_MS = 60_000;
 const GOOGLE_CALENDAR_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const GOOGLE_CALENDAR_WAKE_REFRESH_MS = 60 * 1000;
 const FINANCE_SESSION_RECHECK_MS = 5_000;
@@ -28362,7 +28364,7 @@ function stopRemoteStateRefresh() {
   remoteStateRefreshTimer = 0;
 }
 
-function scheduleRemoteStateRefresh(delay = REMOTE_STATE_REFRESH_INTERVAL_MS) {
+function scheduleRemoteStateRefresh(delay = remoteStateEventsConnected ? REMOTE_STATE_EVENT_REFRESH_INTERVAL_MS : REMOTE_STATE_REFRESH_INTERVAL_MS) {
   stopRemoteStateRefresh();
   if (document.visibilityState === "hidden") return;
   if (
@@ -28398,6 +28400,7 @@ function handleRemoteStateWakeRefresh() {
 function stopRemoteStateEvents() {
   remoteStateEventSource?.close();
   remoteStateEventSource = null;
+  remoteStateEventsConnected = false;
 }
 
 function connectRemoteStateEvents() {
@@ -28411,6 +28414,16 @@ function connectRemoteStateEvents() {
 
   const source = new EventSource("/api/state/events");
   remoteStateEventSource = source;
+  source.addEventListener("open", () => {
+    if (remoteStateEventSource !== source) return;
+    remoteStateEventsConnected = true;
+    scheduleRemoteStateRefresh();
+  });
+  source.addEventListener("error", () => {
+    if (remoteStateEventSource !== source || !remoteStateEventsConnected) return;
+    remoteStateEventsConnected = false;
+    scheduleRemoteStateRefresh();
+  });
   source.addEventListener("state", (event) => {
     if (remoteStateEventSource !== source) return;
     try {

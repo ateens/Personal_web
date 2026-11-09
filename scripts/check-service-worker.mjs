@@ -91,7 +91,7 @@ assert.deepEqual(installed.deleted, ["sygma-old-version"], "activation must pres
 await assert.rejects(worker({ requiredFails: true }).lifecycle("install"), /Missing required asset/);
 
 for (const options of [{ putFails: true }, { openFails: true }]) {
-  for (const [url, mode] of [["/projects", "navigate"], ["/app.js", "cors"], ["/assets/app.abcdef123456.js", "cors"]]) {
+  for (const [url, mode] of [["/projects", "navigate"], ["/app.js", "cors"], ["/assets/app.abcdef123456.js", "cors"], [mermaidAsset, "cors"]]) {
     const response = await worker(options).request(url, mode);
     assert.equal(await response.text(), "fresh response", `${url}: cache failures must preserve the network response`);
   }
@@ -109,6 +109,21 @@ for (const url of ["/api", "/api/state", "/api/finance/state", "/health", "https
   assert.equal(offline.request(url), undefined, `${url} must bypass the worker`);
 }
 assert.equal(offline.request("/app.js", "cors", "POST"), undefined);
+const cachedRenderers = worker();
+for (const asset of [...katexAssets, highlightAsset, mermaidAsset]) {
+  await cachedRenderers.request(asset);
+  const firstUseCalls = cachedRenderers.network.calls;
+  assert.equal(await (await cachedRenderers.request(asset)).text(), "fresh response");
+  assert.equal(cachedRenderers.network.calls, firstUseCalls, `bundled renderer must not download again online: ${asset}`);
+}
+await cachedRenderers.request("/manifest.json");
+const mutableCalls = cachedRenderers.network.calls;
+await cachedRenderers.request("/manifest.json");
+assert.equal(cachedRenderers.network.calls, mutableCalls + 1, "mutable files must continue to revalidate online");
+const newRelease = worker();
+await newRelease.request(mermaidAsset);
+assert.equal(newRelease.network.calls, 1, "a new worker cache must fetch its own renderer version");
+
 const offlineEquations = worker();
 for (const asset of katexAssets) await offlineEquations.request(asset);
 offlineEquations.network.offline = true;

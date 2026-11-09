@@ -17,10 +17,12 @@ const port = Number(process.env.CHECK_PORT || 4199);
 const resourcePort = Number(process.env.CHECK_RESOURCE_PORT || port + 1);
 const appStateId = process.env.CHECK_APP_STATE_ID || `check-${randomBytes(6).toString("hex")}`;
 const resourceAppStateId = `${appStateId}-resource-api`;
+const resourceWriteStateId = `${appStateId}-resource-write`;
+const relationalSyncStateId = `${appStateId}-relational-sync`;
 const operatorResetStateId = `${appStateId}-operator-reset`;
 const tokenStateId = `${appStateId}-private`;
 const legacyTokenStateId = `${appStateId}-legacy-token`;
-const checkStateIds = [appStateId, resourceAppStateId, operatorResetStateId, tokenStateId, legacyTokenStateId];
+const checkStateIds = [appStateId, resourceAppStateId, resourceWriteStateId, relationalSyncStateId, operatorResetStateId, tokenStateId, legacyTokenStateId];
 const legacyTokenFile = `/tmp/personal-web-legacy-token-${appStateId}.json`;
 const baseUrl = `http://127.0.0.1:${port}`;
 const resourceBaseUrl = `http://127.0.0.1:${resourcePort}`;
@@ -174,6 +176,8 @@ try {
   assert(firstRead.payload.state?.tasks?.[0]?.dueDate === "2026-06-02", "task due date changed during PostgreSQL round trip");
   assert(firstRead.payload.state?.habitInstances?.[0]?.date === "2026-06-02", "habit date changed during PostgreSQL round trip");
   await checkHealthyStateRead(firstRead.payload);
+  await checkHealthyResourceWrite();
+  await checkUnchangedRelationalCollections();
   const resourceImage = await checkResourceImageApi();
   await checkFinanceApi();
 
@@ -2093,6 +2097,111 @@ async function checkHealthyStateRead(expected) {
     assert(result.revision === expected.revision, "healthy read revision changed");
     assert(tableReads.size === COLLECTION_KEYS.length + 1, "healthy read skipped a collection or task-resource relation");
     assert([...tableReads.values()].every((count) => count === 1), "healthy reads must read each relational table only once");
+  } finally {
+    Client.prototype.query = originalQuery;
+    await storage.end();
+  }
+}
+
+async function checkHealthyResourceWrite() {
+  const storage = createStorage({ databaseUrl, appStateId: resourceWriteStateId });
+  const originalQuery = Client.prototype.query;
+  const tableReads = new Map();
+  try {
+    await storage.ready();
+    const state = makeValidState();
+    state.resources.push(makeIncrementalResource("check-resource-peer", "Unchanged peer"));
+    const initial = await storage.writeAppState(state, { baseRevision: 0 });
+    await pool.query("UPDATE resources SET title = 'Authoritative peer' WHERE app_state_id = $1 AND id = 'check-resource-peer'", [resourceWriteStateId]);
+    const resource = { ...initial.state.resources[0], title: "Saved resource", revision: 2 };
+    let validated = false;
+    Client.prototype.query = function (query, ...args) {
+      const table = typeof query === "string" && query.match(/^SELECT .+ FROM (\w+) WHERE app_state_id = \$1 ORDER BY /)?.[1];
+      if (table) tableReads.set(table, (tableReads.get(table) || 0) + 1);
+      return originalQuery.call(this, query, ...args);
+    };
+    const saved = await storage.writeResource(resource, {
+      baseRevision: initial.revision,
+      requirePrecondition: true,
+      validateState(nextState) {
+        validated = true;
+        assert(nextState.resources[1].title === "Authoritative peer", "Resource validation lost authoritative peer state");
+        for (const key of COLLECTION_KEYS.filter((key) => key !== "resources")) {
+          assert(JSON.stringify(nextState[key]) === JSON.stringify(initial.state[key]), `Resource save changed ${key}`);
+        }
+      },
+    });
+    Client.prototype.query = originalQuery;
+    assert(validated, "Resource save skipped full-state validation");
+    assert(saved.revision === 2 && saved.resource.title === resource.title, "Resource save returned an invalid revision or row");
+    assert(tableReads.size === COLLECTION_KEYS.length + 1, "Resource save skipped authoritative relational data");
+    assert([...tableReads.values()].every((count) => count === 1), "Resource saves must read each relational table only once");
+    const persisted = await storage.readAppState();
+    assert(JSON.stringify(persisted.state.resources[0]) === JSON.stringify(saved.resource), "Resource save response differs from its persisted row");
+    assert(persisted.state.resources[1].title === "Authoritative peer", "Resource save overwrote an unrelated authoritative row");
+  } finally {
+    Client.prototype.query = originalQuery;
+    await storage.end();
+  }
+}
+
+async function checkUnchangedRelationalCollections() {
+  const storage = createStorage({ databaseUrl, appStateId: relationalSyncStateId });
+  const originalQuery = Client.prototype.query;
+  const writes = new Set();
+  let snapshotWrites = 0;
+  try {
+    await storage.ready();
+    let saved = await storage.writeAppState(makeValidState(), { baseRevision: 0 });
+    Client.prototype.query = function (query, ...args) {
+      const table = typeof query === "string" && query.match(/^\s*(?:INSERT INTO|DELETE FROM|UPDATE) (\w+)/)?.[1];
+      if (table) writes.add(table);
+      if (table === "app_state" && /SET state =/.test(query)) snapshotWrites += 1;
+      return originalQuery.call(this, query, ...args);
+    };
+    async function save(state) {
+      writes.clear();
+      snapshotWrites = 0;
+      saved = await storage.writeAppState(state, {
+        baseRevision: saved.revision,
+        requirePrecondition: true,
+        rejectResourcePermanentDelete: true,
+      });
+      assert(snapshotWrites === 1, "Full-state saves must write the canonical JSON snapshot only once");
+      return saved.state;
+    }
+    const originalResource = JSON.stringify(saved.state.resources);
+    const taskChanged = structuredClone(saved.state);
+    taskChanged.tasks[0].title = "Changed task only";
+    await save(taskChanged);
+    assert(writes.has("tasks") && !writes.has("resources"), "Task-only saves must preserve unchanged Resource rows");
+    assert([...writes].every((table) => ["app_state", "tasks", "task_resources"].includes(table)), "Task-only save rewrote another collection");
+    assert(JSON.stringify(saved.state.resources) === originalResource, "Task-only save changed Resource content");
+
+    const settingsChanged = structuredClone(saved.state);
+    settingsChanged.settings.navOrder.reverse();
+    await save(settingsChanged);
+    assert([...writes].every((table) => ["app_state", "task_resources"].includes(table)), "Settings-only save rewrote primary collection rows");
+
+    // Removing parents must still clear formerly valid foreign keys in otherwise unchanged children.
+    const withoutParents = structuredClone(saved.state);
+    withoutParents.boxes = [];
+    withoutParents.projects = [];
+    withoutParents.habits = [];
+    withoutParents.googleCalendars = [];
+    await save(withoutParents);
+    for (const key of ["tasks", "resources"]) {
+      assert(saved.state[key][0].boxId === "" && saved.state[key][0].projectId === "", `Removed parent references survived in ${key}`);
+    }
+    assert(saved.state.habitInstances[0].habitId === "", "Removed habit reference survived in its instance");
+    assert(saved.state.googleEvents[0].calendarId === "", "Removed calendar reference survived in its event");
+
+    const withoutTask = structuredClone(saved.state);
+    withoutTask.tasks = [];
+    await save(withoutTask);
+    const relations = await pool.query("SELECT count(*)::int AS count FROM task_resources WHERE app_state_id = $1", [relationalSyncStateId]);
+    assert(relations.rows[0].count === 0, "Task deletion retained a derived resource relation");
+    assert(!writes.has("resources"), "Task deletion rewrote unchanged Resources");
   } finally {
     Client.prototype.query = originalQuery;
     await storage.end();

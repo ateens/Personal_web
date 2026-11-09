@@ -682,13 +682,29 @@ function clearCookie(response, request, name, options = {}) {
 }
 
 function sendJson(response, status, payload, headers = {}) {
-  response.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    ...headers,
+  const body = Buffer.from(JSON.stringify(payload));
+  const encoding = responseEncoding(response.req || { headers: {} }, ".json", body.length);
+  const send = (data, compressed = false) => {
+    if (response.destroyed || response.writableEnded) return;
+    response.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      Vary: "Accept-Encoding",
+      "Content-Length": data.length,
+      ...headers,
+      ...(compressed ? { "Content-Encoding": encoding } : {}),
+    });
+    response.end(data);
+  };
+  if (!encoding) return send(body);
+  const compress = encoding === "br" ? brotliCompress : gzip;
+  const options = encoding === "br" ? { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } } : { level: 4 };
+  compress(body, options, (error, data) => {
+    // A compression failure must never discard an otherwise valid API response.
+    const compressed = !error && data.length < body.length;
+    send(compressed ? data : body, compressed);
   });
-  response.end(JSON.stringify(payload));
 }
 
 function endBufferResponse(response, data) {

@@ -114,5 +114,7 @@ self.addEventListener("fetch", (event) => {
   }
 
   const immutableAsset = /^\/assets\/[^/]+\.[a-f0-9]{10,}\./.test(url.pathname);
-  event.respondWith(immutableAsset ? cacheFirst(event.request) : networkFirst(event.request));
+  // The build includes these vendor bytes in CACHE_NAME, so each release gets a fresh cache.
+  const bundledRenderer = /^\/assets\/(?:katex|highlight|mermaid)\//.test(url.pathname);
+  event.respondWith(immutableAsset || bundledRenderer ? cacheFirst(event.request) : networkFirst(event.request));
 });
