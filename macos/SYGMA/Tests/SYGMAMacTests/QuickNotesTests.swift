@@ -182,6 +182,54 @@ final class QuickNotesTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalReadyDeliversSavedBodyToWebViewBeforeWorkspaceReady() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-local-ready-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = QuickNotesStore(rootURL: root)
+        let noteID = try XCTUnwrap(store.selectedID)
+        let savedBody = "서버 응답 전 표시할 로컬 노트"
+        store.updateBody(savedBody, for: noteID)
+        let session = QuickMemoEditorSession(store: store)
+        let webView = session.makeWebView()
+        defer { session.detach(webView) }
+        webView.stopLoading()
+        session.loadLocal(noteID, revision: store.contentRevision)
+        let html = """
+            <p id="note"></p>
+            <script>
+            window.noteLoads = 0;
+            window.sygmaQuickEditor = {
+              loadLocal(payload) {
+                window.noteLoads++;
+                document.querySelector('#note').textContent = payload.markdown;
+                return true;
+              },
+              setReadOnly() { return true; }
+            };
+            window.webkit.messageHandlers.quickMemo.postMessage({ type: 'localReady', documentId: String(performance.timeOrigin) });
+            </script>
+            """
+        func openDocument(after previous: String? = nil) async throws -> String {
+            webView.loadHTMLString(html, baseURL: SYGMAWebRuntime.homeURL)
+            for _ in 0..<60 {
+                let body = (try? await webView.evaluateJavaScript("document.querySelector('#note')?.textContent ?? ''")) as? String
+                let documentID = (try? await webView.evaluateJavaScript("String(performance.timeOrigin)")) as? String
+                if let documentID, documentID != previous, body == savedBody { return documentID }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTFail("The local note did not load in the new document")
+            return ""
+        }
+        let firstDocument = try await openDocument()
+        session.handleBridgeMessage(["type": "ready", "documentId": firstDocument])
+        try await Task.sleep(for: .milliseconds(100))
+        let loadCount = try await webView.evaluateJavaScript("window.noteLoads") as? Int
+        XCTAssertEqual(loadCount, 1, "Workspace readiness must not reload an already visible local note")
+        let secondDocument = try await openDocument(after: firstDocument)
+        XCTAssertNotEqual(secondDocument, firstDocument)
+    }
+
+    @MainActor
     func testQueuedLocalReloadCannotInterruptNewerBridgeEdit() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("sygma-stale-local-\(UUID())", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

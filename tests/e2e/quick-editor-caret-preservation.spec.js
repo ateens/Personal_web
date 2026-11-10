@@ -73,6 +73,43 @@ async function currentLocalPayload(page) {
   });
 }
 
+test("the native local note opens while the initial workspace request is blocked", async ({ page, request }) => {
+  let releaseWorkspace;
+  const stalled = new Promise((resolve) => { releaseWorkspace = resolve; });
+  await page.route("**/api/state/status", async (route) => {
+    await stalled;
+    await route.continue();
+  });
+  await page.addInitScript((payload) => {
+    window.__quickMemoMessages = [];
+    window.addEventListener("sygma:quickMemo", ({ detail }) => {
+      window.__quickMemoMessages.push(detail);
+      if (detail.type === "localReady" || detail.type === "ready") {
+        if (window.__localNoteLoaded) return;
+        window.__localNoteLoaded = window.sygmaQuickEditor.loadLocal(payload);
+      }
+    });
+  }, { id: NOTE_ID, blocks: blocks() });
+
+  try {
+    await page.goto("/?surface=quick-editor");
+    const middle = page.locator('[data-block-content="middle"]');
+    await expect(middle).toHaveText("가운데 문장", { timeout: 3000 });
+    expect(await page.evaluate(() => window.__quickMemoMessages.some((message) => message.type === "ready"))).toBe(false);
+    await setCaret(middle, 3);
+    await page.keyboard.press("Backspace");
+    await expect(middle).toHaveText("가운 문장");
+
+    releaseWorkspace();
+    await expect.poll(() => page.evaluate(() => window.__quickMemoMessages.find((message) => message.type === "ready")?.resources?.length || 0)).toBeGreaterThan(0);
+    await expect(middle).toHaveText("가운 문장");
+    expect(await caret(page)).toEqual({ blockId: "middle", offset: 2, collapsed: true });
+    expect((await fixtureSnapshot(request)).writes).toEqual([]);
+  } finally {
+    releaseWorkspace();
+  }
+});
+
 test("floating local Backspace keeps the preceding caret through repeated identical native save echoes", async ({ page, request }) => {
   const editor = await openLocal(page);
   await setCaret(editor.locator('[data-block-content="blank"]'), 0);

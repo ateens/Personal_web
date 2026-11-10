@@ -661,6 +661,7 @@ final class QuickMemoEditorSession: ObservableObject {
     private let coordinator: SYGMAWebCoordinator
     private weak var webView: WKWebView?
     private var ready = false
+    private var readyDocumentID: String?
     private var pendingLocal: (id: UUID, revision: Int, payload: [String: Any])?
     private var loadedLocalID: UUID?
     private var loadedRevision = -1
@@ -682,6 +683,7 @@ final class QuickMemoEditorSession: ObservableObject {
         let webView = coordinator.makeCompanionWebView(url: SYGMAWebRuntime.quickEditorURL)
         self.webView = webView
         ready = false
+        readyDocumentID = nil
         loadedRevision = -1
         return webView
     }
@@ -756,8 +758,14 @@ final class QuickMemoEditorSession: ObservableObject {
     }
 
     func handleBridgeMessage(_ message: [String: Any]) {
-        switch message["type"] as? String {
-        case "ready":
+        let type = message["type"] as? String
+        switch type {
+        case "localReady", "ready":
+            // A restored Resource still needs the workspace. Local notes only need the editor.
+            guard type != "localReady" || !isResourceOpen else { return }
+            let documentID = message["documentId"] as? String
+            if let documentID, documentID == readyDocumentID { return }
+            readyDocumentID = documentID
             ready = true
             if let pendingLocal,
                pendingLocal.id != store.selectedID || pendingLocal.revision != store.contentRevision {

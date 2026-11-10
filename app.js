@@ -956,6 +956,7 @@ function init() {
   updateTopbarStickiness();
   if (googleRedirect.connected) showToast("Google Calendar 연결 완료");
   if (googleRedirect.failed) showToast("Google Calendar 연결에 실패했습니다.");
+  notifyQuickEditorReady("localReady");
   initializeLocalResourcePersistence({ applySnapshot: false }).then(initializeDatabaseState).finally(() => {
     replaceViewHistoryState(ui.view, { replace: true });
     if (QUICK_EDITOR_SURFACE) notifyQuickEditorReady();
@@ -1407,9 +1408,11 @@ function resolveQuickEditorLocalImage(requestId, payload = {}) {
   return true;
 }
 
-function notifyQuickEditorReady() {
+function notifyQuickEditorReady(type = "ready") {
   if (!QUICK_EDITOR_SURFACE) return false;
-  return postQuickEditorMessage({ type: "ready", resources: quickEditorResourceEntries() });
+  const message = { type, documentId: String(performance.timeOrigin) };
+  if (type === "ready") message.resources = quickEditorResourceEntries();
+  return postQuickEditorMessage(message);
 }
 
 function quickEditorResourceTitle(resource) {
